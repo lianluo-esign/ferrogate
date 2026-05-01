@@ -14,7 +14,7 @@ Built by the team behind [Token4AI Cloud](https://token4ai.cloud), a managed pla
 | GitHub repo | `ferrogate` |
 | Rust crate | `ferrogate` |
 | CLI binary | `ferrogate` |
-| Docker image | `ghcr.io/your-org/ferrogate` |
+| Docker image | `ghcr.io/lianluo-esign/ferrogate` |
 | Config file | `ferrogate.toml` |
 | Website path | <https://token4ai.cloud/ferrogate> |
 
@@ -76,6 +76,24 @@ api_key_env = "OPENAI_API_KEY"
 docker build -t ferrogate .
 docker run --rm -p 8080:8080 ferrogate
 ```
+
+## Documentation wiki
+
+This repository includes an Obsidian-first project wiki in [`wiki/`](wiki/). The wiki documents the product requirements, architecture, development workflow, operations guide, and design decisions.
+
+A Quartz-based static site generator is vendored in [`wiki-site/`](wiki-site/). Build the static documentation site with:
+
+```bash
+./scripts/build-wiki-site.sh build
+```
+
+Preview it locally with:
+
+```bash
+./scripts/build-wiki-site.sh serve
+```
+
+Generated files are written to `wiki-site/public/` and are ignored by git by default.
 
 ## License
 
