@@ -3,9 +3,3 @@ Cargo.lock.bak
 *.log
 .env
 .DS_Store
-
-# Wiki static site build outputs
-wiki-site/node_modules/
-wiki-site/public/
-wiki-site/.quartz-cache/
-wiki-site/.cache/

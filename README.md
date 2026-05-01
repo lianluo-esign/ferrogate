@@ -79,21 +79,39 @@ docker run --rm -p 8080:8080 ferrogate
 
 ## Documentation wiki
 
-This repository includes an Obsidian-first project wiki in [`wiki/`](wiki/). The wiki documents the product requirements, architecture, development workflow, operations guide, and design decisions.
+The project wiki now lives in a standalone monorepo: [`ferrogate-wiki`](https://github.com/lianluo-esign/ferrogate-wiki).
 
-A Quartz-based static site generator is vendored in [`wiki-site/`](wiki-site/). Build the static documentation site with:
+This repository keeps it available as a submodule at [`ferrogate-wiki/`](ferrogate-wiki/), containing:
+
+- `wiki/`: Obsidian vault and Markdown source of truth
+- `wiki-site/`: Quartz static site generator project
+- `scripts/build-wiki-site.sh`: build, serve, and clean entrypoint
+
+Clone this repository with submodules:
 
 ```bash
+git clone --recurse-submodules https://github.com/lianluo-esign/ferrogate.git
+```
+
+Or initialize the wiki submodule after cloning:
+
+```bash
+git submodule update --init --recursive
+```
+
+Build the wiki site from the submodule:
+
+```bash
+cd ferrogate-wiki
 ./scripts/build-wiki-site.sh build
 ```
 
-Preview it locally with:
+Preview it locally:
 
 ```bash
+cd ferrogate-wiki
 ./scripts/build-wiki-site.sh serve
 ```
-
-Generated files are written to `wiki-site/public/` and are ignored by git by default.
 
 ## License
 
