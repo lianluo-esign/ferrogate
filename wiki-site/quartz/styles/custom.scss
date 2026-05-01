@@ -1,3 +1,31 @@
 @use "./base.scss";
 
-// put your custom CSS here!
+// FerroGate wiki layout overrides.
+// Quartz defaults leave a generous 6rem top gutter. This project wiki should
+// feel more like product documentation, so keep the page chrome close to the
+// top edge while preserving a small breathing room.
+.page > #quartz-body {
+  & .page-header {
+    margin-top: 1rem;
+  }
+
+  & .sidebar {
+    padding-top: 1rem;
+  }
+
+  & .center article > h1:first-child {
+    margin-top: 0.5rem;
+  }
+}
+
+@media all and (max-width: 800px) {
+  .page > #quartz-body {
+    & .sidebar.left {
+      padding-top: 0.75rem;
+    }
+
+    & .center article > h1:first-child {
+      margin-top: 0.25rem;
+    }
+  }
+}
