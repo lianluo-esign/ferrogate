@@ -20,34 +20,51 @@ Built by the team behind [Token4AI Cloud](https://token4ai.cloud), a managed pla
 
 ## Goals
 
-- Open-source AI gateway for LLM API traffic
-- Caddy-inspired developer experience
+- Open-source Rust API Gateway and AI Gateway for AI traffic
+- Built-in API gateway capabilities inspired by mature gateway products
 - Reverse proxy foundation for HTTP services
+- Virtual API keys, tenant context, and model allowlists
 - Provider routing and OpenAI-compatible API surface
 - Token control, usage observability, and policy hooks
 - Production-friendly Rust implementation
 
 ## Current status
 
-This repository is newly initialized. The first milestone is to build a minimal gateway core:
+FerroGate is in early development. The current MVP implements:
 
 - `GET /healthz` health check
-- `GET /v1/models` OpenAI-compatible placeholder endpoint
-- TOML configuration loading
+- `GET /v1/models` OpenAI-compatible model list from config
+- `POST /v1/chat/completions` request validation, virtual API key auth, tenant context resolution, and model routing placeholder
+- `GET /admin/status` gateway status summary
+- TOML configuration loading and validation
+- Provider registry, model registry, and virtual API key config
 - CLI commands for serving and config validation
+- `x-request-id` propagation/generation and structured gateway logs
+
+Upstream proxying to AI providers and Pingora-based runtime integration are the next implementation milestones.
 
 ## Quick start
 
 ```bash
-cargo run -- check
-cargo run -- serve
+cargo run -- --config ./config/ferrogate.example.toml check
+cargo run -- --config ./config/ferrogate.example.toml serve
 ```
 
 Then open:
 
 ```bash
 curl http://127.0.0.1:8080/healthz
-curl http://127.0.0.1:8080/v1/models
+curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/v1/models
+curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/admin/status
+```
+
+Try the chat completion routing placeholder:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Authorization: Bearer dev-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ## Configuration

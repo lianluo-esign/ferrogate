@@ -2,12 +2,65 @@
 
 listen = "127.0.0.1:8080"
 
+[telemetry]
+service_name = "ferrogate"
+log_bodies = false
+
 [[providers]]
 name = "openai"
+kind = "openai"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
 [[providers]]
 name = "anthropic"
+kind = "anthropic"
 base_url = "https://api.anthropic.com/v1"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[[providers]]
+name = "gemini"
+kind = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+api_key_env = "GEMINI_API_KEY"
+
+[[providers]]
+name = "grok"
+kind = "grok"
+base_url = "https://api.x.ai/v1"
+api_key_env = "GROK_API_KEY"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming", "tools"]
+context_window = 128000
+input_price_per_1m = 0.15
+output_price_per_1m = 0.60
+
+[[models]]
+name = "best-reasoning"
+provider = "anthropic"
+provider_model = "claude-3-5-sonnet-latest"
+capabilities = ["chat", "streaming", "tools"]
+context_window = 200000
+
+[[models]]
+name = "gemini-flash"
+provider = "gemini"
+provider_model = "gemini-1.5-flash"
+capabilities = ["chat", "streaming", "vision"]
+context_window = 1000000
+
+# Development-only inline key. Prefer key_env outside local development.
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "dev-secret"
+scopes = ["models.read", "chat.completions", "admin.read"]
+allowed_models = ["fast-chat", "best-reasoning", "gemini-flash"]
+organization_id = "org_demo"
+team_id = "team_platform"
+project_id = "project_ferrogate"
+monthly_token_budget = 1000000
