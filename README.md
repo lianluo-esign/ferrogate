@@ -32,16 +32,20 @@ Built by the team behind [Token4AI Cloud](https://token4ai.cloud), a managed pla
 
 FerroGate is in early development. The current MVP implements:
 
+- Cloudflare Pingora-based gateway runtime
 - `GET /healthz` health check
 - `GET /v1/models` OpenAI-compatible model list from config
 - `POST /v1/chat/completions` request validation, virtual API key auth, tenant context resolution, and model routing placeholder
 - `GET /admin/status` gateway status summary
+- Generic reverse proxy with configured upstreams/routes
+- Path prefix routing and path rewrite (`strip_prefix`/`add_prefix`)
+- Request header forwarding and configured header injection
 - TOML configuration loading and validation
 - Provider registry, model registry, and virtual API key config
 - CLI commands for serving and config validation
 - `x-request-id` propagation/generation and structured gateway logs
 
-Upstream proxying to AI providers and Pingora-based runtime integration are the next implementation milestones.
+Upstream proxying to AI providers, streaming, and production-grade Pingora load balancing/failover are the next implementation milestones.
 
 ## Quick start
 
@@ -54,6 +58,7 @@ Then open:
 
 ```bash
 curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/proxy/httpbin/get
 curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/v1/models
 curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/admin/status
 ```

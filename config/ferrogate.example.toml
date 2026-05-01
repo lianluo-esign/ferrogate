@@ -6,6 +6,20 @@ listen = "127.0.0.1:8080"
 service_name = "ferrogate"
 log_bodies = false
 
+[[upstreams]]
+name = "example-api"
+url = "https://httpbin.org"
+
+[[routes]]
+name = "example-api"
+upstream = "example-api"
+path_prefixes = ["/proxy/httpbin"]
+strip_prefix = "/proxy/httpbin"
+
+[[routes.request_headers]]
+name = "x-ferrogate-route"
+value = "example-api"
+
 [[providers]]
 name = "openai"
 kind = "openai"

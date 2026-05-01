@@ -1,4 +1,5 @@
 /target
+/.jcode/cmake-venv
 Cargo.lock.bak
 *.log
 .env
