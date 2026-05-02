@@ -1,28 +1,39 @@
-[package]
-name = "ferrogate"
+[workspace]
+members = [
+    "crates/ferrogate-admin",
+    "crates/ferrogate-auth",
+    "crates/ferrogate-billing",
+    "crates/ferrogate-cli",
+    "crates/ferrogate-config",
+    "crates/ferrogate-core",
+    "crates/ferrogate-observability",
+    "crates/ferrogate-policy",
+    "crates/ferrogate-providers",
+    "crates/ferrogate-routing",
+    "crates/ferrogate-runtime",
+    "crates/ferrogate-storage",
+]
+default-members = ["crates/ferrogate-cli"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.84"
-description = "Open-source Rust AI gateway and reverse proxy for routing, securing, and observing AI traffic."
 license = "Apache-2.0"
 repository = "https://github.com/lianluo-esign/ferrogate"
 homepage = "https://token4ai.cloud/ferrogate"
-readme = "README.md"
-keywords = ["ai", "gateway", "llm", "proxy", "rust"]
-categories = ["web-programming::http-server", "command-line-utilities"]
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
+bytes = "1.7"
 clap = { version = "4.5", features = ["derive", "env"] }
 http = "1"
 pingora = { version = "0.8", features = ["proxy", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bytes = "1.7"
+tempfile = "3.10"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-
-[dev-dependencies]
-tempfile = "3.10"

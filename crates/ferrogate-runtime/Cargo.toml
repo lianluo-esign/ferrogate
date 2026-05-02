@@ -1,0 +1,15 @@
+[package]
+name = "ferrogate-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Pingora runtime boundary for FerroGate."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+ferrogate-core = { path = "../ferrogate-core" }
+
+[features]
+default = []

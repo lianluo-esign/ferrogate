@@ -1,0 +1,15 @@
+[package]
+name = "ferrogate-observability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Logging, metrics, and tracing boundaries for FerroGate."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+tracing.workspace = true
+
+[features]
+default = []

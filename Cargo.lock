@@ -677,13 +677,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
-name = "ferrogate"
+name = "ferrogate-admin"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ferrogate-auth"
+version = "0.1.0"
+dependencies = [
+ "ferrogate-core",
+]
+
+[[package]]
+name = "ferrogate-billing"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ferrogate-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
  "clap",
+ "ferrogate-config",
+ "ferrogate-providers",
+ "ferrogate-runtime",
  "http",
  "pingora",
  "serde",
@@ -692,6 +716,64 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ferrogate-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+]
+
+[[package]]
+name = "ferrogate-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ferrogate-observability"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
+name = "ferrogate-policy"
+version = "0.1.0"
+dependencies = [
+ "ferrogate-core",
+]
+
+[[package]]
+name = "ferrogate-providers"
+version = "0.1.0"
+dependencies = [
+ "ferrogate-core",
+ "serde_json",
+]
+
+[[package]]
+name = "ferrogate-routing"
+version = "0.1.0"
+dependencies = [
+ "ferrogate-core",
+]
+
+[[package]]
+name = "ferrogate-runtime"
+version = "0.1.0"
+dependencies = [
+ "ferrogate-core",
+]
+
+[[package]]
+name = "ferrogate-storage"
+version = "0.1.0"
+dependencies = [
+ "ferrogate-core",
 ]
 
 [[package]]

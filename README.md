@@ -12,10 +12,10 @@ Built by the team behind [Token4AI Cloud](https://token4ai.cloud), a managed pla
 | --- | --- |
 | Project display name | FerroGate |
 | GitHub repo | `ferrogate` |
-| Rust crate | `ferrogate` |
+| Rust workspace | `crates/ferrogate-*` |
 | CLI binary | `ferrogate` |
 | Docker image | `ghcr.io/lianluo-esign/ferrogate` |
-| Config file | `ferrogate.toml` |
+| Config file | `Ferrogate/Caddyfile` |
 | Website path | <https://token4ai.cloud/ferrogate> |
 
 ## Goals
@@ -38,20 +38,22 @@ FerroGate is in early development. The current MVP implements:
 - `POST /v1/chat/completions` request validation, virtual API key auth, tenant context resolution, and model routing placeholder
 - `GET /admin/status` gateway status summary
 - Generic reverse proxy with configured upstreams/routes
+- Upstream endpoint pools with basic round-robin selection
 - Path prefix routing and path rewrite (`strip_prefix`/`add_prefix`)
-- Request header forwarding and configured header injection
-- TOML configuration loading and validation
+- Request/response header forwarding and configured header mutation
+- Caddyfile-style startup configuration at `Ferrogate/Caddyfile`
+- TOML configuration loading and validation for tests and transitional workflows
 - Provider registry, model registry, and virtual API key config
-- CLI commands for serving and config validation
+- Caddy-style binary subcommands: `ferrogate run`, `ferrogate validate`, and planned `ferrogate reload`
 - `x-request-id` propagation/generation and structured gateway logs
 
-Upstream proxying to AI providers, streaming, and production-grade Pingora load balancing/failover are the next implementation milestones.
+AI provider proxying, richer streaming error coverage, and production-grade Pingora failover are the next implementation milestones.
 
 ## Quick start
 
 ```bash
-cargo run -- --config ./config/ferrogate.example.toml check
-cargo run -- --config ./config/ferrogate.example.toml serve
+cargo run -- run --config Ferrogate/Caddyfile
+cargo run -- validate --config Ferrogate/Caddyfile
 ```
 
 Then open:
@@ -74,14 +76,31 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 ## Configuration
 
-FerroGate loads `ferrogate.toml` by default. You can also pass a custom path:
+FerroGate loads `Ferrogate/Caddyfile` by default. TOML remains supported as a structured internal, test, and transitional format when an explicit TOML path is provided.
 
 ```bash
-ferrogate --config ./config/ferrogate.example.toml check
-ferrogate --config ./config/ferrogate.example.toml serve
+ferrogate run --config Ferrogate/Caddyfile
+ferrogate validate --config Ferrogate/Caddyfile
+ferrogate validate --config ./config/ferrogate.example.toml
 ```
 
-Example:
+Example Caddyfile:
+
+```caddyfile
+:8080 {
+    log
+
+    respond /healthz "ok" 200
+
+    route /v1/* {
+        reverse_proxy https://api.openai.com {
+            header_up Authorization "Bearer {env.OPENAI_API_KEY}"
+        }
+    }
+}
+```
+
+Example TOML:
 
 ```toml
 listen = "127.0.0.1:8080"

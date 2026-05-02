@@ -1,0 +1,15 @@
+[package]
+name = "ferrogate-routing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Route and upstream selection boundaries for FerroGate."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+ferrogate-core = { path = "../ferrogate-core" }
+
+[features]
+default = []

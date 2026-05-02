@@ -1,0 +1,38 @@
+[package]
+name = "ferrogate-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FerroGate command-line entrypoint."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["ai", "gateway", "llm", "proxy", "rust"]
+categories = ["web-programming::http-server", "command-line-utilities"]
+
+[[bin]]
+name = "ferrogate"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+clap.workspace = true
+ferrogate-config = { path = "../ferrogate-config" }
+ferrogate-providers = { path = "../ferrogate-providers" }
+ferrogate-runtime = { path = "../ferrogate-runtime" }
+http.workspace = true
+pingora.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+default = []
