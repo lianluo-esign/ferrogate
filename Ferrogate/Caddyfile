@@ -1,0 +1,16 @@
+{
+    admin localhost:2019
+    debug
+}
+
+:8080 {
+    log
+
+    respond /healthz "ok" 200
+
+    route /v1/* {
+        reverse_proxy https://api.openai.com {
+            header_up Authorization "Bearer {env.OPENAI_API_KEY}"
+        }
+    }
+}
