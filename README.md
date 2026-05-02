@@ -17,6 +17,7 @@ Built by the team behind [Token4AI Cloud](https://token4ai.cloud), a managed pla
 | Docker image | `ghcr.io/lianluo-esign/ferrogate` |
 | Config file | `Ferrogate/Caddyfile` |
 | Website path | <https://token4ai.cloud/ferrogate> |
+| Wiki | <https://lianluo-esign.github.io/ferrogate/> |
 
 ## Goals
 

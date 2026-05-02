@@ -1,0 +1,13 @@
+title: FerroGate Wiki
+description: Development notes and roadmap for the FerroGate AI gateway.
+url: https://lianluo-esign.github.io
+baseurl: /ferrogate
+
+markdown: kramdown
+theme: null
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default

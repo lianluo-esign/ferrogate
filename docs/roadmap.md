@@ -1,4 +1,14 @@
+---
+title: Roadmap
+description: FerroGate development milestones and implementation progress.
+permalink: /roadmap/
+---
+
 # FerroGate Roadmap
+
+Last reviewed: 2026-05-03.
+
+The current MVP has completed the gateway core and is moving through provider proxying. Some traffic governance and edge proxy features have already started, but streaming provider forwarding, rate limiting, accounting hooks, fallback policies, automatic HTTPS, and executable hot reload are still open.
 
 ## Milestone 1: Gateway core
 
