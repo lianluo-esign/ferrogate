@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr"><head><title>产品需求文档 · FerroGate</title><meta charset="utf-8"/><link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com"/><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted Grotesk:wght@400;700&amp;family=Source Sans Pro:ital,wght@0,400;0,600;1,400;1,600&amp;family=IBM Plex Mono:wght@400;600&amp;display=swap"/><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin="anonymous"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="og:site_name" content="FerroGate Wiki"/><meta property="og:title" content="产品需求文档 · FerroGate"/><meta property="og:type" content="website"/><meta name="twitter:card" content="summary_large_image"/><meta name="twitter:title" content="产品需求文档 · FerroGate"/><meta name="twitter:description" content="FerroGate 产品需求文档 PRD 1."/><meta property="og:description" content="FerroGate 产品需求文档 PRD 1."/><meta property="og:image:alt" content="FerroGate 产品需求文档 PRD 1."/><meta property="og:image" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta property="og:image:url" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta name="twitter:image" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta property="og:image:type" content="image/.png"/><meta property="twitter:domain" content="lianluo-esign.github.io/ferrogate"/><meta property="og:url" content="https://lianluo-esign.github.io/ferrogate/01-product/product-requirements"/><meta property="twitter:url" content="https://lianluo-esign.github.io/ferrogate/01-product/product-requirements"/><link rel="icon" href="../static/icon.png"/><meta name="description" content="FerroGate 产品需求文档 PRD 1."/><meta name="generator" content="Quartz"/><link href="../index.css" rel="stylesheet" type="text/css" data-persist="true"/><style>.expand-button {
+  position: absolute;
+  display: flex;
+  float: right;
+  padding: 0.4rem;
+  margin: 0.3rem;
+  right: 0;
+  color: var(--gray);
+  border-color: var(--dark);
+  background-color: var(--light);
+  border: 1px solid;
+  border-radius: 5px;
+  opacity: 0;
+  transition: 0.2s;
+}
+.expand-button > svg {
+  fill: var(--light);
+  filter: contrast(0.3);
+}
+.expand-button:hover {
+  cursor: pointer;
+  border-color: var(--secondary);
+}
+.expand-button:focus {
+  outline: 0;
+}
+
+pre:hover > .expand-button {
+  opacity: 1;
+  transition: 0.2s;
+}
+
+#mermaid-container {
+  position: fixed;
+  contain: layout;
+  z-index: 999;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  display: none;
+  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.5);
+}
+#mermaid-container.active {
+  display: inline-block;
+}
+#mermaid-container > #mermaid-space {
+  border: 1px solid var(--lightgray);
+  background-color: var(--light);
+  border-radius: 5px;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  height: 80vh;
+  width: 80vw;
+  overflow: hidden;
+}
+#mermaid-container > #mermaid-space > .mermaid-content {
+  position: relative;
+  transform-origin: 0 0;
+  transition: transform 0.1s ease;
+  overflow: visible;
+  min-height: 200px;
+  min-width: 200px;
+}
+#mermaid-container > #mermaid-space > .mermaid-content pre {
+  margin: 0;
+  border: none;
+}
+#mermaid-container > #mermaid-space > .mermaid-content svg {
+  max-width: none;
+  height: auto;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  background: var(--light);
+  border: 1px solid var(--lightgray);
+  border-radius: 6px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  z-index: 2;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--lightgray);
+  background: var(--light);
+  color: var(--dark);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  font-family: var(--bodyFont);
+  transition: all 0.2s ease;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:hover {
+  background: var(--lightgray);
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:active {
+  transform: translateY(1px);
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:nth-child(2) {
+  width: auto;
+  padding: 0 12px;
+  font-size: 14px;
+}
+/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VSb290IjoiL1VzZXJzL2Focy9Qcm9qZWN0cy9mZXJyb2dhdGUvZmVycm9nYXRlLXdpa2kvd2lraS1zaXRlL3F1YXJ0ei9jb21wb25lbnRzL3N0eWxlcyIsInNvdXJjZXMiOlsibWVybWFpZC5pbmxpbmUuc2NzcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFBQTtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTs7QUFHRjtFQUNFO0VBQ0E7O0FBR0Y7RUFDRTs7O0FBS0Y7RUFDRTtFQUNBOzs7QUFJSjtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7O0FBRUE7RUFDRTs7QUFHRjtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTs7QUFHRjtFQUNFO0VBQ0E7O0FBSUo7RUFDRTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTs7QUFFQTtFQUNFOztBQUdGO0VBQ0U7O0FBSUY7RUFDRTtFQUNBO0VBQ0EiLCJzb3VyY2VzQ29udGVudCI6WyIuZXhwYW5kLWJ1dHRvbiB7XG4gIHBvc2l0aW9uOiBhYnNvbHV0ZTtcbiAgZGlzcGxheTogZmxleDtcbiAgZmxvYXQ6IHJpZ2h0O1xuICBwYWRkaW5nOiAwLjRyZW07XG4gIG1hcmdpbjogMC4zcmVtO1xuICByaWdodDogMDsgLy8gTk9URTogcmlnaHQgd2lsbCBiZSBzZXQgaW4gbWVybWFpZC5pbmxpbmUudHNcbiAgY29sb3I6IHZhcigtLWdyYXkpO1xuICBib3JkZXItY29sb3I6IHZhcigtLWRhcmspO1xuICBiYWNrZ3JvdW5kLWNvbG9yOiB2YXIoLS1saWdodCk7XG4gIGJvcmRlcjogMXB4IHNvbGlkO1xuICBib3JkZXItcmFkaXVzOiA1cHg7XG4gIG9wYWNpdHk6IDA7XG4gIHRyYW5zaXRpb246IDAuMnM7XG5cbiAgJiA+IHN2ZyB7XG4gICAgZmlsbDogdmFyKC0tbGlnaHQpO1xuICAgIGZpbHRlcjogY29udHJhc3QoMC4zKTtcbiAgfVxuXG4gICY6aG92ZXIge1xuICAgIGN1cnNvcjogcG9pbnRlcjtcbiAgICBib3JkZXItY29sb3I6IHZhcigtLXNlY29uZGFyeSk7XG4gIH1cblxuICAmOmZvY3VzIHtcbiAgICBvdXRsaW5lOiAwO1xuICB9XG59XG5cbnByZSB7XG4gICY6aG92ZXIgPiAuZXhwYW5kLWJ1dHRvbiB7XG4gICAgb3BhY2l0eTogMTtcbiAgICB0cmFuc2l0aW9uOiAwLjJzO1xuICB9XG59XG5cbiNtZXJtYWlkLWNvbnRhaW5lciB7XG4gIHBvc2l0aW9uOiBmaXhlZDtcbiAgY29udGFpbjogbGF5b3V0O1xuICB6LWluZGV4OiA5OTk7XG4gIGxlZnQ6IDA7XG4gIHRvcDogMDtcbiAgd2lkdGg6IDEwMHZ3O1xuICBoZWlnaHQ6IDEwMHZoO1xuICBvdmVyZmxvdzogaGlkZGVuO1xuICBkaXNwbGF5OiBub25lO1xuICBiYWNrZHJvcC1maWx0ZXI6IGJsdXIoNHB4KTtcbiAgYmFja2dyb3VuZDogcmdiYSgwLCAwLCAwLCAwLjUpO1xuXG4gICYuYWN0aXZlIHtcbiAgICBkaXNwbGF5OiBpbmxpbmUtYmxvY2s7XG4gIH1cblxuICAmID4gI21lcm1haWQtc3BhY2Uge1xuICAgIGJvcmRlcjogMXB4IHNvbGlkIHZhcigtLWxpZ2h0Z3JheSk7XG4gICAgYmFja2dyb3VuZC1jb2xvcjogdmFyKC0tbGlnaHQpO1xuICAgIGJvcmRlci1yYWRpdXM6IDVweDtcbiAgICBwb3NpdGlvbjogZml4ZWQ7XG4gICAgdG9wOiA1MCU7XG4gICAgbGVmdDogNTAlO1xuICAgIHRyYW5zZm9ybTogdHJhbnNsYXRlKC01MCUsIC01MCUpO1xuICAgIGhlaWdodDogODB2aDtcbiAgICB3aWR0aDogODB2dztcbiAgICBvdmVyZmxvdzogaGlkZGVuO1xuXG4gICAgJiA+IC5tZXJtYWlkLWNvbnRlbnQge1xuICAgICAgcG9zaXRpb246IHJlbGF0aXZlO1xuICAgICAgdHJhbnNmb3JtLW9yaWdpbjogMCAwO1xuICAgICAgdHJhbnNpdGlvbjogdHJhbnNmb3JtIDAuMXMgZWFzZTtcbiAgICAgIG92ZXJmbG93OiB2aXNpYmxlO1xuICAgICAgbWluLWhlaWdodDogMjAwcHg7XG4gICAgICBtaW4td2lkdGg6IDIwMHB4O1xuXG4gICAgICBwcmUge1xuICAgICAgICBtYXJnaW46IDA7XG4gICAgICAgIGJvcmRlcjogbm9uZTtcbiAgICAgIH1cblxuICAgICAgc3ZnIHtcbiAgICAgICAgbWF4LXdpZHRoOiBub25lO1xuICAgICAgICBoZWlnaHQ6IGF1dG87XG4gICAgICB9XG4gICAgfVxuXG4gICAgJiA+IC5tZXJtYWlkLWNvbnRyb2xzIHtcbiAgICAgIHBvc2l0aW9uOiBhYnNvbHV0ZTtcbiAgICAgIGJvdHRvbTogMjBweDtcbiAgICAgIHJpZ2h0OiAyMHB4O1xuICAgICAgZGlzcGxheTogZmxleDtcbiAgICAgIGdhcDogOHB4O1xuICAgICAgcGFkZGluZzogOHB4O1xuICAgICAgYmFja2dyb3VuZDogdmFyKC0tbGlnaHQpO1xuICAgICAgYm9yZGVyOiAxcHggc29saWQgdmFyKC0tbGlnaHRncmF5KTtcbiAgICAgIGJvcmRlci1yYWRpdXM6IDZweDtcbiAgICAgIGJveC1zaGFkb3c6IDAgMnB4IDRweCByZ2JhKDAsIDAsIDAsIDAuMSk7XG4gICAgICB6LWluZGV4OiAyO1xuXG4gICAgICAubWVybWFpZC1jb250cm9sLWJ1dHRvbiB7XG4gICAgICAgIGRpc3BsYXk6IGZsZXg7XG4gICAgICAgIGFsaWduLWl0ZW1zOiBjZW50ZXI7XG4gICAgICAgIGp1c3RpZnktY29udGVudDogY2VudGVyO1xuICAgICAgICB3aWR0aDogMzJweDtcbiAgICAgICAgaGVpZ2h0OiAzMnB4O1xuICAgICAgICBwYWRkaW5nOiAwO1xuICAgICAgICBib3JkZXI6IDFweCBzb2xpZCB2YXIoLS1saWdodGdyYXkpO1xuICAgICAgICBiYWNrZ3JvdW5kOiB2YXIoLS1saWdodCk7XG4gICAgICAgIGNvbG9yOiB2YXIoLS1kYXJrKTtcbiAgICAgICAgYm9yZGVyLXJhZGl1czogNHB4O1xuICAgICAgICBjdXJzb3I6IHBvaW50ZXI7XG4gICAgICAgIGZvbnQtc2l6ZTogMTZweDtcbiAgICAgICAgZm9udC1mYW1pbHk6IHZhcigtLWJvZHlGb250KTtcbiAgICAgICAgdHJhbnNpdGlvbjogYWxsIDAuMnMgZWFzZTtcblxuICAgICAgICAmOmhvdmVyIHtcbiAgICAgICAgICBiYWNrZ3JvdW5kOiB2YXIoLS1saWdodGdyYXkpO1xuICAgICAgICB9XG5cbiAgICAgICAgJjphY3RpdmUge1xuICAgICAgICAgIHRyYW5zZm9ybTogdHJhbnNsYXRlWSgxcHgpO1xuICAgICAgICB9XG5cbiAgICAgICAgLy8gU3R5bGUgdGhlIHJlc2V0IGJ1dHRvbiBkaWZmZXJlbnRseVxuICAgICAgICAmOm50aC1jaGlsZCgyKSB7XG4gICAgICAgICAgd2lkdGg6IGF1dG87XG4gICAgICAgICAgcGFkZGluZzogMCAxMnB4O1xuICAgICAgICAgIGZvbnQtc2l6ZTogMTRweDtcbiAgICAgICAgfVxuICAgICAgfVxuICAgIH1cbiAgfVxufVxuIl19 */</style><link href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" rel="stylesheet" type="text/css" data-persist="true"/><script src="../prescript.js" type="application/javascript" data-persist="true"></script><script type="application/javascript" data-persist="true">const fetchData = fetch("../static/contentIndex.json").then(data => data.json())</script><link rel="alternate" type="application/rss+xml" title="RSS Feed" href="https://lianluo-esign.github.io/ferrogate/index.xml"/></head><body data-slug="01-product/product-requirements"><div id="quartz-root" class="page"><div id="quartz-body"><div class="left sidebar"><h2 class="page-title"><a href="..">FerroGate Wiki</a></h2><div class="spacer mobile-only"></div><div class="flex-component" style="flex-direction: row; flex-wrap: nowrap; gap: 1rem;"><div style="flex-grow: 1; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><div class="search"><button class="search-button"><svg role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 19.9 19.7"><title>Search</title><g class="search-path" fill="none"><path stroke-linecap="square" d="M18.5 18.3l-5.4-5.4"></path><circle cx="8" cy="8" r="7"></circle></g></svg><p>Search</p></button><div class="search-container"><div class="search-space"><input autocomplete="off" class="search-bar" name="search" type="text" aria-label="Search for something" placeholder="Search for something"/><div class="search-layout" data-preview="true"></div></div></div></div></div><div style="flex-grow: 0; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><button class="darkmode"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="dayIcon" x="0px" y="0px" viewBox="0 0 35 35" style="enable-background:new 0 0 35 35" xml:space="preserve" aria-label="Dark mode"><title>Dark mode</title><path d="M6,17.5C6,16.672,5.328,16,4.5,16h-3C0.672,16,0,16.672,0,17.5    S0.672,19,1.5,19h3C5.328,19,6,18.328,6,17.5z M7.5,26c-0.414,0-0.789,0.168-1.061,0.439l-2,2C4.168,28.711,4,29.086,4,29.5    C4,30.328,4.671,31,5.5,31c0.414,0,0.789-0.168,1.06-0.44l2-2C8.832,28.289,9,27.914,9,27.5C9,26.672,8.329,26,7.5,26z M17.5,6    C18.329,6,19,5.328,19,4.5v-3C19,0.672,18.329,0,17.5,0S16,0.672,16,1.5v3C16,5.328,16.671,6,17.5,6z M27.5,9    c0.414,0,0.789-0.168,1.06-0.439l2-2C30.832,6.289,31,5.914,31,5.5C31,4.672,30.329,4,29.5,4c-0.414,0-0.789,0.168-1.061,0.44    l-2,2C26.168,6.711,26,7.086,26,7.5C26,8.328,26.671,9,27.5,9z M6.439,8.561C6.711,8.832,7.086,9,7.5,9C8.328,9,9,8.328,9,7.5    c0-0.414-0.168-0.789-0.439-1.061l-2-2C6.289,4.168,5.914,4,5.5,4C4.672,4,4,4.672,4,5.5c0,0.414,0.168,0.789,0.439,1.06    L6.439,8.561z M33.5,16h-3c-0.828,0-1.5,0.672-1.5,1.5s0.672,1.5,1.5,1.5h3c0.828,0,1.5-0.672,1.5-1.5S34.328,16,33.5,16z     M28.561,26.439C28.289,26.168,27.914,26,27.5,26c-0.828,0-1.5,0.672-1.5,1.5c0,0.414,0.168,0.789,0.439,1.06l2,2    C28.711,30.832,29.086,31,29.5,31c0.828,0,1.5-0.672,1.5-1.5c0-0.414-0.168-0.789-0.439-1.061L28.561,26.439z M17.5,29    c-0.829,0-1.5,0.672-1.5,1.5v3c0,0.828,0.671,1.5,1.5,1.5s1.5-0.672,1.5-1.5v-3C19,29.672,18.329,29,17.5,29z M17.5,7    C11.71,7,7,11.71,7,17.5S11.71,28,17.5,28S28,23.29,28,17.5S23.29,7,17.5,7z M17.5,25c-4.136,0-7.5-3.364-7.5-7.5    c0-4.136,3.364-7.5,7.5-7.5c4.136,0,7.5,3.364,7.5,7.5C25,21.636,21.636,25,17.5,25z"></path></svg><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="nightIcon" x="0px" y="0px" viewBox="0 0 100 100" style="enable-background:new 0 0 100 100" xml:space="preserve" aria-label="Light mode"><title>Light mode</title><path d="M96.76,66.458c-0.853-0.852-2.15-1.064-3.23-0.534c-6.063,2.991-12.858,4.571-19.655,4.571  C62.022,70.495,50.88,65.88,42.5,57.5C29.043,44.043,25.658,23.536,34.076,6.47c0.532-1.08,0.318-2.379-0.534-3.23  c-0.851-0.852-2.15-1.064-3.23-0.534c-4.918,2.427-9.375,5.619-13.246,9.491c-9.447,9.447-14.65,22.008-14.65,35.369  c0,13.36,5.203,25.921,14.65,35.368s22.008,14.65,35.368,14.65c13.361,0,25.921-5.203,35.369-14.65  c3.872-3.871,7.064-8.328,9.491-13.246C97.826,68.608,97.611,67.309,96.76,66.458z"></path></svg></button></div><div style="flex-grow: 0; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><button class="readermode"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="readerIcon" fill="currentColor" stroke="currentColor" stroke-width="0.2" stroke-linecap="round" stroke-linejoin="round" width="64px" height="64px" viewBox="0 0 24 24" aria-label="Reader mode"><title>Reader mode</title><g transform="translate(-1.8, -1.8) scale(1.15, 1.2)"><path d="M8.9891247,2.5 C10.1384702,2.5 11.2209868,2.96705384 12.0049645,3.76669482 C12.7883914,2.96705384 13.8709081,2.5 15.0202536,2.5 L18.7549359,2.5 C19.1691495,2.5 19.5049359,2.83578644 19.5049359,3.25 L19.5046891,4.004 L21.2546891,4.00457396 C21.6343849,4.00457396 21.9481801,4.28672784 21.9978425,4.6528034 L22.0046891,4.75457396 L22.0046891,20.25 C22.0046891,20.6296958 21.7225353,20.943491 21.3564597,20.9931534 L21.2546891,21 L2.75468914,21 C2.37499337,21 2.06119817,20.7178461 2.01153575,20.3517706 L2.00468914,20.25 L2.00468914,4.75457396 C2.00468914,4.37487819 2.28684302,4.061083 2.65291858,4.01142057 L2.75468914,4.00457396 L4.50368914,4.004 L4.50444233,3.25 C4.50444233,2.87030423 4.78659621,2.55650904 5.15267177,2.50684662 L5.25444233,2.5 L8.9891247,2.5 Z M4.50368914,5.504 L3.50468914,5.504 L3.50468914,19.5 L10.9478955,19.4998273 C10.4513189,18.9207296 9.73864328,18.5588115 8.96709342,18.5065584 L8.77307039,18.5 L5.25444233,18.5 C4.87474657,18.5 4.56095137,18.2178461 4.51128895,17.8517706 L4.50444233,17.75 L4.50368914,5.504 Z M19.5049359,17.75 C19.5049359,18.1642136 19.1691495,18.5 18.7549359,18.5 L15.2363079,18.5 C14.3910149,18.5 13.5994408,18.8724714 13.0614828,19.4998273 L20.5046891,19.5 L20.5046891,5.504 L19.5046891,5.504 L19.5049359,17.75 Z M18.0059359,3.999 L15.0202536,4 L14.8259077,4.00692283 C13.9889509,4.06666544 13.2254227,4.50975805 12.7549359,5.212 L12.7549359,17.777 L12.7782651,17.7601316 C13.4923805,17.2719483 14.3447024,17 15.2363079,17 L18.0059359,16.999 L18.0056891,4.798 L18.0033792,4.75457396 L18.0056891,4.71 L18.0059359,3.999 Z M8.9891247,4 L6.00368914,3.999 L6.00599909,4.75457396 L6.00599909,4.75457396 L6.00368914,4.783 L6.00368914,16.999 L8.77307039,17 C9.57551536,17 10.3461406,17.2202781 11.0128313,17.6202194 L11.2536891,17.776 L11.2536891,5.211 C10.8200889,4.56369974 10.1361548,4.13636104 9.37521067,4.02745763 L9.18347055,4.00692283 L8.9891247,4 Z"></path></g></svg></button></div></div><div class="explorer" data-behavior="link" data-collapsed="collapsed" data-savestate="true" data-data-fns="{&quot;order&quot;:[&quot;filter&quot;,&quot;map&quot;,&quot;sort&quot;],&quot;sortFn&quot;:&quot;(a,b)=>!a.isFolder&amp;&amp;!b.isFolder||a.isFolder&amp;&amp;b.isFolder?a.displayName.localeCompare(b.displayName,void 0,{numeric:!0,sensitivity:\&quot;base\&quot;}):!a.isFolder&amp;&amp;b.isFolder?1:-1&quot;,&quot;filterFn&quot;:&quot;node=>node.slugSegment!==\&quot;tags\&quot;&quot;,&quot;mapFn&quot;:&quot;node=>node&quot;}"><button type="button" class="explorer-toggle mobile-explorer hide-until-loaded" data-mobile="true" aria-controls="explorer-3"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide-menu"><line x1="4" x2="20" y1="12" y2="12"></line><line x1="4" x2="20" y1="6" y2="6"></line><line x1="4" x2="20" y1="18" y2="18"></line></svg></button><button type="button" class="title-button explorer-toggle desktop-explorer" data-mobile="false" aria-expanded="true"><h2>Explorer</h2><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="5 8 14 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fold"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="explorer-3" class="explorer-content" aria-expanded="false" role="group"><ul class="explorer-ul overflow" id="list-0"><li class="overflow-end"></li></ul></div><template id="template-file"><li><a href="#"></a></li></template><template id="template-folder"><li><div class="folder-container"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="5 8 14 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder-icon"><polyline points="6 9 12 15 18 9"></polyline></svg><div><button class="folder-button"><span class="folder-title"></span></button></div></div><div class="folder-outer"><ul class="content"></ul></div></li></template></div></div><div class="center"><div class="page-header"><div class="popover-hint"><nav class="breadcrumb-container" aria-label="breadcrumbs"><div class="breadcrumb-element"><a href="../">Home</a><p> ❯ </p></div><div class="breadcrumb-element"><a href="../01-product/">01 product</a><p> ❯ </p></div><div class="breadcrumb-element"><a href>产品需求文档</a></div></nav><h1 class="article-title">产品需求文档</h1><p show-comma="true" class="content-meta"><time datetime="2026-05-02T15:40:19.000Z">May 02, 2026</time><span>30 min read</span></p></div></div><article class="popover-hint"><h1 id="ferrogate-产品需求文档-prd">FerroGate 产品需求文档 PRD<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#ferrogate-产品需求文档-prd" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h1>
+<h2 id="1-产品定位">1. 产品定位<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#1-产品定位" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>FerroGate 是一个使用 Rust 实现的开源 API Gateway 和 AI Gateway。</p>
+<p>FerroGate 的目标不是只做一个简单的 LLM Proxy，而是要先把 Caddy 这类成熟 API 网关产品中已经被验证过的核心功能完整内建复刻到 FerroGate 中，再在此基础上叠加 AI Gateway 能力。</p>
+<p>这里的“复刻”指的是能力复刻和产品体验复刻，不是代码复刻，也不是做一个外部插件生态。FerroGate 应该把通用 API 网关需要的能力作为产品内建模块来实现，包括：</p>
+<ul>
+<li>反向代理</li>
+<li>路由匹配</li>
+<li>上游服务管理</li>
+<li>TLS 和监听器管理</li>
+<li>配置驱动运行</li>
+<li>配置校验</li>
+<li>平滑重载</li>
+<li>请求/响应中间件流水线</li>
+<li>认证与授权</li>
+<li>限流、配额、熔断、重试</li>
+<li>健康检查</li>
+<li>结构化访问日志</li>
+<li>指标、日志、链路追踪</li>
+<li>管理 API</li>
+<li>内建后台 Dashboard</li>
+</ul>
+<p>在完整 API Gateway 基础之上，FerroGate 需要提供 AI Gateway 的专属能力：</p>
+<ul>
+<li>虚拟 API Key</li>
+<li>多模型 Provider 支持</li>
+<li>OpenAI-compatible API 入口</li>
+<li>OpenAI、Anthropic、Gemini、Grok、Azure OpenAI 等官方 API 支持</li>
+<li>Provider 请求/响应格式转换</li>
+<li>Streaming 支持</li>
+<li>模型别名和模型路由</li>
+<li>Token 统计、成本计算和计费</li>
+<li>租户隔离</li>
+<li>企业级组织、团队、用户、项目管理</li>
+<li>组织内部权限控制</li>
+<li>OpenTelemetry 全链路追踪</li>
+<li>AI 请求日志和审计</li>
+<li>简易后台 Dashboard，后期可逐步美化和增强</li>
+</ul>
+<h2 id="2-产品愿景">2. 产品愿景<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#2-产品愿景" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>FerroGate 要成为面向 AI 流量的 Rust 原生开源网关。</p>
+<p>它应该同时满足两类需求：</p>
+<ol>
+<li>作为通用 API Gateway，可以承载常规 HTTP/API 网关能力。</li>
+<li>作为 AI Gateway，可以统一管理企业或团队内部所有 AI Provider、模型、API Key、Token 用量、日志追踪和计费。</li>
+</ol>
+<p>最终用户不应该直接把 OpenAI、Anthropic、Gemini、Grok 等 Provider Key 分散到各个业务系统里，而是统一接入 FerroGate，由 FerroGate 负责：</p>
+<ul>
+<li>统一入口</li>
+<li>统一认证</li>
+<li>统一模型路由</li>
+<li>统一权限控制</li>
+<li>统一日志追踪</li>
+<li>统一 Token 计费</li>
+<li>统一 Dashboard 管理</li>
+</ul>
+<h2 id="3-用户和使用场景">3. 用户和使用场景<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#3-用户和使用场景" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="31-个人开发者">3.1 个人开发者<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#31-个人开发者" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>需要一个本地或自托管网关，统一调用不同 AI Provider，避免在代码中硬编码多个 Provider 的 API Key 和差异化调用方式。</p>
+<h3 id="32-创业团队">3.2 创业团队<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#32-创业团队" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>需要一个低成本、易部署的 AI Gateway，统一管理多个应用、多个 Provider、多个模型的调用和成本。</p>
+<h3 id="33-平台工程团队">3.3 平台工程团队<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#33-平台工程团队" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>需要为企业内部所有 AI 流量提供统一入口、统一治理、统一日志、统一权限和统一计费。</p>
+<h3 id="34-企业组织">3.4 企业组织<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#34-企业组织" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>需要支持公司、组织、团队、项目、用户、服务账号和 API Key 的多层级隔离与权限管理。</p>
+<h3 id="35-token4ai-cloud-用户">3.5 Token4AI Cloud 用户<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#35-token4ai-cloud-用户" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>需要一个开源可控的网关组件，后续可以与 Token4AI Cloud 的用量分析、计费、治理平台对接。</p>
+<h2 id="4-核心问题">4. 核心问题<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#4-核心问题" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<ol>
+<li>AI Provider API 不统一，鉴权方式、请求格式、响应格式、错误格式、流式协议、用量字段都不同。</li>
+<li>业务系统里直接使用官方 Provider Key，安全风险高，难以回收、审计和限权。</li>
+<li>企业内部缺少统一的模型访问控制、预算控制和 Token 配额控制。</li>
+<li>AI 请求日志不完整，很难追踪一次请求从业务系统到网关再到上游 Provider 的完整链路。</li>
+<li>Token 成本难以按组织、团队、用户、项目、API Key、模型、Provider 维度拆分。</li>
+<li>简单 LLM Proxy 通常缺少企业级租户、权限、审计和 Dashboard。</li>
+<li>传统 API Gateway 通常不是 AI 原生，缺少模型路由、Token 计费和 Provider 适配能力。</li>
+<li>团队需要一个 Rust 实现、可审计、可自托管、可长期演进的网关产品。</li>
+</ol>
+<h2 id="5-产品范围">5. 产品范围<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#5-产品范围" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>FerroGate 分为三层能力：</p>
+<pre><button class="expand-button" aria-label="Expand mermaid diagram" data-view-component="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 1.06L2.56 7h10.88l-2.22-2.22a.75.75 0 011.06-1.06l3.5 3.5a.75.75 0 010 1.06l-3.5 3.5a.75.75 0 11-1.06-1.06l2.22-2.22H2.56l2.22 2.22a.75.75 0 11-1.06 1.06l-3.5-3.5a.75.75 0 010-1.06l3.5-3.5z"></path></svg></button><code class="mermaid" data-clipboard="&quot;flowchart TB\n  Gateway[通用 API Gateway 内建能力]\n  AI[AI Gateway 专属能力]\n  Control[管理后台和控制平面]\n\n  Gateway --> AI\n  AI --> Control&quot;">flowchart TB
+  Gateway[通用 API Gateway 内建能力]
+  AI[AI Gateway 专属能力]
+  Control[管理后台和控制平面]
+
+  Gateway --> AI
+  AI --> Control
+</code><div id="mermaid-container" role="dialog"><div id="mermaid-space"><div class="mermaid-content"></div></div></div></pre>
+<h3 id="51-通用-api-gateway-内建能力">5.1 通用 API Gateway 内建能力<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#51-通用-api-gateway-内建能力" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 必须内建完整 API Gateway 能力，不依赖外部插件系统完成核心功能。</p>
+<p>需要实现：</p>
+<ul>
+<li>HTTP 反向代理</li>
+<li>路由匹配</li>
+<li>上游服务池</li>
+<li>上游负载均衡</li>
+<li>上游健康检查</li>
+<li>故障转移</li>
+<li>超时控制</li>
+<li>重试策略</li>
+<li>熔断策略</li>
+<li>TLS 监听</li>
+<li>配置文件校验</li>
+<li>平滑重载</li>
+<li>请求/响应中间件流水线</li>
+<li>请求头、响应头改写</li>
+<li>路径重写</li>
+<li>访问日志</li>
+<li>指标采集</li>
+<li>OpenTelemetry 链路追踪</li>
+<li>管理 API</li>
+<li>简易 Dashboard</li>
+</ul>
+<h3 id="52-ai-gateway-专属能力">5.2 AI Gateway 专属能力<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#52-ai-gateway-专属能力" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>AI Gateway 层负责所有 AI 相关能力：</p>
+<ul>
+<li>虚拟 API Key</li>
+<li>Provider Registry</li>
+<li>Model Registry</li>
+<li>OpenAI-compatible API 入口</li>
+<li>Provider Adapter</li>
+<li>模型别名</li>
+<li>模型路由</li>
+<li>模型 fallback</li>
+<li>Streaming 响应转发</li>
+<li>Token 统计</li>
+<li>Token 计费</li>
+<li>成本估算</li>
+<li>租户级 Policy</li>
+<li>AI 请求审计日志</li>
+<li>Provider 错误归一化</li>
+<li>请求/响应格式归一化</li>
+</ul>
+<h3 id="53-管理后台和控制平面">5.3 管理后台和控制平面<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#53-管理后台和控制平面" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>前期 Dashboard 可以简单，但必须尽早具备基本管理能力。</p>
+<p>MVP Dashboard 应包含：</p>
+<ul>
+<li>网关概览</li>
+<li>组织/团队/项目管理</li>
+<li>用户和权限管理</li>
+<li>虚拟 API Key 管理</li>
+<li>Provider 配置展示</li>
+<li>Model Registry 展示</li>
+<li>请求日志查询</li>
+<li>Token 用量汇总</li>
+<li>成本汇总</li>
+<li>网关健康状态</li>
+</ul>
+<p>后期 Dashboard 需要逐步增强：</p>
+<ul>
+<li>更美观的 UI</li>
+<li>实时流量图表</li>
+<li>成本趋势分析</li>
+<li>Policy 可视化编辑</li>
+<li>模型路由编辑</li>
+<li>审计日志查询</li>
+<li>Provider 健康看板</li>
+<li>权限管理界面</li>
+<li>企业级报表</li>
+</ul>
+<h3 id="54-caddy-基础功能复刻和-caddyfile-兼容范围">5.4 Caddy 基础功能复刻和 Caddyfile 兼容范围<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#54-caddy-基础功能复刻和-caddyfile-兼容范围" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 需要复刻 Caddy 作为 API 网关/反向代理产品中的核心能力，但不复刻 Caddy 的插件生态模式。FerroGate 的实现方式应该是 Rust 内建模块，不要求用户通过外部插件来获得核心能力。</p>
+<p>FerroGate 还必须支持 Caddyfile 风格的启动配置。用户应该可以使用 Caddy 类似的配置体验启动 FerroGate，例如：</p>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="bash" data-theme="github-light github-dark"><code data-language="bash" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">ferrogate</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> run</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --config</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> Ferrogate/Caddyfile</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">ferrogate</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> validate</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --config</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> Ferrogate/Caddyfile</span></span></code></pre></figure>
+<p>其中 <code>Ferrogate/Caddyfile</code> 是 FerroGate 需要支持的标准 Caddyfile 风格启动配置路径。后续也可以支持 <code>./Caddyfile</code>、<code>./ferrogate.toml</code> 等路径，但不能影响 <code>Ferrogate/Caddyfile</code> 的一等支持。</p>
+<p>FerroGate 实现 Caddy 基础能力时，必须下载并对照 Caddy 官方源码进行设计审查，当前参考源码建议放在仓库本地忽略目录 <code>.references/caddy</code>。对照目标是理解 Caddy 的配置解析、Caddyfile adapter、HTTP directive、route/handle/reverse_proxy/log/tls 等成熟产品语义，并将这些语义用 Rust、Pingora 和 FerroGate 自身模块重新实现。严禁复制 Caddy 的 Go 源码、内部架构或许可证不兼容实现。</p>
+<h4 id="541-必须内建复刻的-caddy-基础能力">5.4.1 必须内建复刻的 Caddy 基础能力<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#541-必须内建复刻的-caddy-基础能力" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h4>
+<ul>
+<li>多监听地址和端口配置，包括 <code>:8080</code>、<code>localhost:8080</code>、域名站点块。</li>
+<li>HTTP/HTTPS 入口管理。</li>
+<li>TLS 配置和证书加载，后续支持自动证书管理。</li>
+<li>HTTP 反向代理，对应 Caddy <code>reverse_proxy</code> 的基础能力。</li>
+<li>Path、Host、Method、Header、Query 匹配。</li>
+<li><code>route</code>、<code>handle</code>、<code>handle_path</code> 风格的路由分组和处理链语义。</li>
+<li>Header 匹配、请求 Header 改写、响应 Header 改写。</li>
+<li>Path rewrite 和 URI rewrite。</li>
+<li>Query 参数处理。</li>
+<li>上游 upstream pool。</li>
+<li>负载均衡。</li>
+<li>主动/被动健康检查。</li>
+<li>超时、重试、故障转移。</li>
+<li>静态响应和健康检查响应，对应 <code>respond</code> 基础能力。</li>
+<li>重定向，对应 <code>redir</code> 基础能力。</li>
+<li>请求/响应压缩，对应 <code>encode</code> 基础能力，后续逐步支持 gzip、zstd。</li>
+<li>访问日志和错误日志，对应 <code>log</code> 基础能力。</li>
+<li>管理 API。</li>
+<li>配置文件校验。</li>
+<li>配置热加载/平滑重载。</li>
+<li>中间件处理链。</li>
+<li>基础安全能力，例如请求体大小限制、Header 限制、速率限制。</li>
+<li>运行时状态查看。</li>
+</ul>
+<h4 id="542-caddyfile-兼容目标">5.4.2 Caddyfile 兼容目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#542-caddyfile-兼容目标" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h4>
+<p>FerroGate 的 Caddyfile 兼容是“核心反向代理和网关语义兼容”，不是 Caddy 全插件生态兼容。</p>
+<p>MVP 必须支持以下 Caddyfile 子集或给出明确可读的校验错误：</p>
+<ul>
+<li>全局选项块，例如日志、admin endpoint、debug、默认配置。</li>
+<li>Site block，例如 <code>:8080 { ... }</code>、<code>example.com { ... }</code>。</li>
+<li>Matcher，包括 path、host、method、header、query 的基础匹配。</li>
+<li><code>reverse_proxy</code>，包括单上游、多上游、基础负载均衡、超时配置。</li>
+<li><code>route</code> / <code>handle</code> / <code>handle_path</code> 的基础路由组织。</li>
+<li><code>header</code>，包括请求/响应 Header 设置、删除和追加。</li>
+<li><code>rewrite</code> / <code>uri</code> 的基础路径和 URI 改写。</li>
+<li><code>respond</code> 静态响应。</li>
+<li><code>redir</code> 重定向。</li>
+<li><code>encode</code> 压缩声明。</li>
+<li><code>tls</code> 手动证书配置，自动证书能力后续增强。</li>
+<li><code>log</code> 访问日志配置。</li>
+</ul>
+<p>FerroGate 可以扩展 Caddyfile 语法，增加 AI Gateway 专属 directive，例如 <code>ai_gateway</code>、<code>provider</code>、<code>model</code>、<code>virtual_key</code>、<code>policy</code>、<code>billing</code> 等，但扩展语法必须保持和 Caddyfile 的块结构、缩进风格、可读性一致。</p>
+<h4 id="543-不需要复刻的部分">5.4.3 不需要复刻的部分<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#543-不需要复刻的部分" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h4>
+<ul>
+<li>不做 Caddy 外部插件生态。</li>
+<li>不要求用户通过插件安装核心网关能力。</li>
+<li>不复制 Caddy 的 Go 语言实现和内部架构。</li>
+<li>不要求兼容 Caddy 所有第三方插件 directive。</li>
+<li>不要求第一阶段实现 Caddy 自动 HTTPS 的完整体验，但配置模型和 TLS 边界必须为后续自动证书管理预留空间。</li>
+</ul>
+<p>产品判断标准：如果一个团队原本想用成熟 API 网关做 HTTP 反向代理、路由、TLS、重载、日志和上游治理，那么 FerroGate 应该能覆盖这些基础网关场景；如果这个团队已有基础 Caddyfile 反向代理配置，FerroGate 应该能读取兼容的 <code>Ferrogate/Caddyfile</code> 启动配置或给出明确迁移诊断；如果这个团队还需要 AI Provider 管理、Token 计费、虚拟 API Key、租户权限和 AI 请求追踪，那么 FerroGate 应该比传统网关更适合。</p>
+<h2 id="6-功能需求">6. 功能需求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#6-功能需求" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h2 id="61-虚拟-api-key-系统">6.1 虚拟 API Key 系统<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#61-虚拟-api-key-系统" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>业务系统只使用 FerroGate 发放的虚拟 API Key，不直接接触 OpenAI、Anthropic、Gemini、Grok 等上游 Provider Key。</p>
+<h3 id="功能要求">功能要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#功能要求" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>创建虚拟 API Key</li>
+<li>禁用虚拟 API Key</li>
+<li>删除虚拟 API Key</li>
+<li>轮换虚拟 API Key</li>
+<li>设置过期时间</li>
+<li>Key 只存储 Hash，不存储明文</li>
+<li>Key 绑定组织、团队、项目、用户或服务账号</li>
+<li>Key 支持作用域 Scope</li>
+<li>Key 支持模型 allowlist/denylist</li>
+<li>Key 支持 Provider allowlist/denylist</li>
+<li>Key 支持请求限流</li>
+<li>Key 支持 Token 配额</li>
+<li>Key 支持成本预算</li>
+<li>Key 支持审计记录</li>
+</ul>
+<h3 id="示例配置">示例配置<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#示例配置" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="toml" data-theme="github-light github-dark"><code data-language="toml" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">[[</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">api_keys</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">]]</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">name = </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;prod-web-app&quot;</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">owner = </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;team-platform&quot;</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">scopes = [</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;chat.completions&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">, </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;models.read&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">]</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">allowed_models = [</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;gpt-4o&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">, </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;claude-3-5-sonnet&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">, </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;gemini-1.5-pro&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">]</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">monthly_token_budget = </span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;">100000000</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">rate_limit = </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;600r/m&quot;</span></span></code></pre></figure>
+<h3 id="验收标准">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>客户端可以用一个虚拟 API Key 调用 FerroGate。</li>
+<li>FerroGate 可以根据 Key 解析出组织、团队、项目、用户上下文。</li>
+<li>上游 Provider Key 不暴露给业务系统。</li>
+<li>被禁用、过期、超限的 Key 会被拒绝并返回统一错误。</li>
+</ul>
+<h2 id="62-provider-支持">6.2 Provider 支持<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#62-provider-支持" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-1">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-1" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 需要支持主流官方 AI Provider，并通过统一接口隐藏 Provider 差异。</p>
+<h3 id="首批-provider">首批 Provider<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#首批-provider" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>OpenAI</li>
+<li>Anthropic</li>
+<li>Google Gemini</li>
+<li>xAI Grok</li>
+<li>Azure OpenAI</li>
+</ul>
+<h3 id="后续-provider">后续 Provider<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#后续-provider" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>Mistral</li>
+<li>Cohere</li>
+<li>Together AI</li>
+<li>DeepSeek</li>
+<li>Perplexity</li>
+<li>Groq</li>
+<li>AWS Bedrock</li>
+<li>Google Vertex AI</li>
+<li>OpenRouter</li>
+<li>自托管 OpenAI-compatible 服务</li>
+</ul>
+<h3 id="provider-adapter-职责">Provider Adapter 职责<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#provider-adapter-职责" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>每个 Provider Adapter 需要负责：</p>
+<ul>
+<li>鉴权 Header 注入</li>
+<li>Endpoint 映射</li>
+<li>请求体转换</li>
+<li>响应体转换</li>
+<li>Streaming 协议转换</li>
+<li>错误码归一化</li>
+<li>模型名映射</li>
+<li>Usage 字段提取</li>
+<li>是否可重试判断</li>
+<li>Provider 健康状态检查</li>
+</ul>
+<h2 id="63-model-registry-和模型路由">6.3 Model Registry 和模型路由<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#63-model-registry-和模型路由" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-2">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-2" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>用户应该使用逻辑模型名调用 FerroGate，由 FerroGate 决定具体路由到哪个 Provider 和模型。</p>
+<h3 id="功能要求-1">功能要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#功能要求-1" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>注册逻辑模型名，例如 <code>fast-chat</code>、<code>best-reasoning</code>、<code>cheap-summary</code></li>
+<li>逻辑模型映射到一个或多个 Provider 模型</li>
+<li>支持模型别名</li>
+<li>支持优先级 fallback</li>
+<li>支持权重路由</li>
+<li>支持租户级模型可见性</li>
+<li>支持模型能力描述，例如 chat、embedding、vision、tools、streaming</li>
+<li>支持模型价格信息</li>
+<li>支持上下文长度配置</li>
+</ul>
+<h3 id="示例配置-1">示例配置<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#示例配置-1" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="toml" data-theme="github-light github-dark"><code data-language="toml" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">[[</span><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">models</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">]]</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">name = </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;fast-chat&quot;</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">primary = </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;openai:gpt-4o-mini&quot;</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">fallbacks = [</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;gemini:gemini-1.5-flash&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">, </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;grok:grok-2-mini&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">]</span></span>
+<span data-line><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">capabilities = [</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;chat&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">, </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;streaming&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">, </span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;tools&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">]</span></span></code></pre></figure>
+<h2 id="64-openai-compatible-api-入口">6.4 OpenAI-compatible API 入口<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#64-openai-compatible-api-入口" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-3">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-3" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>尽量让现有 OpenAI SDK 可以直接接入 FerroGate。</p>
+<h3 id="mvp-endpoint">MVP Endpoint<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#mvp-endpoint" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li><code>GET /healthz</code></li>
+<li><code>GET /v1/models</code></li>
+<li><code>POST /v1/chat/completions</code></li>
+</ul>
+<h3 id="后续-endpoint">后续 Endpoint<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#后续-endpoint" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li><code>POST /v1/completions</code></li>
+<li><code>POST /v1/embeddings</code></li>
+<li><code>POST /v1/responses</code></li>
+<li><code>POST /v1/images/generations</code></li>
+<li><code>POST /v1/audio/transcriptions</code></li>
+<li>Provider-specific passthrough path</li>
+</ul>
+<h3 id="要求">要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#要求" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>统一错误格式</li>
+<li>支持 Streaming</li>
+<li>每个响应带 Request ID</li>
+<li>日志中记录逻辑模型、实际 Provider 和实际模型</li>
+<li>兼容模式不能阻碍 Provider 特有能力扩展</li>
+</ul>
+<h2 id="65-opentelemetry-全链路日志追踪">6.5 OpenTelemetry 全链路日志追踪<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#65-opentelemetry-全链路日志追踪" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-4">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-4" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>每一次 AI 请求都必须能被追踪，从客户端进入 FerroGate，到鉴权、租户解析、策略判断、模型路由、Provider 调用、响应转换、Token 计费，全链路可观测。</p>
+<h3 id="功能要求-2">功能要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#功能要求-2" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>集成 OpenTelemetry traces、metrics、logs</li>
+<li>支持 trace ID 透传和生成</li>
+<li>支持 request ID 生成</li>
+<li>支持 JSON 结构化日志</li>
+<li>支持对接 OTel Collector</li>
+<li>支持日志脱敏</li>
+<li>支持按租户/项目/API Key 配置是否记录 prompt 和 response body</li>
+</ul>
+<h3 id="span-设计">Span 设计<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#span-设计" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>需要至少包含以下 Span：</p>
+<ul>
+<li>inbound request</li>
+<li>virtual api key authentication</li>
+<li>tenant context resolution</li>
+<li>policy evaluation</li>
+<li>model routing</li>
+<li>provider adapter transform</li>
+<li>upstream provider call</li>
+<li>retry attempt</li>
+<li>fallback attempt</li>
+<li>streaming lifecycle</li>
+<li>token usage extraction</li>
+<li>billing event creation</li>
+</ul>
+<h3 id="日志字段">日志字段<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#日志字段" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>每条请求日志至少包含：</p>
+<ul>
+<li>request_id</li>
+<li>trace_id</li>
+<li>organization_id</li>
+<li>team_id</li>
+<li>project_id</li>
+<li>user_id</li>
+<li>api_key_id，不能记录原始 Key</li>
+<li>route</li>
+<li>logical_model</li>
+<li>provider</li>
+<li>provider_model</li>
+<li>upstream_host</li>
+<li>status_code</li>
+<li>latency_ms</li>
+<li>retry_count</li>
+<li>fallback_count</li>
+<li>prompt_tokens</li>
+<li>completion_tokens</li>
+<li>total_tokens</li>
+<li>estimated_cost</li>
+<li>error_code</li>
+<li>policy_decision</li>
+</ul>
+<h2 id="66-租户隔离和企业级权限">6.6 租户隔离和企业级权限<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#66-租户隔离和企业级权限" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-5">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-5" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 必须支持企业级多租户管理，包括组织/公司、团队、项目、用户、服务账号和 API Key。</p>
+<h3 id="租户层级">租户层级<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#租户层级" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<pre><button class="expand-button" aria-label="Expand mermaid diagram" data-view-component="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 1.06L2.56 7h10.88l-2.22-2.22a.75.75 0 011.06-1.06l3.5 3.5a.75.75 0 010 1.06l-3.5 3.5a.75.75 0 11-1.06-1.06l2.22-2.22H2.56l2.22 2.22a.75.75 0 11-1.06 1.06l-3.5-3.5a.75.75 0 010-1.06l3.5-3.5z"></path></svg></button><code class="mermaid" data-clipboard="&quot;flowchart TB\n  Org[组织 / 公司]\n  Team[团队]\n  Project[项目 / 应用]\n  User[用户]\n  Service[服务账号]\n  Key[虚拟 API Key]\n\n  Org --> Team\n  Team --> Project\n  Org --> User\n  Org --> Service\n  Project --> Key\n  User --> Key\n  Service --> Key&quot;">flowchart TB
+  Org[组织 / 公司]
+  Team[团队]
+  Project[项目 / 应用]
+  User[用户]
+  Service[服务账号]
+  Key[虚拟 API Key]
+
+  Org --> Team
+  Team --> Project
+  Org --> User
+  Org --> Service
+  Project --> Key
+  User --> Key
+  Service --> Key
+</code><div id="mermaid-container" role="dialog"><div id="mermaid-space"><div class="mermaid-content"></div></div></div></pre>
+<h3 id="核心实体">核心实体<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#核心实体" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>Organization / Company</li>
+<li>Team</li>
+<li>Project / App</li>
+<li>User</li>
+<li>Service Account</li>
+<li>Virtual API Key</li>
+<li>Role</li>
+<li>Permission</li>
+<li>Policy</li>
+<li>Billing Account</li>
+</ul>
+<h3 id="初始角色">初始角色<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#初始角色" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>Owner</li>
+<li>Admin</li>
+<li>Billing Admin</li>
+<li>Developer</li>
+<li>Viewer</li>
+<li>Service Account</li>
+</ul>
+<h3 id="权限示例">权限示例<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#权限示例" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>管理组织设置</li>
+<li>管理团队</li>
+<li>管理用户</li>
+<li>管理项目</li>
+<li>管理虚拟 API Key</li>
+<li>查看请求日志</li>
+<li>查看 Token 用量</li>
+<li>查看成本</li>
+<li>编辑 Provider 配置</li>
+<li>编辑模型路由</li>
+<li>编辑 Policy</li>
+<li>查看审计日志</li>
+</ul>
+<h3 id="隔离要求">隔离要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#隔离要求" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>所有租户数据必须带 organization_id。</li>
+<li>虚拟 API Key 必须解析到唯一租户上下文。</li>
+<li>用户只能查看自己有权限的日志、用量和成本。</li>
+<li>Provider 凭据可以是全局级、组织级或项目级。</li>
+<li>Policy 支持从组织到团队到项目到 Key 的继承和覆盖。</li>
+</ul>
+<h2 id="67-token-计费系统">6.7 Token 计费系统<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#67-token-计费系统" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-6">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-6" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 必须记录 AI 用量，并支持基于 Token 的成本统计、预算控制和计费事件输出。</p>
+<h3 id="功能要求-3">功能要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#功能要求-3" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>记录 prompt tokens</li>
+<li>记录 completion tokens</li>
+<li>记录 total tokens</li>
+<li>记录 cached tokens，如果 Provider 支持</li>
+<li>Provider 不返回 usage 时支持估算</li>
+<li>维护模型价格表</li>
+<li>计算单次请求成本</li>
+<li>按组织、团队、项目、用户、API Key、Provider、模型、时间维度聚合</li>
+<li>支持月度预算</li>
+<li>支持预付费额度</li>
+<li>支持软限制和硬限制</li>
+<li>生成 billing events</li>
+<li>支持企业内部成本分摊</li>
+</ul>
+<h3 id="billing-event-字段">Billing Event 字段<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#billing-event-字段" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>event_id</li>
+<li>request_id</li>
+<li>timestamp</li>
+<li>organization_id</li>
+<li>team_id</li>
+<li>project_id</li>
+<li>user_id</li>
+<li>api_key_id</li>
+<li>provider</li>
+<li>provider_model</li>
+<li>logical_model</li>
+<li>prompt_tokens</li>
+<li>completion_tokens</li>
+<li>total_tokens</li>
+<li>unit_price_input</li>
+<li>unit_price_output</li>
+<li>calculated_cost</li>
+<li>currency</li>
+<li>billing_status</li>
+</ul>
+<h2 id="68-policy-engine">6.8 Policy Engine<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#68-policy-engine" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-7">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-7" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 需要在请求到达上游 Provider 前执行统一治理策略。</p>
+<h3 id="必须支持的-policy">必须支持的 Policy<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#必须支持的-policy" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>模型 allowlist/denylist</li>
+<li>Provider allowlist/denylist</li>
+<li>请求频率限制</li>
+<li>Token 频率限制</li>
+<li>日/月 Token 预算</li>
+<li>最大 prompt 长度</li>
+<li>最大 output tokens</li>
+<li>最大请求体大小</li>
+<li>允许的 API 能力</li>
+<li>dev/staging/prod 环境隔离</li>
+<li>prompt/body 日志策略</li>
+<li>组织、团队、项目、Key 多级策略继承</li>
+</ul>
+<h3 id="后续-policy">后续 Policy<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#后续-policy" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>内容安全检测</li>
+<li>PII 检测</li>
+<li>数据驻留规则</li>
+<li>按地域、成本、延迟做 Provider 选择</li>
+<li>高成本模型审批流程</li>
+</ul>
+<h2 id="69-路由负载均衡和故障转移">6.9 路由、负载均衡和故障转移<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#69-路由负载均衡和故障转移" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-8">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-8" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 需要可靠地将请求路由到合适的 Provider 和模型。</p>
+<h3 id="功能要求-4">功能要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#功能要求-4" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>静态路由规则</li>
+<li>模型别名</li>
+<li>权重路由</li>
+<li>优先级 fallback</li>
+<li>Provider 健康检查</li>
+<li>超时策略</li>
+<li>重试策略</li>
+<li>熔断器</li>
+<li>租户级路由规则</li>
+<li>成本优先路由，后续阶段</li>
+<li>延迟优先路由，后续阶段</li>
+</ul>
+<h2 id="610-管理-api">6.10 管理 API<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#610-管理-api" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-9">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-9" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Dashboard 和自动化工具都应该通过稳定的 Admin API 操作 FerroGate。</p>
+<h3 id="api-范围">API 范围<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#api-范围" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>organizations</li>
+<li>teams</li>
+<li>users</li>
+<li>projects</li>
+<li>service accounts</li>
+<li>virtual api keys</li>
+<li>providers</li>
+<li>models</li>
+<li>policies</li>
+<li>usage summaries</li>
+<li>billing events</li>
+<li>request logs</li>
+<li>gateway status</li>
+</ul>
+<h3 id="要求-1">要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#要求-1" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>RBAC 保护</li>
+<li>所有写操作进入审计日志</li>
+<li>API 版本化</li>
+<li>Dashboard 不直接访问内部状态，只通过 Admin API</li>
+</ul>
+<h2 id="611-dashboard">6.11 Dashboard<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#611-dashboard" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-10">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-10" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>前期提供简单但可用的后台 Dashboard，后期逐步美化。</p>
+<h3 id="mvp-页面">MVP 页面<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#mvp-页面" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>登录页或本地管理员入口</li>
+<li>Overview 概览</li>
+<li>组织管理</li>
+<li>团队管理</li>
+<li>项目管理</li>
+<li>用户和角色管理</li>
+<li>虚拟 API Key 管理</li>
+<li>Provider 配置</li>
+<li>Model Registry</li>
+<li>请求日志</li>
+<li>Token 用量</li>
+<li>成本汇总</li>
+<li>网关健康状态</li>
+</ul>
+<h3 id="后续页面">后续页面<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#后续页面" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>Policy 编辑器</li>
+<li>模型路由编辑器</li>
+<li>实时 Trace Viewer</li>
+<li>成本报表</li>
+<li>审计日志</li>
+<li>Provider 健康看板</li>
+<li>UI 主题和视觉美化</li>
+</ul>
+<h2 id="612-配置系统">6.12 配置系统<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#612-配置系统" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="目标-11">目标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#目标-11" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate 前期采用文件配置优先，后期支持动态控制平面。</p>
+<p>FerroGate 的一等启动配置格式必须兼容 Caddyfile 风格，标准路径为 <code>Ferrogate/Caddyfile</code>。</p>
+<p>FerroGate 可以保留 TOML 作为内部结构化配置、测试配置或过渡配置，但不能以 TOML 替代 Caddyfile 兼容目标。</p>
+<h3 id="功能要求-5">功能要求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#功能要求-5" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>MVP 支持读取和校验 <code>Ferrogate/Caddyfile</code></li>
+<li>MVP 支持 Caddyfile 风格 Site block、matcher、<code>reverse_proxy</code>、<code>route</code>、<code>handle</code>、<code>handle_path</code>、<code>header</code>、<code>rewrite</code>、<code>respond</code>、<code>redir</code>、<code>encode</code>、<code>tls</code>、<code>log</code> 的基础子集</li>
+<li>支持将 Caddyfile 风格配置解析为 FerroGate 内部 typed config model</li>
+<li>可选支持 TOML 配置作为内部调试和测试入口</li>
+<li>启动前配置校验</li>
+<li>支持环境变量引用 Secret</li>
+<li>支持配置平滑重载</li>
+<li>区分启动配置和动态业务配置</li>
+<li>配置错误必须包含文件名、行列号、directive 名称和可读迁移建议</li>
+</ul>
+<h2 id="7-非功能需求">7. 非功能需求<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#7-非功能需求" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="70-技术底座硬性约束">7.0 技术底座硬性约束<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#70-技术底座硬性约束" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>FerroGate 必须按照标准化 Rust 大型工程代码库来设计和实现，而不是以单文件 Demo、脚本式原型或短期验证项目的方式推进。</li>
+<li>工程结构必须采用清晰的 workspace/crate/module 分层，区分网关运行时、领域模型、配置系统、Provider Adapter、Policy Engine、计费、存储、Admin API、Dashboard 适配和可观测性等边界。</li>
+<li>所有核心模块必须通过显式接口、错误类型、配置模型和测试边界进行解耦，避免跨层直接依赖和隐式全局状态。</li>
+<li>代码必须遵循 Rust 大型工程实践，包括 <code>cargo fmt</code>、<code>cargo clippy</code>、单元测试、集成测试、文档注释、错误上下文、feature gate、CI 校验和可维护的 crate 依赖管理。</li>
+<li>新功能实现必须优先补充或更新对应文档、设计说明、测试用例和执行计划进度，保证 PRD、架构文档、开发计划与代码实现保持同步。</li>
+<li>FerroGate 的 API Gateway 与 AI Gateway 网络代理运行时必须基于 Cloudflare Pingora 开发。</li>
+<li>监听、反向代理、上游连接、请求/响应过滤、平滑关闭、后续热重载和负载均衡都应优先使用 Pingora 能力承载。</li>
+<li>不允许将 <code>axum</code>、<code>reqwest</code>、<code>hyper</code> 等通用 Web/HTTP 客户端框架作为核心网关运行时替代 Pingora。</li>
+<li>其他 Rust 库只能作为管理 API、辅助工具或非代理关键路径组件使用，不能绕过 Pingora 的代理生命周期。</li>
+<li>FerroGate 的产品代码重点放在路由策略、AI Provider 适配、虚拟 API Key、租户权限、计费、审计、可观测性和 Dashboard，而不是重写 Pingora 已经提供的底层网络能力。</li>
+</ul>
+<h3 id="71-性能">7.1 性能<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#71-性能" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>代理路径开销要低。</li>
+<li>Streaming 响应不能完整缓冲。</li>
+<li>Key 查询、路由匹配、Policy 判断必须高效。</li>
+<li>Token 计费不能明显阻塞响应路径。</li>
+</ul>
+<h3 id="72-可靠性">7.2 可靠性<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#72-可靠性" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>支持平滑关闭。</li>
+<li>支持平滑重载。</li>
+<li>支持上游超时控制。</li>
+<li>支持重试和 fallback。</li>
+<li>Provider 错误要归一化。</li>
+</ul>
+<h3 id="73-安全">7.3 安全<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#73-安全" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>虚拟 API Key 只存 Hash。</li>
+<li>不记录原始 API Key。</li>
+<li>不记录上游 Provider Secret。</li>
+<li>默认脱敏敏感字段。</li>
+<li>Admin API 必须 RBAC。</li>
+<li>控制平面写操作必须审计。</li>
+</ul>
+<h3 id="74-可观测性">7.4 可观测性<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#74-可观测性" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>OpenTelemetry 优先。</li>
+<li>所有请求有 request_id 和 trace_id。</li>
+<li>支持结构化日志。</li>
+<li>支持流量、错误率、延迟、Token、成本指标。</li>
+</ul>
+<h3 id="75-可维护性">7.5 可维护性<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#75-可维护性" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>不做外部插件体系作为早期目标。</li>
+<li>使用内建模块化设计，将 Provider、Policy、计费、日志、Dashboard 等能力分层实现。</li>
+<li>内部模块接口要清晰，便于后续维护和重构。</li>
+<li>Dashboard 必须通过 Admin API，而不是直接依赖内部实现。</li>
+</ul>
+<h2 id="8-里程碑">8. 里程碑<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#8-里程碑" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>本节是产品级里程碑，必须与 <a href="../03-development/prd-implementation-plan" class="internal alias" data-slug="03-development/prd-implementation-plan">PRD 执行计划任务</a> 的 P0-P8 阶段保持一致。执行计划负责维护 checklist、进度、验收命令和阶段产出；本节只描述每个阶段的产品交付边界。</p>
+<h3 id="p0-工程基线crate-边界与-caddyfile-配置契约">P0: 工程基线、crate 边界与 Caddyfile 配置契约<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p0-工程基线crate-边界与-caddyfile-配置契约" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>Rust workspace 和核心 crate/module 边界</li>
+<li><code>ferrogate run</code> / <code>ferrogate validate</code> 命令契约</li>
+<li><code>Ferrogate/Caddyfile</code> 一等启动配置路径</li>
+<li>Caddyfile 风格配置 parser/adapter 边界</li>
+<li>内部 typed config model</li>
+<li>Caddy 官方源码语义对照清单</li>
+<li>基础质量门禁和文档骨架</li>
+</ul>
+<h3 id="p1-pingora-通用-api-gateway-runtime-垂直切片">P1: Pingora 通用 API Gateway Runtime 垂直切片<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p1-pingora-通用-api-gateway-runtime-垂直切片" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>基于 Pingora 的监听器和代理服务</li>
+<li>配置驱动的普通 HTTP 反向代理</li>
+<li>Host/Path/Header 路由匹配</li>
+<li>upstream pool 和基础负载均衡</li>
+<li>请求/响应 Header 改写和 path rewrite</li>
+<li><code>/healthz</code> 健康检查响应</li>
+<li>request_id 和结构化访问日志</li>
+</ul>
+<h3 id="p2-配置校验生命周期和平滑重载">P2: 配置校验、生命周期和平滑重载<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p2-配置校验生命周期和平滑重载" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>Caddyfile 风格监听器、路由、upstream、TLS、日志、Provider、模型、API Key 配置模型</li>
+<li>启动前配置校验和字段级错误诊断</li>
+<li>Secret 环境变量引用和脱敏错误输出</li>
+<li>Pingora-backed 平滑重载接口</li>
+<li>配置快照、版本号和失败回滚语义</li>
+<li>Caddy 风格 <code>run</code>、<code>validate</code>、未来 <code>reload</code> 子命令约定，保留 <code>check</code> 作为 <code>validate</code> 兼容别名</li>
+</ul>
+<h3 id="p3-openai-compatible-ai-proxy-mvp">P3: OpenAI-compatible AI Proxy MVP<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p3-openai-compatible-ai-proxy-mvp" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>Provider Adapter trait MVP</li>
+<li>OpenAI-compatible Adapter 最小实现</li>
+<li><code>GET /v1/models</code></li>
+<li><code>POST /v1/chat/completions</code> 非流式路径</li>
+<li><code>stream=true</code> SSE 转发</li>
+<li>统一错误响应格式</li>
+<li>logical_model、provider、provider_model 记录</li>
+</ul>
+<h3 id="p4-虚拟-api-key租户上下文与-policy-mvp">P4: 虚拟 API Key、租户上下文与 Policy MVP<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p4-虚拟-api-key租户上下文与-policy-mvp" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>虚拟 API Key 生成、Hash 存储和校验</li>
+<li>Organization、Team、Project、User、Service Account、Role、Permission、Policy 核心模型</li>
+<li>API Key 到唯一租户上下文的解析</li>
+<li>Key、Tenant、Policy repository 边界</li>
+<li>模型和 Provider allowlist/denylist</li>
+<li>基础请求频率限制和 Token 预算接口</li>
+<li>Auth 与 Policy 接入 AI Proxy 请求路径</li>
+</ul>
+<h3 id="p5-多-provider-adapter-与-model-registry">P5: 多 Provider Adapter 与 Model Registry<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p5-多-provider-adapter-与-model-registry" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>OpenAI、Anthropic、Gemini、Grok、Azure OpenAI Adapter</li>
+<li>Provider 请求/响应转换、Streaming、错误归一化、usage 提取</li>
+<li>Model Registry、模型别名、模型能力、价格和上下文长度</li>
+<li>优先级 fallback 和权重路由</li>
+<li>租户级模型可见性</li>
+</ul>
+<h3 id="p6-可观测性请求日志storage-与计费事件">P6: 可观测性、请求日志、Storage 与计费事件<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p6-可观测性请求日志storage-与计费事件" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>OpenTelemetry traces、metrics、logs</li>
+<li>PRD 要求的 AI 请求 span 层级</li>
+<li>结构化请求日志模型和 repository</li>
+<li>Token usage 提取和估算接口</li>
+<li>模型价格表和成本计算</li>
+<li>Billing Event 模型和异步写入接口</li>
+<li>in-memory/file storage 以及 SQLite/Postgres 扩展边界</li>
+</ul>
+<h3 id="p7-admin-api-与-dashboard-mvp">P7: Admin API 与 Dashboard MVP<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p7-admin-api-与-dashboard-mvp" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>版本化 Admin API</li>
+<li>RBAC 保护和写操作审计</li>
+<li>组织、团队、项目、用户、API Key、Provider、Model、Policy、Usage、Request Log 查询接口</li>
+<li>Dashboard 通过 Admin API 访问数据</li>
+<li>Overview、API Key、Provider、Model、请求日志、Token 用量、网关健康页面</li>
+</ul>
+<h3 id="p8-生产级可靠性安全和部署增强">P8: 生产级可靠性、安全和部署增强<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#p8-生产级可靠性安全和部署增强" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul>
+<li>熔断器</li>
+<li>请求限流和 Token 限流</li>
+<li>超时、重试、fallback 策略</li>
+<li>Provider 健康检查和健康看板</li>
+<li>TLS 配置和证书加载增强</li>
+<li>供应链与安全检查</li>
+<li>性能基准和 streaming 压测</li>
+<li>部署文档、运维手册和容量评估指南</li>
+</ul>
+<h2 id="9-开放问题">9. 开放问题<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#9-开放问题" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<ol>
+<li>Dashboard 前期是否内嵌到 Rust Binary，还是单独作为前端包发布？</li>
+<li>租户、Key、Usage 数据必须先有 storage/repository 抽象；首个持久化 backend 应选择 SQLite 还是 Postgres？</li>
+<li>Token 计费事件应该同步写入、异步写入，还是事件队列化？</li>
+<li>Prompt/Response Body 日志默认应该关闭还是按租户策略控制？</li>
+<li>Admin API 是否默认开启，还是必须显式配置？</li>
+<li>Provider Secret 应该支持配置文件、数据库、外部 Secret Manager 中的哪些方式？</li>
+<li>是否需要在开源版和商业托管版之间区分高级企业功能？</li>
+</ol>
+<h2 id="10-成功指标">10. 成功指标<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#10-成功指标" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<ul>
+<li>10 分钟内完成第一个可用 AI Gateway 配置。</li>
+<li>一个虚拟 API Key 可以按模型别名路由到多个 Provider。</li>
+<li>每次请求都有 request_id、trace_id、租户上下文、Provider、模型、延迟、Token 用量和成本。</li>
+<li>企业用户可以管理组织、团队、项目、用户、服务账号和 API Key。</li>
+<li>Dashboard 可以回答：谁用了哪个模型、用了多少 Token、花了多少钱、请求为什么失败。</li>
+<li>FerroGate 可以作为完整 API Gateway 运行，而不仅仅是 AI Proxy。</li>
+</ul></article><hr/><div class="page-footer"></div></div><div class="right sidebar"><div class="graph"><h3>Graph View</h3><div class="graph-outer"><div class="graph-container" data-cfg="{&quot;drag&quot;:true,&quot;zoom&quot;:true,&quot;depth&quot;:1,&quot;scale&quot;:1.1,&quot;repelForce&quot;:0.5,&quot;centerForce&quot;:0.3,&quot;linkDistance&quot;:30,&quot;fontSize&quot;:0.6,&quot;opacityScale&quot;:1,&quot;showTags&quot;:true,&quot;removeTags&quot;:[],&quot;focusOnHover&quot;:false,&quot;enableRadial&quot;:false}"></div><button class="global-graph-icon" aria-label="Global Graph"><svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 55 55" fill="currentColor" xml:space="preserve"><path d="M49,0c-3.309,0-6,2.691-6,6c0,1.035,0.263,2.009,0.726,2.86l-9.829,9.829C32.542,17.634,30.846,17,29,17
+                s-3.542,0.634-4.898,1.688l-7.669-7.669C16.785,10.424,17,9.74,17,9c0-2.206-1.794-4-4-4S9,6.794,9,9s1.794,4,4,4
+                c0.74,0,1.424-0.215,2.019-0.567l7.669,7.669C21.634,21.458,21,23.154,21,25s0.634,3.542,1.688,4.897L10.024,42.562
+                C8.958,41.595,7.549,41,6,41c-3.309,0-6,2.691-6,6s2.691,6,6,6s6-2.691,6-6c0-1.035-0.263-2.009-0.726-2.86l12.829-12.829
+                c1.106,0.86,2.44,1.436,3.898,1.619v10.16c-2.833,0.478-5,2.942-5,5.91c0,3.309,2.691,6,6,6s6-2.691,6-6c0-2.967-2.167-5.431-5-5.91
+                v-10.16c1.458-0.183,2.792-0.759,3.898-1.619l7.669,7.669C41.215,39.576,41,40.26,41,41c0,2.206,1.794,4,4,4s4-1.794,4-4
+                s-1.794-4-4-4c-0.74,0-1.424,0.215-2.019,0.567l-7.669-7.669C36.366,28.542,37,26.846,37,25s-0.634-3.542-1.688-4.897l9.665-9.665
+                C46.042,11.405,47.451,12,49,12c3.309,0,6-2.691,6-6S52.309,0,49,0z M11,9c0-1.103,0.897-2,2-2s2,0.897,2,2s-0.897,2-2,2
+                S11,10.103,11,9z M6,51c-2.206,0-4-1.794-4-4s1.794-4,4-4s4,1.794,4,4S8.206,51,6,51z M33,49c0,2.206-1.794,4-4,4s-4-1.794-4-4
+                s1.794-4,4-4S33,46.794,33,49z M29,31c-3.309,0-6-2.691-6-6s2.691-6,6-6s6,2.691,6,6S32.309,31,29,31z M47,41c0,1.103-0.897,2-2,2
+                s-2-0.897-2-2s0.897-2,2-2S47,39.897,47,41z M49,10c-2.206,0-4-1.794-4-4s1.794-4,4-4s4,1.794,4,4S51.206,10,49,10z"></path></svg></button></div><div class="global-graph-outer"><div class="global-graph-container" data-cfg="{&quot;drag&quot;:true,&quot;zoom&quot;:true,&quot;depth&quot;:-1,&quot;scale&quot;:0.9,&quot;repelForce&quot;:0.5,&quot;centerForce&quot;:0.2,&quot;linkDistance&quot;:30,&quot;fontSize&quot;:0.6,&quot;opacityScale&quot;:1,&quot;showTags&quot;:true,&quot;removeTags&quot;:[],&quot;focusOnHover&quot;:true,&quot;enableRadial&quot;:true}"></div></div></div><div class="toc desktop-only"><button type="button" class="toc-header" aria-controls="toc-1" aria-expanded="true"><h3>Table of Contents</h3><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fold"><polyline points="6 9 12 15 18 9"></polyline></svg></button><ul id="list-1" class="toc-content overflow"><li class="depth-0"><a href="#ferrogate-产品需求文档-prd" data-for="ferrogate-产品需求文档-prd">FerroGate 产品需求文档 PRD</a></li><li class="depth-1"><a href="#1-产品定位" data-for="1-产品定位">1. 产品定位</a></li><li class="depth-1"><a href="#2-产品愿景" data-for="2-产品愿景">2. 产品愿景</a></li><li class="depth-1"><a href="#3-用户和使用场景" data-for="3-用户和使用场景">3. 用户和使用场景</a></li><li class="depth-2"><a href="#31-个人开发者" data-for="31-个人开发者">3.1 个人开发者</a></li><li class="depth-2"><a href="#32-创业团队" data-for="32-创业团队">3.2 创业团队</a></li><li class="depth-2"><a href="#33-平台工程团队" data-for="33-平台工程团队">3.3 平台工程团队</a></li><li class="depth-2"><a href="#34-企业组织" data-for="34-企业组织">3.4 企业组织</a></li><li class="depth-2"><a href="#35-token4ai-cloud-用户" data-for="35-token4ai-cloud-用户">3.5 Token4AI Cloud 用户</a></li><li class="depth-1"><a href="#4-核心问题" data-for="4-核心问题">4. 核心问题</a></li><li class="depth-1"><a href="#5-产品范围" data-for="5-产品范围">5. 产品范围</a></li><li class="depth-2"><a href="#51-通用-api-gateway-内建能力" data-for="51-通用-api-gateway-内建能力">5.1 通用 API Gateway 内建能力</a></li><li class="depth-2"><a href="#52-ai-gateway-专属能力" data-for="52-ai-gateway-专属能力">5.2 AI Gateway 专属能力</a></li><li class="depth-2"><a href="#53-管理后台和控制平面" data-for="53-管理后台和控制平面">5.3 管理后台和控制平面</a></li><li class="depth-2"><a href="#54-caddy-基础功能复刻和-caddyfile-兼容范围" data-for="54-caddy-基础功能复刻和-caddyfile-兼容范围">5.4 Caddy 基础功能复刻和 Caddyfile 兼容范围</a></li><li class="depth-1"><a href="#6-功能需求" data-for="6-功能需求">6. 功能需求</a></li><li class="depth-1"><a href="#61-虚拟-api-key-系统" data-for="61-虚拟-api-key-系统">6.1 虚拟 API Key 系统</a></li><li class="depth-2"><a href="#目标" data-for="目标">目标</a></li><li class="depth-2"><a href="#功能要求" data-for="功能要求">功能要求</a></li><li class="depth-2"><a href="#示例配置" data-for="示例配置">示例配置</a></li><li class="depth-2"><a href="#验收标准" data-for="验收标准">验收标准</a></li><li class="depth-1"><a href="#62-provider-支持" data-for="62-provider-支持">6.2 Provider 支持</a></li><li class="depth-2"><a href="#目标-1" data-for="目标-1">目标</a></li><li class="depth-2"><a href="#首批-provider" data-for="首批-provider">首批 Provider</a></li><li class="depth-2"><a href="#后续-provider" data-for="后续-provider">后续 Provider</a></li><li class="depth-2"><a href="#provider-adapter-职责" data-for="provider-adapter-职责">Provider Adapter 职责</a></li><li class="depth-1"><a href="#63-model-registry-和模型路由" data-for="63-model-registry-和模型路由">6.3 Model Registry 和模型路由</a></li><li class="depth-2"><a href="#目标-2" data-for="目标-2">目标</a></li><li class="depth-2"><a href="#功能要求-1" data-for="功能要求-1">功能要求</a></li><li class="depth-2"><a href="#示例配置-1" data-for="示例配置-1">示例配置</a></li><li class="depth-1"><a href="#64-openai-compatible-api-入口" data-for="64-openai-compatible-api-入口">6.4 OpenAI-compatible API 入口</a></li><li class="depth-2"><a href="#目标-3" data-for="目标-3">目标</a></li><li class="depth-2"><a href="#mvp-endpoint" data-for="mvp-endpoint">MVP Endpoint</a></li><li class="depth-2"><a href="#后续-endpoint" data-for="后续-endpoint">后续 Endpoint</a></li><li class="depth-2"><a href="#要求" data-for="要求">要求</a></li><li class="depth-1"><a href="#65-opentelemetry-全链路日志追踪" data-for="65-opentelemetry-全链路日志追踪">6.5 OpenTelemetry 全链路日志追踪</a></li><li class="depth-2"><a href="#目标-4" data-for="目标-4">目标</a></li><li class="depth-2"><a href="#功能要求-2" data-for="功能要求-2">功能要求</a></li><li class="depth-2"><a href="#span-设计" data-for="span-设计">Span 设计</a></li><li class="depth-2"><a href="#日志字段" data-for="日志字段">日志字段</a></li><li class="depth-1"><a href="#66-租户隔离和企业级权限" data-for="66-租户隔离和企业级权限">6.6 租户隔离和企业级权限</a></li><li class="depth-2"><a href="#目标-5" data-for="目标-5">目标</a></li><li class="depth-2"><a href="#租户层级" data-for="租户层级">租户层级</a></li><li class="depth-2"><a href="#核心实体" data-for="核心实体">核心实体</a></li><li class="depth-2"><a href="#初始角色" data-for="初始角色">初始角色</a></li><li class="depth-2"><a href="#权限示例" data-for="权限示例">权限示例</a></li><li class="depth-2"><a href="#隔离要求" data-for="隔离要求">隔离要求</a></li><li class="depth-1"><a href="#67-token-计费系统" data-for="67-token-计费系统">6.7 Token 计费系统</a></li><li class="depth-2"><a href="#目标-6" data-for="目标-6">目标</a></li><li class="depth-2"><a href="#功能要求-3" data-for="功能要求-3">功能要求</a></li><li class="depth-2"><a href="#billing-event-字段" data-for="billing-event-字段">Billing Event 字段</a></li><li class="depth-1"><a href="#68-policy-engine" data-for="68-policy-engine">6.8 Policy Engine</a></li><li class="depth-2"><a href="#目标-7" data-for="目标-7">目标</a></li><li class="depth-2"><a href="#必须支持的-policy" data-for="必须支持的-policy">必须支持的 Policy</a></li><li class="depth-2"><a href="#后续-policy" data-for="后续-policy">后续 Policy</a></li><li class="depth-1"><a href="#69-路由负载均衡和故障转移" data-for="69-路由负载均衡和故障转移">6.9 路由、负载均衡和故障转移</a></li><li class="depth-2"><a href="#目标-8" data-for="目标-8">目标</a></li><li class="depth-2"><a href="#功能要求-4" data-for="功能要求-4">功能要求</a></li><li class="depth-1"><a href="#610-管理-api" data-for="610-管理-api">6.10 管理 API</a></li><li class="depth-2"><a href="#目标-9" data-for="目标-9">目标</a></li><li class="depth-2"><a href="#api-范围" data-for="api-范围">API 范围</a></li><li class="depth-2"><a href="#要求-1" data-for="要求-1">要求</a></li><li class="depth-1"><a href="#611-dashboard" data-for="611-dashboard">6.11 Dashboard</a></li><li class="depth-2"><a href="#目标-10" data-for="目标-10">目标</a></li><li class="depth-2"><a href="#mvp-页面" data-for="mvp-页面">MVP 页面</a></li><li class="depth-2"><a href="#后续页面" data-for="后续页面">后续页面</a></li><li class="depth-1"><a href="#612-配置系统" data-for="612-配置系统">6.12 配置系统</a></li><li class="depth-2"><a href="#目标-11" data-for="目标-11">目标</a></li><li class="depth-2"><a href="#功能要求-5" data-for="功能要求-5">功能要求</a></li><li class="depth-1"><a href="#7-非功能需求" data-for="7-非功能需求">7. 非功能需求</a></li><li class="depth-2"><a href="#70-技术底座硬性约束" data-for="70-技术底座硬性约束">7.0 技术底座硬性约束</a></li><li class="depth-2"><a href="#71-性能" data-for="71-性能">7.1 性能</a></li><li class="depth-2"><a href="#72-可靠性" data-for="72-可靠性">7.2 可靠性</a></li><li class="depth-2"><a href="#73-安全" data-for="73-安全">7.3 安全</a></li><li class="depth-2"><a href="#74-可观测性" data-for="74-可观测性">7.4 可观测性</a></li><li class="depth-2"><a href="#75-可维护性" data-for="75-可维护性">7.5 可维护性</a></li><li class="depth-1"><a href="#8-里程碑" data-for="8-里程碑">8. 里程碑</a></li><li class="depth-2"><a href="#p0-工程基线crate-边界与-caddyfile-配置契约" data-for="p0-工程基线crate-边界与-caddyfile-配置契约">P0: 工程基线、crate 边界与 Caddyfile 配置契约</a></li><li class="depth-2"><a href="#p1-pingora-通用-api-gateway-runtime-垂直切片" data-for="p1-pingora-通用-api-gateway-runtime-垂直切片">P1: Pingora 通用 API Gateway Runtime 垂直切片</a></li><li class="depth-2"><a href="#p2-配置校验生命周期和平滑重载" data-for="p2-配置校验生命周期和平滑重载">P2: 配置校验、生命周期和平滑重载</a></li><li class="depth-2"><a href="#p3-openai-compatible-ai-proxy-mvp" data-for="p3-openai-compatible-ai-proxy-mvp">P3: OpenAI-compatible AI Proxy MVP</a></li><li class="depth-2"><a href="#p4-虚拟-api-key租户上下文与-policy-mvp" data-for="p4-虚拟-api-key租户上下文与-policy-mvp">P4: 虚拟 API Key、租户上下文与 Policy MVP</a></li><li class="depth-2"><a href="#p5-多-provider-adapter-与-model-registry" data-for="p5-多-provider-adapter-与-model-registry">P5: 多 Provider Adapter 与 Model Registry</a></li><li class="depth-2"><a href="#p6-可观测性请求日志storage-与计费事件" data-for="p6-可观测性请求日志storage-与计费事件">P6: 可观测性、请求日志、Storage 与计费事件</a></li><li class="depth-2"><a href="#p7-admin-api-与-dashboard-mvp" data-for="p7-admin-api-与-dashboard-mvp">P7: Admin API 与 Dashboard MVP</a></li><li class="depth-2"><a href="#p8-生产级可靠性安全和部署增强" data-for="p8-生产级可靠性安全和部署增强">P8: 生产级可靠性、安全和部署增强</a></li><li class="depth-1"><a href="#9-开放问题" data-for="9-开放问题">9. 开放问题</a></li><li class="depth-1"><a href="#10-成功指标" data-for="10-成功指标">10. 成功指标</a></li><li class="overflow-end"></li></ul></div><div class="backlinks"><h3>Backlinks</h3><ul id="list-2" class="overflow"><li><a href="../" class="internal">FerroGate Wiki</a></li><li class="overflow-end"></li></ul></div></div><footer class><p>Created with <a href="https://quartz.jzhao.xyz/">Quartz v4.5.2</a> © 2026</p><ul><li><a href="https://github.com/jackyzha0/quartz">GitHub</a></li><li><a href="https://discord.gg/cRFFHYye7t">Discord Community</a></li></ul></footer></div></div></body><script type="application/javascript" data-persist="true">function n(){let t=this.parentElement;t.classList.toggle("is-collapsed");let e=t.getElementsByClassName("callout-content")[0];if(!e)return;let l=t.classList.contains("is-collapsed");e.style.gridTemplateRows=l?"0fr":"1fr"}function c(){let t=document.getElementsByClassName("callout is-collapsible");for(let e of t){let l=e.getElementsByClassName("callout-title")[0],s=e.getElementsByClassName("callout-content")[0];if(!l||!s)continue;l.addEventListener("click",n),window.addCleanup(()=>l.removeEventListener("click",n));let o=e.classList.contains("is-collapsed");s.style.gridTemplateRows=o?"0fr":"1fr"}}document.addEventListener("nav",c);
+</script><script type="module" data-persist="true">function E(a,e){if(!a)return;function t(o){o.target===this&&(o.preventDefault(),o.stopPropagation(),e())}function n(o){o.key.startsWith("Esc")&&(o.preventDefault(),e())}a?.addEventListener("click",t),window.addCleanup(()=>a?.removeEventListener("click",t)),document.addEventListener("keydown",n),window.addCleanup(()=>document.removeEventListener("keydown",n))}function f(a){for(;a.firstChild;)a.removeChild(a.firstChild)}var m=class{constructor(e,t){this.container=e;this.content=t;this.setupEventListeners(),this.setupNavigationControls(),this.resetTransform()}isDragging=!1;startPan={x:0,y:0};currentPan={x:0,y:0};scale=1;MIN_SCALE=.5;MAX_SCALE=3;cleanups=[];setupEventListeners(){let e=this.onMouseDown.bind(this),t=this.onMouseMove.bind(this),n=this.onMouseUp.bind(this),o=this.onTouchStart.bind(this),r=this.onTouchMove.bind(this),i=this.onTouchEnd.bind(this),s=this.resetTransform.bind(this);this.container.addEventListener("mousedown",e),document.addEventListener("mousemove",t),document.addEventListener("mouseup",n),this.container.addEventListener("touchstart",o,{passive:!1}),document.addEventListener("touchmove",r,{passive:!1}),document.addEventListener("touchend",i),window.addEventListener("resize",s),this.cleanups.push(()=>this.container.removeEventListener("mousedown",e),()=>document.removeEventListener("mousemove",t),()=>document.removeEventListener("mouseup",n),()=>this.container.removeEventListener("touchstart",o),()=>document.removeEventListener("touchmove",r),()=>document.removeEventListener("touchend",i),()=>window.removeEventListener("resize",s))}cleanup(){for(let e of this.cleanups)e()}setupNavigationControls(){let e=document.createElement("div");e.className="mermaid-controls";let t=this.createButton("+",()=>this.zoom(.1)),n=this.createButton("-",()=>this.zoom(-.1)),o=this.createButton("Reset",()=>this.resetTransform());e.appendChild(n),e.appendChild(o),e.appendChild(t),this.container.appendChild(e)}createButton(e,t){let n=document.createElement("button");return n.textContent=e,n.className="mermaid-control-button",n.addEventListener("click",t),window.addCleanup(()=>n.removeEventListener("click",t)),n}onMouseDown(e){e.button===0&&(this.isDragging=!0,this.startPan={x:e.clientX-this.currentPan.x,y:e.clientY-this.currentPan.y},this.container.style.cursor="grabbing")}onMouseMove(e){this.isDragging&&(e.preventDefault(),this.currentPan={x:e.clientX-this.startPan.x,y:e.clientY-this.startPan.y},this.updateTransform())}onMouseUp(){this.isDragging=!1,this.container.style.cursor="grab"}onTouchStart(e){if(e.touches.length!==1)return;this.isDragging=!0;let t=e.touches[0];this.startPan={x:t.clientX-this.currentPan.x,y:t.clientY-this.currentPan.y}}onTouchMove(e){if(!this.isDragging||e.touches.length!==1)return;e.preventDefault();let t=e.touches[0];this.currentPan={x:t.clientX-this.startPan.x,y:t.clientY-this.startPan.y},this.updateTransform()}onTouchEnd(){this.isDragging=!1}zoom(e){let t=Math.min(Math.max(this.scale+e,this.MIN_SCALE),this.MAX_SCALE),n=this.content.getBoundingClientRect(),o=n.width/2,r=n.height/2,i=t-this.scale;this.currentPan.x-=o*i,this.currentPan.y-=r*i,this.scale=t,this.updateTransform()}updateTransform(){this.content.style.transform=`translate(${this.currentPan.x}px, ${this.currentPan.y}px) scale(${this.scale})`}resetTransform(){let t=this.content.querySelector("svg").getBoundingClientRect(),n=t.width/this.scale,o=t.height/this.scale;this.scale=1,this.currentPan={x:(this.container.clientWidth-n)/2,y:(this.container.clientHeight-o)/2},this.updateTransform()}},T=["--secondary","--tertiary","--gray","--light","--lightgray","--highlight","--dark","--darkgray","--codeFont"],y;document.addEventListener("nav",async()=>{let e=document.querySelector(".center").querySelectorAll("code.mermaid");if(e.length===0)return;y||=await import("https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.esm.min.mjs");let t=y.default,n=new WeakMap;for(let r of e)n.set(r,r.innerText);async function o(){for(let s of e){s.removeAttribute("data-processed");let c=n.get(s);c&&(s.innerHTML=c)}let r=T.reduce((s,c)=>(s[c]=window.getComputedStyle(document.documentElement).getPropertyValue(c),s),{}),i=document.documentElement.getAttribute("saved-theme")==="dark";t.initialize({startOnLoad:!1,securityLevel:"loose",theme:i?"dark":"base",themeVariables:{fontFamily:r["--codeFont"],primaryColor:r["--light"],primaryTextColor:r["--darkgray"],primaryBorderColor:r["--tertiary"],lineColor:r["--darkgray"],secondaryColor:r["--secondary"],tertiaryColor:r["--tertiary"],clusterBkg:r["--light"],edgeLabelBackground:r["--highlight"]}}),await t.run({nodes:e})}await o(),document.addEventListener("themechange",o),window.addCleanup(()=>document.removeEventListener("themechange",o));for(let r=0;r<e.length;r++){let v=function(){let g=l.querySelector("#mermaid-space"),h=l.querySelector(".mermaid-content");if(!h)return;f(h);let w=i.querySelector("svg").cloneNode(!0);h.appendChild(w),l.classList.add("active"),g.style.cursor="grab",u=new m(g,h)},M=function(){l.classList.remove("active"),u?.cleanup(),u=null},i=e[r],s=i.parentElement,c=s.querySelector(".clipboard-button"),d=s.querySelector(".expand-button"),p=window.getComputedStyle(c),L=c.offsetWidth+parseFloat(p.marginLeft||"0")+parseFloat(p.marginRight||"0");d.style.right=`calc(${L}px + 0.3rem)`,s.prepend(d);let l=s.querySelector("#mermaid-container");if(!l)return;let u=null;d.addEventListener("click",v),E(l,M),window.addCleanup(()=>{u?.cleanup(),d.removeEventListener("click",v)})}});
+</script><script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/copy-tex.min.js" type="application/javascript" data-persist="true"></script><script src="../postscript.js" type="module" data-persist="true"></script></html>

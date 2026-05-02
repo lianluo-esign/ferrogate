@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0">
+    <channel>
+      <title>FerroGate Wiki</title>
+      <link>https://lianluo-esign.github.io/ferrogate</link>
+      <description>Last 10 notes on FerroGate Wiki</description>
+      <generator>Quartz -- quartz.jzhao.xyz</generator>
+      <item>
+    <title>Project overview</title>
+    <link>https://lianluo-esign.github.io/ferrogate/00-home/overview</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/00-home/overview</guid>
+    <description><![CDATA[ Project overview FerroGate is an open-source Rust gateway for AI traffic. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>产品需求文档</title>
+    <link>https://lianluo-esign.github.io/ferrogate/01-product/product-requirements</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/01-product/product-requirements</guid>
+    <description><![CDATA[ FerroGate 产品需求文档 PRD 1. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>FerroGate architecture and functional modules</title>
+    <link>https://lianluo-esign.github.io/ferrogate/02-architecture/ferrogate-architecture-and-modules</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/02-architecture/ferrogate-architecture-and-modules</guid>
+    <description><![CDATA[ FerroGate architecture and functional modules FerroGate is an AI gateway implemented in Rust. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>Mature API gateway design references</title>
+    <link>https://lianluo-esign.github.io/ferrogate/02-architecture/mature-api-gateway-design</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/02-architecture/mature-api-gateway-design</guid>
+    <description><![CDATA[ Mature API gateway design references FerroGate should borrow proven ideas from mature API gateway products, but implement the system in Rust and specialize it for AI traffic. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>System architecture</title>
+    <link>https://lianluo-esign.github.io/ferrogate/02-architecture/system-architecture</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/02-architecture/system-architecture</guid>
+    <description><![CDATA[ System architecture FerroGate is designed as a Rust AI gateway with a mature API gateway developer and operations experience. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>Development workflow</title>
+    <link>https://lianluo-esign.github.io/ferrogate/03-development/development-workflow</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/03-development/development-workflow</guid>
+    <description><![CDATA[ Development workflow Local development cargo run -- validate --config Ferrogate/Caddyfile cargo run -- reload --config Ferrogate/Caddyfile cargo run -- run --config Ferrogate/Caddyfile validate 和当前 P2 占位 reload 都会输出候选配置 snapshot id。reload 在 Pingora-backed 热重载完成前只做配置加载和校验，不会声称已经替换运行中配置。 /admin/status... ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>FerroGate PRD 执行计划任务</title>
+    <link>https://lianluo-esign.github.io/ferrogate/03-development/prd-implementation-plan</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/03-development/prd-implementation-plan</guid>
+    <description><![CDATA[ FerroGate PRD 执行计划任务 本文档根据 产品需求文档 制定，用于把 PRD 转换为可执行、可验收、可持续更新进度的工程任务。 0. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>User guide</title>
+    <link>https://lianluo-esign.github.io/ferrogate/04-operations/user-guide</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/04-operations/user-guide</guid>
+    <description><![CDATA[ User guide Install from source git clone github.com/lianluo-esign/ferrogate.git cd ferrogate cargo build --release Run locally cargo run -- run --config Ferrogate/Caddyfile Use a custom config cargo run -- validate --config ./config/ferrogate.example.toml cargo run -- reload --config ./config/ferrog... ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>ADR 0001 - Rust gateway foundation</title>
+    <link>https://lianluo-esign.github.io/ferrogate/05-decisions/adr-0001-rust-gateway</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/05-decisions/adr-0001-rust-gateway</guid>
+    <description><![CDATA[ ADR 0001: Rust gateway foundation Status Accepted Context FerroGate needs to be reliable, efficient, and suitable for long-running production workloads that proxy AI traffic. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item><item>
+    <title>ADR 0002 - Use Pingora for proxy runtime</title>
+    <link>https://lianluo-esign.github.io/ferrogate/05-decisions/adr-0002-use-pingora-for-proxy-runtime</link>
+    <guid>https://lianluo-esign.github.io/ferrogate/05-decisions/adr-0002-use-pingora-for-proxy-runtime</guid>
+    <description><![CDATA[ ADR 0002: Use Pingora for proxy runtime Status Proposed Context FerroGate aims to be a Rust API gateway with AI-native capabilities and a mature gateway operational experience. ]]></description>
+    <pubDate>Sat, 02 May 2026 15:40:19 GMT</pubDate>
+  </item>
+    </channel>
+  </rss>

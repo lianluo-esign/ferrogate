@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr"><head><title>FerroGate architecture and functional modules · FerroGate</title><meta charset="utf-8"/><link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com"/><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted Grotesk:wght@400;700&amp;family=Source Sans Pro:ital,wght@0,400;0,600;1,400;1,600&amp;family=IBM Plex Mono:wght@400;600&amp;display=swap"/><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin="anonymous"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="og:site_name" content="FerroGate Wiki"/><meta property="og:title" content="FerroGate architecture and functional modules · FerroGate"/><meta property="og:type" content="website"/><meta name="twitter:card" content="summary_large_image"/><meta name="twitter:title" content="FerroGate architecture and functional modules · FerroGate"/><meta name="twitter:description" content="FerroGate architecture and functional modules FerroGate is an AI gateway implemented in Rust."/><meta property="og:description" content="FerroGate architecture and functional modules FerroGate is an AI gateway implemented in Rust."/><meta property="og:image:alt" content="FerroGate architecture and functional modules FerroGate is an AI gateway implemented in Rust."/><meta property="og:image" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta property="og:image:url" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta name="twitter:image" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta property="og:image:type" content="image/.png"/><meta property="twitter:domain" content="lianluo-esign.github.io/ferrogate"/><meta property="og:url" content="https://lianluo-esign.github.io/ferrogate/02-architecture/ferrogate-architecture-and-modules"/><meta property="twitter:url" content="https://lianluo-esign.github.io/ferrogate/02-architecture/ferrogate-architecture-and-modules"/><link rel="icon" href="../static/icon.png"/><meta name="description" content="FerroGate architecture and functional modules FerroGate is an AI gateway implemented in Rust."/><meta name="generator" content="Quartz"/><link href="../index.css" rel="stylesheet" type="text/css" data-persist="true"/><style>.expand-button {
+  position: absolute;
+  display: flex;
+  float: right;
+  padding: 0.4rem;
+  margin: 0.3rem;
+  right: 0;
+  color: var(--gray);
+  border-color: var(--dark);
+  background-color: var(--light);
+  border: 1px solid;
+  border-radius: 5px;
+  opacity: 0;
+  transition: 0.2s;
+}
+.expand-button > svg {
+  fill: var(--light);
+  filter: contrast(0.3);
+}
+.expand-button:hover {
+  cursor: pointer;
+  border-color: var(--secondary);
+}
+.expand-button:focus {
+  outline: 0;
+}
+
+pre:hover > .expand-button {
+  opacity: 1;
+  transition: 0.2s;
+}
+
+#mermaid-container {
+  position: fixed;
+  contain: layout;
+  z-index: 999;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  display: none;
+  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.5);
+}
+#mermaid-container.active {
+  display: inline-block;
+}
+#mermaid-container > #mermaid-space {
+  border: 1px solid var(--lightgray);
+  background-color: var(--light);
+  border-radius: 5px;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  height: 80vh;
+  width: 80vw;
+  overflow: hidden;
+}
+#mermaid-container > #mermaid-space > .mermaid-content {
+  position: relative;
+  transform-origin: 0 0;
+  transition: transform 0.1s ease;
+  overflow: visible;
+  min-height: 200px;
+  min-width: 200px;
+}
+#mermaid-container > #mermaid-space > .mermaid-content pre {
+  margin: 0;
+  border: none;
+}
+#mermaid-container > #mermaid-space > .mermaid-content svg {
+  max-width: none;
+  height: auto;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  background: var(--light);
+  border: 1px solid var(--lightgray);
+  border-radius: 6px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  z-index: 2;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--lightgray);
+  background: var(--light);
+  color: var(--dark);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  font-family: var(--bodyFont);
+  transition: all 0.2s ease;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:hover {
+  background: var(--lightgray);
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:active {
+  transform: translateY(1px);
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:nth-child(2) {
+  width: auto;
+  padding: 0 12px;
+  font-size: 14px;
+}
+/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VSb290IjoiL1VzZXJzL2Focy9Qcm9qZWN0cy9mZXJyb2dhdGUvZmVycm9nYXRlLXdpa2kvd2lraS1zaXRlL3F1YXJ0ei9jb21wb25lbnRzL3N0eWxlcyIsInNvdXJjZXMiOlsibWVybWFpZC5pbmxpbmUuc2NzcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFBQTtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTs7QUFHRjtFQUNFO0VBQ0E7O0FBR0Y7RUFDRTs7O0FBS0Y7RUFDRTtFQUNBOzs7QUFJSjtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7O0FBRUE7RUFDRTs7QUFHRjtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTs7QUFHRjtFQUNFO0VBQ0E7O0FBSUo7RUFDRTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTs7QUFFQTtFQUNFOztBQUdGO0VBQ0U7O0FBSUY7RUFDRTtFQUNBO0VBQ0EiLCJzb3VyY2VzQ29udGVudCI6WyIuZXhwYW5kLWJ1dHRvbiB7XG4gIHBvc2l0aW9uOiBhYnNvbHV0ZTtcbiAgZGlzcGxheTogZmxleDtcbiAgZmxvYXQ6IHJpZ2h0O1xuICBwYWRkaW5nOiAwLjRyZW07XG4gIG1hcmdpbjogMC4zcmVtO1xuICByaWdodDogMDsgLy8gTk9URTogcmlnaHQgd2lsbCBiZSBzZXQgaW4gbWVybWFpZC5pbmxpbmUudHNcbiAgY29sb3I6IHZhcigtLWdyYXkpO1xuICBib3JkZXItY29sb3I6IHZhcigtLWRhcmspO1xuICBiYWNrZ3JvdW5kLWNvbG9yOiB2YXIoLS1saWdodCk7XG4gIGJvcmRlcjogMXB4IHNvbGlkO1xuICBib3JkZXItcmFkaXVzOiA1cHg7XG4gIG9wYWNpdHk6IDA7XG4gIHRyYW5zaXRpb246IDAuMnM7XG5cbiAgJiA+IHN2ZyB7XG4gICAgZmlsbDogdmFyKC0tbGlnaHQpO1xuICAgIGZpbHRlcjogY29udHJhc3QoMC4zKTtcbiAgfVxuXG4gICY6aG92ZXIge1xuICAgIGN1cnNvcjogcG9pbnRlcjtcbiAgICBib3JkZXItY29sb3I6IHZhcigtLXNlY29uZGFyeSk7XG4gIH1cblxuICAmOmZvY3VzIHtcbiAgICBvdXRsaW5lOiAwO1xuICB9XG59XG5cbnByZSB7XG4gICY6aG92ZXIgPiAuZXhwYW5kLWJ1dHRvbiB7XG4gICAgb3BhY2l0eTogMTtcbiAgICB0cmFuc2l0aW9uOiAwLjJzO1xuICB9XG59XG5cbiNtZXJtYWlkLWNvbnRhaW5lciB7XG4gIHBvc2l0aW9uOiBmaXhlZDtcbiAgY29udGFpbjogbGF5b3V0O1xuICB6LWluZGV4OiA5OTk7XG4gIGxlZnQ6IDA7XG4gIHRvcDogMDtcbiAgd2lkdGg6IDEwMHZ3O1xuICBoZWlnaHQ6IDEwMHZoO1xuICBvdmVyZmxvdzogaGlkZGVuO1xuICBkaXNwbGF5OiBub25lO1xuICBiYWNrZHJvcC1maWx0ZXI6IGJsdXIoNHB4KTtcbiAgYmFja2dyb3VuZDogcmdiYSgwLCAwLCAwLCAwLjUpO1xuXG4gICYuYWN0aXZlIHtcbiAgICBkaXNwbGF5OiBpbmxpbmUtYmxvY2s7XG4gIH1cblxuICAmID4gI21lcm1haWQtc3BhY2Uge1xuICAgIGJvcmRlcjogMXB4IHNvbGlkIHZhcigtLWxpZ2h0Z3JheSk7XG4gICAgYmFja2dyb3VuZC1jb2xvcjogdmFyKC0tbGlnaHQpO1xuICAgIGJvcmRlci1yYWRpdXM6IDVweDtcbiAgICBwb3NpdGlvbjogZml4ZWQ7XG4gICAgdG9wOiA1MCU7XG4gICAgbGVmdDogNTAlO1xuICAgIHRyYW5zZm9ybTogdHJhbnNsYXRlKC01MCUsIC01MCUpO1xuICAgIGhlaWdodDogODB2aDtcbiAgICB3aWR0aDogODB2dztcbiAgICBvdmVyZmxvdzogaGlkZGVuO1xuXG4gICAgJiA+IC5tZXJtYWlkLWNvbnRlbnQge1xuICAgICAgcG9zaXRpb246IHJlbGF0aXZlO1xuICAgICAgdHJhbnNmb3JtLW9yaWdpbjogMCAwO1xuICAgICAgdHJhbnNpdGlvbjogdHJhbnNmb3JtIDAuMXMgZWFzZTtcbiAgICAgIG92ZXJmbG93OiB2aXNpYmxlO1xuICAgICAgbWluLWhlaWdodDogMjAwcHg7XG4gICAgICBtaW4td2lkdGg6IDIwMHB4O1xuXG4gICAgICBwcmUge1xuICAgICAgICBtYXJnaW46IDA7XG4gICAgICAgIGJvcmRlcjogbm9uZTtcbiAgICAgIH1cblxuICAgICAgc3ZnIHtcbiAgICAgICAgbWF4LXdpZHRoOiBub25lO1xuICAgICAgICBoZWlnaHQ6IGF1dG87XG4gICAgICB9XG4gICAgfVxuXG4gICAgJiA+IC5tZXJtYWlkLWNvbnRyb2xzIHtcbiAgICAgIHBvc2l0aW9uOiBhYnNvbHV0ZTtcbiAgICAgIGJvdHRvbTogMjBweDtcbiAgICAgIHJpZ2h0OiAyMHB4O1xuICAgICAgZGlzcGxheTogZmxleDtcbiAgICAgIGdhcDogOHB4O1xuICAgICAgcGFkZGluZzogOHB4O1xuICAgICAgYmFja2dyb3VuZDogdmFyKC0tbGlnaHQpO1xuICAgICAgYm9yZGVyOiAxcHggc29saWQgdmFyKC0tbGlnaHRncmF5KTtcbiAgICAgIGJvcmRlci1yYWRpdXM6IDZweDtcbiAgICAgIGJveC1zaGFkb3c6IDAgMnB4IDRweCByZ2JhKDAsIDAsIDAsIDAuMSk7XG4gICAgICB6LWluZGV4OiAyO1xuXG4gICAgICAubWVybWFpZC1jb250cm9sLWJ1dHRvbiB7XG4gICAgICAgIGRpc3BsYXk6IGZsZXg7XG4gICAgICAgIGFsaWduLWl0ZW1zOiBjZW50ZXI7XG4gICAgICAgIGp1c3RpZnktY29udGVudDogY2VudGVyO1xuICAgICAgICB3aWR0aDogMzJweDtcbiAgICAgICAgaGVpZ2h0OiAzMnB4O1xuICAgICAgICBwYWRkaW5nOiAwO1xuICAgICAgICBib3JkZXI6IDFweCBzb2xpZCB2YXIoLS1saWdodGdyYXkpO1xuICAgICAgICBiYWNrZ3JvdW5kOiB2YXIoLS1saWdodCk7XG4gICAgICAgIGNvbG9yOiB2YXIoLS1kYXJrKTtcbiAgICAgICAgYm9yZGVyLXJhZGl1czogNHB4O1xuICAgICAgICBjdXJzb3I6IHBvaW50ZXI7XG4gICAgICAgIGZvbnQtc2l6ZTogMTZweDtcbiAgICAgICAgZm9udC1mYW1pbHk6IHZhcigtLWJvZHlGb250KTtcbiAgICAgICAgdHJhbnNpdGlvbjogYWxsIDAuMnMgZWFzZTtcblxuICAgICAgICAmOmhvdmVyIHtcbiAgICAgICAgICBiYWNrZ3JvdW5kOiB2YXIoLS1saWdodGdyYXkpO1xuICAgICAgICB9XG5cbiAgICAgICAgJjphY3RpdmUge1xuICAgICAgICAgIHRyYW5zZm9ybTogdHJhbnNsYXRlWSgxcHgpO1xuICAgICAgICB9XG5cbiAgICAgICAgLy8gU3R5bGUgdGhlIHJlc2V0IGJ1dHRvbiBkaWZmZXJlbnRseVxuICAgICAgICAmOm50aC1jaGlsZCgyKSB7XG4gICAgICAgICAgd2lkdGg6IGF1dG87XG4gICAgICAgICAgcGFkZGluZzogMCAxMnB4O1xuICAgICAgICAgIGZvbnQtc2l6ZTogMTRweDtcbiAgICAgICAgfVxuICAgICAgfVxuICAgIH1cbiAgfVxufVxuIl19 */</style><link href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" rel="stylesheet" type="text/css" data-persist="true"/><script src="../prescript.js" type="application/javascript" data-persist="true"></script><script type="application/javascript" data-persist="true">const fetchData = fetch("../static/contentIndex.json").then(data => data.json())</script><link rel="alternate" type="application/rss+xml" title="RSS Feed" href="https://lianluo-esign.github.io/ferrogate/index.xml"/></head><body data-slug="02-architecture/ferrogate-architecture-and-modules"><div id="quartz-root" class="page"><div id="quartz-body"><div class="left sidebar"><h2 class="page-title"><a href="..">FerroGate Wiki</a></h2><div class="spacer mobile-only"></div><div class="flex-component" style="flex-direction: row; flex-wrap: nowrap; gap: 1rem;"><div style="flex-grow: 1; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><div class="search"><button class="search-button"><svg role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 19.9 19.7"><title>Search</title><g class="search-path" fill="none"><path stroke-linecap="square" d="M18.5 18.3l-5.4-5.4"></path><circle cx="8" cy="8" r="7"></circle></g></svg><p>Search</p></button><div class="search-container"><div class="search-space"><input autocomplete="off" class="search-bar" name="search" type="text" aria-label="Search for something" placeholder="Search for something"/><div class="search-layout" data-preview="true"></div></div></div></div></div><div style="flex-grow: 0; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><button class="darkmode"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="dayIcon" x="0px" y="0px" viewBox="0 0 35 35" style="enable-background:new 0 0 35 35" xml:space="preserve" aria-label="Dark mode"><title>Dark mode</title><path d="M6,17.5C6,16.672,5.328,16,4.5,16h-3C0.672,16,0,16.672,0,17.5    S0.672,19,1.5,19h3C5.328,19,6,18.328,6,17.5z M7.5,26c-0.414,0-0.789,0.168-1.061,0.439l-2,2C4.168,28.711,4,29.086,4,29.5    C4,30.328,4.671,31,5.5,31c0.414,0,0.789-0.168,1.06-0.44l2-2C8.832,28.289,9,27.914,9,27.5C9,26.672,8.329,26,7.5,26z M17.5,6    C18.329,6,19,5.328,19,4.5v-3C19,0.672,18.329,0,17.5,0S16,0.672,16,1.5v3C16,5.328,16.671,6,17.5,6z M27.5,9    c0.414,0,0.789-0.168,1.06-0.439l2-2C30.832,6.289,31,5.914,31,5.5C31,4.672,30.329,4,29.5,4c-0.414,0-0.789,0.168-1.061,0.44    l-2,2C26.168,6.711,26,7.086,26,7.5C26,8.328,26.671,9,27.5,9z M6.439,8.561C6.711,8.832,7.086,9,7.5,9C8.328,9,9,8.328,9,7.5    c0-0.414-0.168-0.789-0.439-1.061l-2-2C6.289,4.168,5.914,4,5.5,4C4.672,4,4,4.672,4,5.5c0,0.414,0.168,0.789,0.439,1.06    L6.439,8.561z M33.5,16h-3c-0.828,0-1.5,0.672-1.5,1.5s0.672,1.5,1.5,1.5h3c0.828,0,1.5-0.672,1.5-1.5S34.328,16,33.5,16z     M28.561,26.439C28.289,26.168,27.914,26,27.5,26c-0.828,0-1.5,0.672-1.5,1.5c0,0.414,0.168,0.789,0.439,1.06l2,2    C28.711,30.832,29.086,31,29.5,31c0.828,0,1.5-0.672,1.5-1.5c0-0.414-0.168-0.789-0.439-1.061L28.561,26.439z M17.5,29    c-0.829,0-1.5,0.672-1.5,1.5v3c0,0.828,0.671,1.5,1.5,1.5s1.5-0.672,1.5-1.5v-3C19,29.672,18.329,29,17.5,29z M17.5,7    C11.71,7,7,11.71,7,17.5S11.71,28,17.5,28S28,23.29,28,17.5S23.29,7,17.5,7z M17.5,25c-4.136,0-7.5-3.364-7.5-7.5    c0-4.136,3.364-7.5,7.5-7.5c4.136,0,7.5,3.364,7.5,7.5C25,21.636,21.636,25,17.5,25z"></path></svg><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="nightIcon" x="0px" y="0px" viewBox="0 0 100 100" style="enable-background:new 0 0 100 100" xml:space="preserve" aria-label="Light mode"><title>Light mode</title><path d="M96.76,66.458c-0.853-0.852-2.15-1.064-3.23-0.534c-6.063,2.991-12.858,4.571-19.655,4.571  C62.022,70.495,50.88,65.88,42.5,57.5C29.043,44.043,25.658,23.536,34.076,6.47c0.532-1.08,0.318-2.379-0.534-3.23  c-0.851-0.852-2.15-1.064-3.23-0.534c-4.918,2.427-9.375,5.619-13.246,9.491c-9.447,9.447-14.65,22.008-14.65,35.369  c0,13.36,5.203,25.921,14.65,35.368s22.008,14.65,35.368,14.65c13.361,0,25.921-5.203,35.369-14.65  c3.872-3.871,7.064-8.328,9.491-13.246C97.826,68.608,97.611,67.309,96.76,66.458z"></path></svg></button></div><div style="flex-grow: 0; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><button class="readermode"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="readerIcon" fill="currentColor" stroke="currentColor" stroke-width="0.2" stroke-linecap="round" stroke-linejoin="round" width="64px" height="64px" viewBox="0 0 24 24" aria-label="Reader mode"><title>Reader mode</title><g transform="translate(-1.8, -1.8) scale(1.15, 1.2)"><path d="M8.9891247,2.5 C10.1384702,2.5 11.2209868,2.96705384 12.0049645,3.76669482 C12.7883914,2.96705384 13.8709081,2.5 15.0202536,2.5 L18.7549359,2.5 C19.1691495,2.5 19.5049359,2.83578644 19.5049359,3.25 L19.5046891,4.004 L21.2546891,4.00457396 C21.6343849,4.00457396 21.9481801,4.28672784 21.9978425,4.6528034 L22.0046891,4.75457396 L22.0046891,20.25 C22.0046891,20.6296958 21.7225353,20.943491 21.3564597,20.9931534 L21.2546891,21 L2.75468914,21 C2.37499337,21 2.06119817,20.7178461 2.01153575,20.3517706 L2.00468914,20.25 L2.00468914,4.75457396 C2.00468914,4.37487819 2.28684302,4.061083 2.65291858,4.01142057 L2.75468914,4.00457396 L4.50368914,4.004 L4.50444233,3.25 C4.50444233,2.87030423 4.78659621,2.55650904 5.15267177,2.50684662 L5.25444233,2.5 L8.9891247,2.5 Z M4.50368914,5.504 L3.50468914,5.504 L3.50468914,19.5 L10.9478955,19.4998273 C10.4513189,18.9207296 9.73864328,18.5588115 8.96709342,18.5065584 L8.77307039,18.5 L5.25444233,18.5 C4.87474657,18.5 4.56095137,18.2178461 4.51128895,17.8517706 L4.50444233,17.75 L4.50368914,5.504 Z M19.5049359,17.75 C19.5049359,18.1642136 19.1691495,18.5 18.7549359,18.5 L15.2363079,18.5 C14.3910149,18.5 13.5994408,18.8724714 13.0614828,19.4998273 L20.5046891,19.5 L20.5046891,5.504 L19.5046891,5.504 L19.5049359,17.75 Z M18.0059359,3.999 L15.0202536,4 L14.8259077,4.00692283 C13.9889509,4.06666544 13.2254227,4.50975805 12.7549359,5.212 L12.7549359,17.777 L12.7782651,17.7601316 C13.4923805,17.2719483 14.3447024,17 15.2363079,17 L18.0059359,16.999 L18.0056891,4.798 L18.0033792,4.75457396 L18.0056891,4.71 L18.0059359,3.999 Z M8.9891247,4 L6.00368914,3.999 L6.00599909,4.75457396 L6.00599909,4.75457396 L6.00368914,4.783 L6.00368914,16.999 L8.77307039,17 C9.57551536,17 10.3461406,17.2202781 11.0128313,17.6202194 L11.2536891,17.776 L11.2536891,5.211 C10.8200889,4.56369974 10.1361548,4.13636104 9.37521067,4.02745763 L9.18347055,4.00692283 L8.9891247,4 Z"></path></g></svg></button></div></div><div class="explorer" data-behavior="link" data-collapsed="collapsed" data-savestate="true" data-data-fns="{&quot;order&quot;:[&quot;filter&quot;,&quot;map&quot;,&quot;sort&quot;],&quot;sortFn&quot;:&quot;(a,b)=>!a.isFolder&amp;&amp;!b.isFolder||a.isFolder&amp;&amp;b.isFolder?a.displayName.localeCompare(b.displayName,void 0,{numeric:!0,sensitivity:\&quot;base\&quot;}):!a.isFolder&amp;&amp;b.isFolder?1:-1&quot;,&quot;filterFn&quot;:&quot;node=>node.slugSegment!==\&quot;tags\&quot;&quot;,&quot;mapFn&quot;:&quot;node=>node&quot;}"><button type="button" class="explorer-toggle mobile-explorer hide-until-loaded" data-mobile="true" aria-controls="explorer-6"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide-menu"><line x1="4" x2="20" y1="12" y2="12"></line><line x1="4" x2="20" y1="6" y2="6"></line><line x1="4" x2="20" y1="18" y2="18"></line></svg></button><button type="button" class="title-button explorer-toggle desktop-explorer" data-mobile="false" aria-expanded="true"><h2>Explorer</h2><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="5 8 14 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fold"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="explorer-6" class="explorer-content" aria-expanded="false" role="group"><ul class="explorer-ul overflow" id="list-0"><li class="overflow-end"></li></ul></div><template id="template-file"><li><a href="#"></a></li></template><template id="template-folder"><li><div class="folder-container"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="5 8 14 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder-icon"><polyline points="6 9 12 15 18 9"></polyline></svg><div><button class="folder-button"><span class="folder-title"></span></button></div></div><div class="folder-outer"><ul class="content"></ul></div></li></template></div></div><div class="center"><div class="page-header"><div class="popover-hint"><nav class="breadcrumb-container" aria-label="breadcrumbs"><div class="breadcrumb-element"><a href="../">Home</a><p> ❯ </p></div><div class="breadcrumb-element"><a href="../02-architecture/">02 architecture</a><p> ❯ </p></div><div class="breadcrumb-element"><a href>FerroGate architecture and functional modules</a></div></nav><h1 class="article-title">FerroGate architecture and functional modules</h1><p show-comma="true" class="content-meta"><time datetime="2026-05-02T15:40:19.000Z">May 02, 2026</time><span>6 min read</span></p><ul class="tags"><li><a href="../tags/architecture" class="internal tag-link">architecture</a></li><li><a href="../tags/modules" class="internal tag-link">modules</a></li><li><a href="../tags/pingora" class="internal tag-link">pingora</a></li><li><a href="../tags/api-gateway" class="internal tag-link">api-gateway</a></li></ul></div></div><article class="popover-hint"><h1 id="ferrogate-architecture-and-functional-modules">FerroGate architecture and functional modules<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#ferrogate-architecture-and-functional-modules" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h1>
+<p>FerroGate is an AI gateway implemented in Rust. The long-term product direction is to provide a mature API gateway experience for AI traffic while using Cloudflare’s <a href="https://github.com/cloudflare/pingora" class="external">Pingora<svg aria-hidden="true" class="external-icon" style="max-width:0.8em;max-height:0.8em;" viewBox="0 0 512 512"><path d="M320 0H288V64h32 82.7L201.4 265.4 178.7 288 224 333.3l22.6-22.6L448 109.3V192v32h64V192 32 0H480 320zM32 32H0V64 480v32H32 456h32V480 352 320H424v32 96H64V96h96 32V32H160 32z"></path></svg></a> as the high-performance proxy foundation.</p>
+<h2 id="product-positioning">Product positioning<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#product-positioning" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>FerroGate should feel like <strong>a complete API gateway for AI APIs</strong>:</p>
+<ul>
+<li>simple configuration first</li>
+<li>safe defaults</li>
+<li>automatic operational ergonomics where possible</li>
+<li>extensible modules</li>
+<li>production-grade proxying</li>
+<li>clear observability</li>
+<li>a developer experience that is easy to reason about</li>
+</ul>
+<p>FerroGate should reproduce the important capabilities expected from production API gateways, then specialize them for LLM providers, OpenAI-compatible APIs, tokens, usage accounting, and AI governance.</p>
+<h2 id="why-pingora">Why Pingora<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#why-pingora" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>Pingora is a Rust framework for building fast, reliable, and programmable networked systems. It provides a strong foundation for FerroGate because it already supports:</p>
+<ul>
+<li>async Rust proxy infrastructure</li>
+<li>HTTP/1 and HTTP/2 end-to-end proxying</li>
+<li>TLS support through multiple backends</li>
+<li>graceful reload</li>
+<li>customizable load balancing and failover</li>
+<li>gRPC and WebSocket proxying</li>
+<li>integration points for observability</li>
+</ul>
+<p>FerroGate should use Pingora for the lower-level proxy runtime and focus FerroGate-specific code on AI routing, provider normalization, policy, observability, and configuration experience.</p>
+<h2 id="high-level-architecture">High-level architecture<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#high-level-architecture" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<pre><button class="expand-button" aria-label="Expand mermaid diagram" data-view-component="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 1.06L2.56 7h10.88l-2.22-2.22a.75.75 0 011.06-1.06l3.5 3.5a.75.75 0 010 1.06l-3.5 3.5a.75.75 0 11-1.06-1.06l2.22-2.22H2.56l2.22 2.22a.75.75 0 11-1.06 1.06l-3.5-3.5a.75.75 0 010-1.06l3.5-3.5z"></path></svg></button><code class="mermaid" data-clipboard="&quot;flowchart TB\n  Client[Client SDK / App] --> Listener[Pingora listener and TLS]\n  Listener --> RequestPipeline[FerroGate request pipeline]\n\n  RequestPipeline --> Auth[Auth and key resolution]\n  RequestPipeline --> Policy[Policy engine]\n  RequestPipeline --> Router[AI provider router]\n  RequestPipeline --> Transform[Request/response transform]\n  RequestPipeline --> Usage[Usage and token accounting]\n  RequestPipeline --> Observability[Logs / Metrics / Traces]\n\n  Router --> LB[Pingora load balancing and failover]\n  LB --> OpenAI[OpenAI]\n  LB --> Anthropic[Anthropic]\n  LB --> Gemini[Google Gemini]\n  LB --> Azure[Azure OpenAI]\n  LB --> Compatible[OpenAI-compatible upstreams]\n\n  Config[Ferrogate/Caddyfile / typed config] --> RequestPipeline\n  Admin[Admin API / control plane] --> Config&quot;">flowchart TB
+  Client[Client SDK / App] --> Listener[Pingora listener and TLS]
+  Listener --> RequestPipeline[FerroGate request pipeline]
+
+  RequestPipeline --> Auth[Auth and key resolution]
+  RequestPipeline --> Policy[Policy engine]
+  RequestPipeline --> Router[AI provider router]
+  RequestPipeline --> Transform[Request/response transform]
+  RequestPipeline --> Usage[Usage and token accounting]
+  RequestPipeline --> Observability[Logs / Metrics / Traces]
+
+  Router --> LB[Pingora load balancing and failover]
+  LB --> OpenAI[OpenAI]
+  LB --> Anthropic[Anthropic]
+  LB --> Gemini[Google Gemini]
+  LB --> Azure[Azure OpenAI]
+  LB --> Compatible[OpenAI-compatible upstreams]
+
+  Config[Ferrogate/Caddyfile / typed config] --> RequestPipeline
+  Admin[Admin API / control plane] --> Config
+</code><div id="mermaid-container" role="dialog"><div id="mermaid-space"><div class="mermaid-content"></div></div></div></pre>
+<h2 id="runtime-layers">Runtime layers<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#runtime-layers" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<h3 id="1-network-and-proxy-runtime">1. Network and proxy runtime<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#1-network-and-proxy-runtime" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Responsible for accepting traffic, TLS, connection handling, upstream proxying, retries, timeouts, load balancing, and graceful reload.</p>
+<p>Initial implementation direction:</p>
+<ul>
+<li>use <code>pingora-core</code> for service lifecycle</li>
+<li>use <code>pingora-proxy</code> for HTTP proxy behavior</li>
+<li>use <code>pingora-load-balancing</code> for upstream pools and failover</li>
+<li>use Pingora’s graceful reload model for config reloads</li>
+</ul>
+<h3 id="2-ferrogate-request-pipeline">2. FerroGate request pipeline<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#2-ferrogate-request-pipeline" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>This is the AI-specific gateway pipeline that runs around the proxy path.</p>
+<p>Typical stages:</p>
+<ol>
+<li>receive inbound request</li>
+<li>identify tenant, project, and API key</li>
+<li>parse OpenAI-compatible route</li>
+<li>apply policy and quota checks</li>
+<li>select provider/model/upstream</li>
+<li>normalize request for the selected provider</li>
+<li>proxy through Pingora</li>
+<li>normalize response back to the client contract</li>
+<li>record usage, latency, tokens, and errors</li>
+</ol>
+<h3 id="3-configuration-and-control-plane">3. Configuration and control plane<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#3-configuration-and-control-plane" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate should support a simple file-first workflow while leaving room for a future dynamic control plane.</p>
+<p>Near-term config:</p>
+<ul>
+<li><code>Ferrogate/Caddyfile</code> as the default startup path</li>
+<li>explicit TOML config for internal tests and transitional workflows</li>
+<li>provider definitions</li>
+<li>routes and model aliases</li>
+<li>upstream pools</li>
+<li>timeout/retry/load balancing options</li>
+<li>auth keys and env var references</li>
+</ul>
+<p>Reload lifecycle contract:</p>
+<ol>
+<li><code>ferrogate reload --config &lt;path></code> first loads and validates the candidate config.</li>
+<li>Validation produces a deterministic snapshot id from the normalized typed config.</li>
+<li>Until Pingora-backed hot reload is implemented, reload runs in <code>mode=validate-only</code> and reports <code>swap=false</code>.</li>
+<li>Invalid candidates fail before any runtime swap path and must not emit a success report.</li>
+<li>The future Pingora-backed implementation must only replace the active snapshot after candidate validation succeeds; failed candidates keep the current snapshot active.</li>
+<li>The runtime reload state machine uses prepare/commit/reject semantics: prepare creates a candidate snapshot without publishing it, commit replaces the active snapshot, and reject returns the unchanged active snapshot with the failure reason.</li>
+<li>The CLI lifecycle report must call the runtime reload state machine even before Pingora hot reload is wired, so external command semantics and runtime semantics cannot drift.</li>
+<li><code>/admin/status</code> exposes the active snapshot id. Failed reload tests must compare this value before and after an invalid candidate to prove the active config was not changed.</li>
+</ol>
+<p>Future config direction:</p>
+<ul>
+<li>gateway-style readable config syntax</li>
+<li>hot reload</li>
+<li>admin API</li>
+<li>optional Token4AI Cloud managed config sync</li>
+</ul>
+<h3 id="4-provider-abstraction">4. Provider abstraction<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#4-provider-abstraction" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Provider implementations isolate vendor-specific behavior.</p>
+<p>Each provider adapter should own:</p>
+<ul>
+<li>endpoint mapping</li>
+<li>auth header injection</li>
+<li>model name translation</li>
+<li>request body transformation</li>
+<li>response body transformation</li>
+<li>streaming behavior</li>
+<li>error mapping</li>
+<li>usage extraction</li>
+</ul>
+<p>P3 当前的 OpenAI-compatible adapter MVP 已经把 endpoint mapping、auth header planning、model name translation 和 chat completion request body transformation 固化在 <code>ferrogate-providers</code> crate 中。Gateway 只调用 adapter 生成 provider request plan，再通过 gateway dispatch 边界执行非流式 HTTP upstream 调用。HTTPS dispatch、response transformation、streaming、error mapping 和 usage extraction 继续作为后续 P3 切片推进。</p>
+<h3 id="5-policy-and-governance">5. Policy and governance<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#5-policy-and-governance" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>Policy is applied before and after provider routing.</p>
+<p>Policy examples:</p>
+<ul>
+<li>API key authentication</li>
+<li>tenant/project isolation</li>
+<li>model allow/deny lists</li>
+<li>rate limits</li>
+<li>token budgets</li>
+<li>request size limits</li>
+<li>prompt/content guard hooks</li>
+<li>audit logging hooks</li>
+</ul>
+<h3 id="6-observability-and-usage-accounting">6. Observability and usage accounting<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#6-observability-and-usage-accounting" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<p>FerroGate must make AI traffic observable by default.</p>
+<p>Core telemetry:</p>
+<ul>
+<li>request ID</li>
+<li>tenant/project/key identity</li>
+<li>selected provider/model/upstream</li>
+<li>request latency</li>
+<li>upstream latency</li>
+<li>status code and provider error code</li>
+<li>prompt/completion/total tokens when available</li>
+<li>retry/failover events</li>
+<li>policy decision events</li>
+</ul>
+<h2 id="functional-module-map">Functional module map<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#functional-module-map" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div class="table-container"><table><thead><tr><th>Module</th><th>Responsibility</th><th>Initial priority</th></tr></thead><tbody><tr><td>CLI</td><td><code>run</code>, <code>validate</code>, <code>reload</code>, and <code>check</code> compatibility alias</td><td>P0</td></tr><tr><td>Config loader</td><td>Parse and validate gateway configuration</td><td>P0</td></tr><tr><td>Pingora runtime</td><td>Listener, proxy lifecycle, graceful reload</td><td>P0</td></tr><tr><td>Route matcher</td><td>Match OpenAI-compatible paths and future route rules</td><td>P0</td></tr><tr><td>Provider router</td><td>Select provider/model/upstream</td><td>P0</td></tr><tr><td>Provider adapters</td><td>OpenAI-compatible first, then OpenAI/Anthropic/Gemini/Azure</td><td>P1</td></tr><tr><td>Auth module</td><td>Gateway API key validation and upstream secret resolution</td><td>P1</td></tr><tr><td>Policy engine</td><td>Quotas, limits, allow/deny rules, hooks</td><td>P1</td></tr><tr><td>Usage accounting</td><td>Token and request metrics</td><td>P1</td></tr><tr><td>Observability</td><td>tracing, metrics, structured logs</td><td>P1</td></tr><tr><td>Admin API</td><td>config reload, status, provider health</td><td>P2</td></tr><tr><td>Built-in module system</td><td>内建 Provider、Policy、Observability、Dashboard 模块边界</td><td>P2</td></tr><tr><td>Static docs/wiki</td><td>Product and architecture documentation</td><td>P0</td></tr></tbody></table></div>
+<h2 id="general-api-gateway-capabilities-translated-to-ferrogate">General API gateway capabilities translated to FerroGate<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#general-api-gateway-capabilities-translated-to-ferrogate" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div class="table-container"><table><thead><tr><th>General gateway concept</th><th>FerroGate equivalent</th></tr></thead><tbody><tr><td>Reverse proxy</td><td>AI provider proxy and model router</td></tr><tr><td>Readable config syntax</td><td><code>Ferrogate/Caddyfile</code> plus typed internal config</td></tr><tr><td>Automatic HTTPS</td><td>TLS defaults and certificate automation as a later module</td></tr><tr><td>Built-in modules</td><td>Provider adapters, policy modules, observability sinks</td></tr><tr><td>Admin API</td><td>Gateway runtime control plane</td></tr><tr><td>Hot reload</td><td>Pingora-backed graceful config reload</td></tr><tr><td>Site blocks/routes</td><td>Tenant/project/model route blocks</td></tr></tbody></table></div>
+<h2 id="suggested-cratemodule-structure">Suggested crate/module structure<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#suggested-cratemodule-structure" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="text" data-theme="github-light github-dark"><code data-language="text" data-theme="github-light github-dark" style="display:grid;"><span data-line><span>src/</span></span>
+<span data-line><span>  main.rs</span></span>
+<span data-line><span>  cli.rs</span></span>
+<span data-line><span>  config/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    schema.rs</span></span>
+<span data-line><span>    validate.rs</span></span>
+<span data-line><span>  runtime/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    pingora_service.rs</span></span>
+<span data-line><span>    reload.rs</span></span>
+<span data-line><span>  proxy/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    pipeline.rs</span></span>
+<span data-line><span>    request_context.rs</span></span>
+<span data-line><span>  routing/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    matcher.rs</span></span>
+<span data-line><span>    provider_router.rs</span></span>
+<span data-line><span>    upstream_pool.rs</span></span>
+<span data-line><span>  providers/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    openai_compatible.rs</span></span>
+<span data-line><span>    openai.rs</span></span>
+<span data-line><span>    anthropic.rs</span></span>
+<span data-line><span>    gemini.rs</span></span>
+<span data-line><span>    azure_openai.rs</span></span>
+<span data-line><span>  policy/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    auth.rs</span></span>
+<span data-line><span>    limits.rs</span></span>
+<span data-line><span>    decisions.rs</span></span>
+<span data-line><span>  usage/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    tokens.rs</span></span>
+<span data-line><span>    accounting.rs</span></span>
+<span data-line><span>  observability/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    tracing.rs</span></span>
+<span data-line><span>    metrics.rs</span></span>
+<span data-line><span>  admin/</span></span>
+<span data-line><span>    mod.rs</span></span>
+<span data-line><span>    api.rs</span></span></code></pre></figure>
+<h2 id="mvp-implementation-sequence">MVP implementation sequence<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#mvp-implementation-sequence" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<ol>
+<li>Keep existing Axum health/config prototype as a temporary bootstrap.</li>
+<li>Add Pingora dependencies and introduce a minimal Pingora HTTP proxy service.</li>
+<li>Implement <code>GET /healthz</code> outside or beside the proxy path.</li>
+<li>Implement OpenAI-compatible <code>/v1/models</code> from config.</li>
+<li>Implement OpenAI-compatible chat completions proxy to one upstream.</li>
+<li>Add provider router and upstream pool.</li>
+<li>Add structured tracing and request IDs.</li>
+<li>Add auth and basic policy checks.</li>
+<li>Add streaming support and provider error normalization.</li>
+<li>Add graceful reload from config.</li>
+</ol>
+<h2 id="key-design-principles">Key design principles<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#key-design-principles" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<ul>
+<li>Use Pingora for networking and proxy mechanics.</li>
+<li>Keep FerroGate’s AI semantics independent from Pingora internals.</li>
+<li>Prefer explicit typed interfaces for providers and policies.</li>
+<li>Keep the first config format simple and stable.</li>
+<li>Design for hot reload and operational introspection from the beginning.</li>
+<li>Do not build an external plugin system as an early goal. Keep core gateway capabilities built in and maintain clear internal module boundaries.</li>
+</ul></article><hr/><div class="page-footer"></div></div><div class="right sidebar"><div class="graph"><h3>Graph View</h3><div class="graph-outer"><div class="graph-container" data-cfg="{&quot;drag&quot;:true,&quot;zoom&quot;:true,&quot;depth&quot;:1,&quot;scale&quot;:1.1,&quot;repelForce&quot;:0.5,&quot;centerForce&quot;:0.3,&quot;linkDistance&quot;:30,&quot;fontSize&quot;:0.6,&quot;opacityScale&quot;:1,&quot;showTags&quot;:true,&quot;removeTags&quot;:[],&quot;focusOnHover&quot;:false,&quot;enableRadial&quot;:false}"></div><button class="global-graph-icon" aria-label="Global Graph"><svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 55 55" fill="currentColor" xml:space="preserve"><path d="M49,0c-3.309,0-6,2.691-6,6c0,1.035,0.263,2.009,0.726,2.86l-9.829,9.829C32.542,17.634,30.846,17,29,17
+                s-3.542,0.634-4.898,1.688l-7.669-7.669C16.785,10.424,17,9.74,17,9c0-2.206-1.794-4-4-4S9,6.794,9,9s1.794,4,4,4
+                c0.74,0,1.424-0.215,2.019-0.567l7.669,7.669C21.634,21.458,21,23.154,21,25s0.634,3.542,1.688,4.897L10.024,42.562
+                C8.958,41.595,7.549,41,6,41c-3.309,0-6,2.691-6,6s2.691,6,6,6s6-2.691,6-6c0-1.035-0.263-2.009-0.726-2.86l12.829-12.829
+                c1.106,0.86,2.44,1.436,3.898,1.619v10.16c-2.833,0.478-5,2.942-5,5.91c0,3.309,2.691,6,6,6s6-2.691,6-6c0-2.967-2.167-5.431-5-5.91
+                v-10.16c1.458-0.183,2.792-0.759,3.898-1.619l7.669,7.669C41.215,39.576,41,40.26,41,41c0,2.206,1.794,4,4,4s4-1.794,4-4
+                s-1.794-4-4-4c-0.74,0-1.424,0.215-2.019,0.567l-7.669-7.669C36.366,28.542,37,26.846,37,25s-0.634-3.542-1.688-4.897l9.665-9.665
+                C46.042,11.405,47.451,12,49,12c3.309,0,6-2.691,6-6S52.309,0,49,0z M11,9c0-1.103,0.897-2,2-2s2,0.897,2,2s-0.897,2-2,2
+                S11,10.103,11,9z M6,51c-2.206,0-4-1.794-4-4s1.794-4,4-4s4,1.794,4,4S8.206,51,6,51z M33,49c0,2.206-1.794,4-4,4s-4-1.794-4-4
+                s1.794-4,4-4S33,46.794,33,49z M29,31c-3.309,0-6-2.691-6-6s2.691-6,6-6s6,2.691,6,6S32.309,31,29,31z M47,41c0,1.103-0.897,2-2,2
+                s-2-0.897-2-2s0.897-2,2-2S47,39.897,47,41z M49,10c-2.206,0-4-1.794-4-4s1.794-4,4-4s4,1.794,4,4S51.206,10,49,10z"></path></svg></button></div><div class="global-graph-outer"><div class="global-graph-container" data-cfg="{&quot;drag&quot;:true,&quot;zoom&quot;:true,&quot;depth&quot;:-1,&quot;scale&quot;:0.9,&quot;repelForce&quot;:0.5,&quot;centerForce&quot;:0.2,&quot;linkDistance&quot;:30,&quot;fontSize&quot;:0.6,&quot;opacityScale&quot;:1,&quot;showTags&quot;:true,&quot;removeTags&quot;:[],&quot;focusOnHover&quot;:true,&quot;enableRadial&quot;:true}"></div></div></div><div class="toc desktop-only"><button type="button" class="toc-header" aria-controls="toc-2" aria-expanded="true"><h3>Table of Contents</h3><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fold"><polyline points="6 9 12 15 18 9"></polyline></svg></button><ul id="list-1" class="toc-content overflow"><li class="depth-0"><a href="#ferrogate-architecture-and-functional-modules" data-for="ferrogate-architecture-and-functional-modules">FerroGate architecture and functional modules</a></li><li class="depth-1"><a href="#product-positioning" data-for="product-positioning">Product positioning</a></li><li class="depth-1"><a href="#why-pingora" data-for="why-pingora">Why Pingora</a></li><li class="depth-1"><a href="#high-level-architecture" data-for="high-level-architecture">High-level architecture</a></li><li class="depth-1"><a href="#runtime-layers" data-for="runtime-layers">Runtime layers</a></li><li class="depth-2"><a href="#1-network-and-proxy-runtime" data-for="1-network-and-proxy-runtime">1. Network and proxy runtime</a></li><li class="depth-2"><a href="#2-ferrogate-request-pipeline" data-for="2-ferrogate-request-pipeline">2. FerroGate request pipeline</a></li><li class="depth-2"><a href="#3-configuration-and-control-plane" data-for="3-configuration-and-control-plane">3. Configuration and control plane</a></li><li class="depth-2"><a href="#4-provider-abstraction" data-for="4-provider-abstraction">4. Provider abstraction</a></li><li class="depth-2"><a href="#5-policy-and-governance" data-for="5-policy-and-governance">5. Policy and governance</a></li><li class="depth-2"><a href="#6-observability-and-usage-accounting" data-for="6-observability-and-usage-accounting">6. Observability and usage accounting</a></li><li class="depth-1"><a href="#functional-module-map" data-for="functional-module-map">Functional module map</a></li><li class="depth-1"><a href="#general-api-gateway-capabilities-translated-to-ferrogate" data-for="general-api-gateway-capabilities-translated-to-ferrogate">General API gateway capabilities translated to FerroGate</a></li><li class="depth-1"><a href="#suggested-cratemodule-structure" data-for="suggested-cratemodule-structure">Suggested crate/module structure</a></li><li class="depth-1"><a href="#mvp-implementation-sequence" data-for="mvp-implementation-sequence">MVP implementation sequence</a></li><li class="depth-1"><a href="#key-design-principles" data-for="key-design-principles">Key design principles</a></li><li class="overflow-end"></li></ul></div><div class="backlinks"><h3>Backlinks</h3><ul id="list-2" class="overflow"><li><a href="../02-architecture/system-architecture" class="internal">System architecture</a></li><li><a href="../" class="internal">FerroGate Wiki</a></li><li class="overflow-end"></li></ul></div></div><footer class><p>Created with <a href="https://quartz.jzhao.xyz/">Quartz v4.5.2</a> © 2026</p><ul><li><a href="https://github.com/jackyzha0/quartz">GitHub</a></li><li><a href="https://discord.gg/cRFFHYye7t">Discord Community</a></li></ul></footer></div></div></body><script type="application/javascript" data-persist="true">function n(){let t=this.parentElement;t.classList.toggle("is-collapsed");let e=t.getElementsByClassName("callout-content")[0];if(!e)return;let l=t.classList.contains("is-collapsed");e.style.gridTemplateRows=l?"0fr":"1fr"}function c(){let t=document.getElementsByClassName("callout is-collapsible");for(let e of t){let l=e.getElementsByClassName("callout-title")[0],s=e.getElementsByClassName("callout-content")[0];if(!l||!s)continue;l.addEventListener("click",n),window.addCleanup(()=>l.removeEventListener("click",n));let o=e.classList.contains("is-collapsed");s.style.gridTemplateRows=o?"0fr":"1fr"}}document.addEventListener("nav",c);
+</script><script type="module" data-persist="true">function E(a,e){if(!a)return;function t(o){o.target===this&&(o.preventDefault(),o.stopPropagation(),e())}function n(o){o.key.startsWith("Esc")&&(o.preventDefault(),e())}a?.addEventListener("click",t),window.addCleanup(()=>a?.removeEventListener("click",t)),document.addEventListener("keydown",n),window.addCleanup(()=>document.removeEventListener("keydown",n))}function f(a){for(;a.firstChild;)a.removeChild(a.firstChild)}var m=class{constructor(e,t){this.container=e;this.content=t;this.setupEventListeners(),this.setupNavigationControls(),this.resetTransform()}isDragging=!1;startPan={x:0,y:0};currentPan={x:0,y:0};scale=1;MIN_SCALE=.5;MAX_SCALE=3;cleanups=[];setupEventListeners(){let e=this.onMouseDown.bind(this),t=this.onMouseMove.bind(this),n=this.onMouseUp.bind(this),o=this.onTouchStart.bind(this),r=this.onTouchMove.bind(this),i=this.onTouchEnd.bind(this),s=this.resetTransform.bind(this);this.container.addEventListener("mousedown",e),document.addEventListener("mousemove",t),document.addEventListener("mouseup",n),this.container.addEventListener("touchstart",o,{passive:!1}),document.addEventListener("touchmove",r,{passive:!1}),document.addEventListener("touchend",i),window.addEventListener("resize",s),this.cleanups.push(()=>this.container.removeEventListener("mousedown",e),()=>document.removeEventListener("mousemove",t),()=>document.removeEventListener("mouseup",n),()=>this.container.removeEventListener("touchstart",o),()=>document.removeEventListener("touchmove",r),()=>document.removeEventListener("touchend",i),()=>window.removeEventListener("resize",s))}cleanup(){for(let e of this.cleanups)e()}setupNavigationControls(){let e=document.createElement("div");e.className="mermaid-controls";let t=this.createButton("+",()=>this.zoom(.1)),n=this.createButton("-",()=>this.zoom(-.1)),o=this.createButton("Reset",()=>this.resetTransform());e.appendChild(n),e.appendChild(o),e.appendChild(t),this.container.appendChild(e)}createButton(e,t){let n=document.createElement("button");return n.textContent=e,n.className="mermaid-control-button",n.addEventListener("click",t),window.addCleanup(()=>n.removeEventListener("click",t)),n}onMouseDown(e){e.button===0&&(this.isDragging=!0,this.startPan={x:e.clientX-this.currentPan.x,y:e.clientY-this.currentPan.y},this.container.style.cursor="grabbing")}onMouseMove(e){this.isDragging&&(e.preventDefault(),this.currentPan={x:e.clientX-this.startPan.x,y:e.clientY-this.startPan.y},this.updateTransform())}onMouseUp(){this.isDragging=!1,this.container.style.cursor="grab"}onTouchStart(e){if(e.touches.length!==1)return;this.isDragging=!0;let t=e.touches[0];this.startPan={x:t.clientX-this.currentPan.x,y:t.clientY-this.currentPan.y}}onTouchMove(e){if(!this.isDragging||e.touches.length!==1)return;e.preventDefault();let t=e.touches[0];this.currentPan={x:t.clientX-this.startPan.x,y:t.clientY-this.startPan.y},this.updateTransform()}onTouchEnd(){this.isDragging=!1}zoom(e){let t=Math.min(Math.max(this.scale+e,this.MIN_SCALE),this.MAX_SCALE),n=this.content.getBoundingClientRect(),o=n.width/2,r=n.height/2,i=t-this.scale;this.currentPan.x-=o*i,this.currentPan.y-=r*i,this.scale=t,this.updateTransform()}updateTransform(){this.content.style.transform=`translate(${this.currentPan.x}px, ${this.currentPan.y}px) scale(${this.scale})`}resetTransform(){let t=this.content.querySelector("svg").getBoundingClientRect(),n=t.width/this.scale,o=t.height/this.scale;this.scale=1,this.currentPan={x:(this.container.clientWidth-n)/2,y:(this.container.clientHeight-o)/2},this.updateTransform()}},T=["--secondary","--tertiary","--gray","--light","--lightgray","--highlight","--dark","--darkgray","--codeFont"],y;document.addEventListener("nav",async()=>{let e=document.querySelector(".center").querySelectorAll("code.mermaid");if(e.length===0)return;y||=await import("https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.esm.min.mjs");let t=y.default,n=new WeakMap;for(let r of e)n.set(r,r.innerText);async function o(){for(let s of e){s.removeAttribute("data-processed");let c=n.get(s);c&&(s.innerHTML=c)}let r=T.reduce((s,c)=>(s[c]=window.getComputedStyle(document.documentElement).getPropertyValue(c),s),{}),i=document.documentElement.getAttribute("saved-theme")==="dark";t.initialize({startOnLoad:!1,securityLevel:"loose",theme:i?"dark":"base",themeVariables:{fontFamily:r["--codeFont"],primaryColor:r["--light"],primaryTextColor:r["--darkgray"],primaryBorderColor:r["--tertiary"],lineColor:r["--darkgray"],secondaryColor:r["--secondary"],tertiaryColor:r["--tertiary"],clusterBkg:r["--light"],edgeLabelBackground:r["--highlight"]}}),await t.run({nodes:e})}await o(),document.addEventListener("themechange",o),window.addCleanup(()=>document.removeEventListener("themechange",o));for(let r=0;r<e.length;r++){let v=function(){let g=l.querySelector("#mermaid-space"),h=l.querySelector(".mermaid-content");if(!h)return;f(h);let w=i.querySelector("svg").cloneNode(!0);h.appendChild(w),l.classList.add("active"),g.style.cursor="grab",u=new m(g,h)},M=function(){l.classList.remove("active"),u?.cleanup(),u=null},i=e[r],s=i.parentElement,c=s.querySelector(".clipboard-button"),d=s.querySelector(".expand-button"),p=window.getComputedStyle(c),L=c.offsetWidth+parseFloat(p.marginLeft||"0")+parseFloat(p.marginRight||"0");d.style.right=`calc(${L}px + 0.3rem)`,s.prepend(d);let l=s.querySelector("#mermaid-container");if(!l)return;let u=null;d.addEventListener("click",v),E(l,M),window.addCleanup(()=>{u?.cleanup(),d.removeEventListener("click",v)})}});
+</script><script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/copy-tex.min.js" type="application/javascript" data-persist="true"></script><script src="../postscript.js" type="module" data-persist="true"></script></html>

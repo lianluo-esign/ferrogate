@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr"><head><title>FerroGate PRD 执行计划任务 · FerroGate</title><meta charset="utf-8"/><link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com"/><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted Grotesk:wght@400;700&amp;family=Source Sans Pro:ital,wght@0,400;0,600;1,400;1,600&amp;family=IBM Plex Mono:wght@400;600&amp;display=swap"/><link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin="anonymous"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="og:site_name" content="FerroGate Wiki"/><meta property="og:title" content="FerroGate PRD 执行计划任务 · FerroGate"/><meta property="og:type" content="website"/><meta name="twitter:card" content="summary_large_image"/><meta name="twitter:title" content="FerroGate PRD 执行计划任务 · FerroGate"/><meta name="twitter:description" content="FerroGate PRD 执行计划任务 本文档根据 产品需求文档 制定，用于把 PRD 转换为可执行、可验收、可持续更新进度的工程任务。 0."/><meta property="og:description" content="FerroGate PRD 执行计划任务 本文档根据 产品需求文档 制定，用于把 PRD 转换为可执行、可验收、可持续更新进度的工程任务。 0."/><meta property="og:image:alt" content="FerroGate PRD 执行计划任务 本文档根据 产品需求文档 制定，用于把 PRD 转换为可执行、可验收、可持续更新进度的工程任务。 0."/><meta property="og:image" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta property="og:image:url" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta name="twitter:image" content="https://lianluo-esign.github.io/ferrogate/static/og-image.png"/><meta property="og:image:type" content="image/.png"/><meta property="twitter:domain" content="lianluo-esign.github.io/ferrogate"/><meta property="og:url" content="https://lianluo-esign.github.io/ferrogate/03-development/prd-implementation-plan"/><meta property="twitter:url" content="https://lianluo-esign.github.io/ferrogate/03-development/prd-implementation-plan"/><link rel="icon" href="../static/icon.png"/><meta name="description" content="FerroGate PRD 执行计划任务 本文档根据 产品需求文档 制定，用于把 PRD 转换为可执行、可验收、可持续更新进度的工程任务。 0."/><meta name="generator" content="Quartz"/><link href="../index.css" rel="stylesheet" type="text/css" data-persist="true"/><style>.expand-button {
+  position: absolute;
+  display: flex;
+  float: right;
+  padding: 0.4rem;
+  margin: 0.3rem;
+  right: 0;
+  color: var(--gray);
+  border-color: var(--dark);
+  background-color: var(--light);
+  border: 1px solid;
+  border-radius: 5px;
+  opacity: 0;
+  transition: 0.2s;
+}
+.expand-button > svg {
+  fill: var(--light);
+  filter: contrast(0.3);
+}
+.expand-button:hover {
+  cursor: pointer;
+  border-color: var(--secondary);
+}
+.expand-button:focus {
+  outline: 0;
+}
+
+pre:hover > .expand-button {
+  opacity: 1;
+  transition: 0.2s;
+}
+
+#mermaid-container {
+  position: fixed;
+  contain: layout;
+  z-index: 999;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  display: none;
+  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.5);
+}
+#mermaid-container.active {
+  display: inline-block;
+}
+#mermaid-container > #mermaid-space {
+  border: 1px solid var(--lightgray);
+  background-color: var(--light);
+  border-radius: 5px;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  height: 80vh;
+  width: 80vw;
+  overflow: hidden;
+}
+#mermaid-container > #mermaid-space > .mermaid-content {
+  position: relative;
+  transform-origin: 0 0;
+  transition: transform 0.1s ease;
+  overflow: visible;
+  min-height: 200px;
+  min-width: 200px;
+}
+#mermaid-container > #mermaid-space > .mermaid-content pre {
+  margin: 0;
+  border: none;
+}
+#mermaid-container > #mermaid-space > .mermaid-content svg {
+  max-width: none;
+  height: auto;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  background: var(--light);
+  border: 1px solid var(--lightgray);
+  border-radius: 6px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  z-index: 2;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--lightgray);
+  background: var(--light);
+  color: var(--dark);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  font-family: var(--bodyFont);
+  transition: all 0.2s ease;
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:hover {
+  background: var(--lightgray);
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:active {
+  transform: translateY(1px);
+}
+#mermaid-container > #mermaid-space > .mermaid-controls .mermaid-control-button:nth-child(2) {
+  width: auto;
+  padding: 0 12px;
+  font-size: 14px;
+}
+/*# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VSb290IjoiL1VzZXJzL2Focy9Qcm9qZWN0cy9mZXJyb2dhdGUvZmVycm9nYXRlLXdpa2kvd2lraS1zaXRlL3F1YXJ0ei9jb21wb25lbnRzL3N0eWxlcyIsInNvdXJjZXMiOlsibWVybWFpZC5pbmxpbmUuc2NzcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiQUFBQTtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTs7QUFHRjtFQUNFO0VBQ0E7O0FBR0Y7RUFDRTs7O0FBS0Y7RUFDRTtFQUNBOzs7QUFJSjtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7O0FBRUE7RUFDRTs7QUFHRjtFQUNFO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTs7QUFHRjtFQUNFO0VBQ0E7O0FBSUo7RUFDRTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBOztBQUVBO0VBQ0U7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTtFQUNBO0VBQ0E7RUFDQTs7QUFFQTtFQUNFOztBQUdGO0VBQ0U7O0FBSUY7RUFDRTtFQUNBO0VBQ0EiLCJzb3VyY2VzQ29udGVudCI6WyIuZXhwYW5kLWJ1dHRvbiB7XG4gIHBvc2l0aW9uOiBhYnNvbHV0ZTtcbiAgZGlzcGxheTogZmxleDtcbiAgZmxvYXQ6IHJpZ2h0O1xuICBwYWRkaW5nOiAwLjRyZW07XG4gIG1hcmdpbjogMC4zcmVtO1xuICByaWdodDogMDsgLy8gTk9URTogcmlnaHQgd2lsbCBiZSBzZXQgaW4gbWVybWFpZC5pbmxpbmUudHNcbiAgY29sb3I6IHZhcigtLWdyYXkpO1xuICBib3JkZXItY29sb3I6IHZhcigtLWRhcmspO1xuICBiYWNrZ3JvdW5kLWNvbG9yOiB2YXIoLS1saWdodCk7XG4gIGJvcmRlcjogMXB4IHNvbGlkO1xuICBib3JkZXItcmFkaXVzOiA1cHg7XG4gIG9wYWNpdHk6IDA7XG4gIHRyYW5zaXRpb246IDAuMnM7XG5cbiAgJiA+IHN2ZyB7XG4gICAgZmlsbDogdmFyKC0tbGlnaHQpO1xuICAgIGZpbHRlcjogY29udHJhc3QoMC4zKTtcbiAgfVxuXG4gICY6aG92ZXIge1xuICAgIGN1cnNvcjogcG9pbnRlcjtcbiAgICBib3JkZXItY29sb3I6IHZhcigtLXNlY29uZGFyeSk7XG4gIH1cblxuICAmOmZvY3VzIHtcbiAgICBvdXRsaW5lOiAwO1xuICB9XG59XG5cbnByZSB7XG4gICY6aG92ZXIgPiAuZXhwYW5kLWJ1dHRvbiB7XG4gICAgb3BhY2l0eTogMTtcbiAgICB0cmFuc2l0aW9uOiAwLjJzO1xuICB9XG59XG5cbiNtZXJtYWlkLWNvbnRhaW5lciB7XG4gIHBvc2l0aW9uOiBmaXhlZDtcbiAgY29udGFpbjogbGF5b3V0O1xuICB6LWluZGV4OiA5OTk7XG4gIGxlZnQ6IDA7XG4gIHRvcDogMDtcbiAgd2lkdGg6IDEwMHZ3O1xuICBoZWlnaHQ6IDEwMHZoO1xuICBvdmVyZmxvdzogaGlkZGVuO1xuICBkaXNwbGF5OiBub25lO1xuICBiYWNrZHJvcC1maWx0ZXI6IGJsdXIoNHB4KTtcbiAgYmFja2dyb3VuZDogcmdiYSgwLCAwLCAwLCAwLjUpO1xuXG4gICYuYWN0aXZlIHtcbiAgICBkaXNwbGF5OiBpbmxpbmUtYmxvY2s7XG4gIH1cblxuICAmID4gI21lcm1haWQtc3BhY2Uge1xuICAgIGJvcmRlcjogMXB4IHNvbGlkIHZhcigtLWxpZ2h0Z3JheSk7XG4gICAgYmFja2dyb3VuZC1jb2xvcjogdmFyKC0tbGlnaHQpO1xuICAgIGJvcmRlci1yYWRpdXM6IDVweDtcbiAgICBwb3NpdGlvbjogZml4ZWQ7XG4gICAgdG9wOiA1MCU7XG4gICAgbGVmdDogNTAlO1xuICAgIHRyYW5zZm9ybTogdHJhbnNsYXRlKC01MCUsIC01MCUpO1xuICAgIGhlaWdodDogODB2aDtcbiAgICB3aWR0aDogODB2dztcbiAgICBvdmVyZmxvdzogaGlkZGVuO1xuXG4gICAgJiA+IC5tZXJtYWlkLWNvbnRlbnQge1xuICAgICAgcG9zaXRpb246IHJlbGF0aXZlO1xuICAgICAgdHJhbnNmb3JtLW9yaWdpbjogMCAwO1xuICAgICAgdHJhbnNpdGlvbjogdHJhbnNmb3JtIDAuMXMgZWFzZTtcbiAgICAgIG92ZXJmbG93OiB2aXNpYmxlO1xuICAgICAgbWluLWhlaWdodDogMjAwcHg7XG4gICAgICBtaW4td2lkdGg6IDIwMHB4O1xuXG4gICAgICBwcmUge1xuICAgICAgICBtYXJnaW46IDA7XG4gICAgICAgIGJvcmRlcjogbm9uZTtcbiAgICAgIH1cblxuICAgICAgc3ZnIHtcbiAgICAgICAgbWF4LXdpZHRoOiBub25lO1xuICAgICAgICBoZWlnaHQ6IGF1dG87XG4gICAgICB9XG4gICAgfVxuXG4gICAgJiA+IC5tZXJtYWlkLWNvbnRyb2xzIHtcbiAgICAgIHBvc2l0aW9uOiBhYnNvbHV0ZTtcbiAgICAgIGJvdHRvbTogMjBweDtcbiAgICAgIHJpZ2h0OiAyMHB4O1xuICAgICAgZGlzcGxheTogZmxleDtcbiAgICAgIGdhcDogOHB4O1xuICAgICAgcGFkZGluZzogOHB4O1xuICAgICAgYmFja2dyb3VuZDogdmFyKC0tbGlnaHQpO1xuICAgICAgYm9yZGVyOiAxcHggc29saWQgdmFyKC0tbGlnaHRncmF5KTtcbiAgICAgIGJvcmRlci1yYWRpdXM6IDZweDtcbiAgICAgIGJveC1zaGFkb3c6IDAgMnB4IDRweCByZ2JhKDAsIDAsIDAsIDAuMSk7XG4gICAgICB6LWluZGV4OiAyO1xuXG4gICAgICAubWVybWFpZC1jb250cm9sLWJ1dHRvbiB7XG4gICAgICAgIGRpc3BsYXk6IGZsZXg7XG4gICAgICAgIGFsaWduLWl0ZW1zOiBjZW50ZXI7XG4gICAgICAgIGp1c3RpZnktY29udGVudDogY2VudGVyO1xuICAgICAgICB3aWR0aDogMzJweDtcbiAgICAgICAgaGVpZ2h0OiAzMnB4O1xuICAgICAgICBwYWRkaW5nOiAwO1xuICAgICAgICBib3JkZXI6IDFweCBzb2xpZCB2YXIoLS1saWdodGdyYXkpO1xuICAgICAgICBiYWNrZ3JvdW5kOiB2YXIoLS1saWdodCk7XG4gICAgICAgIGNvbG9yOiB2YXIoLS1kYXJrKTtcbiAgICAgICAgYm9yZGVyLXJhZGl1czogNHB4O1xuICAgICAgICBjdXJzb3I6IHBvaW50ZXI7XG4gICAgICAgIGZvbnQtc2l6ZTogMTZweDtcbiAgICAgICAgZm9udC1mYW1pbHk6IHZhcigtLWJvZHlGb250KTtcbiAgICAgICAgdHJhbnNpdGlvbjogYWxsIDAuMnMgZWFzZTtcblxuICAgICAgICAmOmhvdmVyIHtcbiAgICAgICAgICBiYWNrZ3JvdW5kOiB2YXIoLS1saWdodGdyYXkpO1xuICAgICAgICB9XG5cbiAgICAgICAgJjphY3RpdmUge1xuICAgICAgICAgIHRyYW5zZm9ybTogdHJhbnNsYXRlWSgxcHgpO1xuICAgICAgICB9XG5cbiAgICAgICAgLy8gU3R5bGUgdGhlIHJlc2V0IGJ1dHRvbiBkaWZmZXJlbnRseVxuICAgICAgICAmOm50aC1jaGlsZCgyKSB7XG4gICAgICAgICAgd2lkdGg6IGF1dG87XG4gICAgICAgICAgcGFkZGluZzogMCAxMnB4O1xuICAgICAgICAgIGZvbnQtc2l6ZTogMTRweDtcbiAgICAgICAgfVxuICAgICAgfVxuICAgIH1cbiAgfVxufVxuIl19 */</style><link href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" rel="stylesheet" type="text/css" data-persist="true"/><script src="../prescript.js" type="application/javascript" data-persist="true"></script><script type="application/javascript" data-persist="true">const fetchData = fetch("../static/contentIndex.json").then(data => data.json())</script><link rel="alternate" type="application/rss+xml" title="RSS Feed" href="https://lianluo-esign.github.io/ferrogate/index.xml"/></head><body data-slug="03-development/prd-implementation-plan"><div id="quartz-root" class="page"><div id="quartz-body"><div class="left sidebar"><h2 class="page-title"><a href="..">FerroGate Wiki</a></h2><div class="spacer mobile-only"></div><div class="flex-component" style="flex-direction: row; flex-wrap: nowrap; gap: 1rem;"><div style="flex-grow: 1; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><div class="search"><button class="search-button"><svg role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 19.9 19.7"><title>Search</title><g class="search-path" fill="none"><path stroke-linecap="square" d="M18.5 18.3l-5.4-5.4"></path><circle cx="8" cy="8" r="7"></circle></g></svg><p>Search</p></button><div class="search-container"><div class="search-space"><input autocomplete="off" class="search-bar" name="search" type="text" aria-label="Search for something" placeholder="Search for something"/><div class="search-layout" data-preview="true"></div></div></div></div></div><div style="flex-grow: 0; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><button class="darkmode"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="dayIcon" x="0px" y="0px" viewBox="0 0 35 35" style="enable-background:new 0 0 35 35" xml:space="preserve" aria-label="Dark mode"><title>Dark mode</title><path d="M6,17.5C6,16.672,5.328,16,4.5,16h-3C0.672,16,0,16.672,0,17.5    S0.672,19,1.5,19h3C5.328,19,6,18.328,6,17.5z M7.5,26c-0.414,0-0.789,0.168-1.061,0.439l-2,2C4.168,28.711,4,29.086,4,29.5    C4,30.328,4.671,31,5.5,31c0.414,0,0.789-0.168,1.06-0.44l2-2C8.832,28.289,9,27.914,9,27.5C9,26.672,8.329,26,7.5,26z M17.5,6    C18.329,6,19,5.328,19,4.5v-3C19,0.672,18.329,0,17.5,0S16,0.672,16,1.5v3C16,5.328,16.671,6,17.5,6z M27.5,9    c0.414,0,0.789-0.168,1.06-0.439l2-2C30.832,6.289,31,5.914,31,5.5C31,4.672,30.329,4,29.5,4c-0.414,0-0.789,0.168-1.061,0.44    l-2,2C26.168,6.711,26,7.086,26,7.5C26,8.328,26.671,9,27.5,9z M6.439,8.561C6.711,8.832,7.086,9,7.5,9C8.328,9,9,8.328,9,7.5    c0-0.414-0.168-0.789-0.439-1.061l-2-2C6.289,4.168,5.914,4,5.5,4C4.672,4,4,4.672,4,5.5c0,0.414,0.168,0.789,0.439,1.06    L6.439,8.561z M33.5,16h-3c-0.828,0-1.5,0.672-1.5,1.5s0.672,1.5,1.5,1.5h3c0.828,0,1.5-0.672,1.5-1.5S34.328,16,33.5,16z     M28.561,26.439C28.289,26.168,27.914,26,27.5,26c-0.828,0-1.5,0.672-1.5,1.5c0,0.414,0.168,0.789,0.439,1.06l2,2    C28.711,30.832,29.086,31,29.5,31c0.828,0,1.5-0.672,1.5-1.5c0-0.414-0.168-0.789-0.439-1.061L28.561,26.439z M17.5,29    c-0.829,0-1.5,0.672-1.5,1.5v3c0,0.828,0.671,1.5,1.5,1.5s1.5-0.672,1.5-1.5v-3C19,29.672,18.329,29,17.5,29z M17.5,7    C11.71,7,7,11.71,7,17.5S11.71,28,17.5,28S28,23.29,28,17.5S23.29,7,17.5,7z M17.5,25c-4.136,0-7.5-3.364-7.5-7.5    c0-4.136,3.364-7.5,7.5-7.5c4.136,0,7.5,3.364,7.5,7.5C25,21.636,21.636,25,17.5,25z"></path></svg><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="nightIcon" x="0px" y="0px" viewBox="0 0 100 100" style="enable-background:new 0 0 100 100" xml:space="preserve" aria-label="Light mode"><title>Light mode</title><path d="M96.76,66.458c-0.853-0.852-2.15-1.064-3.23-0.534c-6.063,2.991-12.858,4.571-19.655,4.571  C62.022,70.495,50.88,65.88,42.5,57.5C29.043,44.043,25.658,23.536,34.076,6.47c0.532-1.08,0.318-2.379-0.534-3.23  c-0.851-0.852-2.15-1.064-3.23-0.534c-4.918,2.427-9.375,5.619-13.246,9.491c-9.447,9.447-14.65,22.008-14.65,35.369  c0,13.36,5.203,25.921,14.65,35.368s22.008,14.65,35.368,14.65c13.361,0,25.921-5.203,35.369-14.65  c3.872-3.871,7.064-8.328,9.491-13.246C97.826,68.608,97.611,67.309,96.76,66.458z"></path></svg></button></div><div style="flex-grow: 0; flex-shrink: 1; flex-basis: auto; order: 0; align-self: center; justify-self: center;"><button class="readermode"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="readerIcon" fill="currentColor" stroke="currentColor" stroke-width="0.2" stroke-linecap="round" stroke-linejoin="round" width="64px" height="64px" viewBox="0 0 24 24" aria-label="Reader mode"><title>Reader mode</title><g transform="translate(-1.8, -1.8) scale(1.15, 1.2)"><path d="M8.9891247,2.5 C10.1384702,2.5 11.2209868,2.96705384 12.0049645,3.76669482 C12.7883914,2.96705384 13.8709081,2.5 15.0202536,2.5 L18.7549359,2.5 C19.1691495,2.5 19.5049359,2.83578644 19.5049359,3.25 L19.5046891,4.004 L21.2546891,4.00457396 C21.6343849,4.00457396 21.9481801,4.28672784 21.9978425,4.6528034 L22.0046891,4.75457396 L22.0046891,20.25 C22.0046891,20.6296958 21.7225353,20.943491 21.3564597,20.9931534 L21.2546891,21 L2.75468914,21 C2.37499337,21 2.06119817,20.7178461 2.01153575,20.3517706 L2.00468914,20.25 L2.00468914,4.75457396 C2.00468914,4.37487819 2.28684302,4.061083 2.65291858,4.01142057 L2.75468914,4.00457396 L4.50368914,4.004 L4.50444233,3.25 C4.50444233,2.87030423 4.78659621,2.55650904 5.15267177,2.50684662 L5.25444233,2.5 L8.9891247,2.5 Z M4.50368914,5.504 L3.50468914,5.504 L3.50468914,19.5 L10.9478955,19.4998273 C10.4513189,18.9207296 9.73864328,18.5588115 8.96709342,18.5065584 L8.77307039,18.5 L5.25444233,18.5 C4.87474657,18.5 4.56095137,18.2178461 4.51128895,17.8517706 L4.50444233,17.75 L4.50368914,5.504 Z M19.5049359,17.75 C19.5049359,18.1642136 19.1691495,18.5 18.7549359,18.5 L15.2363079,18.5 C14.3910149,18.5 13.5994408,18.8724714 13.0614828,19.4998273 L20.5046891,19.5 L20.5046891,5.504 L19.5046891,5.504 L19.5049359,17.75 Z M18.0059359,3.999 L15.0202536,4 L14.8259077,4.00692283 C13.9889509,4.06666544 13.2254227,4.50975805 12.7549359,5.212 L12.7549359,17.777 L12.7782651,17.7601316 C13.4923805,17.2719483 14.3447024,17 15.2363079,17 L18.0059359,16.999 L18.0056891,4.798 L18.0033792,4.75457396 L18.0056891,4.71 L18.0059359,3.999 Z M8.9891247,4 L6.00368914,3.999 L6.00599909,4.75457396 L6.00599909,4.75457396 L6.00368914,4.783 L6.00368914,16.999 L8.77307039,17 C9.57551536,17 10.3461406,17.2202781 11.0128313,17.6202194 L11.2536891,17.776 L11.2536891,5.211 C10.8200889,4.56369974 10.1361548,4.13636104 9.37521067,4.02745763 L9.18347055,4.00692283 L8.9891247,4 Z"></path></g></svg></button></div></div><div class="explorer" data-behavior="link" data-collapsed="collapsed" data-savestate="true" data-data-fns="{&quot;order&quot;:[&quot;filter&quot;,&quot;map&quot;,&quot;sort&quot;],&quot;sortFn&quot;:&quot;(a,b)=>!a.isFolder&amp;&amp;!b.isFolder||a.isFolder&amp;&amp;b.isFolder?a.displayName.localeCompare(b.displayName,void 0,{numeric:!0,sensitivity:\&quot;base\&quot;}):!a.isFolder&amp;&amp;b.isFolder?1:-1&quot;,&quot;filterFn&quot;:&quot;node=>node.slugSegment!==\&quot;tags\&quot;&quot;,&quot;mapFn&quot;:&quot;node=>node&quot;}"><button type="button" class="explorer-toggle mobile-explorer hide-until-loaded" data-mobile="true" aria-controls="explorer-18"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide-menu"><line x1="4" x2="20" y1="12" y2="12"></line><line x1="4" x2="20" y1="6" y2="6"></line><line x1="4" x2="20" y1="18" y2="18"></line></svg></button><button type="button" class="title-button explorer-toggle desktop-explorer" data-mobile="false" aria-expanded="true"><h2>Explorer</h2><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="5 8 14 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fold"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="explorer-18" class="explorer-content" aria-expanded="false" role="group"><ul class="explorer-ul overflow" id="list-0"><li class="overflow-end"></li></ul></div><template id="template-file"><li><a href="#"></a></li></template><template id="template-folder"><li><div class="folder-container"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="5 8 14 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder-icon"><polyline points="6 9 12 15 18 9"></polyline></svg><div><button class="folder-button"><span class="folder-title"></span></button></div></div><div class="folder-outer"><ul class="content"></ul></div></li></template></div></div><div class="center"><div class="page-header"><div class="popover-hint"><nav class="breadcrumb-container" aria-label="breadcrumbs"><div class="breadcrumb-element"><a href="../">Home</a><p> ❯ </p></div><div class="breadcrumb-element"><a href="../03-development/">03 development</a><p> ❯ </p></div><div class="breadcrumb-element"><a href>FerroGate PRD 执行计划任务</a></div></nav><h1 class="article-title">FerroGate PRD 执行计划任务</h1><p show-comma="true" class="content-meta"><time datetime="2026-05-02T15:40:19.000Z">May 02, 2026</time><span>20 min read</span></p><ul class="tags"><li><a href="../tags/development" class="internal tag-link">development</a></li><li><a href="../tags/planning" class="internal tag-link">planning</a></li><li><a href="../tags/rust" class="internal tag-link">rust</a></li><li><a href="../tags/api-gateway" class="internal tag-link">api-gateway</a></li></ul></div></div><article class="popover-hint"><h1 id="ferrogate-prd-执行计划任务">FerroGate PRD 执行计划任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#ferrogate-prd-执行计划任务" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h1>
+<p>本文档根据 <a href="../产品需求文档" class="internal alias" data-slug="产品需求文档">产品需求文档</a> 制定，用于把 PRD 转换为可执行、可验收、可持续更新进度的工程任务。</p>
+<h2 id="0-执行原则">0. 执行原则<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#0-执行原则" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<ol>
+<li>必须按照标准化 Rust 大型工程代码库设计和实现。</li>
+<li>网关核心运行时必须基于 Cloudflare Pingora，不能用通用 Web 框架替代代理生命周期。</li>
+<li>每完成一个步骤，必须更新本文档的「进度」字段、验收结果和必要的设计/测试链接。</li>
+<li>每个阶段完成前必须运行对应校验，包括格式化、静态检查、单元测试、集成测试和文档同步检查。</li>
+<li>代码、PRD、架构文档和执行计划必须保持同步，任何范围变化都要先更新文档再实现。</li>
+<li>采用“工程骨架 + 可运行垂直切片 + 增量扩展”的节奏，避免只做横向大框架而长期不可运行。</li>
+<li>Caddy 基础能力和 Caddyfile 兼容必须对照 Caddy 官方源码实现语义审查，但只能以 Rust/Pingora/FerroGate 模块重新实现，不能复制 Go 源码或 Caddy 内部架构。</li>
+</ol>
+<h2 id="1-合理性审查结论">1. 合理性审查结论<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#1-合理性审查结论" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>当前计划方向合理，符合 PRD 中“Rust 大型工程代码库”和“Pingora 作为核心代理运行时”的硬性约束，但需要避免以下风险：</p>
+<ol>
+<li><strong>配置系统不能太晚</strong>：Pingora runtime、路由、Provider、API Key 都依赖配置模型，因此配置模型和 <code>check</code> 命令必须在 P0/P1 就形成最小闭环，而不是等到独立后置阶段。</li>
+<li><strong>Provider Adapter 不能晚于 AI Proxy</strong>：<code>/v1/chat/completions</code> 要想可维护，必须先有 OpenAI-compatible Adapter 的最小接口，否则容易把 Provider 逻辑写死在 runtime 中。</li>
+<li><strong>缺少 storage 边界</strong>：虚拟 API Key、租户、请求日志、Token 计费、Admin API 都需要存储抽象。即使 MVP 先用 in-memory/file，也必须提前定义 repository/storage 接口。</li>
+<li><strong>crate 边界需要补齐 routing/storage</strong>：原计划有 core/runtime/providers/policy/auth/billing/admin，但路由和存储是独立变化轴，应单独建边界。</li>
+<li><strong>不要一次性实现所有 crate 的完整功能</strong>：P0 只要求 workspace、crate skeleton、公开接口和最小编译，不要求一次性写完所有业务模块。</li>
+<li><strong>每个阶段必须产生可运行结果</strong>：优先保证 P1 起就能运行最小网关，后续按垂直切片扩展 AI、鉴权、可观测性和控制面。</li>
+<li><strong>Caddyfile 兼容必须前置</strong>：PRD 要求标准启动配置支持 <code>Ferrogate/Caddyfile</code>，因此 P0 必须建立 Caddyfile 解析边界和内部 typed config model，而不是只做 TOML。</li>
+</ol>
+<p>因此，本计划采用修订后的 P0-P8 顺序，并作为 PRD 第 8 节里程碑的执行级来源。若后续调整阶段边界，必须同步更新 PRD 里程碑和本文档进度总览。</p>
+<h2 id="2-进度总览">2. 进度总览<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#2-进度总览" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div class="table-container"><table><thead><tr><th>阶段</th><th>名称</th><th>状态</th><th>进度</th><th>当前产出</th></tr></thead><tbody><tr><td>P0</td><td>工程基线、crate 边界与 Caddyfile 配置契约</td><td>已完成</td><td>100%</td><td>已创建 Rust workspace、P0 crate skeleton、Caddyfile parser/adapter 边界和最小 typed config model</td></tr><tr><td>P1</td><td>Pingora 通用 API Gateway Runtime 垂直切片</td><td>已完成</td><td>100%</td><td>已实现配置驱动 Pingora 反向代理、路由匹配、upstream pool、header/path rewrite、healthz、日志和测试</td></tr><tr><td>P2</td><td>配置校验、生命周期和平滑重载</td><td>进行中</td><td>80%</td><td>已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip</td></tr><tr><td>P3</td><td>OpenAI-compatible AI Proxy MVP</td><td>进行中</td><td>55%</td><td>已实现 OpenAI-compatible Adapter MVP、<code>/v1/models</code>、非流式 chat completion HTTP dispatch、鉴权/模型路由负例和 AI dispatch 性能 smoke</td></tr><tr><td>P4</td><td>虚拟 API Key、租户上下文与 Policy MVP</td><td>未开始</td><td>0%</td><td>待实现鉴权、租户解析和基础策略判断</td></tr><tr><td>P5</td><td>多 Provider Adapter 与 Model Registry</td><td>未开始</td><td>0%</td><td>待实现多 Provider 抽象和逻辑模型路由</td></tr><tr><td>P6</td><td>可观测性、请求日志、Storage 与计费事件</td><td>未开始</td><td>0%</td><td>待集成 OpenTelemetry 和 usage/billing 存储接口</td></tr><tr><td>P7</td><td>Admin API 与 Dashboard MVP</td><td>未开始</td><td>0%</td><td>待实现管理面和基础后台页面</td></tr><tr><td>P8</td><td>生产级可靠性、安全和部署增强</td><td>未开始</td><td>0%</td><td>待实现限流、熔断、fallback、部署文档</td></tr></tbody></table></div>
+<h2 id="3-p0-工程基线crate-边界与-caddyfile-配置契约">3. P0 工程基线、crate 边界与 Caddyfile 配置契约<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#3-p0-工程基线crate-边界与-caddyfile-配置契约" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：建立符合大型 Rust 工程实践的 workspace、crate 边界、质量门禁、Caddy 源码对照方法和最小 Caddyfile 配置契约。</p>
+<h3 id="任务">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" checked disabled/> 创建 Cargo workspace。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 拆分核心 crate skeleton，P0 只要求最小可编译和职责边界清晰：
+<ul>
+<li><code>ferrogate-cli</code>：Caddy 风格命令入口，包含 <code>run</code>、<code>validate</code>、<code>reload</code> 占位和 <code>check</code> 兼容别名。</li>
+<li><code>ferrogate-core</code>：领域模型、错误类型、请求上下文、公共 Result。</li>
+<li><code>ferrogate-config</code>：Caddyfile 风格配置解析、内部 typed config model、加载、校验、环境变量 Secret 引用。</li>
+<li><code>ferrogate-runtime</code>：Pingora 服务生命周期和代理运行时边界。</li>
+<li><code>ferrogate-routing</code>：Host/Path/Header 路由、模型路由、upstream 选择接口。</li>
+<li><code>ferrogate-providers</code>：AI Provider Adapter trait 和 OpenAI-compatible Adapter skeleton。</li>
+<li><code>ferrogate-auth</code>：虚拟 API Key、租户解析接口。</li>
+<li><code>ferrogate-policy</code>：Policy Engine trait 和决策模型。</li>
+<li><code>ferrogate-storage</code>：Repository/storage trait，MVP 可先提供 in-memory 实现。</li>
+<li><code>ferrogate-billing</code>：Token 统计、用量聚合、Billing Event 模型。</li>
+<li><code>ferrogate-observability</code>：日志、指标、Tracing 初始化。</li>
+<li><code>ferrogate-admin</code>：Admin API 边界。</li>
+</ul>
+</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 下载 Caddy 源码到 <code>.references/caddy</code>，记录参考 commit，并建立 Caddy 源码对照清单。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 定义最小 <code>Ferrogate/Caddyfile</code> 配置子集：site block、matcher、<code>reverse_proxy</code>、<code>route</code>、<code>handle</code>、<code>handle_path</code>、<code>header</code>、<code>rewrite</code>、<code>respond</code>、<code>redir</code>、<code>encode</code>、<code>tls</code>、<code>log</code>。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 定义 Caddyfile 风格配置到 FerroGate 内部 typed config model 的转换模型：listener、route、upstream、provider、model、log。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现 Caddy 风格子命令 <code>ferrogate run --config &lt;path></code>、<code>ferrogate validate --config &lt;path></code>，并保留 <code>check</code> 作为 <code>validate</code> 兼容别名。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 建立 <code>cargo fmt</code>、<code>cargo clippy --all-targets --all-features</code>、<code>cargo test --workspace</code> 质量门禁。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 建立统一错误处理、tracing 初始化、feature gate 和 crate 依赖规范。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 添加 workspace README、crate README 或模块级文档注释。</li>
+</ul>
+<h3 id="验收标准">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" checked disabled/> <code>cargo fmt --check</code> 通过。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> <code>cargo clippy --all-targets --all-features -- -D warnings</code> 通过。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> <code>cargo test --workspace</code> 通过。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> <code>Ferrogate/Caddyfile</code> 示例可被 <code>check</code> 命令校验通过。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 不支持的 Caddy directive 会返回带文件名、行列号、directive 名称和迁移建议的错误。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 每个 crate 有清晰职责说明和最小可编译代码。</li>
+</ul>
+<p><strong>进度</strong>：100%。</p>
+<p><strong>验收结果</strong>：</p>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="bash" data-theme="github-light github-dark"><code data-language="bash" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> fmt</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --check</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> clippy</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --all-targets</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --all-features</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -D</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> warnings</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --workspace</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> run</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> validate</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --config</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> Ferrogate/Caddyfile</span></span></code></pre></figure>
+<p>以上命令已通过。P0 测试覆盖 Caddyfile parser/adapter、unsupported directive 诊断、CLI <code>check</code> 集成、workspace skeleton 和轻量 parser 性能 smoke。</p>
+<h2 id="4-p1-pingora-通用-api-gateway-runtime-垂直切片">4. P1 Pingora 通用 API Gateway Runtime 垂直切片<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#4-p1-pingora-通用-api-gateway-runtime-垂直切片" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：实现一个配置驱动、可运行、可测试的 Pingora 反向代理最小闭环。</p>
+<h3 id="任务-1">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-1" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" checked disabled/> 基于 Pingora 实现监听器和代理服务。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 从 P0 配置模型加载 listener、route、upstream。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 定义请求上下文，包括 request_id、trace_id、route、upstream、tenant 占位字段。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现 Host/Path/Header 路由匹配。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现 upstream pool 和基础 round-robin 负载均衡。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现请求/响应 header 改写和 path rewrite。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现 <code>/healthz</code> 静态健康检查响应。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 输出结构化访问日志。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 添加端到端代理集成测试。</li>
+</ul>
+<h3 id="验收标准-1">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-1" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" checked disabled/> 可以代理普通 HTTP 请求到配置的上游。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 路由匹配、header 改写、path rewrite 有单元测试和集成测试。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> Streaming 响应不被完整缓冲。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 所有请求都有 request_id。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> Pingora 是代理关键路径，未用 axum/reqwest/hyper 替代核心 runtime。</li>
+</ul>
+<p><strong>进度</strong>：100%。</p>
+<p><strong>验收结果</strong>：</p>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="bash" data-theme="github-light github-dark"><code data-language="bash" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> proxy_runtime</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> upstream_pool</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> runtime_perf</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> check_command</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span></code></pre></figure>
+<p>以上命令已通过。P1 覆盖 Pingora 代理成功路径、streaming 首包不完整缓冲、upstream pool round-robin、请求/响应 header 改写、path rewrite、命令契约和 runtime debug 性能 smoke。</p>
+<h2 id="5-p2-配置校验生命周期和平滑重载">5. P2 配置校验、生命周期和平滑重载<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#5-p2-配置校验生命周期和平滑重载" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：让网关具备可靠启动、可诊断配置错误和平滑生命周期管理。</p>
+<h3 id="任务-2">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-2" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 完善 Caddyfile 风格监听器、路由、upstream、TLS、日志、Provider、模型、API Key 的配置模型。（已补齐 Caddyfile <code>admin</code> 到 typed config 的映射；TLS/Provider/API Key 的 Caddyfile 高级模型仍待后续切片。）</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 对照 Caddy 源码中的 <code>caddyconfig/caddyfile</code>、<code>caddyconfig/httpcaddyfile</code> 和关键 HTTP directive 行为，完善 FerroGate parser/adapter 设计。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 支持环境变量引用 Secret，并保证错误日志不泄漏 Secret。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现启动前配置校验和字段级错误诊断。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 设计并实现 Pingora-backed 平滑重载接口。（已定义 validate-only/no-swap 候选 reload 契约、runtime reload 状态机，并已接入 CLI lifecycle；Pingora 运行中 swap 待实现。）</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 设计配置快照、版本号和回滚语义。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 补充 <code>ferrogate run</code>、<code>ferrogate validate</code>、未来 <code>ferrogate reload</code> 命令约定。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 更新 <a href="../03-development/development-workflow" class="internal alias" data-slug="03-development/development-workflow">Development workflow</a>。</li>
+</ul>
+<h3 id="验收标准-2">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-2" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" checked disabled/> 示例 <code>Ferrogate/Caddyfile</code> 可通过校验。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 无效配置可以返回字段级错误。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 配置模型有 serde roundtrip 测试。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 平滑重载设计文档同步更新。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> reload 失败不会破坏当前运行配置。（runtime reload 状态机已覆盖 candidate reject 保留 active snapshot；Pingora 连接级平滑 reload 待实现。）</li>
+</ul>
+<p><strong>进度</strong>：80%。</p>
+<p><strong>验收结果</strong>：</p>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="bash" data-theme="github-light github-dark"><code data-language="bash" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> config::tests</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> config::snapshot</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> lifecycle</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-runtime</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-config</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> caddyfile_parser</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> check_command</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> proxy_runtime</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> run</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> validate</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --config</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> Ferrogate/Caddyfile</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> run</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> reload</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --config</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> Ferrogate/Caddyfile</span></span></code></pre></figure>
+<p>以上命令已通过。当前 <code>reload</code> CLI 仍是 validate-only/no-swap 契约，会输出候选配置 snapshot id；invalid candidate 会在 swap 前失败。CLI lifecycle 已通过 <code>ferrogate-runtime</code> 的 prepare/reject 路径生成报告，保证 rejected candidate 不覆盖 active snapshot。<code>Ferrogate/Caddyfile</code> 的 <code>admin localhost:2019</code> 已进入 typed config，<code>/admin/status</code> 会暴露 active snapshot。真正接入 Pingora 运行中服务替换和连接级平滑 reload 仍留在 P2 后续切片。</p>
+<h2 id="6-p3-openai-compatible-ai-proxy-mvp">6. P3 OpenAI-compatible AI Proxy MVP<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#6-p3-openai-compatible-ai-proxy-mvp" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：让 OpenAI SDK 能通过 FerroGate 调用 AI 请求，并保持 Provider 逻辑隔离在 Adapter 中。</p>
+<h3 id="任务-3">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-3" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" checked disabled/> 在 <code>ferrogate-providers</code> 中定义 Provider Adapter trait 的 MVP 版本。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现 OpenAI-compatible Adapter MVP，包括鉴权 header planning、endpoint 映射、logical model 到 provider model 改写、stream 标记保留和 secret debug 脱敏。（错误归一化、usage 提取仍待后续切片。）</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现 <code>GET /v1/models</code>。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 实现 <code>POST /v1/chat/completions</code> 非流式路径。（当前支持 HTTP OpenAI-compatible upstream dispatch；HTTPS provider dispatch 待后续异步/TLS 客户端切片。）</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 <code>stream=true</code> 的 SSE 转发。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 定义统一错误响应格式。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 记录 logical_model、provider、provider_model 的路由计划。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 提供 OpenAI-compatible mock upstream 集成测试。</li>
+</ul>
+<h3 id="验收标准-3">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-3" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" checked disabled/> OpenAI-compatible 客户端可配置 base_url 调通 FerroGate 的非流式 mock upstream 路径。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 非流式和流式请求均有集成测试。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Provider 错误被归一化。</li>
+<li class="task-list-item"><input type="checkbox" checked disabled/> 响应不泄漏 API Key 和 Provider Secret。（日志脱敏仍需随 observability 切片继续验证。）</li>
+<li class="task-list-item"><input type="checkbox" disabled/> OpenAI-compatible 逻辑未写死在 runtime crate 中。</li>
+</ul>
+<p><strong>进度</strong>：55%。</p>
+<p><strong>验收结果</strong>：</p>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="bash" data-theme="github-light github-dark"><code data-language="bash" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-providers</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ai_proxy_auth</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ai_proxy_dispatch_errors</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ai_proxy_runtime</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -p</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ferrogate-cli</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --test</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> ai_proxy_perf</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --nocapture</span></span></code></pre></figure>
+<p>以上命令已通过。当前 P3 覆盖 OpenAI-compatible adapter 的模型改写、stream flag 保留、非对象 body 拒绝、unsupported provider kind 拒绝、Provider Secret debug 脱敏，以及真实 <code>ferrogate run</code> 进程下的 <code>/v1/models</code>、<code>/v1/chat/completions</code> 非流式 HTTP mock provider dispatch、<code>Authorization</code> 与 <code>x-api-key</code>、missing/invalid/scope/model deny 负例、provider Authorization header、provider body 模型改写、逻辑模型名不透传、provider/client secret 响应脱敏。<code>ai_proxy_dispatch_errors</code> 覆盖 HTTPS 暂不支持、provider 连接失败、畸形 provider 响应、malformed JSON 和 <code>stream=true</code> 的用户可见错误映射。<code>ai_proxy_perf</code> 已加入 debug smoke，覆盖 120 次 chat dispatch 和 120 次 auth error 的 p95 延迟上限与 RSS 增长上限。<code>stream=true</code> 仍返回 <code>501 streaming_not_implemented</code>；HTTPS provider dispatch、SSE 转发、错误归一化和 usage 提取仍是 P3 后续切片。</p>
+<h2 id="7-p4-虚拟-api-key租户上下文与-policy-mvp">7. P4 虚拟 API Key、租户上下文与 Policy MVP<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#7-p4-虚拟-api-key租户上下文与-policy-mvp" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：实现基础企业级访问控制和租户隔离，满足 PRD 中 P4 对虚拟 API Key、租户上下文和 Policy MVP 的要求。</p>
+<h3 id="任务-4">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-4" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 实现虚拟 API Key 生成、Hash 存储和校验。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 定义 Organization、Team、Project、User、Service Account、Role、Permission、Policy 模型。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> API Key 解析到唯一租户上下文。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 基于 <code>ferrogate-storage</code> 定义 Key、Tenant、Policy repository。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现模型 allowlist/denylist。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Provider allowlist/denylist。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现基础请求频率限制和 Token 预算占位接口。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 将 Auth 和 Policy 接入 P3 AI Proxy 请求路径。</li>
+</ul>
+<h3 id="验收标准-4">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-4" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 被禁用、过期、超限、无权限 Key 会被拒绝。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 请求上下文包含 organization_id、project_id、api_key_id 等租户字段。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 所有安全相关日志脱敏。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Policy 决策有单元测试。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> OpenAI SDK 请求在无 Key 或无权限时返回统一错误。</li>
+</ul>
+<p><strong>进度</strong>：0%。</p>
+<h2 id="8-p5-多-provider-adapter-与-model-registry">8. P5 多 Provider Adapter 与 Model Registry<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#8-p5-多-provider-adapter-与-model-registry" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：抽象不同 AI Provider 差异，支持逻辑模型路由、fallback 和权重路由。</p>
+<h3 id="任务-5">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-5" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 完善 Provider Adapter trait，覆盖请求转换、响应转换、Streaming、错误归一化、usage 提取、可重试判断。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 OpenAI Adapter。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Anthropic Adapter。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Gemini Adapter。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Grok Adapter。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Azure OpenAI Adapter。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 定义 Model Registry、模型别名、模型能力、价格和上下文长度。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现优先级 fallback 和权重路由。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 支持租户级模型可见性。</li>
+</ul>
+<h3 id="验收标准-5">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-5" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 每个 Adapter 支持鉴权注入、请求转换、响应转换、错误归一化、usage 提取。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 逻辑模型可以路由到不同 Provider 模型。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> fallback 过程有 trace span 和日志字段。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Provider Adapter 单元测试覆盖典型错误和 streaming 事件。</li>
+</ul>
+<p><strong>进度</strong>：0%。</p>
+<h2 id="9-p6-可观测性请求日志storage-与计费事件">9. P6 可观测性、请求日志、Storage 与计费事件<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#9-p6-可观测性请求日志storage-与计费事件" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：提供 AI Gateway 需要的追踪、指标、审计、请求日志和成本统计能力。</p>
+<h3 id="任务-6">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-6" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 集成 OpenTelemetry traces、metrics、logs。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 定义 PRD 中要求的 span 层级。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现结构化请求日志模型和 repository。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Token usage 提取和估算接口。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现模型价格表和成本计算。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Billing Event 模型和异步写入接口。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 支持按租户策略控制 prompt/response body 记录。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 提供 in-memory/file storage，预留 SQLite/Postgres 实现边界。</li>
+</ul>
+<h3 id="验收标准-6">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-6" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 每次请求都有 request_id 和 trace_id。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 日志包含 PRD 要求的核心字段。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Token 和成本可以按组织、项目、API Key、模型聚合。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 敏感字段默认脱敏。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Billing Event 写入失败不会明显阻塞响应路径。</li>
+</ul>
+<p><strong>进度</strong>：0%。</p>
+<h2 id="10-p7-admin-api-与-dashboard-mvp">10. P7 Admin API 与 Dashboard MVP<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#10-p7-admin-api-与-dashboard-mvp" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：提供基础控制平面和可用的后台管理入口。</p>
+<h3 id="任务-7">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-7" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Admin API 版本化路由。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 明确 Admin API 使用的 Rust Web 框架仅限管理面，不能替代 Pingora 代理 runtime。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Admin API 接入 RBAC。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 所有写操作写审计日志。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现组织、团队、项目、用户、API Key、Provider、Model、Policy、Usage、Request Log 查询接口。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Dashboard 通过 Admin API 访问数据。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Overview、API Key、Provider、Model、请求日志、Token 用量、网关健康页面。</li>
+</ul>
+<h3 id="验收标准-7">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-7" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> Dashboard 不直接访问内部状态。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> Admin API 写操作可审计。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 常见管理任务可以通过 UI 完成。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 权限不足会返回统一错误。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 管理面框架依赖不会进入代理关键路径。</li>
+</ul>
+<p><strong>进度</strong>：0%。</p>
+<h2 id="11-p8-生产级可靠性安全和部署增强">11. P8 生产级可靠性、安全和部署增强<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#11-p8-生产级可靠性安全和部署增强" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p><strong>目标</strong>：补齐生产运行需要的治理、可靠性、安全和部署能力。</p>
+<h3 id="任务-8">任务<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#任务-8" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> 实现熔断器。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现请求限流和 Token 限流。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现超时、重试、fallback 策略。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 实现 Provider 健康检查和健康看板。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 完善 TLS 配置和证书加载。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 增加供应链与安全检查，例如 <code>cargo deny</code>、secret 扫描、依赖审计。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 增加性能基准和 streaming 压测。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 编写部署文档、运维手册和容量评估指南。</li>
+</ul>
+<h3 id="验收标准-8">验收标准<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#验收标准-8" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h3>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled/> Provider 故障时可以自动 fallback。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 超限请求被稳定拒绝且有可观测记录。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 平滑关闭不会中断已接收的关键请求。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 性能基准能体现代理路径开销和 streaming 内存表现。</li>
+<li class="task-list-item"><input type="checkbox" disabled/> 部署文档可以指导用户完成自托管安装。</li>
+</ul>
+<p><strong>进度</strong>：0%。</p>
+<h2 id="12-每一步实现后的进度更新规范">12. 每一步实现后的进度更新规范<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#12-每一步实现后的进度更新规范" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>每完成一个任务，必须更新：</p>
+<ol>
+<li>对应 checklist。</li>
+<li>阶段 <code>进度</code> 百分比。</li>
+<li><code>进度总览</code> 表格中的状态和当前产出。</li>
+<li>相关 PRD、架构或开发文档链接。</li>
+<li>验收命令和结果，例如：</li>
+</ol>
+<figure data-rehype-pretty-code-figure><pre tabindex="0" data-language="bash" data-theme="github-light github-dark"><code data-language="bash" data-theme="github-light github-dark" style="display:grid;"><span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> fmt</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --check</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> clippy</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --all-targets</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --all-features</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> -D</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> warnings</span></span>
+<span data-line><span style="--shiki-light:#6F42C1;--shiki-dark:#B392F0;">cargo</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;"> test</span><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;"> --workspace</span></span></code></pre></figure>
+<p>状态枚举：<code>未开始</code>、<code>进行中</code>、<code>已阻塞</code>、<code>待验收</code>、<code>已完成</code>。</p>
+<h2 id="13-阶段完成定义">13. 阶段完成定义<a role="anchor" aria-hidden="true" tabindex="-1" data-no-popover="true" href="#13-阶段完成定义" class="internal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></a></h2>
+<p>一个阶段只有同时满足以下条件才可以标记为 <code>已完成</code>：</p>
+<ol>
+<li>阶段内所有 checklist 已完成或明确移入后续阶段。</li>
+<li>验收标准全部通过。</li>
+<li>相关测试已提交。</li>
+<li>文档已同步更新。</li>
+<li>当前阶段产出可以被下一阶段直接依赖。</li>
+<li>若发现 PRD 或架构假设不成立，必须先更新 PRD/ADR/架构文档再继续实现。</li>
+</ol></article><hr/><div class="page-footer"></div></div><div class="right sidebar"><div class="graph"><h3>Graph View</h3><div class="graph-outer"><div class="graph-container" data-cfg="{&quot;drag&quot;:true,&quot;zoom&quot;:true,&quot;depth&quot;:1,&quot;scale&quot;:1.1,&quot;repelForce&quot;:0.5,&quot;centerForce&quot;:0.3,&quot;linkDistance&quot;:30,&quot;fontSize&quot;:0.6,&quot;opacityScale&quot;:1,&quot;showTags&quot;:true,&quot;removeTags&quot;:[],&quot;focusOnHover&quot;:false,&quot;enableRadial&quot;:false}"></div><button class="global-graph-icon" aria-label="Global Graph"><svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 55 55" fill="currentColor" xml:space="preserve"><path d="M49,0c-3.309,0-6,2.691-6,6c0,1.035,0.263,2.009,0.726,2.86l-9.829,9.829C32.542,17.634,30.846,17,29,17
+                s-3.542,0.634-4.898,1.688l-7.669-7.669C16.785,10.424,17,9.74,17,9c0-2.206-1.794-4-4-4S9,6.794,9,9s1.794,4,4,4
+                c0.74,0,1.424-0.215,2.019-0.567l7.669,7.669C21.634,21.458,21,23.154,21,25s0.634,3.542,1.688,4.897L10.024,42.562
+                C8.958,41.595,7.549,41,6,41c-3.309,0-6,2.691-6,6s2.691,6,6,6s6-2.691,6-6c0-1.035-0.263-2.009-0.726-2.86l12.829-12.829
+                c1.106,0.86,2.44,1.436,3.898,1.619v10.16c-2.833,0.478-5,2.942-5,5.91c0,3.309,2.691,6,6,6s6-2.691,6-6c0-2.967-2.167-5.431-5-5.91
+                v-10.16c1.458-0.183,2.792-0.759,3.898-1.619l7.669,7.669C41.215,39.576,41,40.26,41,41c0,2.206,1.794,4,4,4s4-1.794,4-4
+                s-1.794-4-4-4c-0.74,0-1.424,0.215-2.019,0.567l-7.669-7.669C36.366,28.542,37,26.846,37,25s-0.634-3.542-1.688-4.897l9.665-9.665
+                C46.042,11.405,47.451,12,49,12c3.309,0,6-2.691,6-6S52.309,0,49,0z M11,9c0-1.103,0.897-2,2-2s2,0.897,2,2s-0.897,2-2,2
+                S11,10.103,11,9z M6,51c-2.206,0-4-1.794-4-4s1.794-4,4-4s4,1.794,4,4S8.206,51,6,51z M33,49c0,2.206-1.794,4-4,4s-4-1.794-4-4
+                s1.794-4,4-4S33,46.794,33,49z M29,31c-3.309,0-6-2.691-6-6s2.691-6,6-6s6,2.691,6,6S32.309,31,29,31z M47,41c0,1.103-0.897,2-2,2
+                s-2-0.897-2-2s0.897-2,2-2S47,39.897,47,41z M49,10c-2.206,0-4-1.794-4-4s1.794-4,4-4s4,1.794,4,4S51.206,10,49,10z"></path></svg></button></div><div class="global-graph-outer"><div class="global-graph-container" data-cfg="{&quot;drag&quot;:true,&quot;zoom&quot;:true,&quot;depth&quot;:-1,&quot;scale&quot;:0.9,&quot;repelForce&quot;:0.5,&quot;centerForce&quot;:0.2,&quot;linkDistance&quot;:30,&quot;fontSize&quot;:0.6,&quot;opacityScale&quot;:1,&quot;showTags&quot;:true,&quot;removeTags&quot;:[],&quot;focusOnHover&quot;:true,&quot;enableRadial&quot;:true}"></div></div></div><div class="toc desktop-only"><button type="button" class="toc-header" aria-controls="toc-6" aria-expanded="true"><h3>Table of Contents</h3><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fold"><polyline points="6 9 12 15 18 9"></polyline></svg></button><ul id="list-1" class="toc-content overflow"><li class="depth-0"><a href="#ferrogate-prd-执行计划任务" data-for="ferrogate-prd-执行计划任务">FerroGate PRD 执行计划任务</a></li><li class="depth-1"><a href="#0-执行原则" data-for="0-执行原则">0. 执行原则</a></li><li class="depth-1"><a href="#1-合理性审查结论" data-for="1-合理性审查结论">1. 合理性审查结论</a></li><li class="depth-1"><a href="#2-进度总览" data-for="2-进度总览">2. 进度总览</a></li><li class="depth-1"><a href="#3-p0-工程基线crate-边界与-caddyfile-配置契约" data-for="3-p0-工程基线crate-边界与-caddyfile-配置契约">3. P0 工程基线、crate 边界与 Caddyfile 配置契约</a></li><li class="depth-2"><a href="#任务" data-for="任务">任务</a></li><li class="depth-2"><a href="#验收标准" data-for="验收标准">验收标准</a></li><li class="depth-1"><a href="#4-p1-pingora-通用-api-gateway-runtime-垂直切片" data-for="4-p1-pingora-通用-api-gateway-runtime-垂直切片">4. P1 Pingora 通用 API Gateway Runtime 垂直切片</a></li><li class="depth-2"><a href="#任务-1" data-for="任务-1">任务</a></li><li class="depth-2"><a href="#验收标准-1" data-for="验收标准-1">验收标准</a></li><li class="depth-1"><a href="#5-p2-配置校验生命周期和平滑重载" data-for="5-p2-配置校验生命周期和平滑重载">5. P2 配置校验、生命周期和平滑重载</a></li><li class="depth-2"><a href="#任务-2" data-for="任务-2">任务</a></li><li class="depth-2"><a href="#验收标准-2" data-for="验收标准-2">验收标准</a></li><li class="depth-1"><a href="#6-p3-openai-compatible-ai-proxy-mvp" data-for="6-p3-openai-compatible-ai-proxy-mvp">6. P3 OpenAI-compatible AI Proxy MVP</a></li><li class="depth-2"><a href="#任务-3" data-for="任务-3">任务</a></li><li class="depth-2"><a href="#验收标准-3" data-for="验收标准-3">验收标准</a></li><li class="depth-1"><a href="#7-p4-虚拟-api-key租户上下文与-policy-mvp" data-for="7-p4-虚拟-api-key租户上下文与-policy-mvp">7. P4 虚拟 API Key、租户上下文与 Policy MVP</a></li><li class="depth-2"><a href="#任务-4" data-for="任务-4">任务</a></li><li class="depth-2"><a href="#验收标准-4" data-for="验收标准-4">验收标准</a></li><li class="depth-1"><a href="#8-p5-多-provider-adapter-与-model-registry" data-for="8-p5-多-provider-adapter-与-model-registry">8. P5 多 Provider Adapter 与 Model Registry</a></li><li class="depth-2"><a href="#任务-5" data-for="任务-5">任务</a></li><li class="depth-2"><a href="#验收标准-5" data-for="验收标准-5">验收标准</a></li><li class="depth-1"><a href="#9-p6-可观测性请求日志storage-与计费事件" data-for="9-p6-可观测性请求日志storage-与计费事件">9. P6 可观测性、请求日志、Storage 与计费事件</a></li><li class="depth-2"><a href="#任务-6" data-for="任务-6">任务</a></li><li class="depth-2"><a href="#验收标准-6" data-for="验收标准-6">验收标准</a></li><li class="depth-1"><a href="#10-p7-admin-api-与-dashboard-mvp" data-for="10-p7-admin-api-与-dashboard-mvp">10. P7 Admin API 与 Dashboard MVP</a></li><li class="depth-2"><a href="#任务-7" data-for="任务-7">任务</a></li><li class="depth-2"><a href="#验收标准-7" data-for="验收标准-7">验收标准</a></li><li class="depth-1"><a href="#11-p8-生产级可靠性安全和部署增强" data-for="11-p8-生产级可靠性安全和部署增强">11. P8 生产级可靠性、安全和部署增强</a></li><li class="depth-2"><a href="#任务-8" data-for="任务-8">任务</a></li><li class="depth-2"><a href="#验收标准-8" data-for="验收标准-8">验收标准</a></li><li class="depth-1"><a href="#12-每一步实现后的进度更新规范" data-for="12-每一步实现后的进度更新规范">12. 每一步实现后的进度更新规范</a></li><li class="depth-1"><a href="#13-阶段完成定义" data-for="13-阶段完成定义">13. 阶段完成定义</a></li><li class="overflow-end"></li></ul></div><div class="backlinks"><h3>Backlinks</h3><ul id="list-2" class="overflow"><li><a href="../01-product/product-requirements" class="internal">产品需求文档</a></li><li><a href="../" class="internal">FerroGate Wiki</a></li><li class="overflow-end"></li></ul></div></div><footer class><p>Created with <a href="https://quartz.jzhao.xyz/">Quartz v4.5.2</a> © 2026</p><ul><li><a href="https://github.com/jackyzha0/quartz">GitHub</a></li><li><a href="https://discord.gg/cRFFHYye7t">Discord Community</a></li></ul></footer></div></div></body><script type="application/javascript" data-persist="true">function n(){let t=this.parentElement;t.classList.toggle("is-collapsed");let e=t.getElementsByClassName("callout-content")[0];if(!e)return;let l=t.classList.contains("is-collapsed");e.style.gridTemplateRows=l?"0fr":"1fr"}function c(){let t=document.getElementsByClassName("callout is-collapsible");for(let e of t){let l=e.getElementsByClassName("callout-title")[0],s=e.getElementsByClassName("callout-content")[0];if(!l||!s)continue;l.addEventListener("click",n),window.addCleanup(()=>l.removeEventListener("click",n));let o=e.classList.contains("is-collapsed");s.style.gridTemplateRows=o?"0fr":"1fr"}}document.addEventListener("nav",c);
+</script><script type="module" data-persist="true">function E(a,e){if(!a)return;function t(o){o.target===this&&(o.preventDefault(),o.stopPropagation(),e())}function n(o){o.key.startsWith("Esc")&&(o.preventDefault(),e())}a?.addEventListener("click",t),window.addCleanup(()=>a?.removeEventListener("click",t)),document.addEventListener("keydown",n),window.addCleanup(()=>document.removeEventListener("keydown",n))}function f(a){for(;a.firstChild;)a.removeChild(a.firstChild)}var m=class{constructor(e,t){this.container=e;this.content=t;this.setupEventListeners(),this.setupNavigationControls(),this.resetTransform()}isDragging=!1;startPan={x:0,y:0};currentPan={x:0,y:0};scale=1;MIN_SCALE=.5;MAX_SCALE=3;cleanups=[];setupEventListeners(){let e=this.onMouseDown.bind(this),t=this.onMouseMove.bind(this),n=this.onMouseUp.bind(this),o=this.onTouchStart.bind(this),r=this.onTouchMove.bind(this),i=this.onTouchEnd.bind(this),s=this.resetTransform.bind(this);this.container.addEventListener("mousedown",e),document.addEventListener("mousemove",t),document.addEventListener("mouseup",n),this.container.addEventListener("touchstart",o,{passive:!1}),document.addEventListener("touchmove",r,{passive:!1}),document.addEventListener("touchend",i),window.addEventListener("resize",s),this.cleanups.push(()=>this.container.removeEventListener("mousedown",e),()=>document.removeEventListener("mousemove",t),()=>document.removeEventListener("mouseup",n),()=>this.container.removeEventListener("touchstart",o),()=>document.removeEventListener("touchmove",r),()=>document.removeEventListener("touchend",i),()=>window.removeEventListener("resize",s))}cleanup(){for(let e of this.cleanups)e()}setupNavigationControls(){let e=document.createElement("div");e.className="mermaid-controls";let t=this.createButton("+",()=>this.zoom(.1)),n=this.createButton("-",()=>this.zoom(-.1)),o=this.createButton("Reset",()=>this.resetTransform());e.appendChild(n),e.appendChild(o),e.appendChild(t),this.container.appendChild(e)}createButton(e,t){let n=document.createElement("button");return n.textContent=e,n.className="mermaid-control-button",n.addEventListener("click",t),window.addCleanup(()=>n.removeEventListener("click",t)),n}onMouseDown(e){e.button===0&&(this.isDragging=!0,this.startPan={x:e.clientX-this.currentPan.x,y:e.clientY-this.currentPan.y},this.container.style.cursor="grabbing")}onMouseMove(e){this.isDragging&&(e.preventDefault(),this.currentPan={x:e.clientX-this.startPan.x,y:e.clientY-this.startPan.y},this.updateTransform())}onMouseUp(){this.isDragging=!1,this.container.style.cursor="grab"}onTouchStart(e){if(e.touches.length!==1)return;this.isDragging=!0;let t=e.touches[0];this.startPan={x:t.clientX-this.currentPan.x,y:t.clientY-this.currentPan.y}}onTouchMove(e){if(!this.isDragging||e.touches.length!==1)return;e.preventDefault();let t=e.touches[0];this.currentPan={x:t.clientX-this.startPan.x,y:t.clientY-this.startPan.y},this.updateTransform()}onTouchEnd(){this.isDragging=!1}zoom(e){let t=Math.min(Math.max(this.scale+e,this.MIN_SCALE),this.MAX_SCALE),n=this.content.getBoundingClientRect(),o=n.width/2,r=n.height/2,i=t-this.scale;this.currentPan.x-=o*i,this.currentPan.y-=r*i,this.scale=t,this.updateTransform()}updateTransform(){this.content.style.transform=`translate(${this.currentPan.x}px, ${this.currentPan.y}px) scale(${this.scale})`}resetTransform(){let t=this.content.querySelector("svg").getBoundingClientRect(),n=t.width/this.scale,o=t.height/this.scale;this.scale=1,this.currentPan={x:(this.container.clientWidth-n)/2,y:(this.container.clientHeight-o)/2},this.updateTransform()}},T=["--secondary","--tertiary","--gray","--light","--lightgray","--highlight","--dark","--darkgray","--codeFont"],y;document.addEventListener("nav",async()=>{let e=document.querySelector(".center").querySelectorAll("code.mermaid");if(e.length===0)return;y||=await import("https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.esm.min.mjs");let t=y.default,n=new WeakMap;for(let r of e)n.set(r,r.innerText);async function o(){for(let s of e){s.removeAttribute("data-processed");let c=n.get(s);c&&(s.innerHTML=c)}let r=T.reduce((s,c)=>(s[c]=window.getComputedStyle(document.documentElement).getPropertyValue(c),s),{}),i=document.documentElement.getAttribute("saved-theme")==="dark";t.initialize({startOnLoad:!1,securityLevel:"loose",theme:i?"dark":"base",themeVariables:{fontFamily:r["--codeFont"],primaryColor:r["--light"],primaryTextColor:r["--darkgray"],primaryBorderColor:r["--tertiary"],lineColor:r["--darkgray"],secondaryColor:r["--secondary"],tertiaryColor:r["--tertiary"],clusterBkg:r["--light"],edgeLabelBackground:r["--highlight"]}}),await t.run({nodes:e})}await o(),document.addEventListener("themechange",o),window.addCleanup(()=>document.removeEventListener("themechange",o));for(let r=0;r<e.length;r++){let v=function(){let g=l.querySelector("#mermaid-space"),h=l.querySelector(".mermaid-content");if(!h)return;f(h);let w=i.querySelector("svg").cloneNode(!0);h.appendChild(w),l.classList.add("active"),g.style.cursor="grab",u=new m(g,h)},M=function(){l.classList.remove("active"),u?.cleanup(),u=null},i=e[r],s=i.parentElement,c=s.querySelector(".clipboard-button"),d=s.querySelector(".expand-button"),p=window.getComputedStyle(c),L=c.offsetWidth+parseFloat(p.marginLeft||"0")+parseFloat(p.marginRight||"0");d.style.right=`calc(${L}px + 0.3rem)`,s.prepend(d);let l=s.querySelector("#mermaid-container");if(!l)return;let u=null;d.addEventListener("click",v),E(l,M),window.addCleanup(()=>{u?.cleanup(),d.removeEventListener("click",v)})}});
+</script><script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/copy-tex.min.js" type="application/javascript" data-persist="true"></script><script src="../postscript.js" type="module" data-persist="true"></script></html>
