@@ -1,0 +1,19 @@
+{
+  "name": "ferrogate-wiki-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Obsidian wiki and Quartz static site monorepo for FerroGate.",
+  "workspaces": [
+    "wiki-site"
+  ],
+  "scripts": {
+    "wiki:build": "./scripts/build-wiki-site.sh build",
+    "wiki:serve": "./scripts/build-wiki-site.sh serve",
+    "wiki:clean": "./scripts/build-wiki-site.sh clean"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lianluo-esign/ferrogate-wiki.git"
+  },
+  "license": "Apache-2.0"
+}

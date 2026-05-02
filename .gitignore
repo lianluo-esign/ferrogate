@@ -5,3 +5,11 @@ Cargo.lock.bak
 .env
 .DS_Store
 .references/
+
+# Wiki build outputs
+ferrogate-wiki/wiki-site/node_modules/
+ferrogate-wiki/wiki-site/public/
+ferrogate-wiki/wiki-site/quartz/.quartz-cache/
+ferrogate-wiki/wiki-site/.quartz-cache/
+ferrogate-wiki/wiki-site/.cache/
+ferrogate-wiki/wiki-site/tsconfig.tsbuildinfo

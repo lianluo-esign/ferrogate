@@ -25,21 +25,20 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: ferrogate-wiki/wiki-site/.node-version
+          node-version-file: wiki-site/.node-version
           cache: npm
-          cache-dependency-path: ferrogate-wiki/wiki-site/package-lock.json
+          cache-dependency-path: wiki-site/package-lock.json
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
       - name: Build Quartz wiki
         run: npm run wiki:build
-        working-directory: ferrogate-wiki
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ferrogate-wiki/wiki-site/public
+          path: wiki-site/public
 
   deploy:
     environment:
