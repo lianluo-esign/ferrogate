@@ -140,7 +140,7 @@ Each provider adapter should own:
 - error mapping
 - usage extraction
 
-P3 当前的 OpenAI-compatible adapter MVP 已经把 endpoint mapping、auth header planning、model name translation 和 chat completion request body transformation 固化在 `ferrogate-providers` crate 中。Gateway 只调用 adapter 生成 provider request plan，再通过 gateway dispatch 边界执行非流式 HTTP upstream 调用。HTTPS dispatch、response transformation、streaming、error mapping 和 usage extraction 继续作为后续 P3 切片推进。
+P3 当前的 OpenAI-compatible adapter MVP 已经把 endpoint mapping、auth header planning、model name translation、stream flag preservation 和 chat completion request body transformation 固化在 `ferrogate-providers` crate 中。Gateway 只调用 adapter 生成 provider request plan，再通过 gateway dispatch 边界执行 HTTP upstream 调用，并已支持透传 provider 的 `text/event-stream` SSE response body。HTTPS dispatch、response transformation、真正增量式 streaming、error mapping 和 usage extraction 继续作为后续 P3 切片推进。
 
 ### 5. Policy and governance
 

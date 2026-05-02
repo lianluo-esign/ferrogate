@@ -139,18 +139,6 @@ impl FerroGateway {
             }
         };
 
-        if prepared.stream {
-            write_json_error(
-                session,
-                StatusCode::NOT_IMPLEMENTED,
-                "streaming_not_implemented",
-                "stream=true SSE forwarding is planned for the next P3 slice",
-                &ctx.request_id,
-            )
-            .await?;
-            return Ok(());
-        }
-
         match dispatch_provider_request(&prepared) {
             Ok(response) => {
                 write_raw_response(

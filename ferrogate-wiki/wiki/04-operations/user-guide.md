@@ -32,7 +32,7 @@ cargo run -- run --config ./config/ferrogate.example.toml
 
 ## OpenAI-compatible MVP status
 
-当前 P3 已支持 `GET /v1/models`，并且 `/v1/chat/completions` 已完成 API key 鉴权、租户上下文、模型 allowlist、logical model 到 provider model 的 request planning 和非流式 HTTP upstream dispatch。`stream=true` 的 SSE 转发、HTTPS provider dispatch、usage 提取和 Provider 错误归一化仍在后续 P3 切片中完成。
+当前 P3 已支持 `GET /v1/models`，并且 `/v1/chat/completions` 已完成 API key 鉴权、租户上下文、模型 allowlist、logical model 到 provider model 的 request planning、非流式 HTTP upstream dispatch 和 `stream=true` SSE response forwarding MVP。HTTPS provider dispatch、usage 提取、Provider 错误归一化和真正增量式 streaming 转发仍在后续 P3 切片中完成。
 
 ## Docker
 

@@ -36,7 +36,7 @@ FerroGate is in early development. The current MVP implements:
 - Cloudflare Pingora-based gateway runtime
 - `GET /healthz` health check
 - `GET /v1/models` OpenAI-compatible model list from config
-- `POST /v1/chat/completions` request validation, virtual API key auth, tenant context resolution, and model routing placeholder
+- `POST /v1/chat/completions` request validation, virtual API key auth, tenant context resolution, model routing, non-streaming provider dispatch, and `stream=true` SSE response forwarding MVP
 - `GET /admin/status` gateway status summary
 - Generic reverse proxy with configured upstreams/routes
 - Upstream endpoint pools with basic round-robin selection
@@ -48,7 +48,7 @@ FerroGate is in early development. The current MVP implements:
 - Caddy-style binary subcommands: `ferrogate run`, `ferrogate validate`, and planned `ferrogate reload`
 - `x-request-id` propagation/generation and structured gateway logs
 
-AI provider proxying, richer streaming error coverage, and production-grade Pingora failover are the next implementation milestones.
+HTTPS provider dispatch, richer streaming/error coverage, usage accounting, and production-grade Pingora failover are the next implementation milestones.
 
 ## Quick start
 

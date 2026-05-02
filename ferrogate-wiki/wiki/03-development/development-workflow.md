@@ -26,7 +26,7 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-P3 当前已经完成 OpenAI-compatible 非流式 HTTP dispatch。`/v1/chat/completions` 会完成鉴权、租户上下文、模型路由、provider request planning，并把非流式请求转发到 HTTP OpenAI-compatible upstream。`stream=true` 在 SSE 转发完成前仍返回 `501 streaming_not_implemented`。
+P3 当前已经完成 OpenAI-compatible 非流式 HTTP dispatch 和 `stream=true` SSE response forwarding MVP。`/v1/chat/completions` 会完成鉴权、租户上下文、模型路由、provider request planning，并把请求转发到 HTTP OpenAI-compatible upstream。当前 streaming 切片会透传 provider 的 `text/event-stream` 响应体；真正的上游到下游增量式边读边写、HTTPS provider dispatch、usage 提取和错误归一化继续作为后续 P3 切片推进。
 
 P3 变更必须至少运行：
 

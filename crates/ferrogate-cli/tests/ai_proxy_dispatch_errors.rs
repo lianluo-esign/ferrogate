@@ -75,7 +75,7 @@ fn chat_maps_unsupported_https_provider_dispatch_to_502() {
 }
 
 #[test]
-fn chat_keeps_streaming_as_explicit_501_until_sse_dispatch_exists() {
+fn chat_maps_streaming_provider_connect_failure_to_502() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
@@ -88,8 +88,9 @@ fn chat_keeps_streaming_as_explicit_501_until_sse_dispatch_exists() {
         &gateway_addr,
         r#"{"model":"fast-chat","stream":true,"messages":[]}"#,
     );
-    assert!(response.contains("501 Not Implemented"));
-    assert!(response.contains("streaming_not_implemented"));
+    assert!(response.contains("502 Bad Gateway"));
+    assert!(response.contains("provider_dispatch_error"));
+    assert!(!response.contains("chat-secret"));
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
