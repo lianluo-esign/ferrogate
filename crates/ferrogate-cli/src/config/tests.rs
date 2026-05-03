@@ -61,6 +61,7 @@ allowed_models = ["fast-chat"]
 organization_id = "org_demo"
 team_id = "team_platform"
 project_id = "project_gateway"
+log_bodies = true
 "#,
     )
     .unwrap();
@@ -79,6 +80,7 @@ project_id = "project_gateway"
     assert_eq!(config.models[0].visible_project_ids, ["project_gateway"]);
     assert_eq!(config.api_keys.len(), 1);
     assert_eq!(config.api_keys[0].id, "key_dev");
+    assert_eq!(config.api_keys[0].log_bodies, Some(true));
     assert_eq!(config.upstreams.len(), 1);
     assert_eq!(config.routes.len(), 1);
 }

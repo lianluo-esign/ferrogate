@@ -25,6 +25,7 @@ pub(crate) struct AuthContext {
     pub(crate) project_id: Option<String>,
     #[allow(dead_code)]
     pub(crate) user_id: Option<String>,
+    pub(crate) log_bodies: bool,
 }
 
 impl AuthContext {
@@ -48,6 +49,10 @@ impl AuthContext {
             user_id: self.user_id.clone(),
             api_key_id: self.api_key_id.clone(),
         }
+    }
+
+    pub(crate) fn can_record_bodies(&self, global_log_bodies: bool) -> bool {
+        global_log_bodies && self.log_bodies
     }
 }
 
@@ -76,6 +81,7 @@ pub(crate) fn authenticate(
             team_id: None,
             project_id: None,
             user_id: None,
+            log_bodies: false,
         });
     }
 
@@ -128,6 +134,7 @@ pub(crate) fn authenticate(
                 team_id: configured_key.team_id.clone(),
                 project_id: configured_key.project_id.clone(),
                 user_id: configured_key.user_id.clone(),
+                log_bodies: configured_key.log_bodies.unwrap_or(false),
             };
             if !auth.has_scope(required_scope) {
                 return Err(AuthError {
@@ -259,9 +266,11 @@ mod tests {
             team_id: None,
             project_id: None,
             user_id: None,
+            log_bodies: false,
         };
         assert!(auth.can_use_model("fast-chat"));
         assert!(!auth.can_use_model("expensive-model"));
+        assert!(!auth.can_record_bodies(true));
     }
 
     #[test]
@@ -277,9 +286,12 @@ mod tests {
             team_id: None,
             project_id: Some("project".into()),
             user_id: None,
+            log_bodies: true,
         };
         assert!(auth.can_use_provider("openai"));
         assert!(!auth.can_use_provider("anthropic"));
+        assert!(auth.can_record_bodies(true));
+        assert!(!auth.can_record_bodies(false));
     }
 
     #[test]
@@ -302,6 +314,7 @@ mod tests {
             monthly_token_budget: None,
             request_limit_per_minute: None,
             expires_at_unix: None,
+            log_bodies: None,
         };
 
         assert!(hash.starts_with("blake2b:"));

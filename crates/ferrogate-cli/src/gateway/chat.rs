@@ -417,6 +417,8 @@ impl FerroGateway {
                             );
                         }
                     }
+                    let record_bodies =
+                        auth.can_record_bodies(self.state.config.telemetry.log_bodies);
                     self.state.record_request_log(StoredRequestLog {
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
@@ -427,8 +429,15 @@ impl FerroGateway {
                         provider_model: Some(model_route.provider_model.clone()),
                         status_code: response.status.as_u16(),
                         error_code: None,
-                        prompt_recorded: false,
-                        response_recorded: false,
+                        prompt_recorded: record_bodies,
+                        response_recorded: record_bodies,
+                        prompt_body: record_bodies.then(|| body_json.to_string()),
+                        response_body: record_bodies.then(|| {
+                            String::from_utf8_lossy(&response.body)
+                                .chars()
+                                .take(16 * 1024)
+                                .collect()
+                        }),
                         started_at_unix: None,
                         completed_at_unix: None,
                     });

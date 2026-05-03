@@ -77,6 +77,8 @@ pub struct StoredRequestLog {
     pub error_code: Option<String>,
     pub prompt_recorded: bool,
     pub response_recorded: bool,
+    pub prompt_body: Option<String>,
+    pub response_body: Option<String>,
     pub started_at_unix: Option<u64>,
     pub completed_at_unix: Option<u64>,
 }
@@ -228,6 +230,8 @@ mod tests {
             error_code: None,
             prompt_recorded: false,
             response_recorded: false,
+            prompt_body: None,
+            response_body: None,
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
         });
@@ -243,6 +247,8 @@ mod tests {
             error_code: Some("rate_limit_exceeded".into()),
             prompt_recorded: false,
             response_recorded: false,
+            prompt_body: None,
+            response_body: None,
             started_at_unix: Some(3),
             completed_at_unix: Some(4),
         });

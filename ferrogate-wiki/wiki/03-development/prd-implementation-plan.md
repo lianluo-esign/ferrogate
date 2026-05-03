@@ -49,7 +49,7 @@ tags:
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
 | P4 | 虚拟 API Key、租户上下文与 Policy MVP | 已完成 | 100% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界 |
 | P5 | 多 Provider Adapter 与 Model Registry | 已完成 | 100% | 已实现 OpenAI-compatible、Anthropic、Gemini、Grok、Azure OpenAI adapter 的 registry 分发、请求转换、错误归一化、usage 提取和可重试判断；已定义并接入 Model Registry 的逻辑模型解析、优先级 fallback、加权 fallback 轮转和租户级模型可见性 |
-| P6 | 可观测性、请求日志、Storage 与计费事件 | 进行中 | 65% | 已定义 Token usage、模型价格、成本估算、Billing Event、请求日志、usage aggregate、in-memory repository/sink 和观测 span 模板边界；非流式 AI Proxy 成功响应已写入 in-memory Billing Event 与结构化 request log；OpenTelemetry exporter、错误路径 request log 和 body 记录策略待后续切片 |
+| P6 | 可观测性、请求日志、Storage 与计费事件 | 进行中 | 75% | 已定义 Token usage、模型价格、成本估算、Billing Event、请求日志、usage aggregate、in-memory repository/sink 和观测 span 模板边界；非流式 AI Proxy 成功响应已写入 in-memory Billing Event 与结构化 request log；已支持全局+API Key 双开关控制 prompt/response body 记录；OpenTelemetry exporter 和错误路径 request log 待后续切片 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
 | P8 | 生产级可靠性、安全和部署增强 | 未开始 | 0% | 待实现限流、熔断、fallback、部署文档 |
 
@@ -373,7 +373,7 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targ
 - [x] 实现 Token usage 提取和估算接口。
 - [x] 实现模型价格表和成本计算。
 - [x] 实现 Billing Event 模型和异步写入接口。（当前为非阻塞边界和 in-memory sink，并已接入非流式 AI Proxy usage 成功路径；真正异步队列待后续切片。）
-- [ ] 支持按租户策略控制 prompt/response body 记录。
+- [x] 支持按租户策略控制 prompt/response body 记录。
 - [x] 提供 in-memory/file storage，预留 SQLite/Postgres 实现边界。（当前已提供 in-memory repository/sink；file/SQLite/Postgres 待后续实现。）
 
 ### 验收标准
@@ -384,7 +384,7 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targ
 - [ ] 敏感字段默认脱敏。
 - [ ] Billing Event 写入失败不会明显阻塞响应路径。
 
-**进度**：65%。
+**进度**：75%。
 
 **验收结果**：
 
@@ -404,6 +404,8 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_pr
 2026-05-03 本轮补齐观测 span 模板边界：`ferrogate-observability` 定义 `ObservabilityConfig`、`GatewaySpanKind`、`GatewaySpanTemplate` 和默认 span 层级，覆盖 `ferrogate.gateway.request`、`ferrogate.auth`、`ferrogate.policy.evaluate`、`ferrogate.model.route`、`ferrogate.provider.dispatch`、`ferrogate.billing.write`，并固化 request_id、trace_id、tenant、provider、model、retryable、usage/cost 等 PRD 核心字段。
 
 2026-05-03 本轮接入 request log 成功路径：`ferrogate-cli` 依赖 `ferrogate-storage`，`AppState` 维护 in-memory request log repository；非流式 AI Proxy provider 成功响应会记录 request_id、trace_id、tenant、route、provider、logical model、provider model、status code，`prompt_recorded`/`response_recorded` 默认均为 `false`，避免默认落 body 或 secret。
+
+2026-05-03 本轮补齐 body 记录策略：`telemetry.log_bodies` 作为全局总开关，`api_keys[].log_bodies` 作为 API Key/租户级授权开关；只有二者同时开启时，非流式成功路径 request log 才会保存 prompt/response body，并将 `prompt_recorded`、`response_recorded` 置为 `true`。默认配置继续不记录 body，测试覆盖默认脱敏、API Key 授权和全局开关组合。
 
 ## 10. P7 Admin API 与 Dashboard MVP
 

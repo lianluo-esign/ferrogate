@@ -589,6 +589,8 @@ mod tests {
             error_code: None,
             prompt_recorded: false,
             response_recorded: false,
+            prompt_body: None,
+            response_body: None,
             started_at_unix: None,
             completed_at_unix: None,
         });
@@ -598,5 +600,7 @@ mod tests {
         assert_eq!(logs[0].request_id, "fg-test");
         assert!(!logs[0].prompt_recorded);
         assert!(!logs[0].response_recorded);
+        assert!(logs[0].prompt_body.is_none());
+        assert!(logs[0].response_body.is_none());
     }
 }

@@ -114,6 +114,8 @@ pub(crate) struct ApiKey {
     pub(crate) request_limit_per_minute: Option<u64>,
     #[serde(default)]
     pub(crate) expires_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) log_bodies: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

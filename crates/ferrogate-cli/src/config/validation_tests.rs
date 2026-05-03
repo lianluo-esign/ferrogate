@@ -310,5 +310,6 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         monthly_token_budget: None,
         request_limit_per_minute: None,
         expires_at_unix: None,
+        log_bodies: None,
     }
 }
