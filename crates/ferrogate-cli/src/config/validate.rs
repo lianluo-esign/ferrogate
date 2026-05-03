@@ -96,8 +96,16 @@ impl Config {
             if key.key.as_deref().is_some_and(str::is_empty) {
                 bail!("field api_keys[{index}].key: cannot be empty");
             }
-            if key.key_env.is_none() && key.key.is_none() {
-                bail!("field api_keys[{index}].key_env: key_env or key is required");
+            if key.key_hash.as_deref().is_some_and(str::is_empty) {
+                bail!("field api_keys[{index}].key_hash: cannot be empty");
+            }
+            if let Some(key_hash) = &key.key_hash {
+                if !key_hash.starts_with("blake2b:") {
+                    bail!("field api_keys[{index}].key_hash: unsupported key hash format");
+                }
+            }
+            if key.key_env.is_none() && key.key.is_none() && key.key_hash.is_none() {
+                bail!("field api_keys[{index}].key_env: key_env, key, or key_hash is required");
             }
             for allowed_model in &key.allowed_models {
                 if !model_names.contains(allowed_model.as_str()) {

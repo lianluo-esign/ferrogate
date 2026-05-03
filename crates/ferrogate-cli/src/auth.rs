@@ -1,3 +1,4 @@
+use blake2::{Blake2b512, Digest};
 use http::{header, HeaderMap, StatusCode};
 use std::{
     collections::HashSet,
@@ -85,49 +86,47 @@ pub(crate) fn authenticate(
     };
 
     for configured_key in &state.config.api_keys {
-        if let Some(secret) = configured_key.secret_value() {
-            if constant_time_eq(provided_key.as_bytes(), secret.as_bytes()) {
-                if !configured_key.enabled {
-                    return Err(AuthError {
-                        status: StatusCode::FORBIDDEN,
-                        code: "api_key_disabled",
-                        message: "API key is disabled".into(),
-                    });
-                }
-                if configured_key.is_expired(now_unix_seconds()) {
-                    return Err(AuthError {
-                        status: StatusCode::FORBIDDEN,
-                        code: "api_key_expired",
-                        message: "API key is expired".into(),
-                    });
-                }
-                if configured_key.monthly_token_budget == Some(0) {
-                    return Err(AuthError {
-                        status: StatusCode::TOO_MANY_REQUESTS,
-                        code: "token_budget_exceeded",
-                        message: "API key token budget is exhausted".into(),
-                    });
-                }
-                let auth = AuthContext {
-                    api_key_id: Some(configured_key.id.clone()),
-                    scopes: configured_key.scopes.iter().cloned().collect(),
-                    allowed_models: configured_key.allowed_models.iter().cloned().collect(),
-                    allowed_providers: configured_key.allowed_providers.iter().cloned().collect(),
-                    monthly_token_budget: configured_key.monthly_token_budget,
-                    organization_id: configured_key.organization_id.clone(),
-                    team_id: configured_key.team_id.clone(),
-                    project_id: configured_key.project_id.clone(),
-                    user_id: configured_key.user_id.clone(),
-                };
-                if !auth.has_scope(required_scope) {
-                    return Err(AuthError {
-                        status: StatusCode::FORBIDDEN,
-                        code: "scope_denied",
-                        message: format!("API key does not have required scope {required_scope}"),
-                    });
-                }
-                return Ok(auth);
+        if configured_key.matches_presented_key(&provided_key) {
+            if !configured_key.enabled {
+                return Err(AuthError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "api_key_disabled",
+                    message: "API key is disabled".into(),
+                });
             }
+            if configured_key.is_expired(now_unix_seconds()) {
+                return Err(AuthError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "api_key_expired",
+                    message: "API key is expired".into(),
+                });
+            }
+            if configured_key.monthly_token_budget == Some(0) {
+                return Err(AuthError {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    code: "token_budget_exceeded",
+                    message: "API key token budget is exhausted".into(),
+                });
+            }
+            let auth = AuthContext {
+                api_key_id: Some(configured_key.id.clone()),
+                scopes: configured_key.scopes.iter().cloned().collect(),
+                allowed_models: configured_key.allowed_models.iter().cloned().collect(),
+                allowed_providers: configured_key.allowed_providers.iter().cloned().collect(),
+                monthly_token_budget: configured_key.monthly_token_budget,
+                organization_id: configured_key.organization_id.clone(),
+                team_id: configured_key.team_id.clone(),
+                project_id: configured_key.project_id.clone(),
+                user_id: configured_key.user_id.clone(),
+            };
+            if !auth.has_scope(required_scope) {
+                return Err(AuthError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "scope_denied",
+                    message: format!("API key does not have required scope {required_scope}"),
+                });
+            }
+            return Ok(auth);
         }
     }
 
@@ -139,6 +138,17 @@ pub(crate) fn authenticate(
 }
 
 impl ApiKey {
+    fn matches_presented_key(&self, presented_key: &str) -> bool {
+        if let Some(secret) = self.secret_value() {
+            if constant_time_eq(presented_key.as_bytes(), secret.as_bytes()) {
+                return true;
+            }
+        }
+        self.key_hash
+            .as_deref()
+            .is_some_and(|hash| verify_api_key_secret(presented_key, hash))
+    }
+
     fn secret_value(&self) -> Option<String> {
         if let Some(env_name) = &self.key_env {
             if let Ok(value) = std::env::var(env_name) {
@@ -152,6 +162,28 @@ impl ApiKey {
         self.expires_at_unix
             .is_some_and(|expires_at| expires_at <= now_unix_seconds)
     }
+}
+
+pub(crate) fn hash_api_key_secret(secret: &str) -> String {
+    let digest = Blake2b512::digest(secret.as_bytes());
+    format!("blake2b:{}", encode_hex(&digest))
+}
+
+fn verify_api_key_secret(secret: &str, expected_hash: &str) -> bool {
+    constant_time_eq(
+        hash_api_key_secret(secret).as_bytes(),
+        expected_hash.as_bytes(),
+    )
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn now_unix_seconds() -> u64 {
@@ -236,5 +268,31 @@ mod tests {
         };
         assert!(auth.can_use_provider("openai"));
         assert!(!auth.can_use_provider("anthropic"));
+    }
+
+    #[test]
+    fn verifies_hashed_api_key_secret() {
+        let hash = hash_api_key_secret("client-secret");
+        let key = ApiKey {
+            id: "key".into(),
+            name: "Key".into(),
+            key_env: None,
+            key: None,
+            key_hash: Some(hash.clone()),
+            enabled: true,
+            scopes: vec![],
+            allowed_models: vec![],
+            allowed_providers: vec![],
+            organization_id: None,
+            team_id: None,
+            project_id: None,
+            user_id: None,
+            monthly_token_budget: None,
+            expires_at_unix: None,
+        };
+
+        assert!(hash.starts_with("blake2b:"));
+        assert!(key.matches_presented_key("client-secret"));
+        assert!(!key.matches_presented_key("wrong-secret"));
     }
 }

@@ -232,3 +232,17 @@ key_env = "FERROGATE_TEST_SECRET"
     assert!(!String::from_utf8_lossy(&output.stdout).contains("super-secret-env"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("super-secret-env"));
 }
+
+#[test]
+fn hash_key_generates_config_hash_without_echoing_extra_text() {
+    let output = ferrogate()
+        .args(["hash-key", "--secret", "client-secret"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("blake2b:"));
+    assert!(!stdout.contains("client-secret"));
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+}

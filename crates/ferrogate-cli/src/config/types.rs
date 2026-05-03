@@ -71,6 +71,9 @@ pub(crate) struct ApiKey {
     /// Plain value for local development only. Do not use in production.
     #[serde(default)]
     pub(crate) key: Option<String>,
+    /// Hashed key value for durable config. Use `ferrogate hash-key --secret ...` to generate.
+    #[serde(default)]
+    pub(crate) key_hash: Option<String>,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
     #[serde(default)]

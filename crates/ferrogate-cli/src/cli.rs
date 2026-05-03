@@ -24,6 +24,12 @@ pub(crate) struct ConfigArgs {
     pub(crate) config: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct HashKeyArgs {
+    #[arg(long, env = "FERROGATE_KEY_SECRET")]
+    pub(crate) secret: String,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
     /// Run the FerroGate Pingora gateway server.
@@ -33,4 +39,6 @@ pub(crate) enum Commands {
     Validate(ConfigArgs),
     /// Reload a running gateway process. Planned for P2.
     Reload(ConfigArgs),
+    /// Hash a virtual API key secret for durable configuration.
+    HashKey(HashKeyArgs),
 }

@@ -36,6 +36,10 @@ fn main() -> AnyResult<()> {
             println!("{}", format_reload_report(&config));
             Ok(())
         }
+        Commands::HashKey(args) => {
+            println!("{}", auth::hash_api_key_secret(&args.secret));
+            Ok(())
+        }
     }
 }
 

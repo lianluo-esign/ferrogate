@@ -129,6 +129,21 @@ fn rejects_api_key_with_unknown_allowed_provider() {
 }
 
 #[test]
+fn rejects_api_key_with_unsupported_hash_format() {
+    let mut key = api_key("key_dev", "Development key");
+    key.key = None;
+    key.key_hash = Some("sha256:not-supported".into());
+    let config = Config {
+        api_keys: vec![key],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field api_keys[0].key_hash"));
+    assert!(error.contains("unsupported key hash format"));
+}
+
+#[test]
 fn rejects_policy_with_unknown_references() {
     let config = Config {
         providers: vec![provider()],
@@ -237,6 +252,7 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         name: name.into(),
         key_env: None,
         key: Some(format!("secret-{name}")),
+        key_hash: None,
         enabled: true,
         scopes: vec![],
         allowed_models: vec![],
