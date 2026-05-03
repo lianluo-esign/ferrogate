@@ -713,6 +713,7 @@ dependencies = [
  "ferrogate-policy",
  "ferrogate-providers",
  "ferrogate-runtime",
+ "ferrogate-storage",
  "http",
  "pingora",
  "rustls",

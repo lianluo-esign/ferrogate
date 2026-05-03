@@ -27,6 +27,7 @@ ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-policy = { path = "../ferrogate-policy" }
 ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
+ferrogate-storage = { path = "../ferrogate-storage" }
 http.workspace = true
 pingora.workspace = true
 rustls.workspace = true

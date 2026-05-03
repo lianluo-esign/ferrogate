@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -20,6 +20,7 @@ use ferrogate_providers::{
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute,
 };
+use ferrogate_storage::{AppendRepository, InMemoryAppendRepository, StoredRequestLog};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
@@ -31,6 +32,7 @@ pub(crate) struct AppState {
     model_registry: Arc<ModelRegistry>,
     provider_adapters: Arc<ProviderAdapterRegistry>,
     billing_events: Arc<InMemoryBillingEventSink>,
+    request_logs: Arc<Mutex<InMemoryAppendRepository<StoredRequestLog>>>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
@@ -80,6 +82,7 @@ impl AppState {
             model_registry: Arc::new(model_registry),
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
             billing_events: Arc::new(InMemoryBillingEventSink::default()),
+            request_logs: Arc::new(Mutex::new(InMemoryAppendRepository::new())),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
@@ -235,6 +238,20 @@ impl AppState {
     #[cfg(test)]
     fn billing_events(&self) -> Vec<BillingEvent> {
         self.billing_events.list()
+    }
+
+    pub(crate) fn record_request_log(&self, log: StoredRequestLog) {
+        if let Ok(mut logs) = self.request_logs.lock() {
+            logs.append(log);
+        }
+    }
+
+    #[cfg(test)]
+    fn request_logs(&self) -> Vec<StoredRequestLog> {
+        self.request_logs
+            .lock()
+            .map(|logs| logs.list())
+            .unwrap_or_default()
     }
 
     pub(crate) fn select_upstream_url(&self, upstream: &Upstream) -> Option<String> {
@@ -555,5 +572,31 @@ mod tests {
         assert_eq!(events[0].tenant.organization_id.as_deref(), Some("org"));
         assert_eq!(events[0].usage.total_tokens, 8);
         assert_eq!(events[0].cost.as_ref().unwrap().currency, "USD");
+    }
+
+    #[test]
+    fn records_structured_request_logs_without_body_flags_by_default() {
+        let state = AppState::new(Config::default());
+        state.record_request_log(StoredRequestLog {
+            request_id: "fg-test".into(),
+            trace_id: Some("trace-test".into()),
+            tenant: ferrogate_core::TenantContext::default(),
+            route: Some("openai.chat.completions".into()),
+            provider: Some("openai".into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: false,
+            response_recorded: false,
+            started_at_unix: None,
+            completed_at_unix: None,
+        });
+
+        let logs = state.request_logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_id, "fg-test");
+        assert!(!logs[0].prompt_recorded);
+        assert!(!logs[0].response_recorded);
     }
 }

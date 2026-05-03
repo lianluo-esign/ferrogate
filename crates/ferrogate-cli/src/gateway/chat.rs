@@ -13,6 +13,7 @@ use crate::{
 use ferrogate_core::RequestContext;
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::ModelRegistryError;
+use ferrogate_storage::StoredRequestLog;
 
 use super::{
     body::read_request_body,
@@ -416,6 +417,21 @@ impl FerroGateway {
                             );
                         }
                     }
+                    self.state.record_request_log(StoredRequestLog {
+                        request_id: ctx.request_id.clone(),
+                        trace_id: ctx.trace_id.clone(),
+                        tenant: policy_request.tenant.clone(),
+                        route: policy_request.route.clone(),
+                        provider: Some(provider.name.clone()),
+                        logical_model: Some(request.model.clone()),
+                        provider_model: Some(model_route.provider_model.clone()),
+                        status_code: response.status.as_u16(),
+                        error_code: None,
+                        prompt_recorded: false,
+                        response_recorded: false,
+                        started_at_unix: None,
+                        completed_at_unix: None,
+                    });
 
                     return write_raw_response(
                         session,
