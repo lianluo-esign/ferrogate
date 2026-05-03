@@ -59,6 +59,14 @@ impl ProviderAdapterRegistry {
     ) -> Result<Option<ProviderUsage>, AdapterError> {
         Ok(self.adapter_for(provider_kind)?.extract_usage(body))
     }
+
+    pub fn is_retryable_status(
+        &self,
+        provider_kind: &str,
+        status: u16,
+    ) -> Result<bool, AdapterError> {
+        Ok(self.adapter_for(provider_kind)?.is_retryable_status(status))
+    }
 }
 
 fn normalize_kind(kind: &str) -> String {
@@ -260,6 +268,15 @@ mod tests {
         assert_eq!(usage.prompt_tokens, Some(3));
         assert_eq!(usage.completion_tokens, Some(5));
         assert_eq!(usage.total_tokens, Some(8));
+    }
+
+    #[test]
+    fn classifies_retryable_provider_status_through_registry() {
+        let registry = ProviderAdapterRegistry::default();
+
+        assert!(registry.is_retryable_status("openai", 429).unwrap());
+        assert!(registry.is_retryable_status("gemini", 503).unwrap());
+        assert!(!registry.is_retryable_status("anthropic", 400).unwrap());
     }
 
     #[test]

@@ -401,6 +401,88 @@ allowed_models = ["fast-chat"]
     assert!(!provider_requests[0].contains("client-secret"));
 }
 
+#[test]
+fn chat_dispatch_falls_back_after_primary_provider_5xx() {
+    let gateway_addr = free_addr();
+    let (primary_addr, primary_handle) = spawn_provider_response(
+        "HTTP/1.1 503 Service Unavailable",
+        r#"{"error":{"message":"temporarily unavailable","type":"server_error","code":"unavailable"}}"#,
+    );
+    let (fallback_addr, fallback_handle) = spawn_provider_response(
+        "HTTP/1.1 200 OK",
+        r#"{"id":"chatcmpl_fallback","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "primary"
+kind = "openai"
+base_url = "http://{primary_addr}/v1"
+
+[[providers]]
+name = "backup"
+kind = "openai"
+base_url = "http://{fallback_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "primary"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[models.fallbacks]]
+provider = "backup"
+provider_model = "gpt-4.1-mini"
+priority = 10
+weight = 1
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(chat.contains("200 OK"));
+    assert!(chat.contains("\"id\":\"chatcmpl_fallback\""));
+    assert!(!chat.contains("temporarily unavailable"));
+    assert!(!chat.contains("client-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let primary_request = primary_handle.join().unwrap();
+    let fallback_request = fallback_handle.join().unwrap();
+    assert!(primary_request.contains("POST /v1/chat/completions HTTP/1.1"));
+    assert!(primary_request.contains(r#""model":"gpt-4o-mini""#));
+    assert!(fallback_request.contains("POST /v1/chat/completions HTTP/1.1"));
+    assert!(fallback_request.contains(r#""model":"gpt-4.1-mini""#));
+    assert!(!fallback_request.contains("fast-chat"));
+    assert!(!fallback_request.contains("client-secret"));
+}
+
 fn spawn_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -437,6 +519,27 @@ fn spawn_slow_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
         stream.flush().unwrap();
         thread::sleep(Duration::from_millis(1200));
         stream.write_all(b"data: [DONE]\n\n").unwrap();
+        request
+    });
+    (addr, handle)
+}
+
+fn spawn_provider_response(
+    status_line: &'static str,
+    body: &'static str,
+) -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        write!(
+            stream,
+            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
         request
     });
     (addr, handle)

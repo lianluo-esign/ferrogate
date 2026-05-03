@@ -30,6 +30,12 @@ name = "blocked-chat"
 provider = "openai"
 provider_model = "gpt-4.1"
 
+[[models]]
+name = "tenant-chat"
+provider = "openai"
+provider_model = "gpt-4o"
+visible_organization_ids = ["org_demo"]
+
 [[api_keys]]
 id = "models_only"
 name = "Models only"
@@ -83,6 +89,13 @@ key = "provider-limited-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 allowed_providers = ["other-provider"]
+
+[[api_keys]]
+id = "tenant_denied"
+name = "Tenant denied"
+key = "tenant-denied-secret"
+scopes = ["chat.completions"]
+allowed_models = ["tenant-chat"]
 
 [[api_keys]]
 id = "policy_key"
@@ -149,6 +162,11 @@ fn ai_proxy_rejects_missing_invalid_scope_and_model_auth() {
     let denied_model = chat(&gateway_addr, Some("chat-secret"), "blocked-chat");
     assert!(denied_model.contains("403 Forbidden"));
     assert!(denied_model.contains("model_not_allowed"));
+
+    let denied_tenant = chat(&gateway_addr, Some("tenant-denied-secret"), "tenant-chat");
+    assert!(denied_tenant.contains("403 Forbidden"));
+    assert!(denied_tenant.contains("model_not_visible"));
+    assert!(!denied_tenant.contains("tenant-denied-secret"));
 
     let disabled = chat(&gateway_addr, Some("disabled-secret"), "fast-chat");
     assert!(disabled.contains("403 Forbidden"));

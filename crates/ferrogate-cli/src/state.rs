@@ -13,8 +13,8 @@ use ferrogate_policy::{
 };
 use ferrogate_providers::{
     AdapterError, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry, ModelRegistryError,
-    ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse, ProviderHttpRequest,
-    ProviderUsage, ResolvedModelRoute,
+    ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
+    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute,
 };
 
 #[derive(Debug, Clone)]
@@ -22,10 +22,12 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     pub(crate) providers: Arc<HashMap<String, Provider>>,
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
+    model_visibility: Arc<HashMap<String, ModelVisibility>>,
     model_registry: Arc<ModelRegistry>,
     provider_adapters: Arc<ProviderAdapterRegistry>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
+    model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
 }
 
@@ -43,6 +45,11 @@ impl AppState {
             .cloned()
             .map(|upstream| (upstream.name.clone(), upstream))
             .collect();
+        let model_visibility = config
+            .models
+            .iter()
+            .map(|model| (model.name.clone(), ModelVisibility::from(model)))
+            .collect();
         let upstream_counters = config
             .upstreams
             .iter()
@@ -57,10 +64,12 @@ impl AppState {
             config: Arc::new(config),
             providers: Arc::new(providers),
             upstreams: Arc::new(upstreams),
+            model_visibility: Arc::new(model_visibility),
             model_registry: Arc::new(model_registry),
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
+            model_route_counter: Arc::new(AtomicU64::new(0)),
             request_ids: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -77,7 +86,7 @@ impl AppState {
     pub(crate) fn prepare_chat_completions(
         &self,
         provider: &Provider,
-        model: &ResolvedModelRoute,
+        model_route: &ModelRoute,
         logical_model: String,
         stream: bool,
         body: serde_json::Value,
@@ -91,7 +100,7 @@ impl AppState {
             },
             ChatCompletionPlan {
                 logical_model,
-                provider_model: model.primary.provider_model.clone(),
+                provider_model: model_route.provider_model.clone(),
                 stream,
                 body,
             },
@@ -103,6 +112,35 @@ impl AppState {
         logical_model: &str,
     ) -> Result<ResolvedModelRoute, ModelRegistryError> {
         self.model_registry.resolve(logical_model)
+    }
+
+    pub(crate) fn candidate_model_routes(&self, model: &ResolvedModelRoute) -> Vec<ModelRoute> {
+        let mut routes = vec![model.primary.clone()];
+        let mut cursor = self.model_route_counter.fetch_add(1, Ordering::Relaxed);
+        let mut fallbacks = model.fallbacks.as_slice();
+
+        while let Some((priority, group_end)) = fallback_priority_group(fallbacks) {
+            let group = &fallbacks[..group_end];
+            let start = weighted_start_index(group, cursor);
+            routes.extend(group[start..].iter().cloned());
+            routes.extend(group[..start].iter().cloned());
+            cursor /= total_weight(group);
+            fallbacks = &fallbacks[group_end..];
+            debug_assert!(group.iter().all(|route| route.priority == priority));
+        }
+
+        routes
+    }
+
+    pub(crate) fn can_tenant_use_model(
+        &self,
+        logical_model: &str,
+        organization_id: Option<&str>,
+        project_id: Option<&str>,
+    ) -> bool {
+        self.model_visibility
+            .get(logical_model)
+            .is_none_or(|visibility| visibility.allows(organization_id, project_id))
     }
 
     pub(crate) fn normalize_provider_error(
@@ -130,6 +168,15 @@ impl AppState {
         self.provider_adapters.extract_usage(provider_kind, body)
     }
 
+    pub(crate) fn is_provider_status_retryable(
+        &self,
+        provider_kind: &str,
+        status: u16,
+    ) -> Result<bool, AdapterError> {
+        self.provider_adapters
+            .is_retryable_status(provider_kind, status)
+    }
+
     pub(crate) fn evaluate_policy(
         &self,
         request: &RequestContext,
@@ -155,6 +202,63 @@ impl AppState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct ModelVisibility {
+    organization_ids: Vec<String>,
+    project_ids: Vec<String>,
+}
+
+impl ModelVisibility {
+    fn allows(&self, organization_id: Option<&str>, project_id: Option<&str>) -> bool {
+        allows_optional_scope(&self.organization_ids, organization_id)
+            && allows_optional_scope(&self.project_ids, project_id)
+    }
+}
+
+impl From<&Model> for ModelVisibility {
+    fn from(model: &Model) -> Self {
+        Self {
+            organization_ids: model.visible_organization_ids.clone(),
+            project_ids: model.visible_project_ids.clone(),
+        }
+    }
+}
+
+fn allows_optional_scope(allowed_values: &[String], actual: Option<&str>) -> bool {
+    allowed_values.is_empty()
+        || actual.is_some_and(|actual| allowed_values.iter().any(|allowed| allowed == actual))
+}
+
+fn fallback_priority_group(routes: &[ModelRoute]) -> Option<(u32, usize)> {
+    let priority = routes.first()?.priority;
+    let end = routes
+        .iter()
+        .position(|route| route.priority != priority)
+        .unwrap_or(routes.len());
+    Some((priority, end))
+}
+
+fn weighted_start_index(routes: &[ModelRoute], cursor: u64) -> usize {
+    let total = total_weight(routes);
+    let mut remaining = cursor % total;
+    for (index, route) in routes.iter().enumerate() {
+        let weight = u64::from(route.weight.max(1));
+        if remaining < weight {
+            return index;
+        }
+        remaining -= weight;
+    }
+    0
+}
+
+fn total_weight(routes: &[ModelRoute]) -> u64 {
+    routes
+        .iter()
+        .map(|route| u64::from(route.weight.max(1)))
+        .sum::<u64>()
+        .max(1)
+}
+
 fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
     let mut entry = ModelRegistryEntry::new(
         model.name.clone(),
@@ -166,6 +270,19 @@ fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
     entry.input_price_per_1m = model.input_price_per_1m;
     entry.output_price_per_1m = model.output_price_per_1m;
     entry.enabled = model.enabled;
+    entry.fallbacks = model
+        .fallbacks
+        .iter()
+        .filter(|fallback| fallback.enabled)
+        .map(|fallback| {
+            ModelRoute::with_routing(
+                fallback.provider.clone(),
+                fallback.provider_model.clone(),
+                fallback.priority.unwrap_or(100),
+                fallback.weight.unwrap_or(1),
+            )
+        })
+        .collect();
     entry
 }
 
@@ -234,5 +351,86 @@ mod tests {
             state.select_upstream_url(&upstream).as_deref(),
             Some("http://127.0.0.1:10001")
         );
+    }
+
+    #[test]
+    fn orders_model_fallbacks_with_weighted_rotation_within_priority() {
+        let config = Config {
+            providers: vec![
+                Provider {
+                    name: "primary".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10001/v1".into(),
+                    api_key_env: None,
+                    enabled: true,
+                },
+                Provider {
+                    name: "backup-a".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10002/v1".into(),
+                    api_key_env: None,
+                    enabled: true,
+                },
+                Provider {
+                    name: "backup-b".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10003/v1".into(),
+                    api_key_env: None,
+                    enabled: true,
+                },
+            ],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "primary".into(),
+                provider_model: "gpt-4o-mini".into(),
+                fallbacks: vec![
+                    crate::config::ModelFallback {
+                        provider: "backup-a".into(),
+                        provider_model: "gpt-4.1-mini".into(),
+                        priority: Some(10),
+                        weight: Some(1),
+                        enabled: true,
+                    },
+                    crate::config::ModelFallback {
+                        provider: "backup-b".into(),
+                        provider_model: "gpt-4.1".into(),
+                        priority: Some(10),
+                        weight: Some(2),
+                        enabled: true,
+                    },
+                ],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: None,
+                output_price_per_1m: None,
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let state = AppState::new(config);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+
+        let first = state
+            .candidate_model_routes(&resolved)
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+        let second = state
+            .candidate_model_routes(&resolved)
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+        let third = state
+            .candidate_model_routes(&resolved)
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+
+        assert_eq!(first, ["primary", "backup-b", "backup-a"]);
+        assert_eq!(second, ["primary", "backup-b", "backup-a"]);
+        assert_eq!(third, ["primary", "backup-a", "backup-b"]);
     }
 }

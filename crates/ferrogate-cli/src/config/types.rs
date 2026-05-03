@@ -49,6 +49,12 @@ pub(crate) struct Model {
     /// Actual model name sent to the upstream provider.
     pub(crate) provider_model: String,
     #[serde(default)]
+    pub(crate) fallbacks: Vec<ModelFallback>,
+    #[serde(default)]
+    pub(crate) visible_organization_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) visible_project_ids: Vec<String>,
+    #[serde(default)]
     pub(crate) capabilities: Vec<String>,
     #[serde(default)]
     pub(crate) context_window: Option<u32>,
@@ -56,6 +62,18 @@ pub(crate) struct Model {
     pub(crate) input_price_per_1m: Option<f64>,
     #[serde(default)]
     pub(crate) output_price_per_1m: Option<f64>,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ModelFallback {
+    pub(crate) provider: String,
+    pub(crate) provider_model: String,
+    #[serde(default)]
+    pub(crate) priority: Option<u32>,
+    #[serde(default)]
+    pub(crate) weight: Option<u32>,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
 }

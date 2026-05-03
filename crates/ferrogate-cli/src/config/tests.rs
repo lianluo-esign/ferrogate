@@ -43,6 +43,14 @@ capabilities = ["chat", "streaming"]
 context_window = 128000
 input_price_per_1m = 0.15
 output_price_per_1m = 0.60
+visible_organization_ids = ["org_demo"]
+visible_project_ids = ["project_gateway"]
+
+[[models.fallbacks]]
+provider = "openai"
+provider_model = "gpt-4.1-mini"
+priority = 10
+weight = 2
 
 [[api_keys]]
 id = "key_dev"
@@ -63,6 +71,12 @@ project_id = "project_gateway"
     assert_eq!(config.providers[0].name, "openai");
     assert_eq!(config.models.len(), 1);
     assert_eq!(config.models[0].name, "fast-chat");
+    assert_eq!(config.models[0].fallbacks.len(), 1);
+    assert_eq!(config.models[0].fallbacks[0].provider_model, "gpt-4.1-mini");
+    assert_eq!(config.models[0].fallbacks[0].priority, Some(10));
+    assert_eq!(config.models[0].fallbacks[0].weight, Some(2));
+    assert_eq!(config.models[0].visible_organization_ids, ["org_demo"]);
+    assert_eq!(config.models[0].visible_project_ids, ["project_gateway"]);
     assert_eq!(config.api_keys.len(), 1);
     assert_eq!(config.api_keys[0].id, "key_dev");
     assert_eq!(config.upstreams.len(), 1);

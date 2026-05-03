@@ -101,4 +101,8 @@ pub trait ProviderAdapter: Send + Sync {
     ) -> ProviderErrorResponse;
 
     fn extract_usage(&self, body: &[u8]) -> Option<ProviderUsage>;
+
+    fn is_retryable_status(&self, status: u16) -> bool {
+        status == 429 || (500..=599).contains(&status)
+    }
 }

@@ -70,6 +70,31 @@ impl Config {
                     model.provider
                 );
             }
+            if model.provider_model.trim().is_empty() {
+                bail!("field models[{index}].provider_model: cannot be empty");
+            }
+            for (fallback_index, fallback) in model.fallbacks.iter().enumerate() {
+                if !fallback.enabled {
+                    continue;
+                }
+                if !provider_names.contains(fallback.provider.as_str()) {
+                    bail!(
+                        "field models[{index}].fallbacks[{fallback_index}].provider: model {} references unknown fallback provider {}",
+                        model.name,
+                        fallback.provider
+                    );
+                }
+                if fallback.provider_model.trim().is_empty() {
+                    bail!(
+                        "field models[{index}].fallbacks[{fallback_index}].provider_model: cannot be empty"
+                    );
+                }
+                if fallback.weight == Some(0) {
+                    bail!(
+                        "field models[{index}].fallbacks[{fallback_index}].weight: must be greater than zero"
+                    );
+                }
+            }
         }
         Ok(names)
     }

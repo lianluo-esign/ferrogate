@@ -48,7 +48,7 @@ tags:
 | P2 | 配置校验、生命周期和平滑重载 | 进行中 | 80% | 已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip |
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
 | P4 | 虚拟 API Key、租户上下文与 Policy MVP | 已完成 | 100% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界 |
-| P5 | 多 Provider Adapter 与 Model Registry | 进行中 | 75% | 已实现 OpenAI-compatible、Anthropic、Gemini、Grok、Azure OpenAI adapter 的 registry 分发、请求转换、错误归一化和 usage 提取；已定义并接入 Model Registry 的逻辑模型解析；fallback/权重路由待后续切片 |
+| P5 | 多 Provider Adapter 与 Model Registry | 已完成 | 100% | 已实现 OpenAI-compatible、Anthropic、Gemini、Grok、Azure OpenAI adapter 的 registry 分发、请求转换、错误归一化、usage 提取和可重试判断；已定义并接入 Model Registry 的逻辑模型解析、优先级 fallback、加权 fallback 轮转和租户级模型可见性 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 未开始 | 0% | 待集成 OpenTelemetry 和 usage/billing 存储接口 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
 | P8 | 生产级可靠性、安全和部署增强 | 未开始 | 0% | 待实现限流、熔断、fallback、部署文档 |
@@ -313,24 +313,24 @@ rg -n "(info!|warn!|error!|debug!|trace!)" crates/ferrogate-cli/src crates/ferro
 
 ### 任务
 
-- [ ] 完善 Provider Adapter trait，覆盖请求转换、响应转换、Streaming、错误归一化、usage 提取、可重试判断。
+- [x] 完善 Provider Adapter trait，覆盖请求转换、响应转换、Streaming、错误归一化、usage 提取、可重试判断。
 - [x] 实现 OpenAI Adapter。
 - [x] 实现 Anthropic Adapter。
 - [x] 实现 Gemini Adapter。
 - [x] 实现 Grok Adapter。
 - [x] 实现 Azure OpenAI Adapter。
 - [x] 定义 Model Registry、模型别名、模型能力、价格和上下文长度。（当前已定义模型条目、primary route、fallback route 占位、capabilities、context window、pricing 元数据，并接入 chat route 解析；别名规则待后续扩展。）
-- [ ] 实现优先级 fallback 和权重路由。
-- [ ] 支持租户级模型可见性。
+- [x] 实现优先级 fallback 和权重路由。
+- [x] 支持租户级模型可见性。
 
 ### 验收标准
 
-- [ ] 每个 Adapter 支持鉴权注入、请求转换、响应转换、错误归一化、usage 提取。
+- [x] 每个 Adapter 支持鉴权注入、请求转换、响应转换、错误归一化、usage 提取。
 - [x] 逻辑模型可以路由到不同 Provider 模型。
-- [ ] fallback 过程有 trace span 和日志字段。
-- [ ] Provider Adapter 单元测试覆盖典型错误和 streaming 事件。
+- [x] fallback 过程有 trace span 和日志字段。
+- [x] Provider Adapter 单元测试覆盖典型错误和 streaming 事件。
 
-**进度**：75%。
+**进度**：100%。
 
 **验收结果**：
 
@@ -341,6 +341,9 @@ cargo clippy -p ferrogate-providers --all-targets --all-features -- -D warnings
 PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_auth -- --nocapture
 PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_runtime gemini -- --nocapture
 PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_runtime azure -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_runtime falls_back -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli state -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli config -- --nocapture
 PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targets --all-features -- -D warnings
 ```
 
@@ -353,6 +356,10 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targ
 2026-05-03 本轮补齐 Grok adapter：`grok`/`xai` 作为显式 provider kind 进入 registry，协议层复用 xAI 官方兼容的 OpenAI Chat Completions 请求、Bearer 鉴权、错误归一化和 usage 提取；原 unsupported provider 负例已改为 `unsupported-test`，避免与新增 adapter 冲突。
 
 2026-05-03 本轮补齐 Azure OpenAI adapter：`azure-openai`/`azure` 作为显式 provider kind 进入 registry，provider model 被视为 Azure deployment name 并写入 `/openai/deployments/{deployment}/chat/completions?api-version=...` endpoint，provider secret 通过 `api-key` header 注入，请求 body 移除客户端逻辑模型名；已新增 provider 单元测试和 CLI mock-provider 集成测试验证 endpoint、header、usage、错误归一化和 secret 不回显。
+
+2026-05-03 本轮补齐 fallback/权重路由：`[[models.fallbacks]]` 支持 fallback provider、provider model、priority、weight 和 enabled 字段；配置校验会拒绝未知 fallback provider、空 provider model 和 0 weight。Model Registry 会按 priority 生成候选路由，同一 priority 下按 weight 做轻量轮转；`/v1/chat/completions` 在 primary 出现 adapter 错误、dispatch 错误或 adapter 判定可重试的 5xx/429 时继续尝试 fallback，并记录 `candidate_index`、`fallback_count`、provider、provider_model、status/error 等日志字段。
+
+2026-05-03 本轮完成 P5 收尾：模型配置新增 `visible_organization_ids` 与 `visible_project_ids`，运行时会在 provider dispatch 前基于 API Key 的 organization/project 上下文返回 `model_not_visible`，避免租户不可见模型被路由到上游；`ai_proxy_auth` 已覆盖租户不可见模型拒绝且不回显 client secret。
 
 ## 9. P6 可观测性、请求日志、Storage 与计费事件
 

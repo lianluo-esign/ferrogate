@@ -4,13 +4,26 @@ use std::collections::HashMap;
 pub struct ModelRoute {
     pub provider: String,
     pub provider_model: String,
+    pub priority: u32,
+    pub weight: u32,
 }
 
 impl ModelRoute {
     pub fn new(provider: impl Into<String>, provider_model: impl Into<String>) -> Self {
+        Self::with_routing(provider, provider_model, 0, 1)
+    }
+
+    pub fn with_routing(
+        provider: impl Into<String>,
+        provider_model: impl Into<String>,
+        priority: u32,
+        weight: u32,
+    ) -> Self {
         Self {
             provider: provider.into(),
             provider_model: provider_model.into(),
+            priority,
+            weight,
         }
     }
 }
@@ -97,10 +110,19 @@ impl ModelRegistry {
             });
         }
 
+        let mut fallbacks = entry.fallbacks.clone();
+        fallbacks.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| right.weight.cmp(&left.weight))
+                .then_with(|| left.provider.cmp(&right.provider))
+                .then_with(|| left.provider_model.cmp(&right.provider_model))
+        });
+
         Ok(ResolvedModelRoute {
             logical_model: entry.name.clone(),
             primary: entry.primary.clone(),
-            fallbacks: entry.fallbacks.clone(),
+            fallbacks,
         })
     }
 
@@ -189,5 +211,24 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["a-model", "b-model"]);
+    }
+
+    #[test]
+    fn resolves_fallback_routes_by_priority_then_weight() {
+        let mut entry = ModelRegistryEntry::new("fast-chat", "openai", "gpt-4o-mini");
+        entry.fallbacks = vec![
+            ModelRoute::with_routing("gemini", "gemini-2.5-flash", 20, 10),
+            ModelRoute::with_routing("anthropic", "claude-3-5-sonnet-latest", 10, 1),
+            ModelRoute::with_routing("grok", "grok-4.20-fast", 20, 20),
+        ];
+        let registry = ModelRegistry::new([entry]).unwrap();
+
+        let resolved = registry.resolve("fast-chat").unwrap();
+        let providers = resolved
+            .fallbacks
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+        assert_eq!(providers, ["anthropic", "grok", "gemini"]);
     }
 }

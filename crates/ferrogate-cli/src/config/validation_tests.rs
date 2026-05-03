@@ -7,6 +7,9 @@ fn rejects_model_with_unknown_provider() {
             name: "fast-chat".into(),
             provider: "missing".into(),
             provider_model: "gpt-4o-mini".into(),
+            fallbacks: vec![],
+            visible_organization_ids: vec![],
+            visible_project_ids: vec![],
             capabilities: vec![],
             context_window: None,
             input_price_per_1m: None,
@@ -18,6 +21,46 @@ fn rejects_model_with_unknown_provider() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("unknown provider"));
+}
+
+#[test]
+fn rejects_model_with_unknown_fallback_provider() {
+    let mut model = model();
+    model.fallbacks = vec![ModelFallback {
+        provider: "missing".into(),
+        provider_model: "gpt-4.1-mini".into(),
+        priority: Some(10),
+        weight: Some(1),
+        enabled: true,
+    }];
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("fallback provider missing"));
+}
+
+#[test]
+fn rejects_model_fallback_with_zero_weight() {
+    let mut model = model();
+    model.fallbacks = vec![ModelFallback {
+        provider: "openai".into(),
+        provider_model: "gpt-4.1-mini".into(),
+        priority: Some(10),
+        weight: Some(0),
+        enabled: true,
+    }];
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("fallbacks[0].weight"));
 }
 
 #[test]
@@ -223,6 +266,9 @@ fn model() -> Model {
         name: "fast-chat".into(),
         provider: "openai".into(),
         provider_model: "gpt-4o-mini".into(),
+        fallbacks: vec![],
+        visible_organization_ids: vec![],
+        visible_project_ids: vec![],
         capabilities: vec![],
         context_window: None,
         input_price_per_1m: None,
