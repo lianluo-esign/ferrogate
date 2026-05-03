@@ -12,6 +12,7 @@ use crate::{
 };
 use ferrogate_core::RequestContext;
 use ferrogate_policy::PolicyDecision;
+use ferrogate_providers::ModelRegistryError;
 
 use super::{
     body::read_request_body,
@@ -90,24 +91,38 @@ impl FerroGateway {
             return Ok(());
         }
 
-        let Some(model) = self.state.models.get(&request.model) else {
-            write_json_error(
-                session,
-                StatusCode::BAD_REQUEST,
-                "model_not_found",
-                format!("unknown model {}", request.model),
-                &ctx.request_id,
-            )
-            .await?;
-            return Ok(());
+        let model = match self.state.resolve_model(&request.model) {
+            Ok(model) => model,
+            Err(ModelRegistryError::ModelDisabled { .. }) => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "model_disabled",
+                    format!("model {} is disabled", request.model),
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(_) => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "model_not_found",
+                    format!("unknown model {}", request.model),
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(());
+            }
         };
 
-        let Some(provider) = self.state.providers.get(&model.provider) else {
+        let Some(provider) = self.state.providers.get(&model.primary.provider) else {
             write_json_error(
                 session,
                 StatusCode::BAD_GATEWAY,
                 "provider_not_found",
-                format!("provider {} not found", model.provider),
+                format!("provider {} not found", model.primary.provider),
                 &ctx.request_id,
             )
             .await?;
@@ -150,7 +165,7 @@ impl FerroGateway {
 
         let prepared = match self.state.prepare_chat_completions(
             provider,
-            model,
+            &model,
             request.model.clone(),
             request.stream,
             body_json,
@@ -178,7 +193,7 @@ impl FerroGateway {
             request_limit_per_minute = ?auth.request_limit_per_minute,
             logical_model = %request.model,
             provider = %provider.name,
-            provider_model = %model.provider_model,
+            provider_model = %model.primary.provider_model,
             stream = request.stream,
             "chat completion route planned"
         );
@@ -291,7 +306,7 @@ impl FerroGateway {
                         request_id = %ctx.request_id,
                         logical_model = %request.model,
                         provider = %provider.name,
-                        provider_model = %model.provider_model,
+                        provider_model = %model.primary.provider_model,
                         prompt_tokens = ?usage.prompt_tokens,
                         completion_tokens = ?usage.completion_tokens,
                         total_tokens = ?usage.total_tokens,

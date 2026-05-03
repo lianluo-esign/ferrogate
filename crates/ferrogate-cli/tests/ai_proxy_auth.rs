@@ -203,7 +203,7 @@ fn ai_proxy_maps_adapter_errors_without_leaking_provider_secret() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    write_config(&config, &gateway_addr, "anthropic");
+    write_config(&config, &gateway_addr, "gemini");
     std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
 
     let mut gateway = start_gateway(&config);

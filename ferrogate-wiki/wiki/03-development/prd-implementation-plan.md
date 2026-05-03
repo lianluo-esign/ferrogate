@@ -48,7 +48,7 @@ tags:
 | P2 | 配置校验、生命周期和平滑重载 | 进行中 | 80% | 已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip |
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
 | P4 | 虚拟 API Key、租户上下文与 Policy MVP | 已完成 | 100% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界 |
-| P5 | 多 Provider Adapter 与 Model Registry | 进行中 | 20% | 已实现 OpenAI-compatible 与 Anthropic adapter 的 registry 分发、请求转换、错误归一化和 usage 提取；Model Registry、fallback、Gemini/Grok/Azure 待后续切片 |
+| P5 | 多 Provider Adapter 与 Model Registry | 进行中 | 35% | 已实现 OpenAI-compatible 与 Anthropic adapter 的 registry 分发、请求转换、错误归一化和 usage 提取；已定义并接入 Model Registry 的逻辑模型解析；fallback、Gemini/Grok/Azure 待后续切片 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 未开始 | 0% | 待集成 OpenTelemetry 和 usage/billing 存储接口 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
 | P8 | 生产级可靠性、安全和部署增强 | 未开始 | 0% | 待实现限流、熔断、fallback、部署文档 |
@@ -319,18 +319,18 @@ rg -n "(info!|warn!|error!|debug!|trace!)" crates/ferrogate-cli/src crates/ferro
 - [ ] 实现 Gemini Adapter。
 - [ ] 实现 Grok Adapter。
 - [ ] 实现 Azure OpenAI Adapter。
-- [ ] 定义 Model Registry、模型别名、模型能力、价格和上下文长度。
+- [x] 定义 Model Registry、模型别名、模型能力、价格和上下文长度。（当前已定义模型条目、primary route、fallback route 占位、capabilities、context window、pricing 元数据，并接入 chat route 解析；别名规则待后续扩展。）
 - [ ] 实现优先级 fallback 和权重路由。
 - [ ] 支持租户级模型可见性。
 
 ### 验收标准
 
 - [ ] 每个 Adapter 支持鉴权注入、请求转换、响应转换、错误归一化、usage 提取。
-- [ ] 逻辑模型可以路由到不同 Provider 模型。
+- [x] 逻辑模型可以路由到不同 Provider 模型。
 - [ ] fallback 过程有 trace span 和日志字段。
 - [ ] Provider Adapter 单元测试覆盖典型错误和 streaming 事件。
 
-**进度**：20%。
+**进度**：35%。
 
 **验收结果**：
 
@@ -338,9 +338,13 @@ rg -n "(info!|warn!|error!|debug!|trace!)" crates/ferrogate-cli/src crates/ferro
 cargo fmt --check
 cargo test -p ferrogate-providers -- --nocapture
 cargo clippy -p ferrogate-providers --all-targets --all-features -- -D warnings
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_auth -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targets --all-features -- -D warnings
 ```
 
 2026-05-03 本轮启动 P5：`ferrogate-providers` 新增 `AnthropicAdapter`，可将 OpenAI-style chat plan 转换为 Anthropic `/messages` 请求，注入 `x-api-key` 与 `anthropic-version` header，归一化 Anthropic error response，并从 `input_tokens`/`output_tokens` 提取 usage；`ProviderAdapterRegistry` 已支持 `anthropic` kind。
+
+2026-05-03 本轮继续推进 P5：`ferrogate-providers` 新增 `ModelRegistry`、`ModelRegistryEntry`、`ModelRoute` 和 `ResolvedModelRoute`，覆盖 enabled 过滤、重复模型诊断、稳定模型列表、primary provider route 与 fallback route 占位；`ferrogate-cli` 的 `/v1/chat/completions` 已改为通过 Model Registry 解析逻辑模型，再将 primary provider/provider_model 交给 Provider Adapter dispatch。
 
 ## 9. P6 可观测性、请求日志、Storage 与计费事件
 

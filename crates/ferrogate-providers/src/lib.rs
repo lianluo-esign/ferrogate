@@ -1,11 +1,15 @@
 //! AI provider adapter boundaries.
 
 mod anthropic;
+mod models;
 mod openai;
 mod registry;
 mod types;
 
 pub use anthropic::AnthropicAdapter;
+pub use models::{
+    ModelRegistry, ModelRegistryEntry, ModelRegistryError, ModelRoute, ResolvedModelRoute,
+};
 pub use openai::OpenAiCompatibleAdapter;
 pub use registry::ProviderAdapterRegistry;
 pub use types::{
