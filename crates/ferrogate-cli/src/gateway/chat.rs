@@ -175,6 +175,7 @@ impl FerroGateway {
             organization_id = ?auth.organization_id,
             project_id = ?auth.project_id,
             monthly_token_budget = ?auth.monthly_token_budget,
+            request_limit_per_minute = ?auth.request_limit_per_minute,
             logical_model = %request.model,
             provider = %provider.name,
             provider_model = %model.provider_model,

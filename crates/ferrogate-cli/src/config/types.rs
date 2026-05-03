@@ -93,6 +93,8 @@ pub(crate) struct ApiKey {
     #[serde(default)]
     pub(crate) monthly_token_budget: Option<u64>,
     #[serde(default)]
+    pub(crate) request_limit_per_minute: Option<u64>,
+    #[serde(default)]
     pub(crate) expires_at_unix: Option<u64>,
 }
 

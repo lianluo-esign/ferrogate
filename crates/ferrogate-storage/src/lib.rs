@@ -26,6 +26,7 @@ pub struct StoredApiKey {
     pub allowed_providers: Vec<String>,
     pub tenant: TenantContext,
     pub monthly_token_budget: Option<u64>,
+    pub request_limit_per_minute: Option<u64>,
     pub expires_at_unix: Option<u64>,
 }
 
@@ -109,6 +110,7 @@ mod tests {
                     api_key_id: Some("key_dev".into()),
                 },
                 monthly_token_budget: Some(1_000),
+                request_limit_per_minute: Some(60),
                 expires_at_unix: None,
             },
         );

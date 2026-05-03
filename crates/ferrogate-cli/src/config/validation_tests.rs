@@ -262,6 +262,7 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         project_id: None,
         user_id: None,
         monthly_token_budget: None,
+        request_limit_per_minute: None,
         expires_at_unix: None,
     }
 }

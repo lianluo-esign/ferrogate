@@ -16,6 +16,7 @@ pub(crate) struct AuthContext {
     pub(crate) allowed_models: HashSet<String>,
     pub(crate) allowed_providers: HashSet<String>,
     pub(crate) monthly_token_budget: Option<u64>,
+    pub(crate) request_limit_per_minute: Option<u64>,
     #[allow(dead_code)]
     pub(crate) organization_id: Option<String>,
     #[allow(dead_code)]
@@ -70,6 +71,7 @@ pub(crate) fn authenticate(
             allowed_models: HashSet::new(),
             allowed_providers: HashSet::new(),
             monthly_token_budget: None,
+            request_limit_per_minute: None,
             organization_id: None,
             team_id: None,
             project_id: None,
@@ -108,12 +110,20 @@ pub(crate) fn authenticate(
                     message: "API key token budget is exhausted".into(),
                 });
             }
+            if configured_key.request_limit_per_minute == Some(0) {
+                return Err(AuthError {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    code: "rate_limit_exceeded",
+                    message: "API key request rate limit is exhausted".into(),
+                });
+            }
             let auth = AuthContext {
                 api_key_id: Some(configured_key.id.clone()),
                 scopes: configured_key.scopes.iter().cloned().collect(),
                 allowed_models: configured_key.allowed_models.iter().cloned().collect(),
                 allowed_providers: configured_key.allowed_providers.iter().cloned().collect(),
                 monthly_token_budget: configured_key.monthly_token_budget,
+                request_limit_per_minute: configured_key.request_limit_per_minute,
                 organization_id: configured_key.organization_id.clone(),
                 team_id: configured_key.team_id.clone(),
                 project_id: configured_key.project_id.clone(),
@@ -244,6 +254,7 @@ mod tests {
             allowed_models: HashSet::from(["fast-chat".into()]),
             allowed_providers: HashSet::new(),
             monthly_token_budget: None,
+            request_limit_per_minute: None,
             organization_id: None,
             team_id: None,
             project_id: None,
@@ -261,6 +272,7 @@ mod tests {
             allowed_models: HashSet::new(),
             allowed_providers: HashSet::from(["openai".into()]),
             monthly_token_budget: Some(1_000),
+            request_limit_per_minute: Some(60),
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -288,6 +300,7 @@ mod tests {
             project_id: None,
             user_id: None,
             monthly_token_budget: None,
+            request_limit_per_minute: None,
             expires_at_unix: None,
         };
 

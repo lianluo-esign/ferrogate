@@ -47,7 +47,7 @@ tags:
 | P1 | Pingora 通用 API Gateway Runtime 垂直切片 | 已完成 | 100% | 已实现配置驱动 Pingora 反向代理、路由匹配、upstream pool、header/path rewrite、healthz、日志和测试 |
 | P2 | 配置校验、生命周期和平滑重载 | 进行中 | 80% | 已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip |
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
-| P4 | 虚拟 API Key、租户上下文与 Policy MVP | 进行中 | 80% | 已实现 API Key hash 生成/校验、disabled/expired/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界；生产级持久化实现待后续切片 |
+| P4 | 虚拟 API Key、租户上下文与 Policy MVP | 进行中 | 85% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界；生产级持久化实现待后续切片 |
 | P5 | 多 Provider Adapter 与 Model Registry | 未开始 | 0% | 待实现多 Provider 抽象和逻辑模型路由 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 未开始 | 0% | 待集成 OpenTelemetry 和 usage/billing 存储接口 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
@@ -263,18 +263,18 @@ npm run wiki:build
 - [x] 基于 `ferrogate-storage` 定义 Key、Tenant、Policy repository。（已定义 `ApiKeyRepository`、`TenantRepository`、`PolicyRepository` 和 in-memory 实现；运行路径仍使用配置内存态，生产级持久化实现待后续切片。）
 - [ ] 实现模型 allowlist/denylist。
 - [x] 实现 Provider allowlist/denylist。（当前支持 API Key 级 `allowed_providers`，在 provider dispatch 前拒绝。）
-- [x] 实现基础请求频率限制和 Token 预算占位接口。（当前支持 `monthly_token_budget = 0` 的 exhausted 占位拒绝；真实用量累加待 P6 storage/billing 切片。）
+- [x] 实现基础请求频率限制和 Token 预算占位接口。（当前支持 `request_limit_per_minute = 0` 与 `monthly_token_budget = 0` 的 exhausted 占位拒绝；真实滑动窗口和用量累加待 P6 storage/billing 切片。）
 - [x] 将 Auth 和 Policy 接入 P3 AI Proxy 请求路径。（Auth 与最小 deny-rule `BasicPolicyEngine` 已在 provider dispatch 前执行。）
 
 ### 验收标准
 
-- [x] 被禁用、过期、超限、无权限 Key 会被拒绝。（当前覆盖 disabled、expired、`monthly_token_budget = 0`、scope/model/provider deny。）
+- [x] 被禁用、过期、超限、无权限 Key 会被拒绝。（当前覆盖 disabled、expired、`request_limit_per_minute = 0`、`monthly_token_budget = 0`、scope/model/provider/policy deny。）
 - [x] 请求上下文包含 organization_id、project_id、api_key_id 等租户字段。
 - [ ] 所有安全相关日志脱敏。
 - [x] Policy 决策有单元测试。
 - [x] OpenAI SDK 请求在无 Key 或无权限时返回统一错误。
 
-**进度**：80%。
+**进度**：85%。
 
 **验收结果**：
 
@@ -297,6 +297,8 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targ
 2026-05-03 本轮继续补齐虚拟 API Key hash 能力：`ApiKey` 配置新增 `key_hash`，`authenticate` 同时支持明文开发 key、环境变量 key 和 `blake2b:` hash 校验；新增 `ferrogate hash-key --secret ...` 用于生成配置 hash，并有命令测试确保输出不回显原始 secret。
 
 2026-05-03 本轮继续补齐 storage 边界：`ferrogate-storage` 新增 `StoredApiKey`、`StoredTenant`、`StoredPolicyRule`，并定义 `ApiKeyRepository`、`TenantRepository`、`PolicyRepository` 与 in-memory repository 测试，为后续从配置内存态迁移到持久化控制面保留边界。
+
+2026-05-03 本轮继续补齐限流占位：`ApiKey` 配置新增 `request_limit_per_minute`，当值为 `0` 时 AI Proxy 在 provider dispatch 前返回 `rate_limit_exceeded`；这与 `monthly_token_budget = 0` 一起作为 P4 的本地策略占位，真实计数窗口待 P6。
 
 ## 8. P5 多 Provider Adapter 与 Model Registry
 

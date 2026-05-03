@@ -69,6 +69,14 @@ scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 
 [[api_keys]]
+id = "rate_empty"
+name = "Rate empty"
+key = "rate-secret"
+request_limit_per_minute = 0
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+
+[[api_keys]]
 id = "provider_limited"
 name = "Provider limited"
 key = "provider-limited-secret"
@@ -156,6 +164,11 @@ fn ai_proxy_rejects_missing_invalid_scope_and_model_auth() {
     assert!(budget.contains("429 Too Many Requests"));
     assert!(budget.contains("token_budget_exceeded"));
     assert!(!budget.contains("budget-secret"));
+
+    let rate = chat(&gateway_addr, Some("rate-secret"), "fast-chat");
+    assert!(rate.contains("429 Too Many Requests"));
+    assert!(rate.contains("rate_limit_exceeded"));
+    assert!(!rate.contains("rate-secret"));
 
     let denied_provider = chat(&gateway_addr, Some("provider-limited-secret"), "fast-chat");
     assert!(denied_provider.contains("403 Forbidden"));
