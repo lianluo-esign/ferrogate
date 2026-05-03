@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use http::{header, StatusCode};
-use pingora::{http::ResponseHeader, proxy::Session, Result as PingoraResult};
+use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as PingoraResult};
 use serde::Serialize;
+use std::io::Read;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct HealthResponse<'a> {
@@ -93,6 +94,42 @@ pub(crate) async fn write_raw_response(
         .write_response_header(Box::new(response), false)
         .await?;
     session.write_response_body(Some(body), true).await
+}
+
+pub(crate) async fn write_streaming_response<R: Read>(
+    session: &mut Session,
+    status: StatusCode,
+    content_type: &str,
+    initial_body: Vec<u8>,
+    mut reader: R,
+    request_id: &str,
+) -> PingoraResult<()> {
+    let mut response = ResponseHeader::build(status, Some(4))?;
+    response.insert_header(header::CONTENT_TYPE, content_type)?;
+    response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-ferrogate-runtime", "pingora")?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+
+    if !initial_body.is_empty() {
+        session
+            .write_response_body(Some(Bytes::from(initial_body)), false)
+            .await?;
+    }
+
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .or_err(ErrorType::ReadError, "reading provider streaming response")?;
+        if read == 0 {
+            return session.write_response_body(None, true).await;
+        }
+        session
+            .write_response_body(Some(Bytes::copy_from_slice(&buffer[..read])), false)
+            .await?;
+    }
 }
 
 pub(crate) async fn write_json_error(

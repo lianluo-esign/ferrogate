@@ -710,6 +710,8 @@ dependencies = [
  "ferrogate-runtime",
  "http",
  "pingora",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",

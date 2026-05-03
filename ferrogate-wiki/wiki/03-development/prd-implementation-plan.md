@@ -46,7 +46,7 @@ tags:
 | P0 | 工程基线、crate 边界与 Caddyfile 配置契约 | 已完成 | 100% | 已创建 Rust workspace、P0 crate skeleton、Caddyfile parser/adapter 边界和最小 typed config model |
 | P1 | Pingora 通用 API Gateway Runtime 垂直切片 | 已完成 | 100% | 已实现配置驱动 Pingora 反向代理、路由匹配、upstream pool、header/path rewrite、healthz、日志和测试 |
 | P2 | 配置校验、生命周期和平滑重载 | 进行中 | 80% | 已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip |
-| P3 | OpenAI-compatible AI Proxy MVP | 进行中 | 80% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、非流式 chat completion HTTP dispatch、`stream=true` SSE response forwarding MVP、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
+| P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
 | P4 | 虚拟 API Key、租户上下文与 Policy MVP | 未开始 | 0% | 待实现鉴权、租户解析和基础策略判断 |
 | P5 | 多 Provider Adapter 与 Model Registry | 未开始 | 0% | 待实现多 Provider 抽象和逻辑模型路由 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 未开始 | 0% | 待集成 OpenTelemetry 和 usage/billing 存储接口 |
@@ -190,8 +190,8 @@ cargo run -- reload --config Ferrogate/Caddyfile
 - [x] 在 `ferrogate-providers` 中定义 Provider Adapter trait 的 MVP 版本。
 - [x] 实现 OpenAI-compatible Adapter MVP，包括鉴权 header planning、endpoint 映射、logical model 到 provider model 改写、stream 标记保留、Provider 错误归一化、usage 提取接口、adapter registry 统一入口和 secret debug 脱敏。
 - [x] 实现 `GET /v1/models`。
-- [x] 实现 `POST /v1/chat/completions` 非流式路径。（当前支持 HTTP OpenAI-compatible upstream dispatch；HTTPS provider dispatch 待后续异步/TLS 客户端切片。）
-- [x] 实现 `stream=true` 的 SSE response forwarding MVP。（当前透传 provider `text/event-stream` 响应体；真正增量式边读边写仍待后续性能切片。）
+- [x] 实现 `POST /v1/chat/completions` 非流式路径，支持 HTTP 和 HTTPS OpenAI-compatible upstream dispatch。
+- [x] 实现 `stream=true` 的增量式 SSE response forwarding，provider 首段 chunk 会在 provider 完成前转发给客户端。
 - [x] 定义统一错误响应格式。
 - [x] 记录 logical_model、provider、provider_model 的路由计划。
 - [x] 提供 OpenAI-compatible mock upstream 集成测试。
@@ -204,7 +204,7 @@ cargo run -- reload --config Ferrogate/Caddyfile
 - [x] 响应不泄漏 API Key 和 Provider Secret。（日志脱敏仍需随 observability 切片继续验证。）
 - [x] OpenAI-compatible 逻辑未写死在 runtime crate 中。（`gateway/chat.rs` 只调用 `AppState`/`ProviderAdapterRegistry` 统一入口；adapter 选择、请求准备、错误归一化和 usage 提取均收敛在 `ferrogate-providers`。）
 
-**进度**：80%。
+**进度**：100%。
 
 **验收结果**：
 
@@ -238,7 +238,18 @@ cargo test -p ferrogate-core -- --nocapture
 cargo clippy -p ferrogate-providers --all-targets --all-features -- -D warnings
 ```
 
-本地完整 Rust 测试执行仍被当前机器缺少 `cmake` 阻塞，`libz-ng-sys` build script 报 `is cmake not installed?`；本轮实际尝试的 `cargo test -p ferrogate-cli --test ai_proxy_dispatch_errors -- --nocapture` 和 `cargo test -p ferrogate-cli --test ai_proxy_perf -- --nocapture` 均在编译 Pingora 依赖链时命中同一阻塞，需安装 cmake 后复跑完整命令。当前 P3 覆盖 OpenAI-compatible adapter 的模型改写、stream flag 保留、非对象 body 拒绝、unsupported provider kind 拒绝、Provider Secret debug 脱敏、Provider 错误归一化、usage 提取接口和 adapter registry 解耦，以及真实 `ferrogate run` 进程下的 `/v1/models`、`/v1/chat/completions` 非流式 HTTP mock provider dispatch、`stream=true` SSE response forwarding MVP、`Authorization` 与 `x-api-key`、missing/invalid/scope/model deny 负例、provider Authorization header、provider body 模型改写、逻辑模型名不透传、provider/client secret 响应脱敏。HTTPS provider dispatch 和真正增量式 streaming 仍是 P3 后续切片。
+2026-05-03 本轮完成 P3 收尾：provider dispatch 支持 `http://` 和 `https://` endpoint，HTTPS 使用 rustls 与系统根证书；`stream=true` 路径改为 provider response head 解析后边读边写，不再等待 provider 完整结束才写回客户端，并新增延迟 SSE 集成测试验证首段 chunk 会早于 provider `[DONE]` 到达客户端。本轮为本地验证创建 ignored 的 `.jcode/cmake-venv`，用于提供 `cmake` 给 Pingora `libz-ng-sys` 编译链；该目录不进入仓库。新增/复跑通过：
+
+```bash
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targets --all-features -- -D warnings
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli dispatch -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_dispatch_errors -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_runtime -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_perf -- --nocapture
+npm run wiki:build
+```
+
+当前 P3 覆盖 OpenAI-compatible adapter 的模型改写、stream flag 保留、非对象 body 拒绝、unsupported provider kind 拒绝、Provider Secret debug 脱敏、Provider 错误归一化、usage 提取接口和 adapter registry 解耦，以及真实 `ferrogate run` 进程下的 `/v1/models`、`/v1/chat/completions` 非流式 HTTP mock provider dispatch、HTTPS provider endpoint 连接失败归一化、`stream=true` 增量式 SSE response forwarding、`Authorization` 与 `x-api-key`、missing/invalid/scope/model deny 负例、provider Authorization header、provider body 模型改写、逻辑模型名不透传、provider/client secret 响应脱敏。
 
 ## 7. P4 虚拟 API Key、租户上下文与 Policy MVP
 

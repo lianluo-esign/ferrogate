@@ -25,6 +25,8 @@ ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
 http.workspace = true
 pingora.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

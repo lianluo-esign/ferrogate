@@ -57,11 +57,11 @@ fn chat_body(addr: &str, body: &str) -> String {
 }
 
 #[test]
-fn chat_maps_unsupported_https_provider_dispatch_to_502() {
+fn chat_maps_https_provider_connect_failure_to_502() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    write_config(&config, &gateway_addr, "https://api.example.test/v1");
+    write_config(&config, &gateway_addr, "https://127.0.0.1:9/v1");
 
     let mut gateway = start_gateway(&config);
     wait_for_gateway(&gateway_addr);
@@ -69,7 +69,6 @@ fn chat_maps_unsupported_https_provider_dispatch_to_502() {
     let response = chat(&gateway_addr);
     assert!(response.contains("502 Bad Gateway"));
     assert!(response.contains("provider_dispatch_error"));
-    assert!(response.contains("http endpoints only"));
     assert!(!response.contains("chat-secret"));
 
     gateway.kill().unwrap();

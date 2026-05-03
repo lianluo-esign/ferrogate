@@ -1,15 +1,20 @@
 use http::{HeaderMap, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Deserialize;
+use std::io::Read;
 use tracing::info;
 
 use crate::{
     auth::authenticate,
-    responses::{write_json_error, write_json_response, write_raw_response},
+    responses::{
+        write_json_error, write_json_response, write_raw_response, write_streaming_response,
+    },
 };
 
 use super::{
-    body::read_request_body, dispatch::dispatch_provider_request, FerroGateway, ProxyContext,
+    body::read_request_body,
+    dispatch::{dispatch_provider_request, dispatch_provider_streaming_request},
+    FerroGateway, ProxyContext,
 };
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +132,74 @@ impl FerroGateway {
                 return Ok(());
             }
         };
+
+        if request.stream {
+            return match dispatch_provider_streaming_request(&prepared) {
+                Ok(mut response) => {
+                    if response.status.is_client_error() || response.status.is_server_error() {
+                        let mut body = response.initial_body;
+                        if let Err(error) = response.body.read_to_end(&mut body) {
+                            write_json_error(
+                                session,
+                                StatusCode::BAD_GATEWAY,
+                                "provider_dispatch_error",
+                                format!("provider dispatch failed: {error}"),
+                                &ctx.request_id,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        let normalized = match self.state.normalize_provider_error(
+                            &provider.kind,
+                            response.status.as_u16(),
+                            &response.content_type,
+                            &body,
+                            &ctx.request_id,
+                        ) {
+                            Ok(normalized) => normalized,
+                            Err(error) => {
+                                write_json_error(
+                                    session,
+                                    StatusCode::BAD_GATEWAY,
+                                    "provider_adapter_error",
+                                    format!("provider adapter failed: {error:?}"),
+                                    &ctx.request_id,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        };
+                        return write_json_response(
+                            session,
+                            response.status,
+                            &normalized.body,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+
+                    write_streaming_response(
+                        session,
+                        response.status,
+                        &response.content_type,
+                        response.initial_body,
+                        response.body,
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        StatusCode::BAD_GATEWAY,
+                        "provider_dispatch_error",
+                        format!("provider dispatch failed: {error}"),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            };
+        }
 
         match dispatch_provider_request(&prepared) {
             Ok(response) => {

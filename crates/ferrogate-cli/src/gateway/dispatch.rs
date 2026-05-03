@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result as AnyResult};
 use http::{StatusCode, Uri};
+use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use std::{
     io::{Read, Write},
     net::TcpStream,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -15,6 +17,27 @@ pub(super) struct ProviderHttpResponse {
     pub(super) body: Vec<u8>,
 }
 
+pub(super) struct ProviderStreamingResponse {
+    pub(super) status: StatusCode,
+    pub(super) content_type: String,
+    pub(super) initial_body: Vec<u8>,
+    pub(super) body: ProviderBodyReader,
+}
+
+pub(super) enum ProviderBodyReader {
+    Http(TcpStream),
+    Https(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
+
+impl Read for ProviderBodyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Http(stream) => stream.read(buffer),
+            Self::Https(stream) => stream.read(buffer),
+        }
+    }
+}
+
 pub(super) fn dispatch_provider_request(
     request: &ProviderHttpRequest,
 ) -> AnyResult<ProviderHttpResponse> {
@@ -25,6 +48,77 @@ pub(super) fn dispatch_provider_request(
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
+    match target.scheme {
+        ProviderScheme::Http => send_provider_http_request(&mut stream, &target, request, &body),
+        ProviderScheme::Https => {
+            let server_name = ServerName::try_from(target.host.clone())
+                .with_context(|| format!("invalid provider TLS server name {}", target.host))?;
+            let connection = ClientConnection::new(tls_client_config()?, server_name)
+                .context("failed to initialize provider TLS client")?;
+            let mut tls_stream = StreamOwned::new(connection, stream);
+            send_provider_http_request(&mut tls_stream, &target, request, &body)
+        }
+    }
+}
+
+pub(super) fn dispatch_provider_streaming_request(
+    request: &ProviderHttpRequest,
+) -> AnyResult<ProviderStreamingResponse> {
+    let target = parse_provider_target(&request.endpoint)?;
+    let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
+    let mut stream = TcpStream::connect((target.host.as_str(), target.port))
+        .with_context(|| format!("failed to connect provider {}", target.authority))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+
+    match target.scheme {
+        ProviderScheme::Http => {
+            write_provider_http_request(&mut stream, &target, request, &body)?;
+            let (status, content_type, initial_body) = read_provider_response_head(&mut stream)?;
+            Ok(ProviderStreamingResponse {
+                status,
+                content_type,
+                initial_body,
+                body: ProviderBodyReader::Http(stream),
+            })
+        }
+        ProviderScheme::Https => {
+            let server_name = ServerName::try_from(target.host.clone())
+                .with_context(|| format!("invalid provider TLS server name {}", target.host))?;
+            let connection = ClientConnection::new(tls_client_config()?, server_name)
+                .context("failed to initialize provider TLS client")?;
+            let mut tls_stream = StreamOwned::new(connection, stream);
+            write_provider_http_request(&mut tls_stream, &target, request, &body)?;
+            let (status, content_type, initial_body) =
+                read_provider_response_head(&mut tls_stream)?;
+            Ok(ProviderStreamingResponse {
+                status,
+                content_type,
+                initial_body,
+                body: ProviderBodyReader::Https(Box::new(tls_stream)),
+            })
+        }
+    }
+}
+
+fn send_provider_http_request<S: Read + Write>(
+    stream: &mut S,
+    target: &ProviderTarget,
+    request: &ProviderHttpRequest,
+    body: &[u8],
+) -> AnyResult<ProviderHttpResponse> {
+    write_provider_http_request(stream, target, request, body)?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    parse_provider_response(&raw)
+}
+
+fn write_provider_http_request<S: Write>(
+    stream: &mut S,
+    target: &ProviderTarget,
+    request: &ProviderHttpRequest,
+    body: &[u8],
+) -> AnyResult<()> {
     write!(
         stream,
         "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
@@ -41,15 +135,48 @@ pub(super) fn dispatch_provider_request(
         )?;
     }
     stream.write_all(b"\r\n")?;
-    stream.write_all(&body)?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    Ok(())
+}
 
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    parse_provider_response(&raw)
+fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
+    static TLS_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    if let Some(config) = TLS_CLIENT_CONFIG.get() {
+        return Ok(Arc::clone(config));
+    }
+
+    let config = build_tls_client_config()?;
+    let _ = TLS_CLIENT_CONFIG.set(Arc::clone(&config));
+    Ok(TLS_CLIENT_CONFIG.get().map(Arc::clone).unwrap_or(config))
+}
+
+fn build_tls_client_config() -> AnyResult<Arc<ClientConfig>> {
+    let mut roots = RootCertStore::empty();
+    for cert in rustls_native_certs::load_native_certs()
+        .context("failed to load platform native certificates")?
+    {
+        roots
+            .add(cert)
+            .context("failed to add platform native certificate")?;
+    }
+
+    Ok(Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderScheme {
+    Http,
+    Https,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProviderTarget {
+    scheme: ProviderScheme,
     host: String,
     port: u16,
     authority: String,
@@ -63,15 +190,21 @@ fn parse_provider_target(raw: &str) -> AnyResult<ProviderTarget> {
     let scheme = uri
         .scheme_str()
         .ok_or_else(|| anyhow::anyhow!("provider endpoint must include scheme"))?;
-    if scheme != "http" {
-        bail!("provider dispatch currently supports http endpoints only");
-    }
+    let scheme = match scheme {
+        "http" => ProviderScheme::Http,
+        "https" => ProviderScheme::Https,
+        other => bail!("provider dispatch supports http and https endpoints only, got {other}"),
+    };
     let authority = uri
         .authority()
         .ok_or_else(|| anyhow::anyhow!("provider endpoint must include authority"))?;
     let host = authority.host().to_string();
-    let port = authority.port_u16().unwrap_or(80);
-    let authority = if port == 80 {
+    let default_port = match scheme {
+        ProviderScheme::Http => 80,
+        ProviderScheme::Https => 443,
+    };
+    let port = authority.port_u16().unwrap_or(default_port);
+    let authority = if port == default_port {
         host.clone()
     } else {
         format!("{host}:{port}")
@@ -81,6 +214,7 @@ fn parse_provider_target(raw: &str) -> AnyResult<ProviderTarget> {
         .map(|value| value.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     Ok(ProviderTarget {
+        scheme,
         host,
         port,
         authority,
@@ -95,6 +229,42 @@ fn parse_provider_response(raw: &[u8]) -> AnyResult<ProviderHttpResponse> {
         .ok_or_else(|| anyhow::anyhow!("provider response missing header terminator"))?;
     let header_bytes = &raw[..split];
     let body = raw[split + 4..].to_vec();
+    let (status, content_type) = parse_provider_response_head(header_bytes)?;
+    Ok(ProviderHttpResponse {
+        status,
+        content_type,
+        body,
+    })
+}
+
+fn read_provider_response_head<S: Read>(
+    stream: &mut S,
+) -> AnyResult<(StatusCode, String, Vec<u8>)> {
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    let split = loop {
+        let read = stream
+            .read(&mut buffer)
+            .context("failed to read provider response head")?;
+        if read == 0 {
+            bail!("provider response missing header terminator");
+        }
+        raw.extend_from_slice(&buffer[..read]);
+        if raw.len() > 64 * 1024 {
+            bail!("provider response headers exceed 64KiB");
+        }
+        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break split;
+        }
+    };
+
+    let header_bytes = &raw[..split];
+    let initial_body = raw[split + 4..].to_vec();
+    let (status, content_type) = parse_provider_response_head(header_bytes)?;
+    Ok((status, content_type, initial_body))
+}
+
+fn parse_provider_response_head(header_bytes: &[u8]) -> AnyResult<(StatusCode, String)> {
     let headers = String::from_utf8_lossy(header_bytes);
     let mut lines = headers.lines();
     let status_line = lines
@@ -114,11 +284,8 @@ fn parse_provider_response(raw: &[u8]) -> AnyResult<ProviderHttpResponse> {
             })
         })
         .unwrap_or_else(|| "application/json".to_string());
-    Ok(ProviderHttpResponse {
-        status: StatusCode::from_u16(status_code).context("provider returned invalid status")?,
-        content_type,
-        body,
-    })
+    let status = StatusCode::from_u16(status_code).context("provider returned invalid status")?;
+    Ok((status, content_type))
 }
 
 #[cfg(test)]
@@ -134,6 +301,7 @@ mod tests {
         assert_eq!(target.port, 9000);
         assert_eq!(target.authority, "127.0.0.1:9000");
         assert_eq!(target.path_query, "/v1/chat/completions?trace=1");
+        assert_eq!(target.scheme, ProviderScheme::Http);
     }
 
     #[test]
@@ -144,15 +312,39 @@ mod tests {
         assert_eq!(target.port, 80);
         assert_eq!(target.authority, "api.example.test");
         assert_eq!(target.path_query, "/");
+        assert_eq!(target.scheme, ProviderScheme::Http);
     }
 
     #[test]
-    fn rejects_https_provider_target_until_tls_dispatch_exists() {
-        let error = parse_provider_target("https://api.example.test/v1")
+    fn parses_https_provider_target() {
+        let target = parse_provider_target("https://api.example.test/v1/chat/completions").unwrap();
+
+        assert_eq!(target.host, "api.example.test");
+        assert_eq!(target.port, 443);
+        assert_eq!(target.authority, "api.example.test");
+        assert_eq!(target.path_query, "/v1/chat/completions");
+        assert_eq!(target.scheme, ProviderScheme::Https);
+    }
+
+    #[test]
+    fn parses_https_provider_target_with_custom_port() {
+        let target =
+            parse_provider_target("https://api.example.test:9443/v1/chat/completions").unwrap();
+
+        assert_eq!(target.host, "api.example.test");
+        assert_eq!(target.port, 9443);
+        assert_eq!(target.authority, "api.example.test:9443");
+        assert_eq!(target.path_query, "/v1/chat/completions");
+        assert_eq!(target.scheme, ProviderScheme::Https);
+    }
+
+    #[test]
+    fn rejects_unsupported_provider_target_scheme() {
+        let error = parse_provider_target("ftp://api.example.test/v1")
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("http endpoints only"));
+        assert!(error.contains("supports http and https endpoints only"));
     }
 
     #[test]

@@ -2,8 +2,9 @@ mod support;
 
 use std::{
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     thread,
+    time::{Duration, Instant},
 };
 
 use support::{free_addr, http_request, spawn_provider_upstream, start_gateway, wait_for_gateway};
@@ -160,7 +161,9 @@ allowed_models = ["fast-chat"]
         r#"{"model":"fast-chat","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
     );
     assert!(chat.contains("200 OK"));
-    assert!(chat.contains("content-type: text/event-stream"));
+    assert!(chat
+        .to_ascii_lowercase()
+        .contains("content-type: text/event-stream"));
     assert!(chat.contains("data: {\"choices\""));
     assert!(chat.contains("data: [DONE]"));
     assert!(!chat.contains("provider-secret"));
@@ -177,6 +180,85 @@ allowed_models = ["fast-chat"]
     assert!(!provider_request.contains("client-secret"));
 }
 
+#[test]
+fn openai_chat_streaming_sse_forwards_first_chunk_before_provider_finishes() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_slow_sse_provider_upstream();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(&gateway_addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let body =
+        r#"{"model":"fast-chat","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+    write!(
+        stream,
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer client-secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .unwrap();
+
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 256];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        assert!(read > 0, "gateway closed before first SSE chunk");
+        response.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&response);
+        if text.contains("data: {\"choices\"") {
+            assert!(
+                started.elapsed() < Duration::from_millis(900),
+                "first SSE chunk was buffered until provider completion"
+            );
+            assert!(!text.contains("data: [DONE]"));
+            break;
+        }
+    }
+
+    let mut rest = String::new();
+    stream.read_to_string(&mut rest).unwrap();
+    assert!(rest.contains("data: [DONE]"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_request = provider_handle.join().unwrap();
+    assert!(provider_request.contains(r#""stream":true"#));
+}
+
 fn spawn_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -191,6 +273,28 @@ fn spawn_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
             body
         )
         .unwrap();
+        request
+    });
+    (addr, handle)
+}
+
+fn spawn_slow_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream
+            .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n")
+            .unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(1200));
+        stream.write_all(b"data: [DONE]\n\n").unwrap();
         request
     });
     (addr, handle)
