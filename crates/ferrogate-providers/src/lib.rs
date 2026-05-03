@@ -2,6 +2,7 @@
 
 mod anthropic;
 mod gemini;
+mod grok;
 mod models;
 mod openai;
 mod registry;
@@ -9,6 +10,7 @@ mod types;
 
 pub use anthropic::AnthropicAdapter;
 pub use gemini::GeminiAdapter;
+pub use grok::GrokAdapter;
 pub use models::{
     ModelRegistry, ModelRegistryEntry, ModelRegistryError, ModelRoute, ResolvedModelRoute,
 };
