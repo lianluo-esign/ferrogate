@@ -1,12 +1,13 @@
 use crate::{
-    AdapterError, AnthropicAdapter, ChatCompletionPlan, OpenAiCompatibleAdapter, ProviderAdapter,
-    ProviderConfig, ProviderErrorResponse, ProviderHttpRequest, ProviderUsage,
+    AdapterError, AnthropicAdapter, ChatCompletionPlan, GeminiAdapter, OpenAiCompatibleAdapter,
+    ProviderAdapter, ProviderConfig, ProviderErrorResponse, ProviderHttpRequest, ProviderUsage,
 };
 
 #[derive(Debug, Default, Clone)]
 pub struct ProviderAdapterRegistry {
     openai_compatible: OpenAiCompatibleAdapter,
     anthropic: AnthropicAdapter,
+    gemini: GeminiAdapter,
 }
 
 impl ProviderAdapterRegistry {
@@ -14,6 +15,7 @@ impl ProviderAdapterRegistry {
         match normalize_kind(kind).as_str() {
             "openai" | "openai-compatible" => Ok(&self.openai_compatible),
             "anthropic" => Ok(&self.anthropic),
+            "gemini" => Ok(&self.gemini),
             other => Err(AdapterError::UnsupportedProviderKind {
                 kind: other.to_string(),
             }),
@@ -85,7 +87,7 @@ mod tests {
     #[test]
     fn rejects_unknown_provider_kind_before_runtime_dispatch() {
         let registry = ProviderAdapterRegistry::default();
-        let error = match registry.adapter_for("gemini") {
+        let error = match registry.adapter_for("grok") {
             Ok(adapter) => panic!("unexpected provider adapter {}", adapter.kind()),
             Err(error) => error,
         };
@@ -93,7 +95,7 @@ mod tests {
         assert_eq!(
             error,
             AdapterError::UnsupportedProviderKind {
-                kind: "gemini".into()
+                kind: "grok".into()
             }
         );
     }
@@ -145,6 +147,31 @@ mod tests {
 
         assert_eq!(prepared.endpoint, "https://api.openai.example/v1/messages");
         assert_eq!(prepared.body["model"], "claude-3-5-sonnet-latest");
+    }
+
+    #[test]
+    fn prepares_gemini_chat_completions_through_registry() {
+        let registry = ProviderAdapterRegistry::default();
+        let prepared = registry
+            .prepare_chat_completions(
+                provider("gemini"),
+                ChatCompletionPlan {
+                    logical_model: "flash-chat".into(),
+                    provider_model: "gemini-2.5-flash".into(),
+                    stream: false,
+                    body: json!({
+                        "model": "flash-chat",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://api.openai.example/v1/models/gemini-2.5-flash:generateContent"
+        );
+        assert_eq!(prepared.body["contents"][0]["parts"][0]["text"], "hello");
     }
 
     #[test]

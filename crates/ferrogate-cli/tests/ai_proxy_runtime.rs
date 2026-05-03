@@ -259,6 +259,77 @@ allowed_models = ["fast-chat"]
     assert!(provider_request.contains(r#""stream":true"#));
 }
 
+#[test]
+fn gemini_chat_non_streaming_dispatch_converts_request_shape() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5,"totalTokenCount":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "gemini"
+kind = "gemini"
+base_url = "http://{provider_addr}/v1beta"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "flash-chat"
+provider = "gemini"
+provider_model = "gemini-2.5-flash"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["flash-chat"]
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"flash-chat","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hello"}],"max_tokens":64}"#,
+    );
+    assert!(chat.contains("200 OK"));
+    assert!(chat.contains("\"usageMetadata\""));
+    assert!(!chat.contains("provider-secret"));
+    assert!(!chat.contains("client-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert!(provider_requests[0]
+        .contains("POST /v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1"));
+    assert!(provider_requests[0].contains("x-goog-api-key: provider-secret"));
+    assert!(provider_requests[0].contains(r#""role":"user""#));
+    assert!(provider_requests[0].contains(r#""text":"hello""#));
+    assert!(provider_requests[0].contains(r#""systemInstruction""#));
+    assert!(provider_requests[0].contains(r#""maxOutputTokens":64"#));
+    assert!(!provider_requests[0].contains("flash-chat"));
+    assert!(!provider_requests[0].contains("client-secret"));
+}
+
 fn spawn_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();

@@ -1,12 +1,14 @@
 //! AI provider adapter boundaries.
 
 mod anthropic;
+mod gemini;
 mod models;
 mod openai;
 mod registry;
 mod types;
 
 pub use anthropic::AnthropicAdapter;
+pub use gemini::GeminiAdapter;
 pub use models::{
     ModelRegistry, ModelRegistryEntry, ModelRegistryError, ModelRoute, ResolvedModelRoute,
 };
