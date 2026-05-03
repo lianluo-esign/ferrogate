@@ -9,6 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+ferrogate-core = { path = "../ferrogate-core" }
 serde.workspace = true
 
 [features]

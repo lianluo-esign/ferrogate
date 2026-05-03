@@ -694,6 +694,7 @@ dependencies = [
 name = "ferrogate-billing"
 version = "0.1.0"
 dependencies = [
+ "ferrogate-core",
  "serde",
 ]
 
@@ -778,6 +779,7 @@ dependencies = [
 name = "ferrogate-storage"
 version = "0.1.0"
 dependencies = [
+ "ferrogate-billing",
  "ferrogate-core",
 ]
 

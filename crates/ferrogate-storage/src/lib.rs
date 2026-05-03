@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
 
 pub trait Repository<T> {
@@ -14,6 +15,17 @@ pub trait ApiKeyRepository: Repository<StoredApiKey> {}
 pub trait TenantRepository: Repository<StoredTenant> {}
 
 pub trait PolicyRepository: Repository<StoredPolicyRule> {}
+
+pub trait RequestLogRepository: AppendRepository<StoredRequestLog> {}
+
+pub trait BillingEventRepository: AppendRepository<BillingEvent> {}
+
+pub trait UsageAggregateRepository: Repository<StoredUsageAggregate> {}
+
+pub trait AppendRepository<T> {
+    fn append(&mut self, record: T);
+    fn list(&self) -> Vec<T>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredApiKey {
@@ -52,6 +64,34 @@ pub struct StoredPolicyRule {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRequestLog {
+    pub request_id: String,
+    pub trace_id: Option<String>,
+    pub tenant: TenantContext,
+    pub route: Option<String>,
+    pub provider: Option<String>,
+    pub logical_model: Option<String>,
+    pub provider_model: Option<String>,
+    pub status_code: u16,
+    pub error_code: Option<String>,
+    pub prompt_recorded: bool,
+    pub response_recorded: bool,
+    pub started_at_unix: Option<u64>,
+    pub completed_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredUsageAggregate {
+    pub id: String,
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub logical_model: String,
+    pub provider: String,
+    pub usage: TokenUsage,
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryRepository<T> {
     records: HashMap<String, T>,
@@ -84,6 +124,35 @@ impl ApiKeyRepository for InMemoryRepository<StoredApiKey> {}
 impl TenantRepository for InMemoryRepository<StoredTenant> {}
 
 impl PolicyRepository for InMemoryRepository<StoredPolicyRule> {}
+
+impl UsageAggregateRepository for InMemoryRepository<StoredUsageAggregate> {}
+
+#[derive(Debug, Default)]
+pub struct InMemoryAppendRepository<T> {
+    records: Vec<T>,
+}
+
+impl<T> InMemoryAppendRepository<T> {
+    pub fn new() -> Self {
+        Self {
+            records: Vec::new(),
+        }
+    }
+}
+
+impl<T: Clone> AppendRepository<T> for InMemoryAppendRepository<T> {
+    fn append(&mut self, record: T) {
+        self.records.push(record);
+    }
+
+    fn list(&self) -> Vec<T> {
+        self.records.clone()
+    }
+}
+
+impl RequestLogRepository for InMemoryAppendRepository<StoredRequestLog> {}
+
+impl BillingEventRepository for InMemoryAppendRepository<BillingEvent> {}
 
 #[cfg(test)]
 mod tests {
@@ -142,5 +211,65 @@ mod tests {
 
         let rule = repository.get("deny-fast-chat").unwrap();
         assert_eq!(rule.providers, vec!["openai"]);
+    }
+
+    #[test]
+    fn in_memory_append_repository_keeps_request_logs_in_order() {
+        let mut repository = InMemoryAppendRepository::new();
+        repository.append(StoredRequestLog {
+            request_id: "fg-1".into(),
+            trace_id: Some("trace-1".into()),
+            tenant: TenantContext::default(),
+            route: Some("openai.chat.completions".into()),
+            provider: Some("openai".into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: false,
+            response_recorded: false,
+            started_at_unix: Some(1),
+            completed_at_unix: Some(2),
+        });
+        repository.append(StoredRequestLog {
+            request_id: "fg-2".into(),
+            trace_id: Some("trace-2".into()),
+            tenant: TenantContext::default(),
+            route: Some("openai.chat.completions".into()),
+            provider: Some("gemini".into()),
+            logical_model: Some("flash-chat".into()),
+            provider_model: Some("gemini-2.5-flash".into()),
+            status_code: 429,
+            error_code: Some("rate_limit_exceeded".into()),
+            prompt_recorded: false,
+            response_recorded: false,
+            started_at_unix: Some(3),
+            completed_at_unix: Some(4),
+        });
+
+        let logs = repository.list();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].request_id, "fg-1");
+        assert_eq!(logs[1].error_code.as_deref(), Some("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn usage_aggregate_repository_stores_tenant_model_totals() {
+        let mut repository = InMemoryRepository::new();
+        repository.insert(
+            "org:project:key:fast-chat:openai",
+            StoredUsageAggregate {
+                id: "org:project:key:fast-chat:openai".into(),
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key_dev".into()),
+                logical_model: "fast-chat".into(),
+                provider: "openai".into(),
+                usage: TokenUsage::new(3, 5, 8),
+            },
+        );
+
+        let aggregate = repository.get("org:project:key:fast-chat:openai").unwrap();
+        assert_eq!(aggregate.usage.total_tokens, 8);
     }
 }
