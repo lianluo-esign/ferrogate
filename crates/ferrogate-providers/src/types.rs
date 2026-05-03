@@ -70,7 +70,20 @@ pub enum AdapterError {
     InvalidRequest { message: String },
 }
 
-pub trait ProviderAdapter {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderErrorResponse {
+    pub status: u16,
+    pub body: Value,
+}
+
+pub trait ProviderAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
 
     fn prepare_chat_completions(
@@ -78,4 +91,14 @@ pub trait ProviderAdapter {
         provider: ProviderConfig,
         request: ChatCompletionPlan,
     ) -> Result<ProviderHttpRequest, AdapterError>;
+
+    fn normalize_error_response(
+        &self,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+        request_id: &str,
+    ) -> ProviderErrorResponse;
+
+    fn extract_usage(&self, body: &[u8]) -> Option<ProviderUsage>;
 }

@@ -7,6 +7,10 @@ use std::{
 };
 
 use crate::config::{Config, Model, Provider, Upstream};
+use ferrogate_providers::{
+    AdapterError, ChatCompletionPlan, ProviderAdapterRegistry, ProviderConfig,
+    ProviderErrorResponse, ProviderHttpRequest, ProviderUsage,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
@@ -14,6 +18,7 @@ pub(crate) struct AppState {
     pub(crate) providers: Arc<HashMap<String, Provider>>,
     pub(crate) models: Arc<HashMap<String, Model>>,
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
+    provider_adapters: Arc<ProviderAdapterRegistry>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     request_ids: Arc<AtomicU64>,
 }
@@ -49,6 +54,7 @@ impl AppState {
             providers: Arc::new(providers),
             models: Arc::new(models),
             upstreams: Arc::new(upstreams),
+            provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
             upstream_counters: Arc::new(upstream_counters),
             request_ids: Arc::new(AtomicU64::new(1)),
         }
@@ -61,6 +67,55 @@ impl AppState {
 
     pub(crate) fn auth_required(&self) -> bool {
         !self.config.api_keys.is_empty()
+    }
+
+    pub(crate) fn prepare_chat_completions(
+        &self,
+        provider: &Provider,
+        model: &Model,
+        logical_model: String,
+        stream: bool,
+        body: serde_json::Value,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.provider_adapters.prepare_chat_completions(
+            ProviderConfig {
+                name: provider.name.clone(),
+                kind: provider.kind.clone(),
+                base_url: provider.base_url.clone(),
+                api_key: provider.api_key_value(),
+            },
+            ChatCompletionPlan {
+                logical_model,
+                provider_model: model.provider_model.clone(),
+                stream,
+                body,
+            },
+        )
+    }
+
+    pub(crate) fn normalize_provider_error(
+        &self,
+        provider_kind: &str,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+        request_id: &str,
+    ) -> Result<ProviderErrorResponse, AdapterError> {
+        self.provider_adapters.normalize_error_response(
+            provider_kind,
+            status,
+            content_type,
+            body,
+            request_id,
+        )
+    }
+
+    pub(crate) fn extract_provider_usage(
+        &self,
+        provider_kind: &str,
+        body: &[u8],
+    ) -> Result<Option<ProviderUsage>, AdapterError> {
+        self.provider_adapters.extract_usage(provider_kind, body)
     }
 
     pub(crate) fn select_upstream_url(&self, upstream: &Upstream) -> Option<String> {

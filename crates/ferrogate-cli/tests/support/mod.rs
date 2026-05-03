@@ -63,6 +63,16 @@ pub fn spawn_provider_upstream(
     count: usize,
     response_body: &'static str,
 ) -> (String, JoinHandle<Vec<String>>) {
+    spawn_provider_upstream_response(count, "200 OK", "application/json", response_body)
+}
+
+#[allow(dead_code)]
+pub fn spawn_provider_upstream_response(
+    count: usize,
+    status: &'static str,
+    content_type: &'static str,
+    response_body: &'static str,
+) -> (String, JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let handle = thread::spawn(move || {
@@ -73,7 +83,7 @@ pub fn spawn_provider_upstream(
             requests.push(request);
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
                 response_body
             )

@@ -1,14 +1,11 @@
 use http::{HeaderMap, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Deserialize;
-
-use ferrogate_providers::{
-    ChatCompletionPlan, OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig,
-};
+use tracing::info;
 
 use crate::{
     auth::authenticate,
-    responses::{write_json_error, write_raw_response},
+    responses::{write_json_error, write_json_response, write_raw_response},
 };
 
 use super::{
@@ -110,20 +107,12 @@ impl FerroGateway {
             return Ok(());
         };
 
-        let adapter = OpenAiCompatibleAdapter;
-        let prepared = match adapter.prepare_chat_completions(
-            ProviderConfig {
-                name: provider.name.clone(),
-                kind: provider.kind.clone(),
-                base_url: provider.base_url.clone(),
-                api_key: provider.api_key_value(),
-            },
-            ChatCompletionPlan {
-                logical_model: request.model.clone(),
-                provider_model: model.provider_model.clone(),
-                stream: request.stream,
-                body: body_json,
-            },
+        let prepared = match self.state.prepare_chat_completions(
+            provider,
+            model,
+            request.model.clone(),
+            request.stream,
+            body_json,
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -141,6 +130,52 @@ impl FerroGateway {
 
         match dispatch_provider_request(&prepared) {
             Ok(response) => {
+                if response.status.is_client_error() || response.status.is_server_error() {
+                    let normalized = match self.state.normalize_provider_error(
+                        &provider.kind,
+                        response.status.as_u16(),
+                        &response.content_type,
+                        &response.body,
+                        &ctx.request_id,
+                    ) {
+                        Ok(normalized) => normalized,
+                        Err(error) => {
+                            write_json_error(
+                                session,
+                                StatusCode::BAD_GATEWAY,
+                                "provider_adapter_error",
+                                format!("provider adapter failed: {error:?}"),
+                                &ctx.request_id,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+                    return write_json_response(
+                        session,
+                        response.status,
+                        &normalized.body,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+
+                if let Ok(Some(usage)) = self
+                    .state
+                    .extract_provider_usage(&provider.kind, &response.body)
+                {
+                    info!(
+                        request_id = %ctx.request_id,
+                        logical_model = %request.model,
+                        provider = %provider.name,
+                        provider_model = %model.provider_model,
+                        prompt_tokens = ?usage.prompt_tokens,
+                        completion_tokens = ?usage.completion_tokens,
+                        total_tokens = ?usage.total_tokens,
+                        "provider usage extracted"
+                    );
+                }
+
                 write_raw_response(
                     session,
                     response.status,

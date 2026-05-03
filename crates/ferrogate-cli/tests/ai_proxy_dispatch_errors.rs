@@ -6,7 +6,9 @@ use std::{
     thread,
 };
 
-use support::{free_addr, http_request, start_gateway, wait_for_gateway};
+use support::{
+    free_addr, http_request, spawn_provider_upstream_response, start_gateway, wait_for_gateway,
+};
 
 fn write_config(path: &std::path::Path, gateway_addr: &str, base_url: &str) {
     std::fs::write(
@@ -164,4 +166,39 @@ fn chat_maps_malformed_provider_response_to_502() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
     provider.join().unwrap();
+}
+
+#[test]
+fn chat_normalizes_provider_error_response() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream_response(
+        1,
+        "429 Too Many Requests",
+        "application/json",
+        r#"{"error":{"message":"provider rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_config(
+        &config,
+        &gateway_addr,
+        &format!("http://{provider_addr}/v1"),
+    );
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = chat(&gateway_addr);
+    assert!(response.contains("429 Too Many Requests"));
+    assert!(response.contains("\"type\":\"provider_error\""));
+    assert!(response.contains("\"provider_type\":\"rate_limit_error\""));
+    assert!(response.contains("\"code\":\"rate_limit_exceeded\""));
+    assert!(response.contains("\"provider_status\":429"));
+    assert!(response.contains("\"request_id\":\"fg-"));
+    assert!(!response.contains("chat-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
 }
