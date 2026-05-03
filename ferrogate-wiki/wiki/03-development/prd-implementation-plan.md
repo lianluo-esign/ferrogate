@@ -47,7 +47,7 @@ tags:
 | P1 | Pingora 通用 API Gateway Runtime 垂直切片 | 已完成 | 100% | 已实现配置驱动 Pingora 反向代理、路由匹配、upstream pool、header/path rewrite、healthz、日志和测试 |
 | P2 | 配置校验、生命周期和平滑重载 | 进行中 | 80% | 已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip |
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
-| P4 | 虚拟 API Key、租户上下文与 Policy MVP | 进行中 | 95% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界；安全日志脱敏专项复核待收尾 |
+| P4 | 虚拟 API Key、租户上下文与 Policy MVP | 已完成 | 100% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界 |
 | P5 | 多 Provider Adapter 与 Model Registry | 未开始 | 0% | 待实现多 Provider 抽象和逻辑模型路由 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 未开始 | 0% | 待集成 OpenTelemetry 和 usage/billing 存储接口 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
@@ -270,11 +270,11 @@ npm run wiki:build
 
 - [x] 被禁用、过期、超限、无权限 Key 会被拒绝。（当前覆盖 disabled、expired、`request_limit_per_minute = 0`、`monthly_token_budget = 0`、scope/model/provider/policy deny。）
 - [x] 请求上下文包含 organization_id、project_id、api_key_id 等租户字段。
-- [ ] 所有安全相关日志脱敏。
+- [x] 所有安全相关日志脱敏。（已复核 tracing 字段仅记录 request_id、tenant/api_key id、模型/Provider 名称、预算数值、usage 与错误类型，不记录 client/provider secret 或 Authorization；命令/响应测试覆盖 secret 不回显。）
 - [x] Policy 决策有单元测试。
 - [x] OpenAI SDK 请求在无 Key 或无权限时返回统一错误。
 
-**进度**：95%。
+**进度**：100%。
 
 **验收结果**：
 
@@ -290,6 +290,7 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-auth -- --nocapt
 PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-auth --all-targets --all-features -- -D warnings
 PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-storage --all-targets --all-features -- -D warnings
 PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targets --all-features -- -D warnings
+rg -n "(info!|warn!|error!|debug!|trace!)" crates/ferrogate-cli/src crates/ferrogate-providers/src crates/ferrogate-auth/src crates/ferrogate-policy/src crates/ferrogate-storage/src -S
 ```
 
 2026-05-03 本轮启动 P4：`ApiKey` 配置新增 `allowed_providers` 与 `expires_at_unix`，`authenticate` 会对 disabled、expired、budget exhausted、scope deny 进行统一错误拒绝；`chat` 请求路径在 model/provider 解析后执行 Provider allowlist，并在 route planning log 中记录 `api_key_id`、`organization_id`、`project_id`、logical/provider model 和 stream 标记，避免记录 secret。
@@ -303,6 +304,8 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targ
 2026-05-03 本轮继续补齐限流占位：`ApiKey` 配置新增 `request_limit_per_minute`，当值为 `0` 时 AI Proxy 在 provider dispatch 前返回 `rate_limit_exceeded`；这与 `monthly_token_budget = 0` 一起作为 P4 的本地策略占位，真实计数窗口待 P6。
 
 2026-05-03 本轮继续补齐 RBAC 领域模型：`ferrogate-auth` 新增 `Organization`、`Team`、`Project`、`User`、`ServiceAccount`、`Role`、`Permission`、`PolicyBinding` 与 `PolicySubject`，为后续 Admin API、Storage repository 和控制面权限配置复用。
+
+2026-05-03 本轮完成安全日志脱敏复核：当前 tracing 调用不输出 secret、Authorization、`key`、`key_hash` 或 provider API key；`hash-key`、`validate`、`reload`、AI Proxy 鉴权与 provider dispatch 测试均覆盖响应/命令输出不回显 secret。
 
 ## 8. P5 多 Provider Adapter 与 Model Registry
 
