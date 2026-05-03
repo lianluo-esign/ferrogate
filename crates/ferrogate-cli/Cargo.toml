@@ -21,6 +21,8 @@ async-trait.workspace = true
 bytes.workspace = true
 clap.workspace = true
 ferrogate-config = { path = "../ferrogate-config" }
+ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-policy = { path = "../ferrogate-policy" }
 ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
 http.workspace = true

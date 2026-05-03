@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{config::ApiKey, state::AppState};
+use ferrogate_core::TenantContext;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AuthContext {
@@ -35,6 +36,16 @@ impl AuthContext {
 
     pub(crate) fn can_use_provider(&self, provider: &str) -> bool {
         self.allowed_providers.is_empty() || self.allowed_providers.contains(provider)
+    }
+
+    pub(crate) fn tenant_context(&self) -> TenantContext {
+        TenantContext {
+            organization_id: self.organization_id.clone(),
+            team_id: self.team_id.clone(),
+            project_id: self.project_id.clone(),
+            user_id: self.user_id.clone(),
+            api_key_id: self.api_key_id.clone(),
+        }
     }
 }
 

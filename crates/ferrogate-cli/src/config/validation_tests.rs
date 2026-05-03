@@ -115,6 +115,46 @@ fn rejects_api_key_with_unknown_allowed_model() {
 }
 
 #[test]
+fn rejects_api_key_with_unknown_allowed_provider() {
+    let mut key = api_key("key_dev", "Development key");
+    key.allowed_providers = vec!["missing-provider".into()];
+    let config = Config {
+        api_keys: vec![key],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field api_keys[0].allowed_providers"));
+    assert!(error.contains("missing-provider"));
+}
+
+#[test]
+fn rejects_policy_with_unknown_references() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        policies: vec![PolicyRule {
+            name: "deny missing".into(),
+            effect: "deny".into(),
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["missing-key".into()],
+            models: vec!["missing-model".into()],
+            providers: vec!["missing-provider".into()],
+            code: "policy_denied".into(),
+            message: "blocked".into(),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field policies[0].api_key_ids"));
+    assert!(error.contains("missing-key"));
+}
+
+#[test]
 fn rejects_route_path_prefix_without_leading_slash() {
     let config = Config {
         upstreams: vec![upstream()],
@@ -149,6 +189,29 @@ fn upstream() -> Upstream {
         name: "backend".into(),
         url: Some("http://127.0.0.1:8081".into()),
         urls: vec![],
+        enabled: true,
+    }
+}
+
+fn provider() -> Provider {
+    Provider {
+        name: "openai".into(),
+        kind: "openai".into(),
+        base_url: "http://127.0.0.1:8081/v1".into(),
+        api_key_env: None,
+        enabled: true,
+    }
+}
+
+fn model() -> Model {
+    Model {
+        name: "fast-chat".into(),
+        provider: "openai".into(),
+        provider_model: "gpt-4o-mini".into(),
+        capabilities: vec![],
+        context_window: None,
+        input_price_per_1m: None,
+        output_price_per_1m: None,
         enabled: true,
     }
 }

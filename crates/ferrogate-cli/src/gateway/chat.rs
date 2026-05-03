@@ -10,6 +10,8 @@ use crate::{
         write_json_error, write_json_response, write_raw_response, write_streaming_response,
     },
 };
+use ferrogate_core::RequestContext;
+use ferrogate_policy::PolicyDecision;
 
 use super::{
     body::read_request_body,
@@ -118,6 +120,28 @@ impl FerroGateway {
                 StatusCode::FORBIDDEN,
                 "provider_not_allowed",
                 format!("API key is not allowed to use provider {}", provider.name),
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let policy_request = RequestContext {
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            route: Some("openai.chat.completions".into()),
+            upstream: Some(provider.name.clone()),
+            tenant: auth.tenant_context(),
+        };
+        if let PolicyDecision::Deny { code, message } =
+            self.state
+                .evaluate_policy(&policy_request, Some(&request.model), Some(&provider.name))
+        {
+            write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                code,
+                message,
                 &ctx.request_id,
             )
             .await?;

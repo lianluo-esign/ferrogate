@@ -19,7 +19,8 @@ impl Config {
 
         let provider_names = self.validate_providers()?;
         let model_names = self.validate_models(&provider_names)?;
-        self.validate_api_keys(&model_names)?;
+        let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
+        self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
         Ok(())
@@ -73,7 +74,11 @@ impl Config {
         Ok(names)
     }
 
-    fn validate_api_keys(&self, model_names: &HashSet<&str>) -> AnyResult<()> {
+    fn validate_api_keys<'a>(
+        &'a self,
+        model_names: &HashSet<&str>,
+        provider_names: &HashSet<&str>,
+    ) -> AnyResult<HashSet<&'a str>> {
         let mut ids = HashSet::new();
         for (index, key) in self.api_keys.iter().enumerate() {
             if key.id.trim().is_empty() {
@@ -100,6 +105,66 @@ impl Config {
                         "field api_keys[{index}].allowed_models: api key {} allows unknown model {}",
                         key.id,
                         allowed_model
+                    );
+                }
+            }
+            for allowed_provider in &key.allowed_providers {
+                if !provider_names.contains(allowed_provider.as_str()) {
+                    bail!(
+                        "field api_keys[{index}].allowed_providers: api key {} allows unknown provider {}",
+                        key.id,
+                        allowed_provider
+                    );
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    fn validate_policies(
+        &self,
+        api_key_ids: &HashSet<&str>,
+        model_names: &HashSet<&str>,
+        provider_names: &HashSet<&str>,
+    ) -> AnyResult<()> {
+        let mut names = HashSet::new();
+        for (index, policy) in self.policies.iter().enumerate() {
+            if policy.name.trim().is_empty() {
+                bail!("field policies[{index}].name: cannot be empty");
+            }
+            if !names.insert(policy.name.as_str()) {
+                bail!(
+                    "field policies[{index}].name: duplicate policy name {}",
+                    policy.name
+                );
+            }
+            if !policy.effect.eq_ignore_ascii_case("deny") {
+                bail!("field policies[{index}].effect: only deny is supported in the MVP");
+            }
+            for api_key_id in &policy.api_key_ids {
+                if !api_key_ids.contains(api_key_id.as_str()) {
+                    bail!(
+                        "field policies[{index}].api_key_ids: policy {} references unknown api key {}",
+                        policy.name,
+                        api_key_id
+                    );
+                }
+            }
+            for model in &policy.models {
+                if !model_names.contains(model.as_str()) {
+                    bail!(
+                        "field policies[{index}].models: policy {} references unknown model {}",
+                        policy.name,
+                        model
+                    );
+                }
+            }
+            for provider in &policy.providers {
+                if !provider_names.contains(provider.as_str()) {
+                    bail!(
+                        "field policies[{index}].providers: policy {} references unknown provider {}",
+                        policy.name,
+                        provider
                     );
                 }
             }

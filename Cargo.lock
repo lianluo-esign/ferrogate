@@ -706,6 +706,8 @@ dependencies = [
  "bytes",
  "clap",
  "ferrogate-config",
+ "ferrogate-core",
+ "ferrogate-policy",
  "ferrogate-providers",
  "ferrogate-runtime",
  "http",

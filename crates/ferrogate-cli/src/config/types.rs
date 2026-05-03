@@ -13,6 +13,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) api_keys: Vec<ApiKey>,
     #[serde(default)]
+    pub(crate) policies: Vec<PolicyRule>,
+    #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
     pub(crate) upstreams: Vec<Upstream>,
@@ -92,6 +94,29 @@ pub(crate) struct ApiKey {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct PolicyRule {
+    pub(crate) name: String,
+    #[serde(default = "default_policy_effect")]
+    pub(crate) effect: String,
+    #[serde(default)]
+    pub(crate) organization_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) project_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) api_key_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) models: Vec<String>,
+    #[serde(default)]
+    pub(crate) providers: Vec<String>,
+    #[serde(default = "default_policy_code")]
+    pub(crate) code: String,
+    #[serde(default = "default_policy_message")]
+    pub(crate) message: String,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct TelemetryConfig {
     #[serde(default = "default_service_name")]
     pub(crate) service_name: String,
@@ -160,6 +185,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_policy_effect() -> String {
+    "deny".to_string()
+}
+
+fn default_policy_code() -> String {
+    "policy_denied".to_string()
+}
+
+fn default_policy_message() -> String {
+    "request denied by policy".to_string()
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
@@ -177,6 +214,7 @@ impl Default for Config {
             providers: Vec::new(),
             models: Vec::new(),
             api_keys: Vec::new(),
+            policies: Vec::new(),
             telemetry: TelemetryConfig::default(),
             upstreams: Vec::new(),
             routes: Vec::new(),

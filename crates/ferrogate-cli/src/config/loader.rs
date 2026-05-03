@@ -63,6 +63,7 @@ impl Config {
                 })
                 .collect(),
             api_keys: Vec::new(),
+            policies: Vec::new(),
             telemetry: TelemetryConfig::default(),
             upstreams: config
                 .upstreams

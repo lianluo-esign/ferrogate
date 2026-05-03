@@ -18,6 +18,6 @@ pub(crate) use self::secrets::resolve_env_placeholders;
 pub(crate) use self::snapshot::config_snapshot_id;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
-    AdminConfig, ApiKey, Config, HeaderMatcher, HeaderMutation, Model, Provider, RouteRule,
-    TelemetryConfig, Upstream,
+    AdminConfig, ApiKey, Config, HeaderMatcher, HeaderMutation, Model, PolicyRule, Provider,
+    RouteRule, TelemetryConfig, Upstream,
 };

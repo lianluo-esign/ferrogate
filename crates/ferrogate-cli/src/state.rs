@@ -6,7 +6,11 @@ use std::{
     },
 };
 
-use crate::config::{Config, Model, Provider, Upstream};
+use crate::config::{Config, Model, PolicyRule as ConfigPolicyRule, Provider, Upstream};
+use ferrogate_core::RequestContext;
+use ferrogate_policy::{
+    BasicPolicyEngine, PolicyDecision, PolicyEngine, PolicyRule, PolicySubject,
+};
 use ferrogate_providers::{
     AdapterError, ChatCompletionPlan, ProviderAdapterRegistry, ProviderConfig,
     ProviderErrorResponse, ProviderHttpRequest, ProviderUsage,
@@ -19,6 +23,7 @@ pub(crate) struct AppState {
     pub(crate) models: Arc<HashMap<String, Model>>,
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
     provider_adapters: Arc<ProviderAdapterRegistry>,
+    policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     request_ids: Arc<AtomicU64>,
 }
@@ -49,12 +54,15 @@ impl AppState {
             .map(|upstream| (upstream.name.clone(), AtomicU64::new(0)))
             .collect();
 
+        let policy_engine = build_policy_engine(&config.policies);
+
         Self {
             config: Arc::new(config),
             providers: Arc::new(providers),
             models: Arc::new(models),
             upstreams: Arc::new(upstreams),
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
+            policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
             request_ids: Arc::new(AtomicU64::new(1)),
         }
@@ -118,6 +126,15 @@ impl AppState {
         self.provider_adapters.extract_usage(provider_kind, body)
     }
 
+    pub(crate) fn evaluate_policy(
+        &self,
+        request: &RequestContext,
+        model: Option<&str>,
+        provider: Option<&str>,
+    ) -> PolicyDecision {
+        self.policy_engine.evaluate(request, model, provider)
+    }
+
     pub(crate) fn select_upstream_url(&self, upstream: &Upstream) -> Option<String> {
         let endpoints = upstream.endpoint_urls();
         if endpoints.is_empty() {
@@ -131,6 +148,41 @@ impl AppState {
         endpoints
             .get(next as usize % endpoints.len())
             .map(|url| (*url).to_string())
+    }
+}
+
+fn build_policy_engine(config_rules: &[ConfigPolicyRule]) -> BasicPolicyEngine {
+    let mut rules = Vec::new();
+    for rule in config_rules
+        .iter()
+        .filter(|rule| rule.enabled && rule.effect.eq_ignore_ascii_case("deny"))
+    {
+        for organization_id in expand_optional_subjects(&rule.organization_ids) {
+            for project_id in expand_optional_subjects(&rule.project_ids) {
+                for api_key_id in expand_optional_subjects(&rule.api_key_ids) {
+                    rules.push(PolicyRule::deny(
+                        PolicySubject {
+                            organization_id: organization_id.clone(),
+                            project_id: project_id.clone(),
+                            api_key_id,
+                        },
+                        rule.models.clone(),
+                        rule.providers.clone(),
+                        rule.code.clone(),
+                        rule.message.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    BasicPolicyEngine::new(rules)
+}
+
+fn expand_optional_subjects(values: &[String]) -> Vec<Option<String>> {
+    if values.is_empty() {
+        vec![None]
+    } else {
+        values.iter().cloned().map(Some).collect()
     }
 }
 

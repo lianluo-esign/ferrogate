@@ -54,7 +54,7 @@ struct ErrorObject {
     message: String,
     #[serde(rename = "type")]
     kind: &'static str,
-    code: &'static str,
+    code: String,
     request_id: Option<String>,
 }
 
@@ -135,7 +135,7 @@ pub(crate) async fn write_streaming_response<R: Read>(
 pub(crate) async fn write_json_error(
     session: &mut Session,
     status: StatusCode,
-    code: &'static str,
+    code: impl Into<String>,
     message: impl Into<String>,
     request_id: &str,
 ) -> PingoraResult<()> {
@@ -143,7 +143,7 @@ pub(crate) async fn write_json_error(
         error: ErrorObject {
             message: message.into(),
             kind: "ferrogate_error",
-            code,
+            code: code.into(),
             request_id: Some(request_id.to_string()),
         },
     };

@@ -15,6 +15,11 @@ kind = "{provider_kind}"
 base_url = "http://127.0.0.1:65535/v1"
 api_key_env = "FERROGATE_PROVIDER_SECRET"
 
+[[providers]]
+name = "other-provider"
+kind = "openai"
+base_url = "http://127.0.0.1:65534/v1"
+
 [[models]]
 name = "fast-chat"
 provider = "openai"
@@ -70,6 +75,24 @@ key = "provider-limited-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 allowed_providers = ["other-provider"]
+
+[[api_keys]]
+id = "policy_key"
+name = "Policy key"
+key = "policy-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[policies]]
+name = "deny policy key fast chat"
+effect = "deny"
+api_key_ids = ["policy_key"]
+models = ["fast-chat"]
+providers = ["openai"]
+code = "policy_model_denied"
+message = "model blocked by policy"
 "#
         ),
     )
@@ -138,6 +161,12 @@ fn ai_proxy_rejects_missing_invalid_scope_and_model_auth() {
     assert!(denied_provider.contains("403 Forbidden"));
     assert!(denied_provider.contains("provider_not_allowed"));
     assert!(!denied_provider.contains("provider-limited-secret"));
+
+    let denied_policy = chat(&gateway_addr, Some("policy-secret"), "fast-chat");
+    assert!(denied_policy.contains("403 Forbidden"));
+    assert!(denied_policy.contains("policy_model_denied"));
+    assert!(denied_policy.contains("model blocked by policy"));
+    assert!(!denied_policy.contains("policy-secret"));
 
     let non_object = http_request(
         &gateway_addr,
