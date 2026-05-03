@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -12,6 +12,10 @@ use ferrogate_billing::{
     TokenUsage as BillingTokenUsage,
 };
 use ferrogate_core::RequestContext;
+use ferrogate_observability::{
+    CostMetricTotal, GatewayMetricsSnapshot, ModelProviderMetricTotal, RequestStatusMetric,
+    TokenMetricTotals,
+};
 use ferrogate_policy::{
     BasicPolicyEngine, PolicyDecision, PolicyEngine, PolicyRule, PolicySubject,
 };
@@ -244,6 +248,72 @@ impl AppState {
         if let Ok(mut logs) = self.request_logs.lock() {
             logs.append(log);
         }
+    }
+
+    pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
+        let request_logs = self
+            .request_logs
+            .lock()
+            .map(|logs| logs.list())
+            .unwrap_or_default();
+        let billing_events = self.billing_events.list();
+
+        let mut status_totals = BTreeMap::<u16, u64>::new();
+        let mut token_totals = TokenMetricTotals::default();
+        let mut cost_totals = BTreeMap::<String, f64>::new();
+        let mut model_provider_totals =
+            BTreeMap::<(String, String), ModelProviderMetricTotal>::new();
+
+        for log in &request_logs {
+            *status_totals.entry(log.status_code).or_default() += 1;
+        }
+
+        for event in &billing_events {
+            token_totals.prompt_tokens += event.usage.prompt_tokens;
+            token_totals.completion_tokens += event.usage.completion_tokens;
+            token_totals.total_tokens += event.usage.total_tokens;
+
+            if let Some(cost) = &event.cost {
+                *cost_totals.entry(cost.currency.clone()).or_default() += cost.total_cost;
+            }
+
+            let key = (event.logical_model.clone(), event.provider.clone());
+            let total =
+                model_provider_totals
+                    .entry(key)
+                    .or_insert_with(|| ModelProviderMetricTotal {
+                        logical_model: event.logical_model.clone(),
+                        provider: event.provider.clone(),
+                        requests: 0,
+                        total_tokens: 0,
+                    });
+            total.requests += 1;
+            total.total_tokens += event.usage.total_tokens;
+        }
+
+        GatewayMetricsSnapshot {
+            service_name: self.state_service_name(),
+            request_log_total: request_logs.len() as u64,
+            request_error_total: request_logs
+                .iter()
+                .filter(|log| log.status_code >= 400 || log.error_code.is_some())
+                .count() as u64,
+            request_status_totals: status_totals
+                .into_iter()
+                .map(|(status_code, count)| RequestStatusMetric { status_code, count })
+                .collect(),
+            billing_event_total: billing_events.len() as u64,
+            token_totals,
+            cost_estimates: cost_totals
+                .into_iter()
+                .map(|(currency, amount)| CostMetricTotal { currency, amount })
+                .collect(),
+            model_provider_totals: model_provider_totals.into_values().collect(),
+        }
+    }
+
+    fn state_service_name(&self) -> String {
+        self.config.telemetry.service_name.clone()
     }
 
     #[cfg(test)]
@@ -602,5 +672,78 @@ mod tests {
         assert!(!logs[0].response_recorded);
         assert!(logs[0].prompt_body.is_none());
         assert!(logs[0].response_body.is_none());
+    }
+
+    #[test]
+    fn prometheus_metrics_snapshot_aggregates_request_logs_and_billing() {
+        let config = Config {
+            telemetry: crate::config::TelemetryConfig {
+                service_name: "ferrogate-test".into(),
+                log_bodies: false,
+            },
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: Some(1.0),
+                output_price_per_1m: Some(2.0),
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        let request = RequestContext {
+            request_id: "fg-test".into(),
+            trace_id: Some("trace-test".into()),
+            route: Some("openai.chat.completions".into()),
+            upstream: Some("openai".into()),
+            tenant: ferrogate_core::TenantContext::default(),
+        };
+
+        state.record_request_log(StoredRequestLog {
+            request_id: "fg-test".into(),
+            trace_id: Some("trace-test".into()),
+            tenant: ferrogate_core::TenantContext::default(),
+            route: Some("openai.chat.completions".into()),
+            provider: Some("openai".into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: None,
+            response_body: None,
+            started_at_unix: None,
+            completed_at_unix: None,
+        });
+        state
+            .record_billing_event(
+                &request,
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &ProviderUsage {
+                    prompt_tokens: Some(3),
+                    completion_tokens: Some(5),
+                    total_tokens: Some(8),
+                },
+                200,
+            )
+            .unwrap();
+
+        let snapshot = state.prometheus_metrics_snapshot();
+
+        assert_eq!(snapshot.service_name, "ferrogate-test");
+        assert_eq!(snapshot.request_log_total, 1);
+        assert_eq!(snapshot.request_status_totals[0].status_code, 200);
+        assert_eq!(snapshot.billing_event_total, 1);
+        assert_eq!(snapshot.token_totals.total_tokens, 8);
+        assert_eq!(snapshot.model_provider_totals[0].logical_model, "fast-chat");
     }
 }

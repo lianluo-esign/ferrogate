@@ -44,6 +44,12 @@ scopes = ["models.read"]
 allowed_models = ["fast-chat"]
 
 [[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
 id = "chat_limited"
 name = "Chat limited"
 key = "chat-secret"
@@ -154,6 +160,31 @@ fn ai_proxy_rejects_missing_invalid_scope_and_model_auth() {
     let invalid = chat(&gateway_addr, Some("wrong-secret"), "fast-chat");
     assert!(invalid.contains("401 Unauthorized"));
     assert!(invalid.contains("invalid_api_key"));
+
+    let metrics_missing = http_request(&gateway_addr, "GET", "/metrics", &[], "");
+    assert!(metrics_missing.contains("401 Unauthorized"));
+    assert!(metrics_missing.contains("missing_api_key"));
+
+    let metrics_scope_denied = http_request(
+        &gateway_addr,
+        "GET",
+        "/metrics",
+        &["Authorization: Bearer models-secret"],
+        "",
+    );
+    assert!(metrics_scope_denied.contains("403 Forbidden"));
+    assert!(metrics_scope_denied.contains("scope_denied"));
+
+    let metrics_ok = http_request(
+        &gateway_addr,
+        "GET",
+        "/metrics",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(metrics_ok.contains("200 OK"));
+    assert!(metrics_ok.contains("ferrogate_request_logs_total"));
+    assert!(!metrics_ok.contains("admin-secret"));
 
     let denied_scope = chat(&gateway_addr, Some("models-secret"), "fast-chat");
     assert!(denied_scope.contains("403 Forbidden"));

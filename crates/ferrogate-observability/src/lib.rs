@@ -322,6 +322,189 @@ fn validate_exporter_parts(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GatewayMetricsSnapshot {
+    pub service_name: String,
+    pub request_log_total: u64,
+    pub request_error_total: u64,
+    pub request_status_totals: Vec<RequestStatusMetric>,
+    pub billing_event_total: u64,
+    pub token_totals: TokenMetricTotals,
+    pub cost_estimates: Vec<CostMetricTotal>,
+    pub model_provider_totals: Vec<ModelProviderMetricTotal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestStatusMetric {
+    pub status_code: u16,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenMetricTotals {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostMetricTotal {
+    pub currency: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProviderMetricTotal {
+    pub logical_model: String,
+    pub provider: String,
+    pub requests: u64,
+    pub total_tokens: u64,
+}
+
+pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
+    let mut output = String::new();
+    let service = escape_label_value(&snapshot.service_name);
+
+    push_help(
+        &mut output,
+        "ferrogate_info",
+        "FerroGate process metadata.",
+        "gauge",
+    );
+    output.push_str(&format!("ferrogate_info{{service=\"{service}\"}} 1\n"));
+
+    push_help(
+        &mut output,
+        "ferrogate_request_logs_total",
+        "Total structured request logs recorded by FerroGate.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_request_logs_total {}\n",
+        snapshot.request_log_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_request_errors_total",
+        "Total structured request logs with errors or 4xx/5xx statuses.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_request_errors_total {}\n",
+        snapshot.request_error_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_request_status_total",
+        "Structured request logs grouped by HTTP status code.",
+        "counter",
+    );
+    for status in &snapshot.request_status_totals {
+        output.push_str(&format!(
+            "ferrogate_request_status_total{{status_code=\"{}\"}} {}\n",
+            status.status_code, status.count
+        ));
+    }
+
+    push_help(
+        &mut output,
+        "ferrogate_billing_events_total",
+        "Total billing events recorded by FerroGate.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_billing_events_total {}\n",
+        snapshot.billing_event_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_tokens_total",
+        "Total AI provider token usage recorded by billing events.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_tokens_total{{type=\"prompt\"}} {}\n",
+        snapshot.token_totals.prompt_tokens
+    ));
+    output.push_str(&format!(
+        "ferrogate_tokens_total{{type=\"completion\"}} {}\n",
+        snapshot.token_totals.completion_tokens
+    ));
+    output.push_str(&format!(
+        "ferrogate_tokens_total{{type=\"total\"}} {}\n",
+        snapshot.token_totals.total_tokens
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_cost_estimated_total",
+        "Estimated model cost recorded by billing events, grouped by currency.",
+        "counter",
+    );
+    for cost in &snapshot.cost_estimates {
+        let currency = escape_label_value(&cost.currency);
+        output.push_str(&format!(
+            "ferrogate_cost_estimated_total{{currency=\"{currency}\"}} {}\n",
+            format_float(cost.amount)
+        ));
+    }
+
+    push_help(
+        &mut output,
+        "ferrogate_model_provider_requests_total",
+        "Billing events grouped by logical model and provider.",
+        "counter",
+    );
+    for total in &snapshot.model_provider_totals {
+        let logical_model = escape_label_value(&total.logical_model);
+        let provider = escape_label_value(&total.provider);
+        output.push_str(&format!(
+            "ferrogate_model_provider_requests_total{{logical_model=\"{logical_model}\",provider=\"{provider}\"}} {}\n",
+            total.requests
+        ));
+    }
+
+    push_help(
+        &mut output,
+        "ferrogate_model_provider_tokens_total",
+        "Billing event token usage grouped by logical model and provider.",
+        "counter",
+    );
+    for total in &snapshot.model_provider_totals {
+        let logical_model = escape_label_value(&total.logical_model);
+        let provider = escape_label_value(&total.provider);
+        output.push_str(&format!(
+            "ferrogate_model_provider_tokens_total{{logical_model=\"{logical_model}\",provider=\"{provider}\"}} {}\n",
+            total.total_tokens
+        ));
+    }
+
+    output
+}
+
+fn push_help(output: &mut String, metric: &str, help: &str, kind: &str) {
+    output.push_str(&format!("# HELP {metric} {help}\n"));
+    output.push_str(&format!("# TYPE {metric} {kind}\n"));
+}
+
+fn escape_label_value(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('\n', r"\n")
+        .replace('"', r#"\""#)
+}
+
+fn format_float(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewaySpanKind {
     GatewayRequest,
@@ -546,5 +729,49 @@ mod tests {
                 path: "metrics".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn renders_prometheus_text_for_gateway_metrics_snapshot() {
+        let snapshot = GatewayMetricsSnapshot {
+            service_name: "ferrogate".into(),
+            request_log_total: 2,
+            request_error_total: 1,
+            request_status_totals: vec![
+                RequestStatusMetric {
+                    status_code: 200,
+                    count: 1,
+                },
+                RequestStatusMetric {
+                    status_code: 429,
+                    count: 1,
+                },
+            ],
+            billing_event_total: 1,
+            token_totals: TokenMetricTotals {
+                prompt_tokens: 3,
+                completion_tokens: 5,
+                total_tokens: 8,
+            },
+            cost_estimates: vec![CostMetricTotal {
+                currency: "USD".into(),
+                amount: 0.000_006,
+            }],
+            model_provider_totals: vec![ModelProviderMetricTotal {
+                logical_model: "fast-chat".into(),
+                provider: "openai".into(),
+                requests: 1,
+                total_tokens: 8,
+            }],
+        };
+
+        let text = render_prometheus_text(&snapshot);
+
+        assert!(text.contains("# TYPE ferrogate_request_logs_total counter"));
+        assert!(text.contains("ferrogate_request_errors_total 1"));
+        assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));
+        assert!(text.contains(
+            "ferrogate_model_provider_requests_total{logical_model=\"fast-chat\",provider=\"openai\"} 1"
+        ));
     }
 }

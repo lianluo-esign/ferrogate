@@ -24,6 +24,7 @@ clap.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-observability = { path = "../ferrogate-observability" }
 ferrogate-policy = { path = "../ferrogate-policy" }
 ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }

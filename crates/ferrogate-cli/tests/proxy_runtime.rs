@@ -158,6 +158,13 @@ value = "proxied"
     assert!(admin.contains("\"snapshot\":\""));
     assert!(admin.contains("\"runtime\":\"pingora\""));
 
+    let metrics = http_get(&gateway_addr, "/metrics", "localhost");
+    let normalized_metrics = metrics.to_ascii_lowercase();
+    assert!(metrics.contains("200 OK"));
+    assert!(normalized_metrics.contains("content-type: text/plain; version=0.0.4; charset=utf-8"));
+    assert!(metrics.contains("# TYPE ferrogate_request_logs_total counter"));
+    assert!(metrics.contains("ferrogate_billing_events_total 0"));
+
     let response = http_get(&gateway_addr, "/proxy/get?x=1", "example.test");
     let normalized_response = response.to_ascii_lowercase();
     assert!(response.contains("200 OK"));

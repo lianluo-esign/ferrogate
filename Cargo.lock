@@ -710,6 +710,7 @@ dependencies = [
  "ferrogate-billing",
  "ferrogate-config",
  "ferrogate-core",
+ "ferrogate-observability",
  "ferrogate-policy",
  "ferrogate-providers",
  "ferrogate-runtime",

@@ -41,6 +41,12 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/metrics" {
+            let headers = req.headers.clone();
+            self.handle_metrics(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
         let host = req
             .headers
             .get(header::HOST)

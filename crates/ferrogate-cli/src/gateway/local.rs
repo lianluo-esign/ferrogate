@@ -1,3 +1,5 @@
+use bytes::Bytes;
+use ferrogate_observability::render_prometheus_text;
 use http::StatusCode;
 use pingora::{proxy::Session, Result as PingoraResult};
 
@@ -5,8 +7,8 @@ use crate::{
     auth::authenticate,
     config::config_snapshot_id,
     responses::{
-        write_json_error, write_json_response, AdminStatus, HealthResponse, OpenAiModel,
-        OpenAiModelList,
+        write_json_error, write_json_response, write_raw_response, AdminStatus, HealthResponse,
+        OpenAiModel, OpenAiModelList,
     },
 };
 
@@ -121,6 +123,37 @@ impl FerroGateway {
                     auth_required: self.state.auth_required(),
                 };
                 write_json_response(session, StatusCode::OK, &status, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_metrics(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        match authenticate(&self.state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = render_prometheus_text(&self.state.prometheus_metrics_snapshot());
+                write_raw_response(
+                    session,
+                    StatusCode::OK,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                    Bytes::from(body),
+                    &ctx.request_id,
+                )
+                .await
             }
             Err(error) => {
                 write_json_error(
