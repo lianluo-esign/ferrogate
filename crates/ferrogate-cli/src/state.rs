@@ -7,6 +7,10 @@ use std::{
 };
 
 use crate::config::{Config, Model, PolicyRule as ConfigPolicyRule, Provider, Upstream};
+use ferrogate_billing::{
+    BillingEvent, BillingEventSink, InMemoryBillingEventSink, ModelPrice,
+    TokenUsage as BillingTokenUsage,
+};
 use ferrogate_core::RequestContext;
 use ferrogate_policy::{
     BasicPolicyEngine, PolicyDecision, PolicyEngine, PolicyRule, PolicySubject,
@@ -23,8 +27,10 @@ pub(crate) struct AppState {
     pub(crate) providers: Arc<HashMap<String, Provider>>,
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
     model_visibility: Arc<HashMap<String, ModelVisibility>>,
+    model_prices: Arc<HashMap<String, ModelPrice>>,
     model_registry: Arc<ModelRegistry>,
     provider_adapters: Arc<ProviderAdapterRegistry>,
+    billing_events: Arc<InMemoryBillingEventSink>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
@@ -50,6 +56,11 @@ impl AppState {
             .iter()
             .map(|model| (model.name.clone(), ModelVisibility::from(model)))
             .collect();
+        let model_prices = config
+            .models
+            .iter()
+            .filter_map(|model| model_price(model).map(|price| (model.name.clone(), price)))
+            .collect();
         let upstream_counters = config
             .upstreams
             .iter()
@@ -65,8 +76,10 @@ impl AppState {
             providers: Arc::new(providers),
             upstreams: Arc::new(upstreams),
             model_visibility: Arc::new(model_visibility),
+            model_prices: Arc::new(model_prices),
             model_registry: Arc::new(model_registry),
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
+            billing_events: Arc::new(InMemoryBillingEventSink::default()),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
@@ -186,6 +199,44 @@ impl AppState {
         self.policy_engine.evaluate(request, model, provider)
     }
 
+    pub(crate) fn record_billing_event(
+        &self,
+        request: &RequestContext,
+        logical_model: &str,
+        provider: &str,
+        provider_model: &str,
+        usage: &ProviderUsage,
+        status_code: u16,
+    ) -> Result<(), ferrogate_billing::BillingError> {
+        let usage = BillingTokenUsage::new(
+            usage.prompt_tokens.unwrap_or_default(),
+            usage.completion_tokens.unwrap_or_default(),
+            usage.total_tokens.unwrap_or_default(),
+        )
+        .estimate_missing_total();
+        let cost = self
+            .model_prices
+            .get(logical_model)
+            .map(|price| price.estimate(&usage));
+        self.billing_events.record(BillingEvent {
+            request_id: request.request_id.clone(),
+            trace_id: request.trace_id.clone(),
+            tenant: request.tenant.clone(),
+            logical_model: logical_model.into(),
+            provider: provider.into(),
+            provider_model: provider_model.into(),
+            usage,
+            cost,
+            status_code,
+            occurred_at_unix: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn billing_events(&self) -> Vec<BillingEvent> {
+        self.billing_events.list()
+    }
+
     pub(crate) fn select_upstream_url(&self, upstream: &Upstream) -> Option<String> {
         let endpoints = upstream.endpoint_urls();
         if endpoints.is_empty() {
@@ -284,6 +335,16 @@ fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
         })
         .collect();
     entry
+}
+
+fn model_price(model: &Model) -> Option<ModelPrice> {
+    match (model.input_price_per_1m, model.output_price_per_1m) {
+        (None, None) => None,
+        (input, output) => Some(ModelPrice::usd(
+            input.unwrap_or_default(),
+            output.unwrap_or_default(),
+        )),
+    }
 }
 
 fn build_policy_engine(config_rules: &[ConfigPolicyRule]) -> BasicPolicyEngine {
@@ -432,5 +493,67 @@ mod tests {
         assert_eq!(first, ["primary", "backup-b", "backup-a"]);
         assert_eq!(second, ["primary", "backup-b", "backup-a"]);
         assert_eq!(third, ["primary", "backup-a", "backup-b"]);
+    }
+
+    #[test]
+    fn records_billing_event_with_model_price() {
+        let config = Config {
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: Some(1.0),
+                output_price_per_1m: Some(2.0),
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        let request = RequestContext {
+            request_id: "fg-test".into(),
+            trace_id: Some("trace-test".into()),
+            route: Some("openai.chat.completions".into()),
+            upstream: Some("openai".into()),
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some("org".into()),
+                team_id: None,
+                project_id: Some("project".into()),
+                user_id: None,
+                api_key_id: Some("key_dev".into()),
+            },
+        };
+
+        state
+            .record_billing_event(
+                &request,
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &ProviderUsage {
+                    prompt_tokens: Some(3),
+                    completion_tokens: Some(5),
+                    total_tokens: Some(8),
+                },
+                200,
+            )
+            .unwrap();
+
+        let events = state.billing_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tenant.organization_id.as_deref(), Some("org"));
+        assert_eq!(events[0].usage.total_tokens, 8);
+        assert_eq!(events[0].cost.as_ref().unwrap().currency, "USD");
     }
 }

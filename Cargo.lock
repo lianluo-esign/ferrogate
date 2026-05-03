@@ -707,6 +707,7 @@ dependencies = [
  "blake2",
  "bytes",
  "clap",
+ "ferrogate-billing",
  "ferrogate-config",
  "ferrogate-core",
  "ferrogate-policy",

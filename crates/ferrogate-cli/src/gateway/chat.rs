@@ -398,6 +398,23 @@ impl FerroGateway {
                             total_tokens = ?usage.total_tokens,
                             "provider usage extracted"
                         );
+                        if let Err(error) = self.state.record_billing_event(
+                            &policy_request,
+                            &request.model,
+                            &provider.name,
+                            &model_route.provider_model,
+                            &usage,
+                            response.status.as_u16(),
+                        ) {
+                            warn!(
+                                request_id = %ctx.request_id,
+                                logical_model = %request.model,
+                                provider = %provider.name,
+                                provider_model = %model_route.provider_model,
+                                error_code = %error.code,
+                                "billing event write failed"
+                            );
+                        }
                     }
 
                     return write_raw_response(

@@ -21,6 +21,7 @@ async-trait.workspace = true
 blake2.workspace = true
 bytes.workspace = true
 clap.workspace = true
+ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }
 ferrogate-policy = { path = "../ferrogate-policy" }
