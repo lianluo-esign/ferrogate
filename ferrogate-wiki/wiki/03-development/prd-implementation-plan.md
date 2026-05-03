@@ -48,7 +48,7 @@ tags:
 | P2 | 配置校验、生命周期和平滑重载 | 进行中 | 80% | 已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip |
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
 | P4 | 虚拟 API Key、租户上下文与 Policy MVP | 已完成 | 100% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界 |
-| P5 | 多 Provider Adapter 与 Model Registry | 未开始 | 0% | 待实现多 Provider 抽象和逻辑模型路由 |
+| P5 | 多 Provider Adapter 与 Model Registry | 进行中 | 20% | 已实现 OpenAI-compatible 与 Anthropic adapter 的 registry 分发、请求转换、错误归一化和 usage 提取；Model Registry、fallback、Gemini/Grok/Azure 待后续切片 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 未开始 | 0% | 待集成 OpenTelemetry 和 usage/billing 存储接口 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
 | P8 | 生产级可靠性、安全和部署增强 | 未开始 | 0% | 待实现限流、熔断、fallback、部署文档 |
@@ -314,8 +314,8 @@ rg -n "(info!|warn!|error!|debug!|trace!)" crates/ferrogate-cli/src crates/ferro
 ### 任务
 
 - [ ] 完善 Provider Adapter trait，覆盖请求转换、响应转换、Streaming、错误归一化、usage 提取、可重试判断。
-- [ ] 实现 OpenAI Adapter。
-- [ ] 实现 Anthropic Adapter。
+- [x] 实现 OpenAI Adapter。
+- [x] 实现 Anthropic Adapter。
 - [ ] 实现 Gemini Adapter。
 - [ ] 实现 Grok Adapter。
 - [ ] 实现 Azure OpenAI Adapter。
@@ -330,7 +330,17 @@ rg -n "(info!|warn!|error!|debug!|trace!)" crates/ferrogate-cli/src crates/ferro
 - [ ] fallback 过程有 trace span 和日志字段。
 - [ ] Provider Adapter 单元测试覆盖典型错误和 streaming 事件。
 
-**进度**：0%。
+**进度**：20%。
+
+**验收结果**：
+
+```bash
+cargo fmt --check
+cargo test -p ferrogate-providers -- --nocapture
+cargo clippy -p ferrogate-providers --all-targets --all-features -- -D warnings
+```
+
+2026-05-03 本轮启动 P5：`ferrogate-providers` 新增 `AnthropicAdapter`，可将 OpenAI-style chat plan 转换为 Anthropic `/messages` 请求，注入 `x-api-key` 与 `anthropic-version` header，归一化 Anthropic error response，并从 `input_tokens`/`output_tokens` 提取 usage；`ProviderAdapterRegistry` 已支持 `anthropic` kind。
 
 ## 9. P6 可观测性、请求日志、Storage 与计费事件
 

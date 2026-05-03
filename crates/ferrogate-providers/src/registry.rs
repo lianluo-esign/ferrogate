@@ -1,17 +1,19 @@
 use crate::{
-    AdapterError, ChatCompletionPlan, OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig,
-    ProviderErrorResponse, ProviderHttpRequest, ProviderUsage,
+    AdapterError, AnthropicAdapter, ChatCompletionPlan, OpenAiCompatibleAdapter, ProviderAdapter,
+    ProviderConfig, ProviderErrorResponse, ProviderHttpRequest, ProviderUsage,
 };
 
 #[derive(Debug, Default, Clone)]
 pub struct ProviderAdapterRegistry {
     openai_compatible: OpenAiCompatibleAdapter,
+    anthropic: AnthropicAdapter,
 }
 
 impl ProviderAdapterRegistry {
     pub fn adapter_for(&self, kind: &str) -> Result<&dyn ProviderAdapter, AdapterError> {
         match normalize_kind(kind).as_str() {
             "openai" | "openai-compatible" => Ok(&self.openai_compatible),
+            "anthropic" => Ok(&self.anthropic),
             other => Err(AdapterError::UnsupportedProviderKind {
                 kind: other.to_string(),
             }),
@@ -83,7 +85,7 @@ mod tests {
     #[test]
     fn rejects_unknown_provider_kind_before_runtime_dispatch() {
         let registry = ProviderAdapterRegistry::default();
-        let error = match registry.adapter_for("anthropic") {
+        let error = match registry.adapter_for("gemini") {
             Ok(adapter) => panic!("unexpected provider adapter {}", adapter.kind()),
             Err(error) => error,
         };
@@ -91,7 +93,7 @@ mod tests {
         assert_eq!(
             error,
             AdapterError::UnsupportedProviderKind {
-                kind: "anthropic".into()
+                kind: "gemini".into()
             }
         );
     }
@@ -121,6 +123,28 @@ mod tests {
         );
         assert_eq!(prepared.body["model"], "gpt-4o-mini");
         assert_eq!(prepared.body["stream"], true);
+    }
+
+    #[test]
+    fn prepares_anthropic_chat_completions_through_registry() {
+        let registry = ProviderAdapterRegistry::default();
+        let prepared = registry
+            .prepare_chat_completions(
+                provider("anthropic"),
+                ChatCompletionPlan {
+                    logical_model: "claude-chat".into(),
+                    provider_model: "claude-3-5-sonnet-latest".into(),
+                    stream: false,
+                    body: json!({
+                        "model": "claude-chat",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.endpoint, "https://api.openai.example/v1/messages");
+        assert_eq!(prepared.body["model"], "claude-3-5-sonnet-latest");
     }
 
     #[test]
