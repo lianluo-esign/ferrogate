@@ -10,7 +10,7 @@ use crate::{
         write_json_error, write_json_response, write_raw_response, write_streaming_response,
     },
 };
-use ferrogate_core::RequestContext;
+use ferrogate_core::{RequestContext, TenantContext};
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::ModelRegistryError;
 use ferrogate_storage::StoredRequestLog;
@@ -38,6 +38,14 @@ impl FerroGateway {
         let auth = match authenticate(&self.state, &headers, "chat.completions", &ctx.request_id) {
             Ok(auth) => auth,
             Err(error) => {
+                self.record_chat_error_log(
+                    ctx,
+                    TenantContext::default(),
+                    None,
+                    None,
+                    error.status,
+                    error.code,
+                );
                 write_json_error(
                     session,
                     error.status,
@@ -54,6 +62,14 @@ impl FerroGateway {
         let body_json: serde_json::Value = match serde_json::from_slice(&body) {
             Ok(request) => request,
             Err(error) => {
+                self.record_chat_error_log(
+                    ctx,
+                    auth.tenant_context(),
+                    None,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_json",
+                );
                 write_json_error(
                     session,
                     StatusCode::BAD_REQUEST,
@@ -68,6 +84,14 @@ impl FerroGateway {
         let request: ChatCompletionRequest = match serde_json::from_value(body_json.clone()) {
             Ok(request) => request,
             Err(error) => {
+                self.record_chat_error_log(
+                    ctx,
+                    auth.tenant_context(),
+                    None,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                );
                 write_json_error(
                     session,
                     StatusCode::BAD_REQUEST,
@@ -81,6 +105,14 @@ impl FerroGateway {
         };
 
         if !auth.can_use_model(&request.model) {
+            self.record_chat_error_log(
+                ctx,
+                auth.tenant_context(),
+                Some(&request.model),
+                None,
+                StatusCode::FORBIDDEN,
+                "model_not_allowed",
+            );
             write_json_error(
                 session,
                 StatusCode::FORBIDDEN,
@@ -95,6 +127,14 @@ impl FerroGateway {
         let model = match self.state.resolve_model(&request.model) {
             Ok(model) => model,
             Err(ModelRegistryError::ModelDisabled { .. }) => {
+                self.record_chat_error_log(
+                    ctx,
+                    auth.tenant_context(),
+                    Some(&request.model),
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "model_disabled",
+                );
                 write_json_error(
                     session,
                     StatusCode::BAD_REQUEST,
@@ -106,6 +146,14 @@ impl FerroGateway {
                 return Ok(());
             }
             Err(_) => {
+                self.record_chat_error_log(
+                    ctx,
+                    auth.tenant_context(),
+                    Some(&request.model),
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "model_not_found",
+                );
                 write_json_error(
                     session,
                     StatusCode::BAD_REQUEST,
@@ -123,6 +171,14 @@ impl FerroGateway {
             auth.organization_id.as_deref(),
             auth.project_id.as_deref(),
         ) {
+            self.record_chat_error_log(
+                ctx,
+                auth.tenant_context(),
+                Some(&request.model),
+                None,
+                StatusCode::FORBIDDEN,
+                "model_not_visible",
+            );
             write_json_error(
                 session,
                 StatusCode::FORBIDDEN,
@@ -139,6 +195,14 @@ impl FerroGateway {
 
         for (candidate_index, model_route) in routes.iter().enumerate() {
             let Some(provider) = self.state.providers.get(&model_route.provider) else {
+                self.record_chat_error_log(
+                    ctx,
+                    auth.tenant_context(),
+                    Some(&request.model),
+                    Some(&model_route.provider),
+                    StatusCode::BAD_GATEWAY,
+                    "provider_not_found",
+                );
                 write_json_error(
                     session,
                     StatusCode::BAD_GATEWAY,
@@ -151,6 +215,14 @@ impl FerroGateway {
             };
 
             if !auth.can_use_provider(&provider.name) {
+                self.record_chat_error_log(
+                    ctx,
+                    auth.tenant_context(),
+                    Some(&request.model),
+                    Some(&provider.name),
+                    StatusCode::FORBIDDEN,
+                    "provider_not_allowed",
+                );
                 write_json_error(
                     session,
                     StatusCode::FORBIDDEN,
@@ -174,6 +246,14 @@ impl FerroGateway {
                 Some(&request.model),
                 Some(&provider.name),
             ) {
+                self.record_chat_error_log(
+                    ctx,
+                    policy_request.tenant.clone(),
+                    Some(&request.model),
+                    Some(&provider.name),
+                    StatusCode::FORBIDDEN,
+                    &code,
+                );
                 write_json_error(
                     session,
                     StatusCode::FORBIDDEN,
@@ -207,6 +287,14 @@ impl FerroGateway {
                     continue;
                 }
                 Err(error) => {
+                    self.record_chat_error_log(
+                        ctx,
+                        policy_request.tenant.clone(),
+                        Some(&request.model),
+                        Some(&provider.name),
+                        StatusCode::BAD_GATEWAY,
+                        "provider_adapter_error",
+                    );
                     write_json_error(
                         session,
                         StatusCode::BAD_GATEWAY,
@@ -464,6 +552,14 @@ impl FerroGateway {
                     continue;
                 }
                 Err(error) => {
+                    self.record_chat_error_log(
+                        ctx,
+                        auth.tenant_context(),
+                        Some(&request.model),
+                        None,
+                        StatusCode::BAD_GATEWAY,
+                        "provider_dispatch_error",
+                    );
                     write_json_error(
                         session,
                         StatusCode::BAD_GATEWAY,
@@ -485,6 +581,34 @@ impl FerroGateway {
             &ctx.request_id,
         )
         .await
+    }
+
+    fn record_chat_error_log(
+        &self,
+        ctx: &ProxyContext,
+        tenant: TenantContext,
+        logical_model: Option<&str>,
+        provider: Option<&str>,
+        status: StatusCode,
+        error_code: &str,
+    ) {
+        self.state.record_request_log(StoredRequestLog {
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            tenant,
+            route: Some("openai.chat.completions".into()),
+            provider: provider.map(ToOwned::to_owned),
+            logical_model: logical_model.map(ToOwned::to_owned),
+            provider_model: None,
+            status_code: status.as_u16(),
+            error_code: Some(error_code.to_string()),
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: None,
+            response_body: None,
+            started_at_unix: None,
+            completed_at_unix: None,
+        });
     }
 }
 
