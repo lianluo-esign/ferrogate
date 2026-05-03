@@ -330,6 +330,77 @@ allowed_models = ["flash-chat"]
     assert!(!provider_requests[0].contains("client-secret"));
 }
 
+#[test]
+fn azure_openai_chat_non_streaming_dispatch_uses_deployment_endpoint() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_azure","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "azure-eastus"
+kind = "azure-openai"
+base_url = "http://{provider_addr}?api-version=2024-02-15-preview"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "azure-eastus"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}],"stream":false}"#,
+    );
+    assert!(chat.contains("200 OK"));
+    assert!(chat.contains("\"id\":\"chatcmpl_azure\""));
+    assert!(!chat.contains("provider-secret"));
+    assert!(!chat.contains("client-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert!(provider_requests[0].contains(
+        "POST /openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-02-15-preview HTTP/1.1"
+    ));
+    assert!(provider_requests[0].contains("api-key: provider-secret"));
+    assert!(provider_requests[0].contains(r#""messages""#));
+    assert!(provider_requests[0].contains(r#""role":"user""#));
+    assert!(provider_requests[0].contains(r#""content":"hello""#));
+    assert!(!provider_requests[0].contains(r#""model":"fast-chat""#));
+    assert!(!provider_requests[0].contains("client-secret"));
+}
+
 fn spawn_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();

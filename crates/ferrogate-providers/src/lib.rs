@@ -1,6 +1,7 @@
 //! AI provider adapter boundaries.
 
 mod anthropic;
+mod azure;
 mod gemini;
 mod grok;
 mod models;
@@ -9,6 +10,7 @@ mod registry;
 mod types;
 
 pub use anthropic::AnthropicAdapter;
+pub use azure::AzureOpenAiAdapter;
 pub use gemini::GeminiAdapter;
 pub use grok::GrokAdapter;
 pub use models::{

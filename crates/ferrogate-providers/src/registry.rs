@@ -1,6 +1,6 @@
 use crate::{
-    AdapterError, AnthropicAdapter, ChatCompletionPlan, GeminiAdapter, GrokAdapter,
-    OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
+    AdapterError, AnthropicAdapter, AzureOpenAiAdapter, ChatCompletionPlan, GeminiAdapter,
+    GrokAdapter, OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage,
 };
 
@@ -10,6 +10,7 @@ pub struct ProviderAdapterRegistry {
     anthropic: AnthropicAdapter,
     gemini: GeminiAdapter,
     grok: GrokAdapter,
+    azure_openai: AzureOpenAiAdapter,
 }
 
 impl ProviderAdapterRegistry {
@@ -19,6 +20,7 @@ impl ProviderAdapterRegistry {
             "anthropic" => Ok(&self.anthropic),
             "gemini" => Ok(&self.gemini),
             "grok" | "xai" => Ok(&self.grok),
+            "azure" | "azure-openai" => Ok(&self.azure_openai),
             other => Err(AdapterError::UnsupportedProviderKind {
                 kind: other.to_string(),
             }),
@@ -90,7 +92,7 @@ mod tests {
     #[test]
     fn rejects_unknown_provider_kind_before_runtime_dispatch() {
         let registry = ProviderAdapterRegistry::default();
-        let error = match registry.adapter_for("azure-openai") {
+        let error = match registry.adapter_for("bedrock") {
             Ok(adapter) => panic!("unexpected provider adapter {}", adapter.kind()),
             Err(error) => error,
         };
@@ -98,7 +100,7 @@ mod tests {
         assert_eq!(
             error,
             AdapterError::UnsupportedProviderKind {
-                kind: "azure-openai".into()
+                kind: "bedrock".into()
             }
         );
     }
@@ -200,6 +202,33 @@ mod tests {
             "https://api.openai.example/v1/chat/completions"
         );
         assert_eq!(prepared.body["model"], "grok-4.20-fast");
+    }
+
+    #[test]
+    fn prepares_azure_openai_chat_completions_through_registry() {
+        let registry = ProviderAdapterRegistry::default();
+        let mut provider = provider("azure-openai");
+        provider.base_url = "https://example.openai.azure.com".into();
+        let prepared = registry
+            .prepare_chat_completions(
+                provider,
+                ChatCompletionPlan {
+                    logical_model: "fast-chat".into(),
+                    provider_model: "gpt-4o-mini".into(),
+                    stream: false,
+                    body: json!({
+                        "model": "fast-chat",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://example.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-10-21"
+        );
+        assert!(prepared.body.get("model").is_none());
     }
 
     #[test]
