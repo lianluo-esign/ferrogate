@@ -76,6 +76,8 @@ pub(crate) struct ApiKey {
     #[serde(default)]
     pub(crate) allowed_models: Vec<String>,
     #[serde(default)]
+    pub(crate) allowed_providers: Vec<String>,
+    #[serde(default)]
     pub(crate) organization_id: Option<String>,
     #[serde(default)]
     pub(crate) team_id: Option<String>,
@@ -85,6 +87,8 @@ pub(crate) struct ApiKey {
     pub(crate) user_id: Option<String>,
     #[serde(default)]
     pub(crate) monthly_token_budget: Option<u64>,
+    #[serde(default)]
+    pub(crate) expires_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

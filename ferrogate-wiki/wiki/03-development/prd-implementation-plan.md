@@ -47,7 +47,7 @@ tags:
 | P1 | Pingora 通用 API Gateway Runtime 垂直切片 | 已完成 | 100% | 已实现配置驱动 Pingora 反向代理、路由匹配、upstream pool、header/path rewrite、healthz、日志和测试 |
 | P2 | 配置校验、生命周期和平滑重载 | 进行中 | 80% | 已完成字段级诊断、Secret env 引用、admin typed config、配置 snapshot 可观测性、reload 状态机契约、CLI lifecycle 接入和 serde roundtrip |
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
-| P4 | 虚拟 API Key、租户上下文与 Policy MVP | 未开始 | 0% | 待实现鉴权、租户解析和基础策略判断 |
+| P4 | 虚拟 API Key、租户上下文与 Policy MVP | 进行中 | 30% | 已实现 API Key disabled/expired/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log；Hash 存储、Policy crate 接入和持久化 repository 待后续切片 |
 | P5 | 多 Provider Adapter 与 Model Registry | 未开始 | 0% | 待实现多 Provider 抽象和逻辑模型路由 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 未开始 | 0% | 待集成 OpenTelemetry 和 usage/billing 存储接口 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
@@ -259,22 +259,33 @@ npm run wiki:build
 
 - [ ] 实现虚拟 API Key 生成、Hash 存储和校验。
 - [ ] 定义 Organization、Team、Project、User、Service Account、Role、Permission、Policy 模型。
-- [ ] API Key 解析到唯一租户上下文。
+- [x] API Key 解析到唯一租户上下文。（当前从配置中的 `organization_id`、`team_id`、`project_id`、`user_id`、`api_key_id` 进入 `AuthContext`，chat route log 会记录非敏感租户字段。）
 - [ ] 基于 `ferrogate-storage` 定义 Key、Tenant、Policy repository。
 - [ ] 实现模型 allowlist/denylist。
-- [ ] 实现 Provider allowlist/denylist。
-- [ ] 实现基础请求频率限制和 Token 预算占位接口。
-- [ ] 将 Auth 和 Policy 接入 P3 AI Proxy 请求路径。
+- [x] 实现 Provider allowlist/denylist。（当前支持 API Key 级 `allowed_providers`，在 provider dispatch 前拒绝。）
+- [x] 实现基础请求频率限制和 Token 预算占位接口。（当前支持 `monthly_token_budget = 0` 的 exhausted 占位拒绝；真实用量累加待 P6 storage/billing 切片。）
+- [ ] 将 Auth 和 Policy 接入 P3 AI Proxy 请求路径。（Auth 已接入；Policy crate 决策引擎待后续切片。）
 
 ### 验收标准
 
-- [ ] 被禁用、过期、超限、无权限 Key 会被拒绝。
-- [ ] 请求上下文包含 organization_id、project_id、api_key_id 等租户字段。
+- [x] 被禁用、过期、超限、无权限 Key 会被拒绝。（当前覆盖 disabled、expired、`monthly_token_budget = 0`、scope/model/provider deny。）
+- [x] 请求上下文包含 organization_id、project_id、api_key_id 等租户字段。
 - [ ] 所有安全相关日志脱敏。
 - [ ] Policy 决策有单元测试。
 - [ ] OpenAI SDK 请求在无 Key 或无权限时返回统一错误。
 
-**进度**：0%。
+**进度**：30%。
+
+**验收结果**：
+
+```bash
+cargo fmt --check
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli auth -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_proxy_auth -- --nocapture
+PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targets --all-features -- -D warnings
+```
+
+2026-05-03 本轮启动 P4：`ApiKey` 配置新增 `allowed_providers` 与 `expires_at_unix`，`authenticate` 会对 disabled、expired、budget exhausted、scope deny 进行统一错误拒绝；`chat` 请求路径在 model/provider 解析后执行 Provider allowlist，并在 route planning log 中记录 `api_key_id`、`organization_id`、`project_id`、logical/provider model 和 stream 标记，避免记录 secret。
 
 ## 8. P5 多 Provider Adapter 与 Model Registry
 

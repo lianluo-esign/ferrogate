@@ -177,10 +177,12 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         enabled: true,
         scopes: vec![],
         allowed_models: vec![],
+        allowed_providers: vec![],
         organization_id: None,
         team_id: None,
         project_id: None,
         user_id: None,
         monthly_token_budget: None,
+        expires_at_unix: None,
     }
 }

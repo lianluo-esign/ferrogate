@@ -112,6 +112,18 @@ impl FerroGateway {
             return Ok(());
         };
 
+        if !auth.can_use_provider(&provider.name) {
+            write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "provider_not_allowed",
+                format!("API key is not allowed to use provider {}", provider.name),
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(());
+        }
+
         let prepared = match self.state.prepare_chat_completions(
             provider,
             model,
@@ -132,6 +144,19 @@ impl FerroGateway {
                 return Ok(());
             }
         };
+
+        info!(
+            request_id = %ctx.request_id,
+            api_key_id = ?auth.api_key_id,
+            organization_id = ?auth.organization_id,
+            project_id = ?auth.project_id,
+            monthly_token_budget = ?auth.monthly_token_budget,
+            logical_model = %request.model,
+            provider = %provider.name,
+            provider_model = %model.provider_model,
+            stream = request.stream,
+            "chat completion route planned"
+        );
 
         if request.stream {
             return match dispatch_provider_streaming_request(&prepared) {

@@ -38,6 +38,38 @@ name = "Chat limited"
 key = "chat-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
+
+[[api_keys]]
+id = "disabled_key"
+name = "Disabled key"
+key = "disabled-secret"
+enabled = false
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+
+[[api_keys]]
+id = "expired_key"
+name = "Expired key"
+key = "expired-secret"
+expires_at_unix = 1
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+
+[[api_keys]]
+id = "budget_empty"
+name = "Budget empty"
+key = "budget-secret"
+monthly_token_budget = 0
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+
+[[api_keys]]
+id = "provider_limited"
+name = "Provider limited"
+key = "provider-limited-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+allowed_providers = ["other-provider"]
 "#
         ),
     )
@@ -86,6 +118,26 @@ fn ai_proxy_rejects_missing_invalid_scope_and_model_auth() {
     let denied_model = chat(&gateway_addr, Some("chat-secret"), "blocked-chat");
     assert!(denied_model.contains("403 Forbidden"));
     assert!(denied_model.contains("model_not_allowed"));
+
+    let disabled = chat(&gateway_addr, Some("disabled-secret"), "fast-chat");
+    assert!(disabled.contains("403 Forbidden"));
+    assert!(disabled.contains("api_key_disabled"));
+    assert!(!disabled.contains("disabled-secret"));
+
+    let expired = chat(&gateway_addr, Some("expired-secret"), "fast-chat");
+    assert!(expired.contains("403 Forbidden"));
+    assert!(expired.contains("api_key_expired"));
+    assert!(!expired.contains("expired-secret"));
+
+    let budget = chat(&gateway_addr, Some("budget-secret"), "fast-chat");
+    assert!(budget.contains("429 Too Many Requests"));
+    assert!(budget.contains("token_budget_exceeded"));
+    assert!(!budget.contains("budget-secret"));
+
+    let denied_provider = chat(&gateway_addr, Some("provider-limited-secret"), "fast-chat");
+    assert!(denied_provider.contains("403 Forbidden"));
+    assert!(denied_provider.contains("provider_not_allowed"));
+    assert!(!denied_provider.contains("provider-limited-secret"));
 
     let non_object = http_request(
         &gateway_addr,
