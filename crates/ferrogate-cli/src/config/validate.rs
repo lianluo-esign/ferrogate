@@ -21,8 +21,24 @@ impl Config {
         let model_names = self.validate_models(&provider_names)?;
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
+        self.validate_telemetry()?;
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
+        Ok(())
+    }
+
+    fn validate_telemetry(&self) -> AnyResult<()> {
+        if self.telemetry.service_name.trim().is_empty() {
+            bail!("field telemetry.service_name: cannot be empty");
+        }
+        if let Some(endpoint) = &self.telemetry.otlp_endpoint {
+            if endpoint.trim().is_empty() {
+                bail!("field telemetry.otlp_endpoint: cannot be empty");
+            }
+            if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                bail!("field telemetry.otlp_endpoint: must start with http:// or https://");
+            }
+        }
         Ok(())
     }
 

@@ -24,7 +24,10 @@ use ferrogate_providers::{
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute,
 };
-use ferrogate_storage::{AppendRepository, InMemoryAppendRepository, StoredRequestLog};
+use ferrogate_storage::{
+    AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredRequestLog,
+    StoredUsageAggregate,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
@@ -37,6 +40,7 @@ pub(crate) struct AppState {
     provider_adapters: Arc<ProviderAdapterRegistry>,
     billing_events: Arc<InMemoryBillingEventSink>,
     request_logs: Arc<Mutex<InMemoryAppendRepository<StoredRequestLog>>>,
+    usage_aggregates: Arc<Mutex<InMemoryRepository<StoredUsageAggregate>>>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
@@ -87,6 +91,7 @@ impl AppState {
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
             billing_events: Arc::new(InMemoryBillingEventSink::default()),
             request_logs: Arc::new(Mutex::new(InMemoryAppendRepository::new())),
+            usage_aggregates: Arc::new(Mutex::new(InMemoryRepository::new())),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
@@ -225,23 +230,61 @@ impl AppState {
             .model_prices
             .get(logical_model)
             .map(|price| price.estimate(&usage));
-        self.billing_events.record(BillingEvent {
+        let event = BillingEvent {
             request_id: request.request_id.clone(),
             trace_id: request.trace_id.clone(),
             tenant: request.tenant.clone(),
             logical_model: logical_model.into(),
             provider: provider.into(),
             provider_model: provider_model.into(),
-            usage,
+            usage: usage.clone(),
             cost,
             status_code,
             occurred_at_unix: None,
-        })
+        };
+        self.billing_events.record(event)?;
+        self.record_usage_aggregate(&request.tenant, logical_model, provider, &usage);
+        Ok(())
     }
 
     #[cfg(test)]
     fn billing_events(&self) -> Vec<BillingEvent> {
         self.billing_events.list()
+    }
+
+    #[cfg(test)]
+    fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
+        self.usage_aggregates
+            .lock()
+            .map(|aggregates| aggregates.list())
+            .unwrap_or_default()
+    }
+
+    fn record_usage_aggregate(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        logical_model: &str,
+        provider: &str,
+        usage: &BillingTokenUsage,
+    ) {
+        let id = usage_aggregate_id(tenant, logical_model, provider);
+        let Ok(mut aggregates) = self.usage_aggregates.lock() else {
+            return;
+        };
+
+        let mut aggregate = aggregates.get(&id).unwrap_or_else(|| StoredUsageAggregate {
+            id: id.clone(),
+            organization_id: tenant.organization_id.clone(),
+            project_id: tenant.project_id.clone(),
+            api_key_id: tenant.api_key_id.clone(),
+            logical_model: logical_model.to_string(),
+            provider: provider.to_string(),
+            usage: BillingTokenUsage::default(),
+        });
+        aggregate.usage.prompt_tokens += usage.prompt_tokens;
+        aggregate.usage.completion_tokens += usage.completion_tokens;
+        aggregate.usage.total_tokens += usage.total_tokens;
+        aggregates.insert(id, aggregate);
     }
 
     pub(crate) fn record_request_log(&self, log: StoredRequestLog) {
@@ -432,6 +475,21 @@ fn model_price(model: &Model) -> Option<ModelPrice> {
             output.unwrap_or_default(),
         )),
     }
+}
+
+fn usage_aggregate_id(
+    tenant: &ferrogate_core::TenantContext,
+    logical_model: &str,
+    provider: &str,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        tenant.organization_id.as_deref().unwrap_or("_"),
+        tenant.project_id.as_deref().unwrap_or("_"),
+        tenant.api_key_id.as_deref().unwrap_or("_"),
+        logical_model,
+        provider
+    )
 }
 
 fn build_policy_engine(config_rules: &[ConfigPolicyRule]) -> BasicPolicyEngine {
@@ -642,6 +700,15 @@ mod tests {
         assert_eq!(events[0].tenant.organization_id.as_deref(), Some("org"));
         assert_eq!(events[0].usage.total_tokens, 8);
         assert_eq!(events[0].cost.as_ref().unwrap().currency, "USD");
+
+        let aggregates = state.usage_aggregates();
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].organization_id.as_deref(), Some("org"));
+        assert_eq!(aggregates[0].project_id.as_deref(), Some("project"));
+        assert_eq!(aggregates[0].api_key_id.as_deref(), Some("key_dev"));
+        assert_eq!(aggregates[0].logical_model, "fast-chat");
+        assert_eq!(aggregates[0].provider, "openai");
+        assert_eq!(aggregates[0].usage.total_tokens, 8);
     }
 
     #[test]
@@ -680,6 +747,7 @@ mod tests {
             telemetry: crate::config::TelemetryConfig {
                 service_name: "ferrogate-test".into(),
                 log_bodies: false,
+                otlp_endpoint: None,
             },
             models: vec![Model {
                 name: "fast-chat".into(),
@@ -736,14 +804,34 @@ mod tests {
                 200,
             )
             .unwrap();
+        state
+            .record_billing_event(
+                &request,
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &ProviderUsage {
+                    prompt_tokens: Some(7),
+                    completion_tokens: Some(11),
+                    total_tokens: Some(18),
+                },
+                200,
+            )
+            .unwrap();
 
         let snapshot = state.prometheus_metrics_snapshot();
 
         assert_eq!(snapshot.service_name, "ferrogate-test");
         assert_eq!(snapshot.request_log_total, 1);
         assert_eq!(snapshot.request_status_totals[0].status_code, 200);
-        assert_eq!(snapshot.billing_event_total, 1);
-        assert_eq!(snapshot.token_totals.total_tokens, 8);
+        assert_eq!(snapshot.billing_event_total, 2);
+        assert_eq!(snapshot.token_totals.total_tokens, 26);
         assert_eq!(snapshot.model_provider_totals[0].logical_model, "fast-chat");
+
+        let aggregates = state.usage_aggregates();
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].usage.prompt_tokens, 10);
+        assert_eq!(aggregates[0].usage.completion_tokens, 16);
+        assert_eq!(aggregates[0].usage.total_tokens, 26);
     }
 }

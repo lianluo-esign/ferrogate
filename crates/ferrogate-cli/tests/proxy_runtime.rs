@@ -152,6 +152,7 @@ value = "proxied"
     assert!(health.contains("200 OK"));
     assert!(health.contains("\"status\":\"ok\""));
     assert!(health.contains("x-request-id"));
+    assert!(health.contains("x-trace-id"));
 
     let admin = http_get(&gateway_addr, "/admin/status", "localhost");
     assert!(admin.contains("200 OK"));
@@ -162,6 +163,7 @@ value = "proxied"
     let normalized_metrics = metrics.to_ascii_lowercase();
     assert!(metrics.contains("200 OK"));
     assert!(normalized_metrics.contains("content-type: text/plain; version=0.0.4; charset=utf-8"));
+    assert!(normalized_metrics.contains("x-trace-id"));
     assert!(metrics.contains("# TYPE ferrogate_request_logs_total counter"));
     assert!(metrics.contains("ferrogate_billing_events_total 0"));
 
@@ -175,11 +177,15 @@ value = "proxied"
     assert!(!normalized_response.contains("{env.ferrogate_proxy_test_secret}"));
     assert!(normalized_response.contains("x-ferrogate-response: proxied"));
     assert!(normalized_response.contains("x-request-id"));
+    assert!(normalized_response.contains("x-trace-id"));
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
     let upstream_request = upstream_handle.join().unwrap();
     assert!(upstream_request.contains("x-forwarded-host: example.test"));
+    assert!(upstream_request
+        .to_ascii_lowercase()
+        .contains("x-ferrogate-trace-id: fg-"));
 }
 
 #[test]

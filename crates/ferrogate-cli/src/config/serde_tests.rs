@@ -13,6 +13,11 @@ fn config_model_supports_serde_roundtrip() {
             urls: vec!["http://127.0.0.1:8082".into()],
             enabled: true,
         }],
+        telemetry: TelemetryConfig {
+            service_name: "ferrogate-test".into(),
+            log_bodies: false,
+            otlp_endpoint: Some("http://127.0.0.1:4318".into()),
+        },
         routes: vec![RouteRule {
             name: "api".into(),
             upstream: "backend".into(),
@@ -42,6 +47,10 @@ fn config_model_supports_serde_roundtrip() {
 
     assert_eq!(decoded.listen, config.listen);
     assert_eq!(decoded.admin.listen.as_deref(), Some("localhost:2019"));
+    assert_eq!(
+        decoded.telemetry.otlp_endpoint.as_deref(),
+        Some("http://127.0.0.1:4318")
+    );
     assert_eq!(decoded.upstreams[0].endpoint_urls().len(), 2);
     assert_eq!(decoded.routes[0].request_headers[0].name, "x-request");
     decoded.validate().unwrap();

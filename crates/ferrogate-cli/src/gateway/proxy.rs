@@ -67,6 +67,9 @@ impl ProxyHttp for FerroGateway {
         upstream_request.set_uri(uri);
         upstream_request.insert_header(header::HOST, endpoint.authority)?;
         upstream_request.insert_header("x-ferrogate-request-id", ctx.request_id.as_str())?;
+        if let Some(trace_id) = &ctx.trace_id {
+            upstream_request.insert_header("x-ferrogate-trace-id", trace_id.as_str())?;
+        }
         if let Some(original_host) = &ctx.original_host {
             upstream_request.insert_header("x-forwarded-host", original_host.as_str())?;
         }
@@ -95,6 +98,9 @@ impl ProxyHttp for FerroGateway {
         upstream_response.insert_header("server", "FerroGate")?;
         upstream_response.insert_header("x-ferrogate-runtime", "pingora")?;
         upstream_response.insert_header("x-request-id", ctx.request_id.as_str())?;
+        if let Some(trace_id) = &ctx.trace_id {
+            upstream_response.insert_header("x-trace-id", trace_id.as_str())?;
+        }
         if let Some(route) = &ctx.route {
             for header in &route.response_headers {
                 let name =
@@ -120,9 +126,9 @@ impl ProxyHttp for FerroGateway {
             .response_written()
             .map_or(0, |resp| resp.status.as_u16());
         if let Some(error) = error {
-            warn!(request_id = %ctx.request_id, response_code, error = ?error, "Pingora request failed");
+            warn!(request_id = %ctx.request_id, trace_id = ?ctx.trace_id, response_code, error = ?error, "Pingora request failed");
         } else {
-            info!(request_id = %ctx.request_id, response_code, "Pingora request completed");
+            info!(request_id = %ctx.request_id, trace_id = ?ctx.trace_id, response_code, "Pingora request completed");
         }
     }
 }

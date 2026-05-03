@@ -20,6 +20,10 @@ fn parses_config_file() {
         r#"
 listen = "0.0.0.0:8080"
 
+[telemetry]
+service_name = "ferrogate-dev"
+otlp_endpoint = "http://127.0.0.1:4318"
+
 [[upstreams]]
 name = "example"
 url = "https://example.com/base"
@@ -68,6 +72,11 @@ log_bodies = true
 
     let config = Config::load(&path).unwrap();
     assert_eq!(config.listen, "0.0.0.0:8080");
+    assert_eq!(config.telemetry.service_name, "ferrogate-dev");
+    assert_eq!(
+        config.telemetry.otlp_endpoint.as_deref(),
+        Some("http://127.0.0.1:4318")
+    );
     assert_eq!(config.providers.len(), 1);
     assert_eq!(config.providers[0].name, "openai");
     assert_eq!(config.models.len(), 1);

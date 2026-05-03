@@ -49,7 +49,7 @@ tags:
 | P3 | OpenAI-compatible AI Proxy MVP | 已完成 | 100% | 已实现 OpenAI-compatible Adapter MVP、adapter registry 解耦、`/v1/models`、HTTP/HTTPS chat completion dispatch、`stream=true` 增量式 SSE forwarding、Provider 错误归一化、usage 提取接口、鉴权/模型路由负例和 AI dispatch/registry 性能并发 smoke |
 | P4 | 虚拟 API Key、租户上下文与 Policy MVP | 已完成 | 100% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界 |
 | P5 | 多 Provider Adapter 与 Model Registry | 已完成 | 100% | 已实现 OpenAI-compatible、Anthropic、Gemini、Grok、Azure OpenAI adapter 的 registry 分发、请求转换、错误归一化、usage 提取和可重试判断；已定义并接入 Model Registry 的逻辑模型解析、优先级 fallback、加权 fallback 轮转和租户级模型可见性 |
-| P6 | 可观测性、请求日志、Storage 与计费事件 | 进行中 | 95% | 已定义 Token usage、模型价格、成本估算、Billing Event、请求日志、usage aggregate、in-memory repository/sink、观测 span 模板和可扩展 exporter/plugin 边界；非流式 AI Proxy 成功响应已写入 in-memory Billing Event 与结构化 request log；已支持全局+API Key 双开关控制 prompt/response body 记录；chat 内部拒绝/dispatch 错误路径已写入 request log；Prometheus `/metrics` 已输出 request/billing/token/cost/model-provider 指标并受 `admin.read` 鉴权保护；OpenTelemetry exporter 待后续切片 |
+| P6 | 可观测性、请求日志、Storage 与计费事件 | 进行中 | 98% | 已定义 Token usage、模型价格、成本估算、Billing Event、请求日志、usage aggregate、in-memory repository/sink、观测 span 模板和可扩展 exporter/plugin 边界；非流式 AI Proxy 成功响应已写入 in-memory Billing Event、usage aggregate 与结构化 request log；已支持全局+API Key 双开关控制 prompt/response body 记录；所有本地/代理响应已带 request_id/trace_id；Prometheus `/metrics` 已输出 request/billing/token/cost/model-provider 指标并受 `admin.read` 鉴权保护；OTLP/HTTP traces/metrics/logs 请求规划已完成，后台 sender 待后续切片 |
 | P7 | Admin API 与 Dashboard MVP | 未开始 | 0% | 待实现管理面和基础后台页面 |
 | P8 | 生产级可靠性、安全和部署增强 | 未开始 | 0% | 待实现限流、熔断、fallback、部署文档 |
 
@@ -367,10 +367,11 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targ
 
 ### 任务
 
-- [ ] 集成 OpenTelemetry traces、metrics、logs。（已定义 exporter/plugin 配置边界；Prometheus `/metrics` runtime 已接入，OTLP/OpenTelemetry exporter 接入待后续切片。）
+- [ ] 集成 OpenTelemetry traces、metrics、logs。（已定义 exporter/plugin 配置边界；Prometheus `/metrics` runtime 已接入，OTLP/HTTP traces/metrics/logs JSON 请求规划已完成，后台 sender 待后续切片。）
 - [x] 定义 PRD 中要求的 span 层级。
 - [x] 定义可扩展观测 exporter/plugin 边界，支持按 trace/metric/log 信号拆分 exporter；Prometheus 作为 metrics exporter 暴露 `/metrics`，不作为日志插件。
 - [x] 接入 Prometheus 文本格式 `/metrics`，输出 request log、错误数、status、billing event、token、cost、model/provider 聚合指标，并在开启 API Key 时要求 `admin.read`。
+- [x] 定义 OTLP/HTTP traces、metrics、logs 请求规划和 `telemetry.otlp_endpoint` 配置校验。
 - [x] 实现结构化请求日志模型和 repository。
 - [x] 实现 Token usage 提取和估算接口。
 - [x] 实现模型价格表和成本计算。
@@ -380,13 +381,13 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo clippy -p ferrogate-cli --all-targ
 
 ### 验收标准
 
-- [ ] 每次请求都有 request_id 和 trace_id。
-- [ ] 日志包含 PRD 要求的核心字段。
-- [ ] Token 和成本可以按组织、项目、API Key、模型聚合。
-- [ ] 敏感字段默认脱敏。
-- [ ] Billing Event 写入失败不会明显阻塞响应路径。
+- [x] 每次请求都有 request_id 和 trace_id。
+- [x] 日志包含 PRD 要求的核心字段。
+- [x] Token 和成本可以按组织、项目、API Key、模型聚合。
+- [x] 敏感字段默认脱敏。
+- [x] Billing Event 写入失败不会明显阻塞响应路径。
 
-**进度**：95%。
+**进度**：98%。
 
 **验收结果**：
 
@@ -414,6 +415,8 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_pr
 2026-05-03 本轮补齐可扩展 observability exporter/plugin 边界：`ferrogate-observability` 新增 `ObservabilitySignal`、`ObservabilityExporterKind`、`ObservabilityExporterConfig`、`ObservabilityPipelineConfig` 和 `ObservabilityPlugin` trait，可按 trace、metric、log 三类信号分别声明 stdout、OTLP、Prometheus、file 等 exporter。Prometheus 被明确约束为 metrics-only，并要求绝对 HTTP path（默认形态为 `/metrics`）；日志类插件继续走 log signal，避免将 Prometheus 误作为日志插件。当前完成的是配置/插件契约和校验，实际 exporter runtime wiring 待后续切片。
 
 2026-05-03 本轮接入 Prometheus runtime 切片：`ferrogate-observability` 新增 `GatewayMetricsSnapshot` 和 Prometheus text renderer；`ferrogate-cli` 从 in-memory request log 与 billing event 聚合 request log 总数、错误数、HTTP status、billing event、prompt/completion/total token、cost currency、logical model/provider 请求和 token 指标，并通过 `/metrics` 输出 `text/plain; version=0.0.4`。当网关配置 API Key 时，`/metrics` 复用 `admin.read` 鉴权，避免指标中模型/provider 维度裸露。
+
+2026-05-04 本轮补齐 request/trace 传播、OTLP 规划和 usage aggregate runtime：`handle_request_filter` 统一为本地、AI 和代理路径生成 `trace_id`，JSON/raw/streaming 响应与代理响应均带 `x-trace-id`，转发到上游时补 `x-ferrogate-trace-id`；`ferrogate-observability` 新增 OTLP/HTTP traces、metrics、logs JSON 请求规划，可生成 `/v1/traces`、`/v1/metrics`、`/v1/logs` 请求体；`TelemetryConfig` 新增 `otlp_endpoint` 并做 http/https endpoint 校验；`AppState` 在 billing event 成功写入后同步累加 organization/project/api key/logical model/provider 维度的 usage aggregate。当前尚未启动真实后台 OTLP sender，避免在 Pingora 请求关键路径中直接做外部网络写入。
 
 ## 10. P7 Admin API 与 Dashboard MVP
 

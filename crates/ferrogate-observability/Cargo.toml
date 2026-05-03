@@ -9,6 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+serde_json.workspace = true
 tracing.workspace = true
 
 [features]

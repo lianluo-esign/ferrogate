@@ -69,6 +69,7 @@ pub(crate) async fn write_json_response<T: Serialize>(
     response.insert_header(header::CONTENT_TYPE, "application/json")?;
     response.insert_header(header::CONTENT_LENGTH, body.len().to_string())?;
     response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
     session
         .write_response_header(Box::new(response), false)
@@ -89,6 +90,7 @@ pub(crate) async fn write_raw_response(
     response.insert_header(header::CONTENT_TYPE, content_type)?;
     response.insert_header(header::CONTENT_LENGTH, body.len().to_string())?;
     response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
     session
         .write_response_header(Box::new(response), false)
@@ -107,6 +109,7 @@ pub(crate) async fn write_streaming_response<R: Read>(
     let mut response = ResponseHeader::build(status, Some(4))?;
     response.insert_header(header::CONTENT_TYPE, content_type)?;
     response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
     session
         .write_response_header(Box::new(response), false)

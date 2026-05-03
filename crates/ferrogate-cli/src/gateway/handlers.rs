@@ -15,6 +15,7 @@ impl FerroGateway {
         ctx: &mut ProxyContext,
     ) -> PingoraResult<bool> {
         ctx.request_id = self.state.next_request_id();
+        ctx.trace_id = Some(ctx.request_id.clone());
         let req = session.req_header();
         let path = req.uri.path().to_string();
 
@@ -116,7 +117,6 @@ impl FerroGateway {
             return Ok(true);
         };
 
-        ctx.trace_id = Some(ctx.request_id.clone());
         ctx.tenant_id = None;
 
         match build_target_path_query(&upstream_url, &route, &path, req.uri.query()) {

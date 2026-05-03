@@ -147,6 +147,8 @@ pub(crate) struct TelemetryConfig {
     pub(crate) service_name: String,
     #[serde(default)]
     pub(crate) log_bodies: bool,
+    #[serde(default)]
+    pub(crate) otlp_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -227,6 +229,7 @@ impl Default for TelemetryConfig {
         Self {
             service_name: default_service_name(),
             log_bodies: false,
+            otlp_endpoint: None,
         }
     }
 }

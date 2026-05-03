@@ -1,5 +1,6 @@
 //! Logging, metrics, and tracing boundaries.
 
+use serde_json::json;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +216,10 @@ pub enum ObservabilityConfigError {
         exporter: String,
         path: String,
     },
+    InvalidEndpoint {
+        exporter: String,
+        endpoint: String,
+    },
     UnsupportedSignal {
         exporter: String,
         kind: ObservabilityExporterKind,
@@ -244,6 +249,10 @@ impl fmt::Display for ObservabilityConfigError {
             Self::InvalidHttpPath { exporter, path } => write!(
                 f,
                 "observability exporter `{exporter}` requires an absolute HTTP path, got `{path}`"
+            ),
+            Self::InvalidEndpoint { exporter, endpoint } => write!(
+                f,
+                "observability exporter `{exporter}` requires an http or https endpoint, got `{endpoint}`"
             ),
             Self::UnsupportedSignal {
                 exporter,
@@ -483,6 +492,282 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     }
 
     output
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpHttpRequest {
+    pub method: &'static str,
+    pub url: String,
+    pub content_type: &'static str,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpAttribute {
+    pub key: String,
+    pub value: String,
+}
+
+impl OtlpAttribute {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpSpanRecord {
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub name: String,
+    pub start_time_unix_nano: u64,
+    pub end_time_unix_nano: u64,
+    pub attributes: Vec<OtlpAttribute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpLogRecord {
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub severity_text: String,
+    pub body: String,
+    pub time_unix_nano: u64,
+    pub attributes: Vec<OtlpAttribute>,
+}
+
+pub fn build_otlp_metrics_request(
+    endpoint: &str,
+    snapshot: &GatewayMetricsSnapshot,
+) -> Result<OtlpHttpRequest, ObservabilityConfigError> {
+    let body = json!({
+        "resourceMetrics": [{
+            "resource": resource_json(&snapshot.service_name),
+            "scopeMetrics": [{
+                "scope": instrumentation_scope_json(),
+                "metrics": gateway_metrics_json(snapshot),
+            }]
+        }]
+    });
+    build_otlp_request(endpoint, "/v1/metrics", body)
+}
+
+pub fn build_otlp_traces_request(
+    endpoint: &str,
+    service_name: &str,
+    spans: &[OtlpSpanRecord],
+) -> Result<OtlpHttpRequest, ObservabilityConfigError> {
+    let body = json!({
+        "resourceSpans": [{
+            "resource": resource_json(service_name),
+            "scopeSpans": [{
+                "scope": instrumentation_scope_json(),
+                "spans": spans.iter().map(span_json).collect::<Vec<_>>(),
+            }]
+        }]
+    });
+    build_otlp_request(endpoint, "/v1/traces", body)
+}
+
+pub fn build_otlp_logs_request(
+    endpoint: &str,
+    service_name: &str,
+    logs: &[OtlpLogRecord],
+) -> Result<OtlpHttpRequest, ObservabilityConfigError> {
+    let body = json!({
+        "resourceLogs": [{
+            "resource": resource_json(service_name),
+            "scopeLogs": [{
+                "scope": instrumentation_scope_json(),
+                "logRecords": logs.iter().map(log_json).collect::<Vec<_>>(),
+            }]
+        }]
+    });
+    build_otlp_request(endpoint, "/v1/logs", body)
+}
+
+fn build_otlp_request(
+    endpoint: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<OtlpHttpRequest, ObservabilityConfigError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(ObservabilityConfigError::MissingEndpoint {
+            exporter: "otlp".to_string(),
+            kind: ObservabilityExporterKind::Otlp,
+        });
+    }
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err(ObservabilityConfigError::InvalidEndpoint {
+            exporter: "otlp".to_string(),
+            endpoint: endpoint.to_string(),
+        });
+    }
+
+    Ok(OtlpHttpRequest {
+        method: "POST",
+        url: format!("{}{}", endpoint.trim_end_matches('/'), path),
+        content_type: "application/json",
+        body: serde_json::to_vec(&body).expect("OTLP JSON serialization should not fail"),
+    })
+}
+
+fn resource_json(service_name: &str) -> serde_json::Value {
+    json!({
+        "attributes": [{
+            "key": "service.name",
+            "value": {"stringValue": service_name},
+        }]
+    })
+}
+
+fn instrumentation_scope_json() -> serde_json::Value {
+    json!({
+        "name": "ferrogate",
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Value> {
+    let mut metrics = vec![
+        sum_metric_json(
+            "ferrogate.request_logs",
+            "Total structured request logs recorded by FerroGate.",
+            snapshot.request_log_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.request_errors",
+            "Total structured request logs with errors or 4xx/5xx statuses.",
+            snapshot.request_error_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.billing_events",
+            "Total billing events recorded by FerroGate.",
+            snapshot.billing_event_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.tokens",
+            "Total prompt tokens recorded by billing events.",
+            snapshot.token_totals.prompt_tokens as f64,
+            vec![OtlpAttribute::new("type", "prompt")],
+        ),
+        sum_metric_json(
+            "ferrogate.tokens",
+            "Total completion tokens recorded by billing events.",
+            snapshot.token_totals.completion_tokens as f64,
+            vec![OtlpAttribute::new("type", "completion")],
+        ),
+        sum_metric_json(
+            "ferrogate.tokens",
+            "Total tokens recorded by billing events.",
+            snapshot.token_totals.total_tokens as f64,
+            vec![OtlpAttribute::new("type", "total")],
+        ),
+    ];
+
+    for status in &snapshot.request_status_totals {
+        metrics.push(sum_metric_json(
+            "ferrogate.request_status",
+            "Structured request logs grouped by HTTP status code.",
+            status.count as f64,
+            vec![OtlpAttribute::new(
+                "status_code",
+                status.status_code.to_string(),
+            )],
+        ));
+    }
+
+    for cost in &snapshot.cost_estimates {
+        metrics.push(sum_metric_json(
+            "ferrogate.cost_estimated",
+            "Estimated model cost recorded by billing events.",
+            cost.amount,
+            vec![OtlpAttribute::new("currency", cost.currency.as_str())],
+        ));
+    }
+
+    for total in &snapshot.model_provider_totals {
+        let attributes = vec![
+            OtlpAttribute::new("logical_model", total.logical_model.as_str()),
+            OtlpAttribute::new("provider", total.provider.as_str()),
+        ];
+        metrics.push(sum_metric_json(
+            "ferrogate.model_provider_requests",
+            "Billing events grouped by logical model and provider.",
+            total.requests as f64,
+            attributes.clone(),
+        ));
+        metrics.push(sum_metric_json(
+            "ferrogate.model_provider_tokens",
+            "Billing event token usage grouped by logical model and provider.",
+            total.total_tokens as f64,
+            attributes,
+        ));
+    }
+
+    metrics
+}
+
+fn sum_metric_json(
+    name: &str,
+    description: &str,
+    value: f64,
+    attributes: Vec<OtlpAttribute>,
+) -> serde_json::Value {
+    json!({
+        "name": name,
+        "description": description,
+        "sum": {
+            "aggregationTemporality": 2,
+            "isMonotonic": true,
+            "dataPoints": [{
+                "asDouble": value,
+                "attributes": attributes_json(&attributes),
+            }]
+        }
+    })
+}
+
+fn span_json(span: &OtlpSpanRecord) -> serde_json::Value {
+    json!({
+        "traceId": span.trace_id,
+        "spanId": span.span_id,
+        "parentSpanId": span.parent_span_id,
+        "name": span.name,
+        "kind": 2,
+        "startTimeUnixNano": span.start_time_unix_nano.to_string(),
+        "endTimeUnixNano": span.end_time_unix_nano.to_string(),
+        "attributes": attributes_json(&span.attributes),
+    })
+}
+
+fn log_json(log: &OtlpLogRecord) -> serde_json::Value {
+    json!({
+        "timeUnixNano": log.time_unix_nano.to_string(),
+        "traceId": log.trace_id,
+        "spanId": log.span_id,
+        "severityText": log.severity_text,
+        "body": {"stringValue": log.body},
+        "attributes": attributes_json(&log.attributes),
+    })
+}
+
+fn attributes_json(attributes: &[OtlpAttribute]) -> Vec<serde_json::Value> {
+    attributes
+        .iter()
+        .map(|attribute| {
+            json!({
+                "key": attribute.key,
+                "value": {"stringValue": attribute.value},
+            })
+        })
+        .collect()
 }
 
 fn push_help(output: &mut String, metric: &str, help: &str, kind: &str) {
@@ -773,5 +1058,90 @@ mod tests {
         assert!(text.contains(
             "ferrogate_model_provider_requests_total{logical_model=\"fast-chat\",provider=\"openai\"} 1"
         ));
+    }
+
+    #[test]
+    fn builds_otlp_http_json_requests_for_metrics_traces_and_logs() {
+        let snapshot = GatewayMetricsSnapshot {
+            service_name: "ferrogate".into(),
+            billing_event_total: 1,
+            token_totals: TokenMetricTotals {
+                prompt_tokens: 3,
+                completion_tokens: 5,
+                total_tokens: 8,
+            },
+            ..GatewayMetricsSnapshot::default()
+        };
+
+        let metrics = build_otlp_metrics_request("http://collector:4318", &snapshot).unwrap();
+        assert_eq!(metrics.method, "POST");
+        assert_eq!(metrics.url, "http://collector:4318/v1/metrics");
+        assert_eq!(metrics.content_type, "application/json");
+        let metrics_body: serde_json::Value = serde_json::from_slice(&metrics.body).unwrap();
+        assert_eq!(
+            metrics_body["resourceMetrics"][0]["resource"]["attributes"][0]["value"]["stringValue"],
+            "ferrogate"
+        );
+        assert!(
+            metrics_body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|metric| metric["name"] == "ferrogate.tokens")
+        );
+
+        let traces = build_otlp_traces_request(
+            "http://collector:4318/",
+            "ferrogate",
+            &[OtlpSpanRecord {
+                trace_id: "00000000000000000000000000000001".into(),
+                span_id: "0000000000000001".into(),
+                parent_span_id: None,
+                name: "ferrogate.gateway.request".into(),
+                start_time_unix_nano: 1,
+                end_time_unix_nano: 2,
+                attributes: vec![OtlpAttribute::new("request_id", "fg-1")],
+            }],
+        )
+        .unwrap();
+        assert_eq!(traces.url, "http://collector:4318/v1/traces");
+        let traces_body: serde_json::Value = serde_json::from_slice(&traces.body).unwrap();
+        assert_eq!(
+            traces_body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
+            "ferrogate.gateway.request"
+        );
+
+        let logs = build_otlp_logs_request(
+            "http://collector:4318",
+            "ferrogate",
+            &[OtlpLogRecord {
+                trace_id: Some("00000000000000000000000000000001".into()),
+                span_id: Some("0000000000000001".into()),
+                severity_text: "INFO".into(),
+                body: "request completed".into(),
+                time_unix_nano: 3,
+                attributes: vec![OtlpAttribute::new("status_code", "200")],
+            }],
+        )
+        .unwrap();
+        assert_eq!(logs.url, "http://collector:4318/v1/logs");
+        let logs_body: serde_json::Value = serde_json::from_slice(&logs.body).unwrap();
+        assert_eq!(
+            logs_body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["body"]["stringValue"],
+            "request completed"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_otlp_http_endpoint() {
+        let snapshot = GatewayMetricsSnapshot::default();
+
+        assert_eq!(
+            build_otlp_metrics_request("collector:4318", &snapshot).unwrap_err(),
+            ObservabilityConfigError::InvalidEndpoint {
+                exporter: "otlp".to_string(),
+                endpoint: "collector:4318".to_string(),
+            }
+        );
     }
 }

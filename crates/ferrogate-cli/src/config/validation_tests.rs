@@ -213,6 +213,21 @@ fn rejects_policy_with_unknown_references() {
 }
 
 #[test]
+fn rejects_invalid_otlp_endpoint_with_field_name() {
+    let config = Config {
+        telemetry: TelemetryConfig {
+            service_name: "ferrogate".into(),
+            log_bodies: false,
+            otlp_endpoint: Some("collector:4318".into()),
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field telemetry.otlp_endpoint"));
+}
+
+#[test]
 fn rejects_route_path_prefix_without_leading_slash() {
     let config = Config {
         upstreams: vec![upstream()],
