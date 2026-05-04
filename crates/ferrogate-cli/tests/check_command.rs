@@ -156,7 +156,48 @@ fn reload_validates_config_and_reports_planned_execution() {
     assert!(stdout.contains("snapshot="));
     assert!(stdout.contains("mode=validate-only"));
     assert!(stdout.contains("swap=false"));
-    assert!(stdout.contains("planned for P2"));
+    assert!(stdout.contains("--admin-url"));
+    assert!(stdout.contains("--graceful-upgrade"));
+}
+
+#[test]
+fn reload_admin_api_mode_requires_admin_token() {
+    let output = ferrogate()
+        .args([
+            "reload",
+            "--config",
+            "../../Ferrogate/Caddyfile",
+            "--admin-url",
+            "http://127.0.0.1:8080",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("admin reload requires --admin-token"));
+}
+
+#[test]
+fn reload_graceful_upgrade_requires_pid_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.toml");
+    std::fs::write(&path, r#"listen = "127.0.0.1:0""#).unwrap();
+
+    let output = ferrogate()
+        .args([
+            "reload",
+            "--config",
+            path.to_str().unwrap(),
+            "--graceful-upgrade",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("graceful upgrade reload requires"));
+    assert!(stderr.contains("graceful_upgrade_pid_file"));
 }
 
 #[test]

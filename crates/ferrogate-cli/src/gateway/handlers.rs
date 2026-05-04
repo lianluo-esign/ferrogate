@@ -16,6 +16,7 @@ impl FerroGateway {
     ) -> PingoraResult<bool> {
         ctx.request_id = self.state.next_request_id();
         ctx.trace_id = Some(ctx.request_id.clone());
+        let state = self.state.current();
         let req = session.req_header();
         let path = req.uri.path().to_string();
 
@@ -69,9 +70,24 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/config/reload" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_config_reload(session, ctx, &headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/providers" {
             let headers = req.headers.clone();
             self.handle_admin_providers(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/provider-health" {
+            let headers = req.headers.clone();
+            self.handle_admin_provider_health(session, ctx, &headers)
+                .await?;
             return Ok(true);
         }
 
@@ -129,8 +145,7 @@ impl FerroGateway {
             .map(normalize_host)
             .filter(|value| !value.is_empty());
 
-        let Some(route) = self
-            .state
+        let Some(route) = state
             .config
             .routes
             .iter()
@@ -149,7 +164,7 @@ impl FerroGateway {
             return Ok(true);
         };
 
-        let Some(upstream) = self.state.upstreams.get(&route.upstream).cloned() else {
+        let Some(upstream) = state.upstreams.get(&route.upstream).cloned() else {
             write_json_error(
                 session,
                 StatusCode::BAD_GATEWAY,
@@ -176,7 +191,7 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        let Some(upstream_url) = self.state.select_upstream_url(&upstream) else {
+        let Some(upstream_url) = state.select_upstream_url(&upstream) else {
             write_json_error(
                 session,
                 StatusCode::BAD_GATEWAY,

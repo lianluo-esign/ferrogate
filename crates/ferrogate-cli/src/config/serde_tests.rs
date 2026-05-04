@@ -18,6 +18,17 @@ fn config_model_supports_serde_roundtrip() {
             log_bodies: false,
             otlp_endpoint: Some("http://127.0.0.1:4318".into()),
         },
+        reliability: ReliabilityConfig {
+            provider_circuit_breaker_failure_threshold: Some(2),
+            provider_circuit_breaker_cooldown_secs: Some(30),
+            provider_dispatch_timeout_secs: Some(5),
+            provider_dispatch_max_retries: Some(1),
+            graceful_shutdown_grace_period_secs: Some(3),
+            graceful_shutdown_timeout_secs: Some(15),
+            graceful_upgrade_pid_file: Some("/tmp/ferrogate.pid".into()),
+            graceful_upgrade_sock: Some("/tmp/ferrogate_upgrade.sock".into()),
+            graceful_upgrade_sock_retries: Some(5),
+        },
         routes: vec![RouteRule {
             name: "api".into(),
             upstream: "backend".into(),
@@ -47,10 +58,33 @@ fn config_model_supports_serde_roundtrip() {
 
     assert_eq!(decoded.listen, config.listen);
     assert_eq!(decoded.admin.listen.as_deref(), Some("localhost:2019"));
+    assert!(!decoded.tls.is_enabled());
     assert_eq!(
         decoded.telemetry.otlp_endpoint.as_deref(),
         Some("http://127.0.0.1:4318")
     );
+    assert_eq!(
+        decoded
+            .reliability
+            .provider_circuit_breaker_failure_threshold,
+        Some(2)
+    );
+    assert_eq!(decoded.reliability.provider_dispatch_timeout_secs, Some(5));
+    assert_eq!(decoded.reliability.provider_dispatch_max_retries, Some(1));
+    assert_eq!(
+        decoded.reliability.graceful_shutdown_grace_period_secs,
+        Some(3)
+    );
+    assert_eq!(decoded.reliability.graceful_shutdown_timeout_secs, Some(15));
+    assert_eq!(
+        decoded.reliability.graceful_upgrade_pid_file.as_deref(),
+        Some("/tmp/ferrogate.pid")
+    );
+    assert_eq!(
+        decoded.reliability.graceful_upgrade_sock.as_deref(),
+        Some("/tmp/ferrogate_upgrade.sock")
+    );
+    assert_eq!(decoded.reliability.graceful_upgrade_sock_retries, Some(5));
     assert_eq!(decoded.upstreams[0].endpoint_urls().len(), 2);
     assert_eq!(decoded.routes[0].request_headers[0].name, "x-request");
     decoded.validate().unwrap();

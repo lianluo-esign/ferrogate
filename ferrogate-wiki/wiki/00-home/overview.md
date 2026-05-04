@@ -15,6 +15,7 @@ Make AI API traffic easier to operate in production by providing a small, transp
 - Rust-native reliability and performance
 - OpenAI-compatible developer experience
 - Configuration-first operations
+- Self-hosting runbook for binary, Docker, TLS, health checks, shutdown windows, and capacity planning
 - Provider-neutral routing
 - Clear observability and governance hooks
 - Open-source friendly documentation and contribution workflow

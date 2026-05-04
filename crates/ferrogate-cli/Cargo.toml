@@ -30,11 +30,13 @@ ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
 ferrogate-storage = { path = "../ferrogate-storage" }
 http.workspace = true
+instant-acme.workspace = true
 pingora.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

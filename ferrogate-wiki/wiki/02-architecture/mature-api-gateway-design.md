@@ -62,7 +62,7 @@ Example FerroGate Caddyfile direction:
 
     provider openai {
       base_url https://api.openai.com/v1
-      api_key env.OPENAI_API_KEY
+      api_key {env.OPENAI_API_KEY}
     }
 
     policy default {
@@ -75,6 +75,30 @@ Example FerroGate Caddyfile direction:
 ```
 
 This syntax is a first-class product direction. The implementation should first support a practical Caddyfile subset for reverse proxy, routing, headers, rewrite, logs, TLS, and static responses, then extend it with AI Gateway directives after the internal runtime model is stable.
+
+Current implemented `ai_gateway` subset:
+
+- `provider <name> { kind ... base_url ... api_key env.NAME/{env.NAME}/{$NAME} }`
+- `model <logical-name> -> <provider>:<provider-model> { capabilities ... context_window ... input_price_per_1m ... output_price_per_1m ... }`
+- `api_key <id> { key env.NAME/{env.NAME}/{$NAME} scopes ... allowed_models ... denied_models ... allowed_providers ... denied_providers ... monthly_token_budget ... request_limit_per_minute ... }`
+
+The parser maps this subset to the same typed config model used by TOML, so validation, auth, routing, token budgeting, billing, and provider dispatch do not need a separate Caddyfile-specific runtime path.
+
+## Caddy Source Comparison Notes
+
+Reference tree: `.references/caddy` (local Caddy source snapshot recorded during P0).
+
+Observed Caddy semantics relevant to FerroGate:
+
+- `caddyconfig/caddyfile.Parse` first tokenizes and groups input into server blocks and segments. It expands `{$ENV}` before parsing, while `{env.NAME}` remains a runtime placeholder token in HTTP handlers.
+- `caddyconfig/caddyfile.Dispenser` treats `{` as a block opener, not a line argument. FerroGate mirrors this for normal braces and only treats `{env.NAME}` / `{$NAME}` as argument tokens for Secret references because the current typed config needs to preserve env indirection instead of eagerly substituting secrets.
+- `caddyconfig/httpcaddyfile.RegisterHandlerDirective` extracts an optional matcher token before building HTTP routes. FerroGate currently supports the same broad shape for simple path matchers and named matcher declarations, but maps directly into `RouteRule` instead of Caddy module JSON.
+- Caddy sorts HTTP directives by `defaultDirectiveOrder`, then sub-sorts common path matchers by specificity. FerroGate's current adapter preserves source order for the supported subset except where nested `route`/`handle`/`handle_path` scopes collapse into a typed route; this is acceptable for the MVP subset because unsupported directives fail fast rather than silently reordering mixed middleware.
+- Caddy `route` parses child directives as a subroute without applying the normal directive-order sort, while `handle` builds mutually exclusive grouped subroutes. FerroGate currently treats `route`, `handle`, and `handle_path` as structural path-scope helpers for one proxy/static route, not as a full middleware graph.
+- Caddy `handle_path` requires a slash-prefixed path matcher and prepends a rewrite that strips the matched prefix. FerroGate's `handle_path` maps this to `RouteRule.path_prefixes` plus `strip_prefix` semantics.
+- Caddy `reverse_proxy` accepts multiple upstreams and many subdirectives. FerroGate's implemented subset covers positional upstreams plus `header_up`/`header_down`; advanced load balancing, active/passive health checks, transports, and response interception remain explicit future work.
+
+Design consequence: FerroGate should keep using a narrow, typed Caddyfile adapter with source-span diagnostics until the internal runtime can represent a richer middleware graph. New Caddyfile directives should be added only when they can either map unambiguously to existing typed config or be rejected with a clear migration hint.
 
 ## Built-in module architecture
 

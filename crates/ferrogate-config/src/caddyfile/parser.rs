@@ -1,10 +1,12 @@
 use crate::{
-    CaddyfileDiagnostic, GatewayConfig, GatewayHeader, GatewayLog, GatewayRoute, GatewayUpstream,
+    CaddyfileDiagnostic, GatewayApiKey, GatewayConfig, GatewayHeader, GatewayLog, GatewayModel,
+    GatewayProvider, GatewayRoute, GatewayTlsAcmeConfig, GatewayTlsConfig, GatewayUpstream,
 };
 
 use super::lexer::{lex, Token};
 use super::parser_support::{
-    adapt_site_address, caddy_path_to_prefix, global_suggestion, looks_like_upstream,
+    adapt_site_address, caddy_path_to_prefix, env_reference, global_suggestion,
+    looks_like_upstream, model_ref_arg,
 };
 
 pub fn parse_caddyfile(
@@ -58,6 +60,7 @@ impl<'a> Parser<'a> {
                 return Ok(());
             }
             let Some((directive, token)) = self.consume_word_with_token() else {
+                self.pos += 1;
                 return Ok(());
             };
             let args = self.consume_line_args();
@@ -131,11 +134,37 @@ impl<'a> Parser<'a> {
                 }
             }
             "reverse_proxy" => self.parse_reverse_proxy(host, inherited_prefix, args),
+            "ai_gateway" => self.parse_ai_gateway(&token),
             "respond" => {
                 self.add_static_response(host, inherited_prefix, args);
                 Ok(())
             }
-            "header" | "rewrite" | "uri" | "redir" | "encode" | "tls" => {
+            "tls" => {
+                if args.len() >= 2 {
+                    self.config.tls = Some(GatewayTlsConfig {
+                        cert_path: args[0].clone(),
+                        key_path: args[1].clone(),
+                    });
+                    self.consume_optional_empty_block()?;
+                } else if self.consume_lbrace() {
+                    self.parse_tls_block(host)?;
+                } else {
+                    self.config.tls_acme = Some(GatewayTlsAcmeConfig {
+                        domains: host.into_iter().map(ToString::to_string).collect(),
+                        email: None,
+                        directory_url: None,
+                        challenge: None,
+                        http_challenge_listen: None,
+                        storage_dir: None,
+                        dns_provider: None,
+                        dns_config: Default::default(),
+                        dns_hook_set: None,
+                        dns_hook_cleanup: None,
+                    });
+                }
+                Ok(())
+            }
+            "header" | "rewrite" | "uri" | "redir" | "encode" => {
                 self.consume_optional_empty_block()?;
                 Ok(())
             }
@@ -151,9 +180,376 @@ impl<'a> Parser<'a> {
             _ => Err(self.unsupported(
                 &token,
                 directive,
-                "supported MVP directives are site blocks, matchers, reverse_proxy, route, handle, handle_path, header, rewrite, uri, respond, redir, encode, tls, and log".to_string(),
+                "supported MVP directives are site blocks, matchers, reverse_proxy, ai_gateway, route, handle, handle_path, header, rewrite, uri, respond, redir, encode, tls, and log".to_string(),
             )),
         }
+    }
+
+    fn parse_tls_block(
+        &mut self,
+        host: Option<&str>,
+    ) -> std::result::Result<(), CaddyfileDiagnostic> {
+        let mut acme = GatewayTlsAcmeConfig {
+            domains: host.into_iter().map(ToString::to_string).collect(),
+            email: None,
+            directory_url: None,
+            challenge: None,
+            http_challenge_listen: None,
+            storage_dir: None,
+            dns_provider: None,
+            dns_config: Default::default(),
+            dns_hook_set: None,
+            dns_hook_cleanup: None,
+        };
+
+        loop {
+            self.skip_newlines();
+            if self.consume_rbrace() {
+                self.config.tls_acme = Some(acme);
+                return Ok(());
+            }
+            let Some((directive, token)) = self.consume_word_with_token() else {
+                self.pos += 1;
+                self.config.tls_acme = Some(acme);
+                return Ok(());
+            };
+            let args = self.consume_line_args_until_block();
+            match directive.as_str() {
+                "domain" | "domains" => acme.domains.extend(args),
+                "email" => acme.email = args.first().cloned(),
+                "ca" | "dir" | "directory_url" => acme.directory_url = args.first().cloned(),
+                "challenge" => acme.challenge = args.first().cloned(),
+                "http_challenge_listen" => acme.http_challenge_listen = args.first().cloned(),
+                "storage" => acme.storage_dir = args.first().cloned(),
+                "dns" => {
+                    if args.first().is_some_and(|value| value == "exec") && args.len() >= 3 {
+                        acme.dns_hook_set = Some(args[1].clone());
+                        acme.dns_hook_cleanup = Some(args[2].clone());
+                    } else if let Some(provider) = args.first() {
+                        acme.dns_provider = Some(provider.clone());
+                    }
+                    self.parse_tls_dns_config_block(&mut acme)?;
+                }
+                "dns_hook_set" => acme.dns_hook_set = args.first().cloned(),
+                "dns_hook_cleanup" => acme.dns_hook_cleanup = args.first().cloned(),
+                "issuer" if args.first().is_some_and(|value| value == "acme") => {
+                    self.parse_tls_issuer_acme_block(&mut acme)?;
+                }
+                _ => {
+                    return Err(self.unsupported(
+                        &token,
+                        directive,
+                        "inside tls blocks, FerroGate supports domain(s), email, ca/dir, storage, dns <provider> { ... }, dns exec <set-hook> <cleanup-hook> { ... }, dns_hook_set, dns_hook_cleanup, and issuer acme".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn parse_tls_dns_config_block(
+        &mut self,
+        acme: &mut GatewayTlsAcmeConfig,
+    ) -> std::result::Result<(), CaddyfileDiagnostic> {
+        if !self.consume_lbrace() {
+            return Ok(());
+        }
+        loop {
+            self.skip_newlines();
+            if self.consume_rbrace() {
+                return Ok(());
+            }
+            let Some((directive, _token)) = self.consume_word_with_token() else {
+                self.pos += 1;
+                return Ok(());
+            };
+            let args = self.consume_line_args();
+            if directive == "provider" {
+                acme.dns_provider = args.first().cloned();
+            } else if let Some(value) = args.first() {
+                acme.dns_config.insert(directive, value.clone());
+            }
+        }
+    }
+
+    fn parse_tls_issuer_acme_block(
+        &mut self,
+        acme: &mut GatewayTlsAcmeConfig,
+    ) -> std::result::Result<(), CaddyfileDiagnostic> {
+        if !self.consume_lbrace() {
+            return Ok(());
+        }
+        loop {
+            self.skip_newlines();
+            if self.consume_rbrace() {
+                return Ok(());
+            }
+            let Some((directive, token)) = self.consume_word_with_token() else {
+                self.pos += 1;
+                return Ok(());
+            };
+            let args = self.consume_line_args();
+            match directive.as_str() {
+                "email" => acme.email = args.first().cloned(),
+                "ca" | "dir" | "directory_url" => acme.directory_url = args.first().cloned(),
+                _ => {
+                    return Err(self.unsupported(
+                        &token,
+                        directive,
+                        "inside tls issuer acme, FerroGate supports email and ca/dir".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn parse_ai_gateway(&mut self, token: &Token) -> std::result::Result<(), CaddyfileDiagnostic> {
+        if !self.consume_lbrace() {
+            return Err(self.unsupported(
+                token,
+                "ai_gateway".to_string(),
+                "expected `ai_gateway { provider ... model ... api_key ... }`".to_string(),
+            ));
+        }
+
+        loop {
+            self.skip_newlines();
+            if self.consume_rbrace() {
+                return Ok(());
+            }
+            let Some((directive, token)) = self.consume_word_with_token() else {
+                self.pos += 1;
+                return Ok(());
+            };
+            let args = self.consume_line_args_until_block();
+            match directive.as_str() {
+                "provider" => self.parse_ai_provider(&token, args)?,
+                "model" => self.parse_ai_model(&token, args)?,
+                "api_key" => self.parse_ai_api_key(&token, args)?,
+                "route" | "policy" => {
+                    self.consume_optional_empty_block()?;
+                }
+                _ => {
+                    return Err(self.unsupported(
+                        &token,
+                        directive,
+                        "inside ai_gateway, FerroGate supports provider, model, api_key, route and policy placeholders".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn parse_ai_provider(
+        &mut self,
+        token: &Token,
+        args: Vec<String>,
+    ) -> std::result::Result<(), CaddyfileDiagnostic> {
+        let Some(name) = args.first().cloned() else {
+            return Err(self.expected("provider name"));
+        };
+        let mut provider = GatewayProvider {
+            name,
+            kind: "openai".to_string(),
+            base_url: String::new(),
+            api_key_env: None,
+        };
+
+        if !self.consume_lbrace() {
+            return Err(self.unsupported(
+                token,
+                "provider".to_string(),
+                "expected `provider <name> { base_url <url> api_key {env.NAME} }`".to_string(),
+            ));
+        }
+        loop {
+            self.skip_newlines();
+            if self.consume_rbrace() {
+                break;
+            }
+            let Some((directive, token)) = self.consume_word_with_token() else {
+                self.pos += 1;
+                break;
+            };
+            let args = self.consume_line_args();
+            match directive.as_str() {
+                "kind" => {
+                    if let Some(kind) = args.first() {
+                        provider.kind.clone_from(kind);
+                    }
+                }
+                "base_url" => {
+                    if let Some(base_url) = args.first() {
+                        provider.base_url.clone_from(base_url);
+                    }
+                }
+                "api_key" => {
+                    if let Some(value) = args.first() {
+                        provider.api_key_env = env_reference(value);
+                    }
+                }
+                _ => {
+                    return Err(self.unsupported(
+                        &token,
+                        directive,
+                        "inside provider blocks, FerroGate supports kind, base_url and api_key env.NAME/{env.NAME}".to_string(),
+                    ));
+                }
+            }
+        }
+
+        self.config.providers.push(provider);
+        Ok(())
+    }
+
+    fn parse_ai_model(
+        &mut self,
+        token: &Token,
+        args: Vec<String>,
+    ) -> std::result::Result<(), CaddyfileDiagnostic> {
+        let Some(name) = args.first().cloned() else {
+            return Err(self.expected("model name"));
+        };
+        let Some(provider_model_ref) = model_ref_arg(&args) else {
+            return Err(self.unsupported(
+                token,
+                "model".to_string(),
+                "expected `model <name> -> <provider>:<provider_model>`".to_string(),
+            ));
+        };
+        let Some((provider, provider_model)) = provider_model_ref.split_once(':') else {
+            return Err(self.unsupported(
+                token,
+                "model".to_string(),
+                "model target must use `<provider>:<provider_model>`".to_string(),
+            ));
+        };
+        let mut model = GatewayModel {
+            name,
+            provider: provider.to_string(),
+            provider_model: provider_model.to_string(),
+            capabilities: Vec::new(),
+            context_window: None,
+            input_price_per_1m: None,
+            output_price_per_1m: None,
+        };
+
+        if self.consume_lbrace() {
+            loop {
+                self.skip_newlines();
+                if self.consume_rbrace() {
+                    break;
+                }
+                let Some((directive, token)) = self.consume_word_with_token() else {
+                    self.pos += 1;
+                    break;
+                };
+                let args = self.consume_line_args();
+                match directive.as_str() {
+                    "capabilities" => model.capabilities = args,
+                    "context_window" => {
+                        model.context_window = args.first().and_then(|value| value.parse().ok());
+                    }
+                    "input_price_per_1m" => model.input_price_per_1m = args.first().cloned(),
+                    "output_price_per_1m" => model.output_price_per_1m = args.first().cloned(),
+                    _ => {
+                        return Err(self.unsupported(
+                            &token,
+                            directive,
+                            "inside model blocks, FerroGate supports capabilities, context_window, input_price_per_1m and output_price_per_1m".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.config.models.push(model);
+        Ok(())
+    }
+
+    fn parse_ai_api_key(
+        &mut self,
+        token: &Token,
+        args: Vec<String>,
+    ) -> std::result::Result<(), CaddyfileDiagnostic> {
+        let Some(id) = args.first().cloned() else {
+            return Err(self.expected("api_key id"));
+        };
+        let mut api_key = GatewayApiKey {
+            name: id.clone(),
+            id,
+            key_env: None,
+            key: None,
+            key_hash: None,
+            scopes: Vec::new(),
+            allowed_models: Vec::new(),
+            denied_models: Vec::new(),
+            allowed_providers: Vec::new(),
+            denied_providers: Vec::new(),
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+        };
+
+        if !self.consume_lbrace() {
+            return Err(self.unsupported(
+                token,
+                "api_key".to_string(),
+                "expected `api_key <id> { key {env.NAME} scopes ... }`".to_string(),
+            ));
+        }
+        loop {
+            self.skip_newlines();
+            if self.consume_rbrace() {
+                break;
+            }
+            let Some((directive, token)) = self.consume_word_with_token() else {
+                self.pos += 1;
+                break;
+            };
+            let args = self.consume_line_args();
+            match directive.as_str() {
+                "name" => {
+                    if !args.is_empty() {
+                        api_key.name = args.join(" ");
+                    }
+                }
+                "key" => {
+                    if let Some(value) = args.first() {
+                        if let Some(env) = env_reference(value) {
+                            api_key.key_env = Some(env);
+                        } else if value.starts_with("blake2b:") {
+                            api_key.key_hash = Some(value.clone());
+                        } else {
+                            api_key.key = Some(value.clone());
+                        }
+                    }
+                }
+                "key_env" => api_key.key_env = args.first().cloned(),
+                "key_hash" => api_key.key_hash = args.first().cloned(),
+                "scopes" => api_key.scopes = args,
+                "allowed_models" => api_key.allowed_models = args,
+                "denied_models" => api_key.denied_models = args,
+                "allowed_providers" => api_key.allowed_providers = args,
+                "denied_providers" => api_key.denied_providers = args,
+                "monthly_token_budget" => {
+                    api_key.monthly_token_budget =
+                        args.first().and_then(|value| value.parse().ok());
+                }
+                "request_limit_per_minute" => {
+                    api_key.request_limit_per_minute =
+                        args.first().and_then(|value| value.parse().ok());
+                }
+                _ => {
+                    return Err(self.unsupported(
+                        &token,
+                        directive,
+                        "inside api_key blocks, FerroGate supports name, key, key_env, key_hash, scopes, allowed_models, denied_models, allowed_providers, denied_providers, monthly_token_budget and request_limit_per_minute".to_string(),
+                    ));
+                }
+            }
+        }
+
+        self.config.api_keys.push(api_key);
+        Ok(())
     }
 
     fn parse_reverse_proxy(

@@ -1,6 +1,6 @@
 mod support;
 
-use support::{free_addr, http_request, start_gateway, wait_for_gateway};
+use support::{free_addr, http_request, spawn_provider_upstream, start_gateway, wait_for_gateway};
 
 fn write_config(path: &std::path::Path, gateway_addr: &str, provider_kind: &str) {
     std::fs::write(
@@ -97,6 +97,23 @@ allowed_models = ["fast-chat"]
 allowed_providers = ["other-provider"]
 
 [[api_keys]]
+id = "model_denied"
+name = "Model denied"
+key = "model-denied-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+denied_models = ["fast-chat"]
+
+[[api_keys]]
+id = "provider_denied"
+name = "Provider denied"
+key = "provider-denied-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+allowed_providers = ["openai"]
+denied_providers = ["openai"]
+
+[[api_keys]]
 id = "tenant_denied"
 name = "Tenant denied"
 key = "tenant-denied-secret"
@@ -127,19 +144,21 @@ message = "model blocked by policy"
 }
 
 fn chat(addr: &str, token: Option<&str>, model: &str) -> String {
+    chat_with_body(
+        addr,
+        token,
+        &format!(r#"{{"model":"{model}","messages":[]}}"#),
+    )
+}
+
+fn chat_with_body(addr: &str, token: Option<&str>, body: &str) -> String {
     let mut headers = vec!["Content-Type: application/json"];
     let auth;
     if let Some(token) = token {
         auth = format!("Authorization: Bearer {token}");
         headers.push(&auth);
     }
-    http_request(
-        addr,
-        "POST",
-        "/v1/chat/completions",
-        &headers,
-        &format!(r#"{{"model":"{model}","messages":[]}}"#),
-    )
+    http_request(addr, "POST", "/v1/chat/completions", &headers, body)
 }
 
 #[test]
@@ -224,6 +243,16 @@ fn ai_proxy_rejects_missing_invalid_scope_and_model_auth() {
     assert!(denied_provider.contains("provider_not_allowed"));
     assert!(!denied_provider.contains("provider-limited-secret"));
 
+    let denied_model_list = chat(&gateway_addr, Some("model-denied-secret"), "fast-chat");
+    assert!(denied_model_list.contains("403 Forbidden"));
+    assert!(denied_model_list.contains("model_not_allowed"));
+    assert!(!denied_model_list.contains("model-denied-secret"));
+
+    let denied_provider_list = chat(&gateway_addr, Some("provider-denied-secret"), "fast-chat");
+    assert!(denied_provider_list.contains("403 Forbidden"));
+    assert!(denied_provider_list.contains("provider_not_allowed"));
+    assert!(!denied_provider_list.contains("provider-denied-secret"));
+
     let denied_policy = chat(&gateway_addr, Some("policy-secret"), "fast-chat");
     assert!(denied_policy.contains("403 Forbidden"));
     assert!(denied_policy.contains("policy_model_denied"));
@@ -245,6 +274,172 @@ fn ai_proxy_rejects_missing_invalid_scope_and_model_auth() {
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
+}
+
+#[test]
+fn ai_proxy_enforces_real_request_rate_limit_per_api_key() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_limit","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+
+[[api_keys]]
+id = "rate_limited"
+name = "Rate limited"
+key = "rate-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+request_limit_per_minute = 1
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let first = chat(&gateway_addr, Some("rate-secret"), "fast-chat");
+    assert!(first.contains("200 OK"));
+    assert!(first.contains("\"id\":\"chatcmpl_limit\""));
+
+    let second = chat(&gateway_addr, Some("rate-secret"), "fast-chat");
+    assert!(second.contains("429 Too Many Requests"));
+    assert!(second.contains("rate_limit_exceeded"));
+    assert!(!second.contains("rate-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    assert_eq!(provider_handle.join().unwrap().len(), 1);
+}
+
+#[test]
+fn ai_proxy_enforces_token_budget_after_recorded_usage() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_budget","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+
+[[api_keys]]
+id = "budget_limited"
+name = "Budget limited"
+key = "budget-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+monthly_token_budget = 8
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let first = chat_with_body(
+        &gateway_addr,
+        Some("budget-secret"),
+        r#"{"model":"fast-chat","messages":[],"max_tokens":4}"#,
+    );
+    assert!(first.contains("200 OK"));
+    assert!(first.contains("\"id\":\"chatcmpl_budget\""));
+
+    let second = chat(&gateway_addr, Some("budget-secret"), "fast-chat");
+    assert!(second.contains("429 Too Many Requests"));
+    assert!(second.contains("token_budget_exceeded"));
+    assert!(!second.contains("budget-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    assert_eq!(provider_handle.join().unwrap().len(), 1);
+}
+
+#[test]
+fn ai_proxy_reserves_token_budget_before_provider_dispatch() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        0,
+        r#"{"id":"chatcmpl_budget","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+
+[[api_keys]]
+id = "budget_limited"
+name = "Budget limited"
+key = "budget-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+monthly_token_budget = 8
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = chat_with_body(
+        &gateway_addr,
+        Some("budget-secret"),
+        r#"{"model":"fast-chat","messages":[],"max_tokens":9}"#,
+    );
+    assert!(response.contains("429 Too Many Requests"));
+    assert!(response.contains("token_budget_exceeded"));
+    assert!(!response.contains("budget-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    assert_eq!(provider_handle.join().unwrap().len(), 0);
 }
 
 #[test]

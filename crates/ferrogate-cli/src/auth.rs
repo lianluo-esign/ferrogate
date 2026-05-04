@@ -14,7 +14,9 @@ pub(crate) struct AuthContext {
     pub(crate) api_key_id: Option<String>,
     pub(crate) scopes: HashSet<String>,
     pub(crate) allowed_models: HashSet<String>,
+    pub(crate) denied_models: HashSet<String>,
     pub(crate) allowed_providers: HashSet<String>,
+    pub(crate) denied_providers: HashSet<String>,
     pub(crate) monthly_token_budget: Option<u64>,
     pub(crate) request_limit_per_minute: Option<u64>,
     #[allow(dead_code)]
@@ -34,11 +36,13 @@ impl AuthContext {
     }
 
     pub(crate) fn can_use_model(&self, model: &str) -> bool {
-        self.allowed_models.is_empty() || self.allowed_models.contains(model)
+        !self.denied_models.contains(model)
+            && (self.allowed_models.is_empty() || self.allowed_models.contains(model))
     }
 
     pub(crate) fn can_use_provider(&self, provider: &str) -> bool {
-        self.allowed_providers.is_empty() || self.allowed_providers.contains(provider)
+        !self.denied_providers.contains(provider)
+            && (self.allowed_providers.is_empty() || self.allowed_providers.contains(provider))
     }
 
     pub(crate) fn tenant_context(&self) -> TenantContext {
@@ -67,14 +71,16 @@ pub(crate) fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
     required_scope: &str,
-    _request_id: &str,
+    request_id: &str,
 ) -> std::result::Result<AuthContext, AuthError> {
     if !state.auth_required() {
         return Ok(AuthContext {
             api_key_id: None,
             scopes: HashSet::new(),
             allowed_models: HashSet::new(),
+            denied_models: HashSet::new(),
             allowed_providers: HashSet::new(),
+            denied_providers: HashSet::new(),
             monthly_token_budget: None,
             request_limit_per_minute: None,
             organization_id: None,
@@ -116,18 +122,13 @@ pub(crate) fn authenticate(
                     message: "API key token budget is exhausted".into(),
                 });
             }
-            if configured_key.request_limit_per_minute == Some(0) {
-                return Err(AuthError {
-                    status: StatusCode::TOO_MANY_REQUESTS,
-                    code: "rate_limit_exceeded",
-                    message: "API key request rate limit is exhausted".into(),
-                });
-            }
             let auth = AuthContext {
                 api_key_id: Some(configured_key.id.clone()),
                 scopes: configured_key.scopes.iter().cloned().collect(),
                 allowed_models: configured_key.allowed_models.iter().cloned().collect(),
+                denied_models: configured_key.denied_models.iter().cloned().collect(),
                 allowed_providers: configured_key.allowed_providers.iter().cloned().collect(),
+                denied_providers: configured_key.denied_providers.iter().cloned().collect(),
                 monthly_token_budget: configured_key.monthly_token_budget,
                 request_limit_per_minute: configured_key.request_limit_per_minute,
                 organization_id: configured_key.organization_id.clone(),
@@ -142,6 +143,26 @@ pub(crate) fn authenticate(
                     code: "scope_denied",
                     message: format!("API key does not have required scope {required_scope}"),
                 });
+            }
+            if let Some(limit) = configured_key.request_limit_per_minute {
+                if !state.try_consume_api_key_request(&configured_key.id, limit) {
+                    return Err(AuthError {
+                        status: StatusCode::TOO_MANY_REQUESTS,
+                        code: "rate_limit_exceeded",
+                        message: format!(
+                            "API key request rate limit is exhausted for request {request_id}"
+                        ),
+                    });
+                }
+            }
+            if let Some(budget) = configured_key.monthly_token_budget {
+                if state.api_key_tokens_committed_or_reserved(&configured_key.id) >= budget {
+                    return Err(AuthError {
+                        status: StatusCode::TOO_MANY_REQUESTS,
+                        code: "token_budget_exceeded",
+                        message: "API key token budget is exhausted".into(),
+                    });
+                }
             }
             return Ok(auth);
         }
@@ -259,7 +280,9 @@ mod tests {
             api_key_id: Some("key".into()),
             scopes: HashSet::new(),
             allowed_models: HashSet::from(["fast-chat".into()]),
+            denied_models: HashSet::new(),
             allowed_providers: HashSet::new(),
+            denied_providers: HashSet::new(),
             monthly_token_budget: None,
             request_limit_per_minute: None,
             organization_id: None,
@@ -279,7 +302,9 @@ mod tests {
             api_key_id: Some("key".into()),
             scopes: HashSet::new(),
             allowed_models: HashSet::new(),
+            denied_models: HashSet::new(),
             allowed_providers: HashSet::from(["openai".into()]),
+            denied_providers: HashSet::new(),
             monthly_token_budget: Some(1_000),
             request_limit_per_minute: Some(60),
             organization_id: Some("org".into()),
@@ -295,6 +320,28 @@ mod tests {
     }
 
     #[test]
+    fn auth_context_denylist_overrides_allowlist() {
+        let auth = AuthContext {
+            api_key_id: Some("key".into()),
+            scopes: HashSet::new(),
+            allowed_models: HashSet::from(["fast-chat".into()]),
+            denied_models: HashSet::from(["fast-chat".into()]),
+            allowed_providers: HashSet::from(["openai".into()]),
+            denied_providers: HashSet::from(["openai".into()]),
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+            organization_id: None,
+            team_id: None,
+            project_id: None,
+            user_id: None,
+            log_bodies: false,
+        };
+
+        assert!(!auth.can_use_model("fast-chat"));
+        assert!(!auth.can_use_provider("openai"));
+    }
+
+    #[test]
     fn verifies_hashed_api_key_secret() {
         let hash = hash_api_key_secret("client-secret");
         let key = ApiKey {
@@ -306,7 +353,9 @@ mod tests {
             enabled: true,
             scopes: vec![],
             allowed_models: vec![],
+            denied_models: vec![],
             allowed_providers: vec![],
+            denied_providers: vec![],
             organization_id: None,
             team_id: None,
             project_id: None,

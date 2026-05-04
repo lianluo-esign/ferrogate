@@ -297,6 +297,9 @@ name = "prod-web-app"
 owner = "team-platform"
 scopes = ["chat.completions", "models.read"]
 allowed_models = ["gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"]
+denied_models = []
+allowed_providers = ["openai", "anthropic", "gemini"]
+denied_providers = []
 monthly_token_budget = 100000000
 rate_limit = "600r/m"
 ```
@@ -555,6 +558,7 @@ FerroGate 必须记录 AI 用量，并支持基于 Token 的成本统计、预�
 - 计算单次请求成本
 - 按组织、团队、项目、用户、API Key、Provider、模型、时间维度聚合
 - 支持月度预算
+- 支持请求前预算预留、成功后按真实 usage 结算、失败后释放预留
 - 支持预付费额度
 - 支持软限制和硬限制
 - 生成 billing events
@@ -576,6 +580,7 @@ FerroGate 必须记录 AI 用量，并支持基于 Token 的成本统计、预�
 - prompt_tokens
 - completion_tokens
 - total_tokens
+- usage_source
 - unit_price_input
 - unit_price_output
 - calculated_cost
@@ -833,6 +838,7 @@ FerroGate 可以保留 TOML 作为内部结构化配置、测试配置或过渡�
 - OpenTelemetry traces、metrics、logs
 - PRD 要求的 AI 请求 span 层级
 - 结构化请求日志模型和 repository
+- OTLP/HTTP 后台导出 metrics、request logs 和 gateway request spans
 - Token usage 提取和估算接口
 - 模型价格表和成本计算
 - Billing Event 模型和异步写入接口
@@ -848,13 +854,15 @@ FerroGate 可以保留 TOML 作为内部结构化配置、测试配置或过渡�
 
 ### P8: 生产级可靠性、安全和部署增强
 
-- 熔断器
-- 请求限流和 Token 限流
+- 可配置 Provider 熔断器
+- API Key 请求限流和 Token 预算预留/结算
 - 超时、重试、fallback 策略
 - Provider 健康检查和健康看板
-- TLS 配置和证书加载增强
-- 供应链与安全检查
+- Admin Provider Health API 和 Dashboard Health 视图
+- 手动 TLS listener 配置、证书加载校验和可选 HTTP/2 ALPN
+- 本地供应链与安全检查脚本
 - 性能基准和 streaming 压测
+- graceful shutdown 停机窗口配置
 - 部署文档、运维手册和容量评估指南
 
 ## 9. 开放问题

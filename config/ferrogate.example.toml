@@ -6,6 +6,48 @@ listen = "127.0.0.1:8080"
 service_name = "ferrogate"
 log_bodies = false
 
+[tls]
+enabled = false
+# cert_path = "./certs/fullchain.pem"
+# key_path = "./certs/privkey.pem"
+http2 = false
+
+# Use this instead of cert_path/key_path when FerroGate should request a
+# Let's Encrypt-compatible certificate during startup through DNS-01 hooks.
+# [tls.acme]
+# enabled = true
+# domains = ["api.example.com"]
+# email = "ops@example.com"
+# directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+# terms_agreed = true
+# storage_dir = "./acme"
+# dns_provider = "cloudflare"
+# dns_config = { api_token = "cf-token", zone_id = "zone-123" }
+# dns_propagation_delay_secs = 30
+
+# HTTP-01 alternative for non-wildcard domains:
+# [tls.acme]
+# enabled = true
+# domains = ["api.example.com"]
+# email = "ops@example.com"
+# directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+# terms_agreed = true
+# challenge = "http-01"
+# http_challenge_listen = "0.0.0.0:80"
+# storage_dir = "./acme"
+
+[reliability]
+provider_circuit_breaker_failure_threshold = 3
+provider_circuit_breaker_cooldown_secs = 30
+provider_dispatch_timeout_secs = 10
+provider_dispatch_max_retries = 1
+graceful_shutdown_grace_period_secs = 3
+graceful_shutdown_timeout_secs = 15
+# Pingora graceful upgrade uses SIGQUIT and FD transfer through this socket.
+graceful_upgrade_pid_file = "/tmp/ferrogate.pid"
+graceful_upgrade_sock = "/tmp/ferrogate_upgrade.sock"
+graceful_upgrade_sock_retries = 5
+
 [[upstreams]]
 name = "example-api"
 url = "https://httpbin.org"
@@ -74,7 +116,11 @@ name = "Development key"
 key = "dev-secret"
 scopes = ["models.read", "chat.completions", "admin.read"]
 allowed_models = ["fast-chat", "best-reasoning", "gemini-flash"]
+denied_models = []
+allowed_providers = ["openai", "anthropic", "gemini"]
+denied_providers = []
 organization_id = "org_demo"
 team_id = "team_platform"
 project_id = "project_ferrogate"
 monthly_token_budget = 1000000
+request_limit_per_minute = 60

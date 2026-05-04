@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Config {
@@ -6,6 +7,8 @@ pub(crate) struct Config {
     pub(crate) listen: String,
     #[serde(default)]
     pub(crate) admin: AdminConfig,
+    #[serde(default)]
+    pub(crate) tls: TlsConfig,
     #[serde(default)]
     pub(crate) providers: Vec<Provider>,
     #[serde(default)]
@@ -17,6 +20,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
+    pub(crate) reliability: ReliabilityConfig,
+    #[serde(default)]
     pub(crate) upstreams: Vec<Upstream>,
     #[serde(default)]
     pub(crate) routes: Vec<RouteRule>,
@@ -26,6 +31,80 @@ pub(crate) struct Config {
 pub(crate) struct AdminConfig {
     #[serde(default)]
     pub(crate) listen: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct TlsConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) cert_path: Option<String>,
+    #[serde(default)]
+    pub(crate) key_path: Option<String>,
+    #[serde(default)]
+    pub(crate) http2: bool,
+    #[serde(default)]
+    pub(crate) acme: TlsAcmeConfig,
+}
+
+impl TlsConfig {
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled || self.cert_path.is_some() || self.key_path.is_some() || self.acme.enabled
+    }
+
+    pub(crate) fn manual_cert_and_key(&self) -> Option<(&str, &str)> {
+        Some((self.cert_path.as_deref()?, self.key_path.as_deref()?))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct TlsAcmeConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) domains: Vec<String>,
+    #[serde(default)]
+    pub(crate) email: Option<String>,
+    #[serde(default = "default_acme_directory_url")]
+    pub(crate) directory_url: String,
+    #[serde(default = "default_acme_challenge")]
+    pub(crate) challenge: String,
+    #[serde(default = "default_http_challenge_listen")]
+    pub(crate) http_challenge_listen: String,
+    #[serde(default = "default_acme_storage_dir")]
+    pub(crate) storage_dir: String,
+    #[serde(default)]
+    pub(crate) terms_agreed: bool,
+    #[serde(default)]
+    pub(crate) dns_provider: Option<String>,
+    #[serde(default)]
+    pub(crate) dns_config: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) dns_hook_set: Option<String>,
+    #[serde(default)]
+    pub(crate) dns_hook_cleanup: Option<String>,
+    #[serde(default = "default_dns_propagation_delay_secs")]
+    pub(crate) dns_propagation_delay_secs: u64,
+}
+
+impl Default for TlsAcmeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            domains: Vec::new(),
+            email: None,
+            directory_url: default_acme_directory_url(),
+            challenge: default_acme_challenge(),
+            http_challenge_listen: default_http_challenge_listen(),
+            storage_dir: default_acme_storage_dir(),
+            terms_agreed: false,
+            dns_provider: None,
+            dns_config: BTreeMap::new(),
+            dns_hook_set: None,
+            dns_hook_cleanup: None,
+            dns_propagation_delay_secs: default_dns_propagation_delay_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -99,7 +178,11 @@ pub(crate) struct ApiKey {
     #[serde(default)]
     pub(crate) allowed_models: Vec<String>,
     #[serde(default)]
+    pub(crate) denied_models: Vec<String>,
+    #[serde(default)]
     pub(crate) allowed_providers: Vec<String>,
+    #[serde(default)]
+    pub(crate) denied_providers: Vec<String>,
     #[serde(default)]
     pub(crate) organization_id: Option<String>,
     #[serde(default)]
@@ -149,6 +232,28 @@ pub(crate) struct TelemetryConfig {
     pub(crate) log_bodies: bool,
     #[serde(default)]
     pub(crate) otlp_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ReliabilityConfig {
+    #[serde(default)]
+    pub(crate) provider_circuit_breaker_failure_threshold: Option<u32>,
+    #[serde(default)]
+    pub(crate) provider_circuit_breaker_cooldown_secs: Option<u64>,
+    #[serde(default)]
+    pub(crate) provider_dispatch_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub(crate) provider_dispatch_max_retries: Option<u32>,
+    #[serde(default)]
+    pub(crate) graceful_shutdown_grace_period_secs: Option<u64>,
+    #[serde(default)]
+    pub(crate) graceful_shutdown_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub(crate) graceful_upgrade_pid_file: Option<String>,
+    #[serde(default)]
+    pub(crate) graceful_upgrade_sock: Option<String>,
+    #[serde(default)]
+    pub(crate) graceful_upgrade_sock_retries: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -212,6 +317,26 @@ fn default_true() -> bool {
     true
 }
 
+fn default_acme_directory_url() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+fn default_acme_challenge() -> String {
+    "dns-01".to_string()
+}
+
+fn default_http_challenge_listen() -> String {
+    "0.0.0.0:80".to_string()
+}
+
+fn default_acme_storage_dir() -> String {
+    ".ferrogate/acme".to_string()
+}
+
+fn default_dns_propagation_delay_secs() -> u64 {
+    30
+}
+
 fn default_policy_effect() -> String {
     "deny".to_string()
 }
@@ -239,11 +364,13 @@ impl Default for Config {
         Self {
             listen: default_listen(),
             admin: AdminConfig::default(),
+            tls: TlsConfig::default(),
             providers: Vec::new(),
             models: Vec::new(),
             api_keys: Vec::new(),
             policies: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            reliability: ReliabilityConfig::default(),
             upstreams: Vec::new(),
             routes: Vec::new(),
         }

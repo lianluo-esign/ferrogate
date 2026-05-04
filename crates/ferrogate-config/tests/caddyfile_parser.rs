@@ -88,7 +88,105 @@ fn accepts_declared_p0_directives_as_typed_placeholders() {
     .unwrap();
 
     assert_eq!(config.listen, "127.0.0.1:8443");
+    assert_eq!(config.tls.as_ref().unwrap().cert_path, "cert.pem");
+    assert_eq!(config.tls.as_ref().unwrap().key_path, "key.pem");
     assert_eq!(config.logs.len(), 1);
+}
+
+#[test]
+fn parses_tls_dns01_automation_block() {
+    let config = parse_caddyfile(
+        r#"
+api.example.com {
+    tls {
+        issuer acme {
+            email ops@example.com
+            ca https://acme-v02.api.letsencrypt.org/directory
+        }
+        storage ./acme
+        challenge dns-01
+        dns exec ./hooks/dns-set ./hooks/dns-cleanup {
+            provider cloudflare
+            api_token cf-token
+            zone_id zone-123
+        }
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    let acme = config.tls_acme.as_ref().unwrap();
+    assert_eq!(acme.domains, ["api.example.com"]);
+    assert_eq!(acme.email.as_deref(), Some("ops@example.com"));
+    assert_eq!(
+        acme.directory_url.as_deref(),
+        Some("https://acme-v02.api.letsencrypt.org/directory")
+    );
+    assert_eq!(acme.storage_dir.as_deref(), Some("./acme"));
+    assert_eq!(acme.challenge.as_deref(), Some("dns-01"));
+    assert_eq!(acme.dns_provider.as_deref(), Some("cloudflare"));
+    assert_eq!(acme.dns_config.get("api_token").unwrap(), "cf-token");
+    assert_eq!(acme.dns_config.get("zone_id").unwrap(), "zone-123");
+    assert_eq!(acme.dns_hook_set.as_deref(), Some("./hooks/dns-set"));
+    assert_eq!(
+        acme.dns_hook_cleanup.as_deref(),
+        Some("./hooks/dns-cleanup")
+    );
+}
+
+#[test]
+fn parses_tls_builtin_cloudflare_dns_provider_block() {
+    let config = parse_caddyfile(
+        r#"
+api.example.com {
+    tls {
+        issuer acme {
+            email ops@example.com
+        }
+        dns cloudflare {
+            api_token cf-token
+            zone_id zone-123
+        }
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    let acme = config.tls_acme.as_ref().unwrap();
+    assert_eq!(acme.dns_provider.as_deref(), Some("cloudflare"));
+    assert_eq!(acme.dns_config.get("api_token").unwrap(), "cf-token");
+    assert_eq!(acme.dns_config.get("zone_id").unwrap(), "zone-123");
+    assert!(acme.dns_hook_set.is_none());
+    assert!(acme.dns_hook_cleanup.is_none());
+}
+
+#[test]
+fn parses_tls_http01_automation_block() {
+    let config = parse_caddyfile(
+        r#"
+token4aicloud.com {
+    tls {
+        issuer acme {
+            email ops@token4aicloud.com
+        }
+        challenge http-01
+        http_challenge_listen 0.0.0.0:80
+        storage ./acme
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    let acme = config.tls_acme.as_ref().unwrap();
+    assert_eq!(acme.domains, ["token4aicloud.com"]);
+    assert_eq!(acme.challenge.as_deref(), Some("http-01"));
+    assert_eq!(acme.http_challenge_listen.as_deref(), Some("0.0.0.0:80"));
 }
 
 #[test]
@@ -107,6 +205,47 @@ fn accepts_named_matcher_declarations_for_p0_matcher_subset() {
 
     assert_eq!(config.upstreams.len(), 1);
     assert_eq!(config.routes.len(), 1);
+}
+
+#[test]
+fn parses_ai_gateway_typed_config_subset() {
+    let config = parse_caddyfile(
+        r#"
+:8080 {
+    ai_gateway {
+        provider openai {
+            base_url https://api.openai.com/v1
+            api_key {env.OPENAI_API_KEY}
+        }
+        model fast-chat -> openai:gpt-4o-mini {
+            capabilities chat streaming
+        }
+        api_key key_dev {
+            key {$FERROGATE_DEV_KEY}
+            scopes models.read chat.completions
+            allowed_models fast-chat
+            denied_models fast-chat
+            denied_providers openai
+        }
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    assert_eq!(config.providers[0].base_url, "https://api.openai.com/v1");
+    assert_eq!(
+        config.providers[0].api_key_env.as_deref(),
+        Some("OPENAI_API_KEY")
+    );
+    assert_eq!(config.models[0].provider_model, "gpt-4o-mini");
+    assert_eq!(config.api_keys[0].denied_models, ["fast-chat"]);
+    assert_eq!(config.api_keys[0].denied_providers, ["openai"]);
+    assert_eq!(
+        config.api_keys[0].scopes,
+        ["models.read", "chat.completions"]
+    );
 }
 
 #[test]

@@ -106,16 +106,17 @@ Near-term config:
 - upstream pools
 - timeout/retry/load balancing options
 - auth keys and env var references
+- Caddyfile `ai_gateway` provider/model/API key subset mapped into the same typed runtime config used by TOML
 
 Reload lifecycle contract:
 
 1. `ferrogate reload --config <path>` first loads and validates the candidate config.
 2. Validation produces a deterministic snapshot id from the normalized typed config.
-3. Until Pingora-backed hot reload is implemented, reload runs in `mode=validate-only` and reports `swap=false`.
+3. CLI reload defaults to `mode=validate-only` and reports `swap=false`; when `--admin-url` and `--admin-token` are provided it posts the candidate config to the running Admin API reload endpoint and reports the committed/rejected runtime outcome. For listener/TLS changes, `--graceful-upgrade` starts a new `ferrogate run --upgrade` process and signals the active pid with `SIGQUIT`.
 4. Invalid candidates fail before any runtime swap path and must not emit a success report.
-5. The future Pingora-backed implementation must only replace the active snapshot after candidate validation succeeds; failed candidates keep the current snapshot active.
+5. The running admin API exposes `POST /admin/v1/config/validate` and `POST /admin/v1/config/reload` for TOML/Caddyfile candidates or `source=file` reloads from the current `ferrogate run --config` path; validation returns a reload plan with `reload_mode`, `listener_reload_required`, and `reload_reason`. Process-local config swap is allowed when `listen` and TLS listener settings are unchanged. It replaces request handling state for new requests and preserves in-memory logs, audit events, billing events, usage aggregates, and request id state. The CLI Admin API mode is a thin shell client over the same endpoint.
 6. The runtime reload state machine uses prepare/commit/reject semantics: prepare creates a candidate snapshot without publishing it, commit replaces the active snapshot, and reject returns the unchanged active snapshot with the failure reason.
-7. The CLI lifecycle report must call the runtime reload state machine even before Pingora hot reload is wired, so external command semantics and runtime semantics cannot drift.
+7. Listener address and TLS changes are classified by a listener runtime fingerprint and use the Pingora listener-level graceful-upgrade path; the process-local swap path rejects those candidates before publishing them. FerroGate passes configured Pingora `pid_file`, `upgrade_sock`, and upgrade socket retry count into `ServerConf`, and the CLI orchestrates SIGQUIT graceful upgrade plus FD transfer.
 8. `/admin/status` exposes the active snapshot id. Failed reload tests must compare this value before and after an invalid candidate to prove the active config was not changed.
 
 Future config direction:
@@ -157,6 +158,30 @@ Policy examples:
 - prompt/content guard hooks
 - audit logging hooks
 
+Provider reliability:
+
+- `reliability.provider_circuit_breaker_failure_threshold` enables provider-level circuit breaking.
+- `reliability.provider_circuit_breaker_cooldown_secs` controls how long an unhealthy provider is skipped before a trial request can be attempted again.
+- `reliability.provider_dispatch_timeout_secs` controls provider connect/read/write timeout for AI dispatch.
+- `reliability.provider_dispatch_max_retries` controls retry attempts for retryable provider status responses or dispatch errors before falling back to another route.
+- `reliability.graceful_shutdown_grace_period_secs` and `reliability.graceful_shutdown_timeout_secs` are passed to Pingora `ServerConf` so supervisor stop windows can be aligned with graceful termination.
+- Circuit state is kept outside the provider adapter and is evaluated before dispatch, so fallback routing can avoid known-unhealthy providers without changing adapter behavior.
+- `/admin/v1/provider-health` performs admin-triggered TCP reachability checks for provider `base_url` endpoints and combines the result with circuit state for the Dashboard Health view.
+
+Listener TLS:
+
+- `[tls]` enables a Pingora TLS listener with `cert_path`, `key_path`, and optional `http2`.
+- Caddyfile `tls cert.pem key.pem` maps into the same typed config.
+- TLS certificate and private key paths are resolved relative to the loaded config file and validated with Pingora/rustls before runtime startup.
+- This is manual certificate loading; automatic certificate issuance/renewal remains a separate later module.
+
+API key governance:
+
+- `api_keys[].request_limit_per_minute` is enforced with a per-key in-memory 60 second window after authentication and scope checks pass.
+- `api_keys[].monthly_token_budget` is enforced with a request-time token reservation before provider dispatch, then settled against provider usage when available.
+- If provider usage is missing, including current streaming responses, FerroGate records a gateway estimate and marks the billing event with `usage_source = gateway_estimate`.
+- Rejected rate or budget requests are returned before provider dispatch and are recorded through the existing structured request log path.
+
 ### 6. Observability and usage accounting
 
 FerroGate must make AI traffic observable by default.
@@ -172,6 +197,13 @@ Core telemetry:
 - prompt/completion/total tokens when available
 - retry/failover events
 - policy decision events
+
+Runtime export path:
+
+- Prometheus metrics are rendered from the in-memory gateway snapshot and served at `/metrics`.
+- When `telemetry.otlp_endpoint` is configured, `ferrogate run` starts a background OTLP/HTTP sender.
+- The sender periodically posts metrics, newly appended structured request logs, and `ferrogate.gateway.request` spans to `/v1/metrics`, `/v1/logs`, and `/v1/traces`.
+- The sender runs outside the Pingora request path and does not export prompt/response bodies, even when body recording is enabled for local request logs.
 
 ## Functional module map
 
@@ -197,7 +229,7 @@ Core telemetry:
 | --- | --- |
 | Reverse proxy | AI provider proxy and model router |
 | Readable config syntax | `Ferrogate/Caddyfile` plus typed internal config |
-| Automatic HTTPS | TLS defaults and certificate automation as a later module |
+| Automatic HTTPS | Manual TLS listener is available; certificate automation remains a later module |
 | Built-in modules | Provider adapters, policy modules, observability sinks |
 | Admin API | Gateway runtime control plane |
 | Hot reload | Pingora-backed graceful config reload |

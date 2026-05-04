@@ -232,6 +232,34 @@ pub(super) fn looks_like_upstream(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
+pub(super) fn env_reference(value: &str) -> Option<String> {
+    value
+        .strip_prefix("env.")
+        .or_else(|| {
+            value
+                .strip_prefix("{env.")
+                .and_then(|raw| raw.strip_suffix('}'))
+        })
+        .or_else(|| {
+            value
+                .strip_prefix("{$")
+                .and_then(|raw| raw.strip_suffix('}'))
+        })
+        .filter(|env| !env.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(super) fn model_ref_arg(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find_map(|window| (window[0] == "->").then_some(window[1].as_str()))
+        .or_else(|| {
+            args.iter()
+                .skip(1)
+                .find(|arg| arg.contains(':'))
+                .map(String::as_str)
+        })
+}
+
 pub(super) fn global_suggestion(args: &[String]) -> String {
     if args.is_empty() {
         "remove the directive or add support in ferrogate-config before using it".to_string()

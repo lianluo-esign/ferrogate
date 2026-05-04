@@ -1,10 +1,10 @@
-FROM rust:1.84-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
 COPY Ferrogate ./Ferrogate
 COPY config ./config
-RUN cargo build --release -p ferrogate-cli
+RUN cargo build --release -p ferrogate-cli --locked
 
 FROM debian:bookworm-slim
 RUN apt-get update \

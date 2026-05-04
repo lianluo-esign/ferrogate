@@ -3,11 +3,15 @@ mod support;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
 
-use support::{free_addr, http_request, spawn_provider_upstream, start_gateway, wait_for_gateway};
+use support::{
+    free_addr, http_request, spawn_provider_upstream, spawn_provider_upstream_response,
+    start_gateway, wait_for_gateway,
+};
 
 #[test]
 fn openai_models_and_chat_non_streaming_dispatch_work() {
@@ -133,8 +137,10 @@ enabled = false
     assert!(dashboard.contains("FerroGate Admin"));
     assert!(dashboard.contains("/admin/v1/status"));
     assert!(dashboard.contains("/admin/v1/api-keys"));
+    assert!(dashboard.contains("/admin/v1/provider-health"));
     assert!(dashboard.contains("/admin/v1/request-logs"));
     assert!(dashboard.contains("/admin/v1/config/validate"));
+    assert!(dashboard.contains("/admin/v1/config/reload"));
     assert!(dashboard.contains("/admin/v1/audit-events"));
     assert!(!dashboard.contains("admin-secret"));
     assert!(!dashboard.contains("client-secret"));
@@ -153,7 +159,42 @@ enabled = false
     assert!(valid_candidate.contains("200 OK"));
     assert!(valid_candidate.contains("\"valid\":true"));
     assert!(valid_candidate.contains("\"snapshot\":"));
+    assert!(valid_candidate.contains("\"reload_mode\":\"listener-level-required\""));
+    assert!(valid_candidate.contains("\"listener_reload_required\":true"));
+    assert!(valid_candidate.contains("listen address changes require listener-level reload"));
     assert!(!valid_candidate.contains("admin-secret"));
+
+    let process_local_candidate_body =
+        serde_json::json!({ "config_toml": format!("listen = \"{gateway_addr}\"\n") }).to_string();
+    let process_local_candidate = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/validate",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &process_local_candidate_body,
+    );
+    assert!(process_local_candidate.contains("200 OK"));
+    assert!(process_local_candidate.contains("\"valid\":true"));
+    assert!(process_local_candidate.contains("\"reload_mode\":\"process-local\""));
+    assert!(process_local_candidate.contains("\"listener_reload_required\":false"));
+
+    let source_file_candidate = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/validate",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"source":"file"}"#,
+    );
+    assert!(source_file_candidate.contains("200 OK"));
+    assert!(source_file_candidate.contains("\"valid\":true"));
+    assert!(source_file_candidate.contains("\"reload_mode\":\"process-local\""));
+    assert!(source_file_candidate.contains("\"listener_reload_required\":false"));
 
     let invalid_candidate = http_request(
         &gateway_addr,
@@ -211,6 +252,20 @@ enabled = false
     assert!(providers.contains("\"has_api_key\":true"));
     assert!(!providers.contains("FERROGATE_PROVIDER_SECRET"));
     assert!(!providers.contains("provider-secret"));
+
+    let provider_health = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/provider-health",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(provider_health.contains("200 OK"));
+    assert!(provider_health.contains("\"name\":\"openai\""));
+    assert!(provider_health.contains("\"status\":"));
+    assert!(provider_health.contains("\"reachable\":"));
+    assert!(!provider_health.contains("FERROGATE_PROVIDER_SECRET"));
+    assert!(!provider_health.contains("provider-secret"));
 
     let models_admin = http_request(
         &gateway_addr,
@@ -327,6 +382,378 @@ enabled = false
     assert!(provider_requests[1].contains(r#""model":"gpt-4.1""#));
     assert!(!provider_requests[1].contains("smart-chat"));
     assert!(!provider_requests[1].contains("client-secret"));
+}
+
+#[test]
+fn admin_process_local_reload_swaps_request_state_without_rebinding_listener() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:1/v1"
+
+[[models]]
+name = "old-chat"
+provider = "openai"
+provider_model = "gpt-old"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read"]
+allowed_models = ["old-chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let before = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(before.contains("200 OK"));
+    assert!(before.contains("\"id\":\"old-chat\""));
+    assert!(!before.contains("\"id\":\"new-chat\""));
+
+    let candidate = format!(
+        r#"
+"{gateway_addr}" {{
+    ai_gateway {{
+        provider openai {{
+            base_url http://127.0.0.1:1/v1
+        }}
+        model new-chat -> openai:gpt-new {{
+            capabilities chat
+        }}
+        api_key client {{
+            name Client
+            key client-secret
+            scopes models.read
+            allowed_models new-chat
+        }}
+        api_key admin {{
+            name Admin
+            key admin-secret
+            scopes admin.read admin.write
+        }}
+    }}
+}}
+"#
+    );
+    let reload_body = serde_json::json!({
+        "config_caddyfile": candidate,
+        "filename": "candidate.Caddyfile"
+    })
+    .to_string();
+    let reload = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/reload",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &reload_body,
+    );
+    assert!(reload.contains("200 OK"));
+    assert!(reload.contains("\"valid\":true"));
+    assert!(reload.contains("\"committed\":true"));
+    assert!(reload.contains("\"mode\":\"process-local\""));
+    assert!(!reload.contains("admin-secret"));
+
+    let after = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(after.contains("200 OK"));
+    assert!(after.contains("\"id\":\"new-chat\""));
+    assert!(!after.contains("\"id\":\"old-chat\""));
+
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:1/v1"
+
+[[models]]
+name = "file-chat"
+provider = "openai"
+provider_model = "gpt-file"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read"]
+allowed_models = ["file-chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+    let file_reload = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+        .args([
+            "reload",
+            "--config",
+            config.to_str().unwrap(),
+            "--admin-url",
+            &format!("http://{gateway_addr}"),
+            "--admin-token",
+            "admin-secret",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        file_reload.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&file_reload.stderr)
+    );
+    let file_reload_stdout = String::from_utf8_lossy(&file_reload.stdout);
+    assert!(file_reload_stdout.contains("FerroGate reload request OK"));
+    assert!(file_reload_stdout.contains("valid=true"));
+    assert!(file_reload_stdout.contains("committed=true"));
+    assert!(file_reload_stdout.contains("mode=process-local"));
+    assert!(!file_reload_stdout.contains("admin-secret"));
+
+    let after_file_reload = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(after_file_reload.contains("200 OK"));
+    assert!(after_file_reload.contains("\"id\":\"file-chat\""));
+    assert!(!after_file_reload.contains("\"id\":\"new-chat\""));
+
+    let rejected_candidate = r#"
+127.0.0.1:1 {
+    ai_gateway {
+        provider openai {
+            base_url http://127.0.0.1:1/v1
+        }
+        model rejected-chat -> openai:gpt-rejected {
+            capabilities chat
+        }
+        api_key client {
+            name Client
+            key client-secret
+            scopes models.read
+        }
+        api_key admin {
+            name Admin
+            key admin-secret
+            scopes admin.read admin.write
+        }
+    }
+}
+"#;
+    let rejected_body = serde_json::json!({
+        "config_caddyfile": rejected_candidate,
+        "filename": "candidate.Caddyfile"
+    })
+    .to_string();
+    let rejected = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/reload",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &rejected_body,
+    );
+    assert!(rejected.contains("200 OK"));
+    assert!(rejected.contains("\"valid\":true"));
+    assert!(rejected.contains("\"committed\":false"));
+    assert!(rejected.contains("listener-level reload"));
+
+    let after_reject = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(after_reject.contains("200 OK"));
+    assert!(after_reject.contains("\"id\":\"file-chat\""));
+    assert!(!after_reject.contains("\"id\":\"rejected-chat\""));
+
+    let audit_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(audit_events.contains("200 OK"));
+    assert!(audit_events.contains("\"action\":\"config.reload\""));
+    assert!(audit_events.contains("\"outcome\":\"committed\""));
+    assert!(audit_events.contains("\"outcome\":\"rejected\""));
+    assert!(!audit_events.contains("admin-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
+fn graceful_upgrade_reload_transfers_listener_to_new_process() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    let pid_file = dir.path().join("ferrogate.pid");
+    let upgrade_sock = dir.path().join("ferrogate_upgrade.sock");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[reliability]
+graceful_shutdown_grace_period_secs = 1
+graceful_shutdown_timeout_secs = 1
+graceful_upgrade_pid_file = "{}"
+graceful_upgrade_sock = "{}"
+graceful_upgrade_sock_retries = 8
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:1/v1"
+
+[[models]]
+name = "old-chat"
+provider = "openai"
+provider_model = "gpt-old"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read"]
+allowed_models = ["old-chat"]
+"#,
+            pid_file.display(),
+            upgrade_sock.display()
+        ),
+    )
+    .unwrap();
+
+    let mut old_gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let before = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(before.contains("200 OK"));
+    assert!(before.contains("\"id\":\"old-chat\""));
+
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[reliability]
+graceful_shutdown_grace_period_secs = 1
+graceful_shutdown_timeout_secs = 1
+graceful_upgrade_pid_file = "{}"
+graceful_upgrade_sock = "{}"
+graceful_upgrade_sock_retries = 8
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:1/v1"
+
+[[models]]
+name = "new-chat"
+provider = "openai"
+provider_model = "gpt-new"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read"]
+allowed_models = ["new-chat"]
+"#,
+            pid_file.display(),
+            upgrade_sock.display()
+        ),
+    )
+    .unwrap();
+
+    let reload = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+        .args([
+            "reload",
+            "--config",
+            config.to_str().unwrap(),
+            "--graceful-upgrade",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reload.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&reload.stderr)
+    );
+    let reload_stdout = String::from_utf8_lossy(&reload.stdout);
+    assert!(reload_stdout.contains("FerroGate graceful upgrade requested"));
+    assert!(reload_stdout.contains("mode=listener-level"));
+
+    let upgraded = wait_for_models_contains(&gateway_addr, "client-secret", "\"id\":\"new-chat\"");
+    assert!(upgraded.contains("200 OK"));
+    assert!(!upgraded.contains("\"id\":\"old-chat\""));
+
+    let new_pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    terminate_pid(&new_pid);
+    let _ = old_gateway.wait();
 }
 
 #[test]
@@ -701,6 +1128,227 @@ allowed_models = ["fast-chat"]
     assert!(!fallback_request.contains("client-secret"));
 }
 
+#[test]
+fn provider_circuit_breaker_skips_unhealthy_primary_after_threshold() {
+    let gateway_addr = free_addr();
+    let (primary_addr, primary_handle) = spawn_provider_upstream_response(
+        2,
+        "503 Service Unavailable",
+        "application/json",
+        r#"{"error":{"message":"temporarily unavailable","type":"server_error","code":"unavailable"}}"#,
+    );
+    let (fallback_addr, fallback_handle) = spawn_provider_upstream_response(
+        3,
+        "200 OK",
+        "application/json",
+        r#"{"id":"chatcmpl_fallback","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[reliability]
+provider_circuit_breaker_failure_threshold = 2
+provider_circuit_breaker_cooldown_secs = 60
+
+[[providers]]
+name = "primary"
+kind = "openai"
+base_url = "http://{primary_addr}/v1"
+
+[[providers]]
+name = "backup"
+kind = "openai"
+base_url = "http://{fallback_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "primary"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[models.fallbacks]]
+provider = "backup"
+provider_model = "gpt-4.1-mini"
+priority = 10
+weight = 1
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    for _ in 0..3 {
+        let chat = http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/chat/completions",
+            &[
+                "Authorization: Bearer client-secret",
+                "Content-Type: application/json",
+            ],
+            r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        );
+        assert!(chat.contains("200 OK"));
+        assert!(chat.contains("\"id\":\"chatcmpl_fallback\""));
+        assert!(!chat.contains("client-secret"));
+    }
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let primary_requests = primary_handle.join().unwrap();
+    let fallback_requests = fallback_handle.join().unwrap();
+    assert_eq!(primary_requests.len(), 2);
+    assert_eq!(fallback_requests.len(), 3);
+    assert!(fallback_requests
+        .iter()
+        .all(|request| request.contains(r#""model":"gpt-4.1-mini""#)));
+}
+
+#[test]
+fn chat_retries_retryable_provider_status_before_fallback() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_sequenced_provider_upstream(vec![
+        (
+            "503 Service Unavailable",
+            r#"{"error":{"message":"temporarily unavailable","type":"server_error","code":"unavailable"}}"#,
+        ),
+        (
+            "200 OK",
+            r#"{"id":"chatcmpl_retry","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+        ),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[reliability]
+provider_dispatch_timeout_secs = 2
+provider_dispatch_max_retries = 1
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(chat.contains("200 OK"));
+    assert!(chat.contains("\"id\":\"chatcmpl_retry\""));
+    assert!(!chat.contains("client-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
+    assert!(provider_requests
+        .iter()
+        .all(|request| request.contains(r#""model":"gpt-4o-mini""#)));
+}
+
+#[test]
+fn admin_provider_health_reports_reachable_provider_without_secret() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_tcp_probe_target();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let health = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/provider-health",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    provider_handle.join().unwrap();
+
+    assert!(health.contains("200 OK"));
+    assert!(health.contains("\"name\":\"openai\""));
+    assert!(health.contains("\"status\":\"healthy\""));
+    assert!(health.contains("\"reachable\":true"));
+    assert!(!health.contains("FERROGATE_PROVIDER_SECRET"));
+    assert!(!health.contains("provider-secret"));
+    assert!(!health.contains("admin-secret"));
+}
+
 fn spawn_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -761,6 +1409,70 @@ fn spawn_provider_response(
         request
     });
     (addr, handle)
+}
+
+fn spawn_sequenced_provider_upstream(
+    responses: Vec<(&'static str, &'static str)>,
+) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (status_line, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            requests.push(request);
+            write!(
+                stream,
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        }
+        requests
+    });
+    (addr, handle)
+}
+
+fn spawn_tcp_probe_target() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+    });
+    (addr, handle)
+}
+
+fn wait_for_models_contains(addr: &str, token: &str, needle: &str) -> String {
+    let started = Instant::now();
+    let auth = format!("Authorization: Bearer {token}");
+    let mut last = String::new();
+    while started.elapsed() < Duration::from_secs(15) {
+        if let Ok(mut stream) = TcpStream::connect(addr) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            write!(
+                stream,
+                "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{}\r\n\r\n",
+                auth
+            )
+            .unwrap();
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+            if response.contains(needle) {
+                return response;
+            }
+            last = response;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    panic!("models response did not contain {needle}; last response: {last}");
+}
+
+fn terminate_pid(pid: &str) {
+    let _ = Command::new("kill").args(["-TERM", pid]).status();
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {

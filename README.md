@@ -1,72 +1,122 @@
 # FerroGate
 
-**The open-source Rust gateway for AI traffic.**
+FerroGate is an open-source Rust API gateway and AI gateway built on
+Cloudflare Pingora. It gives teams a self-hostable control point for LLM
+traffic: routing, virtual API keys, provider adapters, policy checks, token
+usage accounting, observability, admin APIs, and automatic HTTPS.
 
-FerroGate is an open-source AI gateway and reverse proxy written in Rust. It is designed to route, secure, monitor, and control traffic to LLM providers such as OpenAI, Anthropic, Google Gemini, Azure OpenAI, and OpenAI-compatible APIs.
+The project is developed as the open-source gateway foundation behind
+[Token4AI Cloud](https://token4ai.cloud).
 
-Built by the team behind [Token4AI Cloud](https://token4ai.cloud), a managed platform for AI usage analytics, billing, and governance.
+## What FerroGate Provides
 
-## Project naming
+- **Pingora gateway runtime** for HTTP reverse proxying, route matching,
+  upstream pools, path/header rewrites, request IDs, tracing IDs, streaming
+  responses, graceful shutdown, and listener-level graceful upgrade.
+- **OpenAI-compatible AI API** with `GET /v1/models` and
+  `POST /v1/chat/completions`, including non-streaming and streaming SSE
+  forwarding.
+- **Provider adapters** for OpenAI-compatible APIs, OpenAI, Anthropic, Gemini,
+  Grok/xAI, and Azure OpenAI.
+- **Model registry and fallback routing** with logical model names, provider
+  model mapping, priority fallback, weighted fallback, tenant visibility, and
+  provider allow/deny controls.
+- **Virtual API keys and policy checks** with hashed keys, tenant context,
+  scopes, disabled/expired keys, model/provider allowlists and denylists,
+  minimal deny-rule policy evaluation, request rate limits, and token budgets.
+- **Token usage and billing events** using provider-reported usage when
+  available, gateway estimates when needed, and a request reservation /
+  settlement flow inspired by production AI gateways.
+- **Observability** with structured request logs, billing events, usage
+  aggregates, Prometheus metrics, request/trace ID propagation, and OTLP/HTTP
+  metrics/logs/traces export.
+- **Admin API and dashboard** for gateway status, providers, models, API keys,
+  tenants, policies, request logs, billing events, usage aggregates, audit
+  events, provider health, config validation, and process-local reload.
+- **Automatic HTTPS** with manual TLS, ACME HTTP-01, and ACME DNS-01 through a
+  built-in Cloudflare provider. ACME provider credentials are read from the
+  configuration file, not environment variables or Python scripts.
+- **Supply-chain and security gates** with formatting, clippy, locked metadata,
+  high-confidence secret scanning, cargo-deny, cargo-audit, and GitHub Actions.
 
-| Item | Value |
-| --- | --- |
-| Project display name | FerroGate |
-| GitHub repo | `ferrogate` |
-| Rust workspace | `crates/ferrogate-*` |
-| CLI binary | `ferrogate` |
-| Docker image | `ghcr.io/lianluo-esign/ferrogate` |
-| Config file | `Ferrogate/Caddyfile` |
-| Website path | <https://token4ai.cloud/ferrogate> |
-| Wiki | <https://lianluo-esign.github.io/ferrogate/> |
+## Current Status
 
-## Goals
+The PRD implementation plan in
+[`ferrogate-wiki/wiki/03-development/prd-implementation-plan.md`](ferrogate-wiki/wiki/03-development/prd-implementation-plan.md)
+is complete for the P0-P8 MVP and production-readiness phases.
 
-- Open-source Rust API Gateway and AI Gateway for AI traffic
-- Built-in API gateway capabilities inspired by mature gateway products
-- Reverse proxy foundation for HTTP services
-- Virtual API keys, tenant context, and model allowlists
-- Provider routing and OpenAI-compatible API surface
-- Token control, usage observability, and policy hooks
-- Production-friendly Rust implementation
+Validated end-to-end:
 
-## Current status
+- HTTP reverse proxy runtime on Pingora.
+- OpenAI-compatible AI gateway paths.
+- Provider adapters and fallback routing.
+- Virtual API key auth, policy checks, rate limits, and token budget handling.
+- Request logs, billing events, usage aggregates, metrics, and OTLP planning.
+- Admin API, static dashboard, config validation, and process-local reload.
+- Manual TLS, ACME HTTP-01, and ACME DNS-01.
+- Real Let's Encrypt staging and production issuance for both HTTP-01 and
+  Cloudflare DNS-01 during live validation.
 
-FerroGate is in early development. The current MVP implements:
+Still intentionally scoped as next-stage production work:
 
-- Cloudflare Pingora-based gateway runtime
-- `GET /healthz` health check
-- `GET /v1/models` OpenAI-compatible model list from config
-- `POST /v1/chat/completions` request validation, virtual API key auth, tenant context resolution, model routing, non-streaming provider dispatch, and `stream=true` SSE response forwarding MVP
-- `GET /admin/status` gateway status summary
-- Generic reverse proxy with configured upstreams/routes
-- Upstream endpoint pools with basic round-robin selection
-- Path prefix routing and path rewrite (`strip_prefix`/`add_prefix`)
-- Request/response header forwarding and configured header mutation
-- Caddyfile-style startup configuration at `Ferrogate/Caddyfile`
-- TOML configuration loading and validation for tests and transitional workflows
-- Provider registry, model registry, and virtual API key config
-- Caddy-style binary subcommands: `ferrogate run`, `ferrogate validate`, and planned `ferrogate reload`
-- `x-request-id` propagation/generation and structured gateway logs
+- Persistent storage implementations for API keys, tenants, policy, billing,
+  request logs, and audit logs. Current runtime state is primarily config and
+  in-memory repository driven.
+- Full Admin API CRUD control plane.
+- Background ACME renewal and hot certificate reload. Current ACME behavior is
+  startup-time issuance/reuse.
+- Expanded DNS provider set beyond the built-in Cloudflare provider and the
+  generic external hook boundary.
 
-HTTPS provider dispatch, richer streaming/error coverage, usage accounting, and production-grade Pingora failover are the next implementation milestones.
+## Repository Layout
 
-## Quick start
+```text
+crates/
+  ferrogate-cli             CLI, Pingora runtime wiring, gateway handlers
+  ferrogate-config          Caddyfile/TOML config model and parser
+  ferrogate-providers       AI provider adapters and model registry
+  ferrogate-auth            Tenant and RBAC domain models
+  ferrogate-policy          Policy decision models and engine
+  ferrogate-storage         Repository traits and in-memory storage
+  ferrogate-billing         Token usage, cost, and billing event models
+  ferrogate-observability   Metrics, spans, exporter contracts
+  ferrogate-runtime         Reload and runtime lifecycle state machine
+config/                     Example TOML configuration
+Ferrogate/Caddyfile          Default Caddyfile-style development config
+ferrogate-wiki/              Product, architecture, development, operations docs
+scripts/security-check.sh    Local security and supply-chain gate
+```
+
+## Quick Start
+
+Prerequisites:
+
+- Rust toolchain compatible with the workspace `rust-version`.
+- `cmake`, `g++`, `make`, and `pkg-config` for Pingora's native compression
+  dependency chain.
+
+Run the default development gateway:
 
 ```bash
 cargo run -- run --config Ferrogate/Caddyfile
-cargo run -- validate --config Ferrogate/Caddyfile
 ```
 
-Then open:
+Validate configuration:
+
+```bash
+cargo run -- validate --config Ferrogate/Caddyfile
+cargo run -- validate --config config/ferrogate.example.toml
+```
+
+Probe the gateway:
 
 ```bash
 curl http://127.0.0.1:8080/healthz
 curl http://127.0.0.1:8080/proxy/httpbin/get
 curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/v1/models
-curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/admin/status
 ```
 
-Try the chat completion routing placeholder:
+Send an OpenAI-compatible chat request:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/chat/completions \
@@ -75,23 +125,52 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+Open the admin dashboard:
+
+```text
+http://127.0.0.1:8080/admin
+```
+
 ## Configuration
 
-FerroGate loads `Ferrogate/Caddyfile` by default. TOML remains supported as a structured internal, test, and transitional format when an explicit TOML path is provided.
+FerroGate loads `Ferrogate/Caddyfile` by default. TOML is also supported for
+structured self-hosting and tests.
 
 ```bash
 ferrogate run --config Ferrogate/Caddyfile
-ferrogate validate --config Ferrogate/Caddyfile
-ferrogate validate --config ./config/ferrogate.example.toml
+ferrogate run --config /etc/ferrogate/ferrogate.toml
 ```
 
-Example Caddyfile:
+### Caddyfile Example
 
 ```caddyfile
 :8080 {
     log
 
     respond /healthz "ok" 200
+
+    ai_gateway {
+        provider openai {
+            kind openai-compatible
+            base_url https://api.openai.com/v1
+            api_key {env.OPENAI_API_KEY}
+        }
+
+        model fast-chat -> openai:gpt-4o-mini {
+            capabilities chat streaming
+            input_price_per_1m 0.15
+            output_price_per_1m 0.60
+        }
+
+        api_key key_dev {
+            key {$FERROGATE_DEV_KEY}
+            scopes models.read chat.completions admin.read
+            allowed_models fast-chat
+            allowed_providers openai
+            request_limit_per_minute 60
+            monthly_token_budget 1000000
+        }
+    }
 
     route /v1/* {
         reverse_proxy https://api.openai.com {
@@ -101,59 +180,289 @@ Example Caddyfile:
 }
 ```
 
-Example TOML:
+### TOML Example
 
 ```toml
-listen = "127.0.0.1:8080"
+listen = "0.0.0.0:8080"
+
+[admin]
+listen = "127.0.0.1:2019"
+
+[reliability]
+provider_circuit_breaker_failure_threshold = 3
+provider_circuit_breaker_cooldown_secs = 30
+provider_dispatch_timeout_secs = 10
+provider_dispatch_max_retries = 1
+graceful_shutdown_grace_period_secs = 3
+graceful_shutdown_timeout_secs = 15
 
 [[providers]]
 name = "openai"
+kind = "openai-compatible"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = "0.15"
+output_price_per_1m = "0.60"
+
+[[api_keys]]
+id = "dev"
+key = "dev-secret"
+scopes = ["models.read", "chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+allowed_providers = ["openai"]
+request_limit_per_minute = 60
+monthly_token_budget = 1000000
 ```
+
+For production, prefer `key_hash` generated by `ferrogate hash-key` over plain
+development keys.
+
+```bash
+ferrogate hash-key --secret 'your-client-secret'
+```
+
+## Automatic HTTPS
+
+FerroGate supports manual TLS certificates and startup-time ACME issuance.
+
+### Manual TLS
+
+```toml
+[tls]
+enabled = true
+cert_path = "/etc/ferrogate/certs/fullchain.pem"
+key_path = "/etc/ferrogate/certs/privkey.pem"
+http2 = true
+```
+
+### ACME HTTP-01
+
+HTTP-01 requires public inbound access to port 80 for the challenge and port
+443 for HTTPS service.
+
+```toml
+listen = "0.0.0.0:443"
+
+[tls]
+enabled = true
+http2 = true
+
+[tls.acme]
+enabled = true
+domains = ["api.example.com"]
+email = "ops@example.com"
+directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+terms_agreed = true
+challenge = "http-01"
+http_challenge_listen = "0.0.0.0:80"
+storage_dir = "/var/lib/ferrogate/acme-http"
+```
+
+### ACME DNS-01 With Built-In Cloudflare
+
+DNS-01 does not require public port 80 and is required for wildcard
+certificates. Cloudflare credentials are configured in the FerroGate config
+file.
+
+```toml
+listen = "0.0.0.0:443"
+
+[tls]
+enabled = true
+http2 = true
+
+[tls.acme]
+enabled = true
+domains = ["api.example.com"]
+email = "ops@example.com"
+directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+terms_agreed = true
+challenge = "dns-01"
+storage_dir = "/var/lib/ferrogate/acme-dns"
+dns_provider = "cloudflare"
+dns_config = { api_token = "cf-token", zone_name = "example.com" }
+dns_propagation_delay_secs = 30
+```
+
+Caddyfile-style DNS-01:
+
+```caddyfile
+api.example.com {
+    tls {
+        issuer acme {
+            email ops@example.com
+        }
+        storage /var/lib/ferrogate/acme-dns
+        dns cloudflare {
+            api_token cf-token
+            zone_name example.com
+        }
+    }
+}
+```
+
+FerroGate also keeps a provider-neutral external hook boundary for DNS
+providers that are not built in. Hooks receive a 0600 JSON payload file path and
+are invoked as:
+
+```text
+<hook> <set|cleanup> <payload-json-path>
+```
+
+## Reloading
+
+Validate-only reload report:
+
+```bash
+ferrogate reload --config Ferrogate/Caddyfile
+```
+
+Process-local reload through a running Admin API:
+
+```bash
+ferrogate reload \
+  --config Ferrogate/Caddyfile \
+  --admin-url http://127.0.0.1:8080 \
+  --admin-token "$FERROGATE_ADMIN_TOKEN"
+```
+
+Listener-level reload through Pingora graceful upgrade:
+
+```bash
+ferrogate reload --config Ferrogate/Caddyfile --graceful-upgrade
+```
+
+Process-local reload is used only when the listen socket and TLS listener
+fingerprint do not change. Listener/TLS changes require graceful upgrade.
+
+## Admin API
+
+Common endpoints:
+
+```text
+GET  /admin/v1/status
+GET  /admin/v1/providers
+GET  /admin/v1/provider-health
+GET  /admin/v1/models
+GET  /admin/v1/api-keys
+GET  /admin/v1/tenants
+GET  /admin/v1/policies
+GET  /admin/v1/request-logs
+GET  /admin/v1/billing-events
+GET  /admin/v1/usage-aggregates
+GET  /admin/v1/audit-events
+POST /admin/v1/config/validate
+POST /admin/v1/config/reload
+GET  /metrics
+GET  /admin
+```
+
+Read endpoints require `admin.read` when API keys are configured. Config
+validation and reload require `admin.write`.
 
 ## Docker
 
+Build the image:
+
 ```bash
 docker build -t ferrogate .
-docker run --rm -p 8080:8080 ferrogate
 ```
 
-## Documentation wiki
-
-The project wiki now lives in a standalone monorepo: [`ferrogate-wiki`](https://github.com/lianluo-esign/ferrogate-wiki).
-
-This repository keeps it available as a submodule at [`ferrogate-wiki/`](ferrogate-wiki/), containing:
-
-- `wiki/`: Obsidian vault and Markdown source of truth
-- `wiki-site/`: Quartz static site generator project
-- `scripts/build-wiki-site.sh`: build, serve, and clean entrypoint
-
-Clone this repository with submodules:
+Run with a mounted config:
 
 ```bash
-git clone --recurse-submodules https://github.com/lianluo-esign/ferrogate.git
+docker run --rm \
+  -p 8080:8080 \
+  -v "$PWD/config/ferrogate.example.toml:/etc/ferrogate/ferrogate.toml:ro" \
+  -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
+  ferrogate
 ```
 
-Or initialize the wiki submodule after cloning:
+For automatic HTTPS, publish the relevant ports and mount ACME storage:
 
 ```bash
-git submodule update --init --recursive
+docker run --rm \
+  -p 80:80 \
+  -p 443:443 \
+  -v /etc/ferrogate/ferrogate.toml:/etc/ferrogate/ferrogate.toml:ro \
+  -v /var/lib/ferrogate/acme:/var/lib/ferrogate/acme \
+  -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
+  ferrogate
 ```
 
-Build the wiki site from the submodule:
+## Quality And Security
+
+Run the local gate before committing:
 
 ```bash
-cd ferrogate-wiki
-./scripts/build-wiki-site.sh build
+./scripts/security-check.sh
 ```
 
-Preview it locally:
+Strict mode requires cargo-deny and cargo-audit:
+
+```bash
+FERROGATE_SECURITY_REQUIRE_TOOLS=1 ./scripts/security-check.sh
+```
+
+Install the supply-chain tools:
+
+```bash
+cargo install cargo-deny --version 0.19.4 --locked
+cargo install cargo-audit --version 0.22.1 --locked
+```
+
+The security gate runs:
+
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo metadata --locked`
+- high-confidence secret scanning
+- `cargo deny check licenses bans sources`
+- `cargo audit`
+
+Known residual audit warnings are documented in `.cargo/audit.toml` and the
+development plan. They currently come from Pingora transitive dependencies and
+are monitored separately from direct FerroGate code.
+
+## Documentation
+
+- Product requirements:
+  [`ferrogate-wiki/wiki/01-product/product-requirements.md`](ferrogate-wiki/wiki/01-product/product-requirements.md)
+- Architecture:
+  [`ferrogate-wiki/wiki/02-architecture/ferrogate-architecture-and-modules.md`](ferrogate-wiki/wiki/02-architecture/ferrogate-architecture-and-modules.md)
+- Implementation plan:
+  [`ferrogate-wiki/wiki/03-development/prd-implementation-plan.md`](ferrogate-wiki/wiki/03-development/prd-implementation-plan.md)
+- Self-hosting runbook:
+  [`ferrogate-wiki/wiki/04-operations/self-hosting-runbook.md`](ferrogate-wiki/wiki/04-operations/self-hosting-runbook.md)
+
+Build the wiki:
+
+```bash
+npm --prefix ferrogate-wiki run wiki:build
+```
+
+Preview locally:
 
 ```bash
 cd ferrogate-wiki
 ./scripts/build-wiki-site.sh serve
 ```
+
+## Contributing
+
+1. Keep changes small and reviewable.
+2. Follow the existing Rust module boundaries and Caddyfile adapter style.
+3. Run `./scripts/security-check.sh` before opening a PR.
+4. Update the wiki when behavior, configuration, operations, or architecture
+   changes.
+5. Do not commit provider secrets, ACME tokens, private keys, or generated
+   certificates.
 
 ## License
 

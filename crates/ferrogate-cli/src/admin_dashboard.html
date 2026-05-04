@@ -60,7 +60,7 @@
       gap: 8px;
       align-items: center;
     }
-    input, textarea, button {
+    input, select, textarea, button {
       height: 36px;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -68,7 +68,7 @@
       color: var(--text);
       font: inherit;
     }
-    input, textarea {
+    input, select, textarea {
       width: 100%;
       padding: 0 10px;
     }
@@ -284,13 +284,13 @@
       },
       health: {
         title: "Health",
-        endpoints: ["/healthz", "/admin/v1/status"],
-        columns: ["service", "runtime", "version", "snapshot", "auth_required"],
+        endpoints: ["/healthz", "/admin/v1/status", "/admin/v1/provider-health"],
+        columns: ["name", "kind", "status", "reachable", "circuit_open", "consecutive_failures", "checked_at_unix"],
       },
       apiKeys: {
         title: "API Keys",
         endpoints: ["/admin/v1/api-keys"],
-        columns: ["id", "name", "enabled", "key_source", "scopes", "allowed_models", "organization_id", "project_id"],
+        columns: ["id", "name", "enabled", "key_source", "scopes", "allowed_models", "denied_models", "allowed_providers", "denied_providers", "organization_id", "project_id"],
       },
       providers: {
         title: "Providers",
@@ -313,9 +313,9 @@
         columns: ["organization_id", "project_id", "api_key_id", "logical_model", "provider", "usage"],
       },
       config: {
-        title: "Config Check",
+        title: "Config",
         endpoints: ["/admin/v1/status"],
-        columns: ["valid", "snapshot", "error"],
+        columns: ["valid", "reload_mode", "listener_reload_required", "reload_reason", "committed", "mode", "active_snapshot", "candidate_snapshot", "error"],
       },
       audit: {
         title: "Audit",
@@ -409,24 +409,41 @@
       const textarea = document.createElement("textarea");
       textarea.id = "candidate-config";
       textarea.value = 'listen = "127.0.0.1:8080"\n';
-      textarea.setAttribute("aria-label", "Candidate TOML config");
+      textarea.setAttribute("aria-label", "Candidate config");
+      const format = document.createElement("select");
+      format.setAttribute("aria-label", "Candidate config format");
+      for (const value of ["toml", "caddyfile", "file"]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        format.append(option);
+      }
       const button = document.createElement("button");
       button.className = "primary";
       button.textContent = "Validate";
+      const reloadButton = document.createElement("button");
+      reloadButton.textContent = "Reload";
       const result = document.createElement("div");
       result.className = "action-result";
-      button.addEventListener("click", async () => {
+      function candidatePayload() {
+        if (format.value === "file") return { source: "file" };
+        if (format.value === "caddyfile") {
+          return { config_caddyfile: textarea.value, filename: "candidate.Caddyfile" };
+        }
+        return { config_toml: textarea.value };
+      }
+      async function submitConfig(endpoint, pendingText) {
         state.token = tokenInput.value.trim();
         localStorage.setItem("ferrogate_admin_token", state.token);
-        result.textContent = "Validating...";
+        result.textContent = pendingText;
         try {
-          const response = await fetch("/admin/v1/config/validate", {
+          const response = await fetch(endpoint, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${state.token}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ config_toml: textarea.value }),
+            body: JSON.stringify(candidatePayload()),
           });
           const payload = await response.json();
           if (!response.ok) throw new Error(JSON.stringify(payload));
@@ -434,8 +451,10 @@
         } catch (error) {
           result.textContent = error.message;
         }
-      });
-      action.append(textarea, button, result);
+      }
+      button.addEventListener("click", () => submitConfig("/admin/v1/config/validate", "Validating..."));
+      reloadButton.addEventListener("click", () => submitConfig("/admin/v1/config/reload", "Reloading..."));
+      action.append(format, textarea, button, reloadButton, result);
     }
 
     function listOf(payload) {
@@ -475,7 +494,14 @@
         return;
       }
       if (viewName === "health") {
-        renderTable([payloads["/healthz"] || {}, payloads["/admin/v1/status"] || {}], view.columns);
+        const providerHealth = listOf(payloads["/admin/v1/provider-health"]);
+        renderMetrics([
+          { label: "Service", value: (payloads["/healthz"] || {}).status },
+          { label: "Runtime", value: (payloads["/admin/v1/status"] || {}).runtime },
+          { label: "Healthy Providers", value: providerHealth.filter(row => row.status === "healthy").length },
+          { label: "Unhealthy Providers", value: providerHealth.filter(row => row.status !== "healthy").length },
+        ]);
+        renderTable(providerHealth, view.columns);
         return;
       }
       renderTable(listOf(payloads[view.endpoints[0]]), view.columns);

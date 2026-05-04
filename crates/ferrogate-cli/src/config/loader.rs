@@ -1,10 +1,13 @@
 use anyhow::{Context, Result as AnyResult};
-use ferrogate_config::{is_caddyfile_path, load_caddyfile, GatewayConfig};
-use std::path::PathBuf;
+use ferrogate_config::{
+    is_caddyfile_path, load_caddyfile, parse_caddyfile, GatewayConfig, GatewayTlsAcmeConfig,
+};
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use super::{
-    AdminConfig, Config, HeaderMutation, Model, Provider, RouteRule, TelemetryConfig, Upstream,
+    AdminConfig, Config, HeaderMutation, Model, Provider, RouteRule, TelemetryConfig, TlsConfig,
+    Upstream,
 };
 
 impl Config {
@@ -18,19 +21,32 @@ impl Config {
         }
 
         if is_caddyfile_path(path) {
-            let config = Self::from_gateway_config(load_caddyfile(path)?);
-            config.validate()?;
+            let mut config = Self::from_gateway_config(load_caddyfile(path)?);
+            config.resolve_paths_relative_to(path.parent());
+            config
+                .validate()
+                .with_context(|| format!("failed to validate config file {}", path.display()))?;
             return Ok(config);
         }
 
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
-        Self::from_toml_str(&raw)
-            .with_context(|| format!("failed to parse config file {}", path.display()))
+        let mut config: Self = toml::from_str(&raw).context("failed to parse TOML config")?;
+        config.resolve_paths_relative_to(path.parent());
+        config
+            .validate()
+            .with_context(|| format!("failed to validate config file {}", path.display()))?;
+        Ok(config)
     }
 
     pub(crate) fn from_toml_str(raw: &str) -> AnyResult<Self> {
         let config: Self = toml::from_str(raw).context("failed to parse TOML config")?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub(crate) fn from_caddyfile_str(raw: &str, file: &str) -> AnyResult<Self> {
+        let config = Self::from_gateway_config(parse_caddyfile(raw, file)?);
         config.validate()?;
         Ok(config)
     }
@@ -41,14 +57,32 @@ impl Config {
             admin: AdminConfig {
                 listen: config.admin,
             },
+            tls: match (config.tls, config.tls_acme) {
+                (Some(tls), None) => TlsConfig {
+                    enabled: true,
+                    cert_path: Some(tls.cert_path),
+                    key_path: Some(tls.key_path),
+                    http2: false,
+                    acme: crate::config::TlsAcmeConfig::default(),
+                },
+                (None, Some(acme)) => Self::tls_from_gateway_acme(acme),
+                (Some(tls), Some(_)) => TlsConfig {
+                    enabled: true,
+                    cert_path: Some(tls.cert_path),
+                    key_path: Some(tls.key_path),
+                    http2: false,
+                    acme: crate::config::TlsAcmeConfig::default(),
+                },
+                (None, None) => TlsConfig::default(),
+            },
             providers: config
                 .providers
                 .into_iter()
                 .map(|provider| Provider {
                     name: provider.name,
-                    kind: "openai".to_string(),
+                    kind: provider.kind,
                     base_url: provider.base_url,
-                    api_key_env: None,
+                    api_key_env: provider.api_key_env,
                     enabled: true,
                 })
                 .collect(),
@@ -62,16 +96,47 @@ impl Config {
                     fallbacks: Vec::new(),
                     visible_organization_ids: Vec::new(),
                     visible_project_ids: Vec::new(),
-                    capabilities: Vec::new(),
-                    context_window: None,
-                    input_price_per_1m: None,
-                    output_price_per_1m: None,
+                    capabilities: model.capabilities,
+                    context_window: model.context_window,
+                    input_price_per_1m: model
+                        .input_price_per_1m
+                        .as_deref()
+                        .and_then(|value| value.parse().ok()),
+                    output_price_per_1m: model
+                        .output_price_per_1m
+                        .as_deref()
+                        .and_then(|value| value.parse().ok()),
                     enabled: true,
                 })
                 .collect(),
-            api_keys: Vec::new(),
+            api_keys: config
+                .api_keys
+                .into_iter()
+                .map(|key| crate::config::ApiKey {
+                    id: key.id,
+                    name: key.name,
+                    key_env: key.key_env,
+                    key: key.key,
+                    key_hash: key.key_hash,
+                    enabled: true,
+                    scopes: key.scopes,
+                    allowed_models: key.allowed_models,
+                    denied_models: key.denied_models,
+                    allowed_providers: key.allowed_providers,
+                    denied_providers: key.denied_providers,
+                    organization_id: None,
+                    team_id: None,
+                    project_id: None,
+                    user_id: None,
+                    monthly_token_budget: key.monthly_token_budget,
+                    request_limit_per_minute: key.request_limit_per_minute,
+                    expires_at_unix: None,
+                    log_bodies: None,
+                })
+                .collect(),
             policies: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            reliability: crate::config::ReliabilityConfig::default(),
             upstreams: config
                 .upstreams
                 .into_iter()
@@ -115,5 +180,73 @@ impl Config {
                 })
                 .collect(),
         }
+    }
+
+    fn tls_from_gateway_acme(acme: GatewayTlsAcmeConfig) -> TlsConfig {
+        let mut tls_acme = crate::config::TlsAcmeConfig {
+            enabled: true,
+            domains: acme.domains,
+            email: acme.email,
+            dns_provider: acme.dns_provider,
+            dns_config: acme.dns_config,
+            dns_hook_set: acme.dns_hook_set,
+            dns_hook_cleanup: acme.dns_hook_cleanup,
+            terms_agreed: true,
+            ..crate::config::TlsAcmeConfig::default()
+        };
+        if let Some(directory_url) = acme.directory_url {
+            tls_acme.directory_url = directory_url;
+        }
+        if let Some(challenge) = acme.challenge {
+            tls_acme.challenge = challenge;
+        }
+        if let Some(http_challenge_listen) = acme.http_challenge_listen {
+            tls_acme.http_challenge_listen = http_challenge_listen;
+        }
+        if let Some(storage_dir) = acme.storage_dir {
+            tls_acme.storage_dir = storage_dir;
+        }
+        TlsConfig {
+            enabled: true,
+            cert_path: None,
+            key_path: None,
+            http2: false,
+            acme: tls_acme,
+        }
+    }
+
+    fn resolve_paths_relative_to(&mut self, base_dir: Option<&Path>) {
+        let Some(base_dir) = base_dir else {
+            return;
+        };
+        if let Some(cert_path) = &mut self.tls.cert_path {
+            *cert_path = resolve_relative_path(base_dir, cert_path);
+        }
+        if let Some(key_path) = &mut self.tls.key_path {
+            *key_path = resolve_relative_path(base_dir, key_path);
+        }
+        if self.tls.acme.enabled {
+            self.tls.acme.storage_dir = resolve_relative_path(base_dir, &self.tls.acme.storage_dir);
+            if let Some(dns_hook_set) = &mut self.tls.acme.dns_hook_set {
+                *dns_hook_set = resolve_relative_path(base_dir, dns_hook_set);
+            }
+            if let Some(dns_hook_cleanup) = &mut self.tls.acme.dns_hook_cleanup {
+                *dns_hook_cleanup = resolve_relative_path(base_dir, dns_hook_cleanup);
+            }
+        }
+    }
+}
+
+fn resolve_relative_path(base_dir: &Path, raw: &str) -> String {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        raw.to_string()
+    } else {
+        base_dir
+            .join(path)
+            .components()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
     }
 }

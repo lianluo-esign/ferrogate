@@ -132,6 +132,183 @@ fn rejects_invalid_admin_listen_address_with_field_name() {
 }
 
 #[test]
+fn rejects_tls_enabled_without_certificate_pair() {
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            cert_path: Some("cert.pem".into()),
+            key_path: None,
+            http2: false,
+            acme: crate::config::TlsAcmeConfig::default(),
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field tls.key_path"));
+}
+
+#[test]
+fn rejects_invalid_tls_certificate_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+    std::fs::write(&cert, "not a certificate").unwrap();
+    std::fs::write(&key, "not a private key").unwrap();
+
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            cert_path: Some(cert.to_string_lossy().into_owned()),
+            key_path: Some(key.to_string_lossy().into_owned()),
+            http2: true,
+            acme: crate::config::TlsAcmeConfig::default(),
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field tls.cert_path/tls.key_path"));
+}
+
+#[test]
+fn accepts_acme_dns01_tls_without_manual_certificate_pair() {
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            acme: crate::config::TlsAcmeConfig {
+                enabled: true,
+                domains: vec!["api.example.com".into()],
+                email: Some("ops@example.com".into()),
+                terms_agreed: true,
+                dns_hook_set: Some("/usr/local/bin/ferrogate-dns-set".into()),
+                dns_hook_cleanup: Some("/usr/local/bin/ferrogate-dns-cleanup".into()),
+                ..crate::config::TlsAcmeConfig::default()
+            },
+            ..TlsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_acme_dns01_tls_without_dns_hooks() {
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            acme: crate::config::TlsAcmeConfig {
+                enabled: true,
+                domains: vec!["api.example.com".into()],
+                email: Some("ops@example.com".into()),
+                terms_agreed: true,
+                ..crate::config::TlsAcmeConfig::default()
+            },
+            ..TlsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field tls.acme.dns_provider"));
+}
+
+#[test]
+fn accepts_acme_dns01_tls_with_builtin_cloudflare_provider() {
+    let mut dns_config = std::collections::BTreeMap::new();
+    dns_config.insert("api_token".into(), "cf-token".into());
+    dns_config.insert("zone_id".into(), "zone-123".into());
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            acme: crate::config::TlsAcmeConfig {
+                enabled: true,
+                domains: vec!["api.example.com".into()],
+                email: Some("ops@example.com".into()),
+                terms_agreed: true,
+                dns_provider: Some("cloudflare".into()),
+                dns_config,
+                ..crate::config::TlsAcmeConfig::default()
+            },
+            ..TlsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn accepts_acme_http01_tls_without_dns_hooks() {
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            acme: crate::config::TlsAcmeConfig {
+                enabled: true,
+                domains: vec!["token4aicloud.com".into()],
+                email: Some("ops@token4aicloud.com".into()),
+                challenge: "http-01".into(),
+                http_challenge_listen: "0.0.0.0:80".into(),
+                terms_agreed: true,
+                ..crate::config::TlsAcmeConfig::default()
+            },
+            ..TlsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_acme_http01_for_wildcard_domains() {
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            acme: crate::config::TlsAcmeConfig {
+                enabled: true,
+                domains: vec!["*.token4aicloud.com".into()],
+                email: Some("ops@token4aicloud.com".into()),
+                challenge: "http-01".into(),
+                terms_agreed: true,
+                ..crate::config::TlsAcmeConfig::default()
+            },
+            ..TlsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("wildcard domains require dns-01"));
+}
+
+#[test]
+fn rejects_acme_tls_mixed_with_manual_certificate_pair() {
+    let config = Config {
+        tls: TlsConfig {
+            enabled: true,
+            cert_path: Some("cert.pem".into()),
+            key_path: Some("key.pem".into()),
+            acme: crate::config::TlsAcmeConfig {
+                enabled: true,
+                domains: vec!["api.example.com".into()],
+                email: Some("ops@example.com".into()),
+                terms_agreed: true,
+                dns_hook_set: Some("/usr/local/bin/ferrogate-dns-set".into()),
+                dns_hook_cleanup: Some("/usr/local/bin/ferrogate-dns-cleanup".into()),
+                ..crate::config::TlsAcmeConfig::default()
+            },
+            ..TlsConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field tls.acme.enabled"));
+}
+
+#[test]
 fn rejects_duplicate_api_key_id_with_field_name() {
     let config = Config {
         api_keys: vec![api_key("key_dev", "one"), api_key("key_dev", "two")],
@@ -158,6 +335,20 @@ fn rejects_api_key_with_unknown_allowed_model() {
 }
 
 #[test]
+fn rejects_api_key_with_unknown_denied_model() {
+    let mut key = api_key("key_dev", "Development key");
+    key.denied_models = vec!["missing-model".into()];
+    let config = Config {
+        api_keys: vec![key],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field api_keys[0].denied_models"));
+    assert!(error.contains("missing-model"));
+}
+
+#[test]
 fn rejects_api_key_with_unknown_allowed_provider() {
     let mut key = api_key("key_dev", "Development key");
     key.allowed_providers = vec!["missing-provider".into()];
@@ -168,6 +359,20 @@ fn rejects_api_key_with_unknown_allowed_provider() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field api_keys[0].allowed_providers"));
+    assert!(error.contains("missing-provider"));
+}
+
+#[test]
+fn rejects_api_key_with_unknown_denied_provider() {
+    let mut key = api_key("key_dev", "Development key");
+    key.denied_providers = vec!["missing-provider".into()];
+    let config = Config {
+        api_keys: vec![key],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field api_keys[0].denied_providers"));
     assert!(error.contains("missing-provider"));
 }
 
@@ -225,6 +430,107 @@ fn rejects_invalid_otlp_endpoint_with_field_name() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field telemetry.otlp_endpoint"));
+}
+
+#[test]
+fn rejects_incomplete_provider_circuit_breaker_config() {
+    let config = Config {
+        reliability: ReliabilityConfig {
+            provider_circuit_breaker_failure_threshold: Some(2),
+            provider_circuit_breaker_cooldown_secs: None,
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.provider_circuit_breaker_cooldown_secs"));
+}
+
+#[test]
+fn rejects_zero_provider_circuit_breaker_threshold() {
+    let config = Config {
+        reliability: ReliabilityConfig {
+            provider_circuit_breaker_failure_threshold: Some(0),
+            provider_circuit_breaker_cooldown_secs: Some(30),
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.provider_circuit_breaker_failure_threshold"));
+}
+
+#[test]
+fn rejects_zero_provider_dispatch_timeout() {
+    let config = Config {
+        reliability: ReliabilityConfig {
+            provider_dispatch_timeout_secs: Some(0),
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.provider_dispatch_timeout_secs"));
+}
+
+#[test]
+fn rejects_zero_graceful_shutdown_settings() {
+    let config = Config {
+        reliability: ReliabilityConfig {
+            graceful_shutdown_grace_period_secs: Some(0),
+            graceful_shutdown_timeout_secs: Some(0),
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.graceful_shutdown_grace_period_secs"));
+}
+
+#[test]
+fn rejects_invalid_graceful_upgrade_settings() {
+    let config = Config {
+        reliability: ReliabilityConfig {
+            graceful_upgrade_pid_file: Some(" ".into()),
+            graceful_upgrade_sock: Some("/tmp/ferrogate_upgrade.sock".into()),
+            graceful_upgrade_sock_retries: Some(5),
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.graceful_upgrade_pid_file"));
+
+    let config = Config {
+        reliability: ReliabilityConfig {
+            graceful_upgrade_pid_file: Some("/tmp/ferrogate.pid".into()),
+            graceful_upgrade_sock: Some(" ".into()),
+            graceful_upgrade_sock_retries: Some(5),
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.graceful_upgrade_sock"));
+
+    let config = Config {
+        reliability: ReliabilityConfig {
+            graceful_upgrade_pid_file: Some("/tmp/ferrogate.pid".into()),
+            graceful_upgrade_sock: Some("/tmp/ferrogate_upgrade.sock".into()),
+            graceful_upgrade_sock_retries: Some(0),
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.graceful_upgrade_sock_retries"));
 }
 
 #[test]
@@ -317,7 +623,9 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         enabled: true,
         scopes: vec![],
         allowed_models: vec![],
+        denied_models: vec![],
         allowed_providers: vec![],
+        denied_providers: vec![],
         organization_id: None,
         team_id: None,
         project_id: None,

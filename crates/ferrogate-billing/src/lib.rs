@@ -65,6 +65,14 @@ pub struct CostEstimate {
     pub currency: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingUsageSource {
+    #[default]
+    ProviderUsage,
+    GatewayEstimate,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BillingEvent {
     pub request_id: String,
@@ -74,6 +82,8 @@ pub struct BillingEvent {
     pub provider: String,
     pub provider_model: String,
     pub usage: TokenUsage,
+    #[serde(default)]
+    pub usage_source: BillingUsageSource,
     pub cost: Option<CostEstimate>,
     pub status_code: u16,
     pub occurred_at_unix: Option<u64>,
@@ -155,6 +165,7 @@ mod tests {
             provider: "openai".into(),
             provider_model: "gpt-4o-mini".into(),
             usage: TokenUsage::new(3, 5, 8),
+            usage_source: BillingUsageSource::ProviderUsage,
             cost: Some(ModelPrice::usd(1.0, 2.0).estimate(&TokenUsage::new(3, 5, 8))),
             status_code: 200,
             occurred_at_unix: Some(1),

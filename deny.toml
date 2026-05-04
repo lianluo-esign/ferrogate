@@ -1,0 +1,56 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[advisories]
+unmaintained = "workspace"
+yanked = "warn"
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+allow-workspace = true
+skip = [
+    { crate = "bitflags@1.3.2", reason = "Pinned transitively by pingora 0.8; revisit with the next Pingora upgrade." },
+    { crate = "getrandom@0.2.17", reason = "Pinned transitively by pingora/ring 0.8 stack; revisit with the next Pingora upgrade." },
+    { crate = "getrandom@0.4.2", reason = "Pinned transitively by cf-rustracing and tempfile; revisit with dependency graph cleanup." },
+    { crate = "hashbrown@0.12.3", reason = "Pinned transitively by pingora-cache 0.8; revisit with the next Pingora upgrade." },
+    { crate = "hashbrown@0.16.1", reason = "Pinned transitively by pingora-pool 0.8; revisit with the next Pingora upgrade." },
+    { crate = "heck@0.4.1", reason = "Pinned transitively by ouroboros in pingora-core 0.8; revisit with the next Pingora upgrade." },
+    { crate = "indexmap@1.9.3", reason = "Pinned transitively by pingora-cache 0.8; revisit with the next Pingora upgrade." },
+    { crate = "openssl-probe@0.1.6", reason = "Pinned transitively by pingora-core/rustls-native-certs 0.7; revisit with the next Pingora upgrade." },
+    { crate = "rand@0.10.1", reason = "Pinned transitively by cf-rustracing; revisit with dependency graph cleanup." },
+    { crate = "rand_core@0.10.1", reason = "Pinned transitively by rand 0.10; revisit with dependency graph cleanup." },
+    { crate = "rustls-native-certs@0.7.3", reason = "Pinned transitively by pingora-rustls 0.8; direct FerroGate TLS clients use 0.8." },
+    { crate = "syn@1.0.109", reason = "Pinned transitively by derivative/trackable in pingora 0.8 dependencies; revisit with the next Pingora upgrade." },
+    { crate = "thiserror@1.0.69", reason = "Pinned transitively by pingora/x509-parser 0.8 stack; instant-acme uses thiserror 2.x." },
+    { crate = "thiserror-impl@1.0.69", reason = "Pinned transitively by thiserror 1.x in pingora/x509-parser 0.8 stack." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

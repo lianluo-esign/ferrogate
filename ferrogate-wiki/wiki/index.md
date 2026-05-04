@@ -19,6 +19,7 @@ Welcome to the FerroGate project wiki. This vault is designed for Obsidian-first
 - [[03-development/development-workflow|Development workflow]]
 - [[03-development/prd-implementation-plan|PRD implementation plan]]
 - [[04-operations/user-guide|User guide]]
+- [[04-operations/self-hosting-runbook|Self-hosting runbook]]
 - [[05-decisions/adr-0001-rust-gateway|ADR 0001 - Rust gateway foundation]]
 - [[05-decisions/adr-0002-use-pingora-for-proxy-runtime|ADR 0002 - Use Pingora for proxy runtime]]
 - [[06-reference/glossary|Glossary]]

@@ -41,6 +41,17 @@ fn wait_for_gateway(addr: &str) {
     panic!("gateway did not become ready at {addr}");
 }
 
+fn wait_for_tcp_listener(addr: &str) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("gateway did not open TCP listener at {addr}");
+}
+
 fn http_get(addr: &str, path: &str, host: &str) -> String {
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
@@ -54,6 +65,28 @@ fn http_get(addr: &str, path: &str, host: &str) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
+}
+
+fn https_get_with_openssl(addr: &str, path: &str, host: &str) -> Option<String> {
+    let mut child = Command::new("openssl")
+        .args(["s_client", "-connect", addr, "-servername", host, "-quiet"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        write!(
+            stdin,
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+    }
+
+    let output = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn spawn_echo_upstream() -> (String, thread::JoinHandle<String>) {
@@ -248,4 +281,70 @@ path_prefixes = ["/stream"]
     gateway.kill().unwrap();
     gateway.wait().unwrap();
     upstream_handle.join().unwrap();
+}
+
+#[test]
+fn tls_listener_serves_healthz_when_certificate_is_configured() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+    if !write_self_signed_test_certificate(&cert, &key) {
+        return;
+    }
+
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[tls]
+enabled = true
+cert_path = "{}"
+key_path = "{}"
+"#,
+            cert.display(),
+            key.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = start_gateway(&config);
+    wait_for_tcp_listener(&gateway_addr);
+
+    let response = https_get_with_openssl(&gateway_addr, "/healthz", "localhost")
+        .expect("openssl should be available after certificate generation");
+    assert!(response.contains("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("ok"), "{response}");
+
+    child.kill().ok();
+    child.wait().ok();
+}
+
+fn write_self_signed_test_certificate(cert: &std::path::Path, key: &std::path::Path) -> bool {
+    let Ok(status) = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+            "-keyout",
+            key.to_str().unwrap(),
+            "-out",
+            cert.to_str().unwrap(),
+            "-days",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    else {
+        return false;
+    };
+    status.success()
 }

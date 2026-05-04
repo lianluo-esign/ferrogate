@@ -47,6 +47,22 @@ pub(crate) fn lex(raw: &str) -> Vec<Token> {
                     column += 1;
                 }
             }
+            '{' if starts_env_placeholder(&chars) => {
+                let mut word = String::from(ch);
+                column += 1;
+                for next in chars.by_ref() {
+                    column += 1;
+                    word.push(next);
+                    if next == '}' || next.is_whitespace() {
+                        break;
+                    }
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Word(word),
+                    line,
+                    column: start_column,
+                });
+            }
             '{' => {
                 tokens.push(Token {
                     kind: TokenKind::LBrace,
@@ -100,4 +116,17 @@ pub(crate) fn lex(raw: &str) -> Vec<Token> {
     }
 
     tokens
+}
+
+fn starts_env_placeholder(chars: &std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut lookahead = chars.clone();
+    match lookahead.next() {
+        Some('$') => true,
+        Some('e') => {
+            lookahead.next() == Some('n')
+                && lookahead.next() == Some('v')
+                && lookahead.next() == Some('.')
+        }
+        _ => false,
+    }
 }

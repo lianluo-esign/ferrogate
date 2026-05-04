@@ -6,9 +6,9 @@ permalink: /roadmap/
 
 # FerroGate Roadmap
 
-Last reviewed: 2026-05-03.
+Last reviewed: 2026-05-04.
 
-The current MVP has completed the gateway core and is moving through provider proxying. Some traffic governance and edge proxy features have already started, but streaming provider forwarding, rate limiting, accounting hooks, fallback policies, automatic HTTPS, and executable hot reload are still open.
+The current MVP has completed the gateway core, provider proxying, admin read/write audit surfaces, the P6 observability/accounting slice, and the P8 production hardening slice. Production reliability now includes configurable provider circuit breakers, provider dispatch timeout/retry controls, admin provider health checks, API key request limits, token-budget reservation/settlement, manual TLS listener support, ACME DNS-01 startup certificate provisioning, process-local admin config reload, Pingora graceful-upgrade listener handoff, graceful shutdown windows, AI streaming perf smoke coverage, a local and CI security-check gate, and a self-hosting runbook. Durable storage remains open.
 
 ## Milestone 1: Gateway core
 
@@ -27,13 +27,20 @@ The current MVP has completed the gateway core and is moving through provider pr
 ## Milestone 3: Traffic governance
 
 - API key authentication
-- Rate limiting
-- Token usage accounting hooks
-- Provider fallback and routing policies
+- API key request limiting and token-budget reservation/settlement
+- Token usage accounting hooks and OTLP/Prometheus observability
+- Provider fallback, retry, circuit breaking, and routing policies
+- Admin provider health checks and dashboard health view
+- Manual TLS listener with certificate/key validation and optional HTTP/2 ALPN
+- ACME automatic HTTPS startup provisioning through DNS-01 hooks
+- Graceful shutdown window configuration for Pingora SIGTERM handling
+- AI streaming concurrent dispatch perf smoke with RSS and p95 bounds
+- Local and CI supply-chain/security gate with secret scan, cargo-deny, and cargo-audit policy
+- Self-hosting runbook for binary, Docker, systemd, capacity planning, and incidents
 
 ## Milestone 4: Edge and Caddy-inspired features
 
 - Reverse proxy for generic HTTP services
 - Automatic HTTPS support
-- Hot config reload
+- Automatic listener/TLS-level config reload orchestration beyond the current explicit graceful-upgrade command
 - Docker and Kubernetes deployment examples

@@ -53,7 +53,9 @@ pub(crate) struct AdminApiKey {
     pub(crate) key_source: &'static str,
     pub(crate) scopes: Vec<String>,
     pub(crate) allowed_models: Vec<String>,
+    pub(crate) denied_models: Vec<String>,
     pub(crate) allowed_providers: Vec<String>,
+    pub(crate) denied_providers: Vec<String>,
     pub(crate) organization_id: Option<String>,
     pub(crate) team_id: Option<String>,
     pub(crate) project_id: Option<String>,
@@ -75,13 +77,33 @@ pub(crate) struct AdminTenantRef {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AdminConfigValidateRequest {
-    pub(crate) config_toml: String,
+    #[serde(default)]
+    pub(crate) config_toml: Option<String>,
+    #[serde(default)]
+    pub(crate) config_caddyfile: Option<String>,
+    #[serde(default)]
+    pub(crate) filename: Option<String>,
+    #[serde(default)]
+    pub(crate) source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminConfigValidateResponse {
     pub(crate) valid: bool,
     pub(crate) snapshot: Option<String>,
+    pub(crate) reload_mode: Option<&'static str>,
+    pub(crate) listener_reload_required: bool,
+    pub(crate) reload_reason: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminConfigReloadResponse {
+    pub(crate) valid: bool,
+    pub(crate) committed: bool,
+    pub(crate) mode: &'static str,
+    pub(crate) active_snapshot: Option<String>,
+    pub(crate) candidate_snapshot: Option<String>,
     pub(crate) error: Option<String>,
 }
 

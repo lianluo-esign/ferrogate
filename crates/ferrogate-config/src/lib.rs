@@ -13,6 +13,6 @@ pub use caddyfile::parse_caddyfile;
 pub use diagnostic::CaddyfileDiagnostic;
 pub use loader::{is_caddyfile_path, load_caddyfile};
 pub use types::{
-    GatewayConfig, GatewayHeader, GatewayLog, GatewayModel, GatewayProvider, GatewayRoute,
-    GatewayUpstream, StaticResponse,
+    GatewayApiKey, GatewayConfig, GatewayHeader, GatewayLog, GatewayModel, GatewayProvider,
+    GatewayRoute, GatewayTlsAcmeConfig, GatewayTlsConfig, GatewayUpstream, StaticResponse,
 };

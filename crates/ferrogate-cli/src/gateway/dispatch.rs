@@ -3,7 +3,7 @@ use http::{StatusCode, Uri};
 use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use std::{
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -40,13 +40,11 @@ impl Read for ProviderBodyReader {
 
 pub(super) fn dispatch_provider_request(
     request: &ProviderHttpRequest,
+    timeout: Duration,
 ) -> AnyResult<ProviderHttpResponse> {
     let target = parse_provider_target(&request.endpoint)?;
     let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
-    let mut stream = TcpStream::connect((target.host.as_str(), target.port))
-        .with_context(|| format!("failed to connect provider {}", target.authority))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut stream = connect_provider(&target, timeout)?;
 
     match target.scheme {
         ProviderScheme::Http => send_provider_http_request(&mut stream, &target, request, &body),
@@ -63,13 +61,11 @@ pub(super) fn dispatch_provider_request(
 
 pub(super) fn dispatch_provider_streaming_request(
     request: &ProviderHttpRequest,
+    timeout: Duration,
 ) -> AnyResult<ProviderStreamingResponse> {
     let target = parse_provider_target(&request.endpoint)?;
     let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
-    let mut stream = TcpStream::connect((target.host.as_str(), target.port))
-        .with_context(|| format!("failed to connect provider {}", target.authority))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut stream = connect_provider(&target, timeout)?;
 
     match target.scheme {
         ProviderScheme::Http => {
@@ -99,6 +95,19 @@ pub(super) fn dispatch_provider_streaming_request(
             })
         }
     }
+}
+
+fn connect_provider(target: &ProviderTarget, timeout: Duration) -> AnyResult<TcpStream> {
+    let address = (target.host.as_str(), target.port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve provider {}", target.authority))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("provider {} resolved no addresses", target.authority))?;
+    let stream = TcpStream::connect_timeout(&address, timeout)
+        .with_context(|| format!("failed to connect provider {}", target.authority))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    Ok(stream)
 }
 
 fn send_provider_http_request<S: Read + Write>(
@@ -153,9 +162,14 @@ fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
 
 fn build_tls_client_config() -> AnyResult<Arc<ClientConfig>> {
     let mut roots = RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs()
-        .context("failed to load platform native certificates")?
-    {
+    let native_certs = rustls_native_certs::load_native_certs();
+    if !native_certs.errors.is_empty() {
+        anyhow::bail!(
+            "failed to load platform native certificates: {:?}",
+            native_certs.errors
+        );
+    }
+    for cert in native_certs.certs {
         roots
             .add(cert)
             .context("failed to add platform native certificate")?;
@@ -291,6 +305,13 @@ fn parse_provider_response_head(header_bytes: &[u8]) -> AnyResult<(StatusCode, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrogate_providers::ProviderHttpRequest;
+    use serde_json::json;
+    use std::{
+        net::TcpListener,
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn parses_http_provider_target() {
@@ -383,5 +404,29 @@ mod tests {
 
         let out_of_range = parse_provider_response(b"HTTP/1.1 1000 OK\r\n\r\n{}").unwrap_err();
         assert!(out_of_range.to_string().contains("invalid status"));
+    }
+
+    #[test]
+    fn provider_dispatch_respects_read_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(250));
+        });
+        let request = ProviderHttpRequest {
+            provider: "openai".into(),
+            endpoint: format!("http://{addr}/v1/chat/completions"),
+            body: json!({"model": "gpt-test", "messages": []}),
+            stream: false,
+            headers: vec![],
+        };
+
+        let started = Instant::now();
+        let error = dispatch_provider_request(&request, Duration::from_millis(50)).unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!error.to_string().is_empty());
+        handle.join().unwrap();
     }
 }
