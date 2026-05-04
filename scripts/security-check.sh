@@ -26,7 +26,6 @@ rg_common=(
   --glob '!.git/**'
   --glob '!.jcode/**'
   --glob '!.references/**'
-  --glob '!ferrogate-wiki/wiki-site/public/**'
   --glob '!Cargo.lock'
 )
 

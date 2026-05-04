@@ -41,9 +41,8 @@ The project is developed as the open-source gateway foundation behind
 
 ## Current Status
 
-The PRD implementation plan in
-[`ferrogate-wiki/wiki/03-development/prd-implementation-plan.md`](ferrogate-wiki/wiki/03-development/prd-implementation-plan.md)
-is complete for the P0-P8 MVP and production-readiness phases.
+The planned MVP and production-readiness implementation slice is complete for
+the open-source gateway codebase.
 
 Validated end-to-end:
 
@@ -83,7 +82,6 @@ crates/
   ferrogate-runtime         Reload and runtime lifecycle state machine
 config/                     Example TOML configuration
 Ferrogate/Caddyfile          Default Caddyfile-style development config
-ferrogate-wiki/              Product, architecture, development, operations docs
 scripts/security-check.sh    Local security and supply-chain gate
 ```
 
@@ -432,35 +430,22 @@ are monitored separately from direct FerroGate code.
 
 ## Documentation
 
-- Product requirements:
-  [`ferrogate-wiki/wiki/01-product/product-requirements.md`](ferrogate-wiki/wiki/01-product/product-requirements.md)
-- Architecture:
-  [`ferrogate-wiki/wiki/02-architecture/ferrogate-architecture-and-modules.md`](ferrogate-wiki/wiki/02-architecture/ferrogate-architecture-and-modules.md)
-- Implementation plan:
-  [`ferrogate-wiki/wiki/03-development/prd-implementation-plan.md`](ferrogate-wiki/wiki/03-development/prd-implementation-plan.md)
-- Self-hosting runbook:
-  [`ferrogate-wiki/wiki/04-operations/self-hosting-runbook.md`](ferrogate-wiki/wiki/04-operations/self-hosting-runbook.md)
+- Project roadmap: [`docs/roadmap.md`](docs/roadmap.md)
+- Example TOML configuration:
+  [`config/ferrogate.example.toml`](config/ferrogate.example.toml)
+- Default Caddyfile-style configuration:
+  [`Ferrogate/Caddyfile`](Ferrogate/Caddyfile)
 
-Build the wiki:
-
-```bash
-npm --prefix ferrogate-wiki run wiki:build
-```
-
-Preview locally:
-
-```bash
-cd ferrogate-wiki
-./scripts/build-wiki-site.sh serve
-```
+Internal development planning notes are maintained outside this product
+repository.
 
 ## Contributing
 
 1. Keep changes small and reviewable.
 2. Follow the existing Rust module boundaries and Caddyfile adapter style.
 3. Run `./scripts/security-check.sh` before opening a PR.
-4. Update the wiki when behavior, configuration, operations, or architecture
-   changes.
+4. Update public product documentation when behavior, configuration,
+   operations, or architecture changes.
 5. Do not commit provider secrets, ACME tokens, private keys, or generated
    certificates.
 
