@@ -24,6 +24,11 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin" || path == "/admin/" || path == "/admin/dashboard" {
+            self.handle_admin_dashboard(session, ctx).await?;
+            return Ok(true);
+        }
+
         if path == "/v1/models" {
             let headers = req.headers.clone();
             self.handle_models(session, ctx, &headers).await?;

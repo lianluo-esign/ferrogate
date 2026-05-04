@@ -50,7 +50,7 @@ tags:
 | P4 | 虚拟 API Key、租户上下文与 Policy MVP | 已完成 | 100% | 已实现 API Key hash 生成/校验、disabled/expired/rate limit/budget exhausted 拒绝、模型/Provider allowlist、租户字段进入 AuthContext 与 chat route log、RBAC 领域模型、最小 deny-rule Policy Engine、AI Proxy 接入，以及 Key/Tenant/Policy repository 边界 |
 | P5 | 多 Provider Adapter 与 Model Registry | 已完成 | 100% | 已实现 OpenAI-compatible、Anthropic、Gemini、Grok、Azure OpenAI adapter 的 registry 分发、请求转换、错误归一化、usage 提取和可重试判断；已定义并接入 Model Registry 的逻辑模型解析、优先级 fallback、加权 fallback 轮转和租户级模型可见性 |
 | P6 | 可观测性、请求日志、Storage 与计费事件 | 进行中 | 98% | 已定义 Token usage、模型价格、成本估算、Billing Event、请求日志、usage aggregate、in-memory repository/sink、观测 span 模板和可扩展 exporter/plugin 边界；非流式 AI Proxy 成功响应已写入 in-memory Billing Event、usage aggregate 与结构化 request log；已支持全局+API Key 双开关控制 prompt/response body 记录；所有本地/代理响应已带 request_id/trace_id；Prometheus `/metrics` 已输出 request/billing/token/cost/model-provider 指标并受 `admin.read` 鉴权保护；OTLP/HTTP traces/metrics/logs 请求规划已完成，后台 sender 待后续切片 |
-| P7 | Admin API 与 Dashboard MVP | 进行中 | 45% | 已启动版本化 Admin API 只读 MVP：status、providers、models、API keys、policies、tenants、request logs、billing events、usage aggregates 均通过 `admin.read` 访问；API Key/Provider secret 已脱敏；Dashboard 仍待实现 |
+| P7 | Admin API 与 Dashboard MVP | 进行中 | 70% | 已启动版本化 Admin API 只读 MVP：status、providers、models、API keys、policies、tenants、request logs、billing events、usage aggregates 均通过 `admin.read` 访问；API Key/Provider secret 已脱敏；已提供静态 Dashboard，通过 Admin API 展示 Overview、API Key、Provider、Model、请求日志、Token 用量和网关健康视图 |
 | P8 | 生产级可靠性、安全和部署增强 | 未开始 | 0% | 待实现限流、熔断、fallback、部署文档 |
 
 ## 3. P0 工程基线、crate 边界与 Caddyfile 配置契约
@@ -429,18 +429,18 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_pr
 - [x] Admin API 接入 RBAC。（当前只读端点统一要求 `admin.read` scope，写操作 RBAC 待后续切片。）
 - [ ] 所有写操作写审计日志。
 - [x] 实现组织、团队、项目、用户、API Key、Provider、Model、Policy、Usage、Request Log 查询接口。（当前组织/团队/项目/用户先通过 API Key tenant ref 视图暴露；后续独立组织/用户实体待存储模型扩展。）
-- [ ] Dashboard 通过 Admin API 访问数据。
-- [ ] 实现 Overview、API Key、Provider、Model、请求日志、Token 用量、网关健康页面。
+- [x] Dashboard 通过 Admin API 访问数据。（当前静态 Dashboard 浏览器端只请求 `/healthz` 与 `/admin/v1/*` JSON 接口，不注入 Rust 内部状态快照。）
+- [x] 实现 Overview、API Key、Provider、Model、请求日志、Token 用量、网关健康页面。
 
 ### 验收标准
 
-- [ ] Dashboard 不直接访问内部状态。
+- [x] Dashboard 不直接访问内部状态。
 - [ ] Admin API 写操作可审计。
 - [ ] 常见管理任务可以通过 UI 完成。
 - [x] 权限不足会返回统一错误。
 - [x] 管理面框架依赖不会进入代理关键路径。
 
-**进度**：45%。
+**进度**：70%。
 
 **验收结果**：
 
@@ -448,12 +448,16 @@ PATH="$PWD/.jcode/cmake-venv/bin:$PATH" cargo test -p ferrogate-cli --test ai_pr
 cargo test -p ferrogate-storage -- --nocapture
 cargo test -p ferrogate-cli --test ai_proxy_runtime openai_models_and_chat_non_streaming_dispatch_work -- --nocapture
 cargo test -p ferrogate-cli state -- --nocapture
+cargo test -p ferrogate-cli --test runtime_perf admin_dashboard_static_debug_perf_smoke -- --nocapture
+cargo test -p ferrogate-cli --test ai_proxy_perf openai_chat_concurrent_dispatch_debug_perf_smoke -- --nocapture
 cargo clippy -p ferrogate-cli --all-targets --all-features -- -D warnings
 ```
 
 2026-05-04 本轮启动 P7：`ferrogate-storage` 的 request log 与 usage aggregate 等存储模型支持 serde 序列化；`ferrogate-cli` 暴露版本化 Admin API 只读入口 `/admin/v1/status`、`/admin/v1/request-logs`、`/admin/v1/billing-events`、`/admin/v1/usage-aggregates`，全部复用 `admin.read` 鉴权。AI Proxy 集成测试覆盖成功请求后通过 Admin API 查询 request log、billing event 和 usage aggregate，普通 client key 访问 Admin API 会被 `scope_denied` 拒绝。
 
 2026-05-04 本轮继续补齐 Admin API 查询面：新增 `/admin/v1/providers`、`/admin/v1/models`、`/admin/v1/api-keys`、`/admin/v1/policies`、`/admin/v1/tenants`。Provider 响应只暴露 `has_api_key`，不返回 `api_key_env`；API Key 响应只返回 `key_source` 和权限/租户元数据，不返回明文 key、hash 或 env 名称。集成测试覆盖这些端点的 `admin.read` 访问、secret 不回显，以及普通 client key 被拒绝。
+
+2026-05-04 本轮新增 Pingora 本地静态 Dashboard：`/admin`、`/admin/`、`/admin/dashboard` 返回内置 HTML/JS/CSS，页面通过浏览器端 bearer token 调用 `/admin/v1/status`、`/admin/v1/api-keys`、`/admin/v1/providers`、`/admin/v1/models`、`/admin/v1/request-logs`、`/admin/v1/usage-aggregates`、`/admin/v1/billing-events` 与 `/healthz`，覆盖 Overview、API Key、Provider、Model、请求日志、Token 用量和网关健康视图。集成测试验证 Dashboard 可访问、页面只包含 Admin API endpoint 引用、不回显 client/admin/provider secret；性能 smoke 覆盖 100 次 Dashboard 顺序请求 p95、16 并发请求和 RSS 增长边界。
 
 ## 11. P8 生产级可靠性、安全和部署增强
 

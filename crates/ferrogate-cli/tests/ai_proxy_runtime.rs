@@ -127,6 +127,17 @@ enabled = false
     assert!(admin_status.contains("\"auth_required\":true"));
     assert!(!admin_status.contains("admin-secret"));
 
+    let dashboard = http_request(&gateway_addr, "GET", "/admin/", &[], "");
+    assert!(dashboard.contains("200 OK"));
+    assert!(dashboard.contains("Content-Type: text/html"));
+    assert!(dashboard.contains("FerroGate Admin"));
+    assert!(dashboard.contains("/admin/v1/status"));
+    assert!(dashboard.contains("/admin/v1/api-keys"));
+    assert!(dashboard.contains("/admin/v1/request-logs"));
+    assert!(!dashboard.contains("admin-secret"));
+    assert!(!dashboard.contains("client-secret"));
+    assert!(!dashboard.contains("provider-secret"));
+
     let providers = http_request(
         &gateway_addr,
         "GET",

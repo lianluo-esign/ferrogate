@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FerroGate Admin</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f4;
+      --panel: #ffffff;
+      --line: #d9ded6;
+      --text: #172017;
+      --muted: #667067;
+      --accent: #18785f;
+      --accent-weak: #dcefe7;
+      --warn: #935f00;
+      --danger: #b42318;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111511;
+        --panel: #181f19;
+        --line: #30392f;
+        --text: #eef4ec;
+        --muted: #a2ad9f;
+        --accent: #66c6a8;
+        --accent-weak: #16382e;
+        --warn: #d99d2b;
+        --danger: #ff8a7a;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    .auth {
+      display: grid;
+      grid-template-columns: minmax(180px, 320px) 40px;
+      gap: 8px;
+      align-items: center;
+    }
+    input, button {
+      height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+    input {
+      width: 100%;
+      padding: 0 10px;
+    }
+    button {
+      display: inline-grid;
+      place-items: center;
+      min-width: 36px;
+      padding: 0 10px;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      min-height: calc(100vh - 73px);
+    }
+    nav {
+      padding: 16px;
+      border-right: 1px solid var(--line);
+    }
+    nav button {
+      width: 100%;
+      justify-content: start;
+      margin-bottom: 6px;
+      background: transparent;
+    }
+    nav button.active {
+      border-color: var(--accent);
+      background: var(--accent-weak);
+      color: var(--text);
+    }
+    .content {
+      padding: 18px 24px 32px;
+      min-width: 0;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    h2 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+    .status {
+      color: var(--muted);
+      min-height: 20px;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 12px;
+      min-height: 76px;
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .metric strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 20px;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      background: color-mix(in srgb, var(--panel), var(--bg) 45%);
+    }
+    tr:last-child td { border-bottom: 0; }
+    .pill {
+      display: inline-block;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .pill.ok { color: var(--accent); border-color: var(--accent); }
+    .pill.warn { color: var(--warn); border-color: var(--warn); }
+    .pill.danger { color: var(--danger); border-color: var(--danger); }
+    @media (max-width: 760px) {
+      header { display: grid; padding: 14px 16px; }
+      .auth { grid-template-columns: minmax(0, 1fr) 40px; }
+      main { display: block; }
+      nav {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      nav button {
+        width: auto;
+        white-space: nowrap;
+        margin: 0;
+      }
+      .content { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>FerroGate Admin</h1>
+    <div class="auth">
+      <input id="token" type="password" autocomplete="current-password" placeholder="Admin token" aria-label="Admin token">
+      <button id="refresh" class="primary" title="Refresh" aria-label="Refresh">↻</button>
+    </div>
+  </header>
+  <main>
+    <nav id="tabs" aria-label="Admin sections">
+      <button data-view="overview" class="active">Overview</button>
+      <button data-view="health">Health</button>
+      <button data-view="apiKeys">API Keys</button>
+      <button data-view="providers">Providers</button>
+      <button data-view="models">Models</button>
+      <button data-view="requests">Request Logs</button>
+      <button data-view="usage">Token Usage</button>
+    </nav>
+    <section class="content" aria-live="polite">
+      <div class="toolbar">
+        <h2 id="title">Overview</h2>
+        <div id="status" class="status"></div>
+      </div>
+      <div id="metrics" class="metrics"></div>
+      <div id="table" class="table-wrap"></div>
+    </section>
+  </main>
+  <script>
+    const tokenInput = document.querySelector("#token");
+    const refreshButton = document.querySelector("#refresh");
+    const tabs = document.querySelector("#tabs");
+    const title = document.querySelector("#title");
+    const statusLine = document.querySelector("#status");
+    const metrics = document.querySelector("#metrics");
+    const tableWrap = document.querySelector("#table");
+    const state = {
+      view: "overview",
+      token: localStorage.getItem("ferrogate_admin_token") || "",
+      cache: {},
+    };
+
+    tokenInput.value = state.token;
+
+    const views = {
+      overview: {
+        title: "Overview",
+        endpoints: ["/admin/v1/status", "/admin/v1/billing-events", "/admin/v1/request-logs", "/admin/v1/usage-aggregates"],
+        columns: ["metric", "value"],
+      },
+      health: {
+        title: "Health",
+        endpoints: ["/healthz", "/admin/v1/status"],
+        columns: ["service", "runtime", "version", "snapshot", "auth_required"],
+      },
+      apiKeys: {
+        title: "API Keys",
+        endpoints: ["/admin/v1/api-keys"],
+        columns: ["id", "name", "enabled", "key_source", "scopes", "allowed_models", "organization_id", "project_id"],
+      },
+      providers: {
+        title: "Providers",
+        endpoints: ["/admin/v1/providers"],
+        columns: ["name", "kind", "base_url", "has_api_key", "enabled"],
+      },
+      models: {
+        title: "Models",
+        endpoints: ["/admin/v1/models"],
+        columns: ["name", "provider", "provider_model", "enabled", "capabilities", "input_price_per_1m", "output_price_per_1m"],
+      },
+      requests: {
+        title: "Request Logs",
+        endpoints: ["/admin/v1/request-logs"],
+        columns: ["request_id", "trace_id", "api_key_id", "logical_model", "provider", "status_code", "duration_ms", "error_code"],
+      },
+      usage: {
+        title: "Token Usage",
+        endpoints: ["/admin/v1/usage-aggregates", "/admin/v1/billing-events"],
+        columns: ["organization_id", "project_id", "api_key_id", "logical_model", "provider", "usage"],
+      },
+    };
+
+    function setStatus(message, tone) {
+      statusLine.textContent = message || "";
+      statusLine.style.color = tone === "error" ? "var(--danger)" : "var(--muted)";
+    }
+
+    async function loadJson(endpoint) {
+      const headers = endpoint.startsWith("/admin/") && state.token
+        ? { Authorization: `Bearer ${state.token}` }
+        : {};
+      const response = await fetch(endpoint, { headers });
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(`${endpoint} ${response.status}: ${text.slice(0, 180)}`);
+      }
+      return text ? JSON.parse(text) : null;
+    }
+
+    function valueText(value) {
+      if (value === null || value === undefined) return "";
+      if (Array.isArray(value)) return value.join(", ");
+      if (typeof value === "object") return JSON.stringify(value);
+      return String(value);
+    }
+
+    function pill(value) {
+      const span = document.createElement("span");
+      const bool = typeof value === "boolean";
+      span.className = bool ? `pill ${value ? "ok" : "warn"}` : "pill";
+      span.textContent = valueText(value);
+      return span;
+    }
+
+    function renderMetrics(items) {
+      metrics.replaceChildren();
+      for (const item of items) {
+        const box = document.createElement("div");
+        box.className = "metric";
+        const label = document.createElement("span");
+        label.textContent = item.label;
+        const value = document.createElement("strong");
+        value.textContent = valueText(item.value);
+        box.append(label, value);
+        metrics.append(box);
+      }
+    }
+
+    function renderTable(rows, columns) {
+      tableWrap.replaceChildren();
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const headerRow = document.createElement("tr");
+      for (const column of columns) {
+        const th = document.createElement("th");
+        th.textContent = column;
+        headerRow.append(th);
+      }
+      thead.append(headerRow);
+      const tbody = document.createElement("tbody");
+      for (const row of rows) {
+        const tr = document.createElement("tr");
+        for (const column of columns) {
+          const td = document.createElement("td");
+          const value = row[column];
+          if (typeof value === "boolean") {
+            td.append(pill(value));
+          } else {
+            td.textContent = valueText(value);
+          }
+          tr.append(td);
+        }
+        tbody.append(tr);
+      }
+      table.append(thead, tbody);
+      tableWrap.append(table);
+    }
+
+    function listOf(payload) {
+      return payload && Array.isArray(payload.data) ? payload.data : [];
+    }
+
+    function render(viewName, payloads) {
+      const view = views[viewName];
+      title.textContent = view.title;
+      if (viewName === "overview") {
+        const status = payloads["/admin/v1/status"] || {};
+        const billing = listOf(payloads["/admin/v1/billing-events"]);
+        const logs = listOf(payloads["/admin/v1/request-logs"]);
+        const usage = listOf(payloads["/admin/v1/usage-aggregates"]);
+        renderMetrics([
+          { label: "Runtime", value: status.runtime },
+          { label: "Providers", value: `${status.enabled_providers || 0}/${status.providers || 0}` },
+          { label: "Models", value: `${status.enabled_models || 0}/${status.models || 0}` },
+          { label: "API Keys", value: status.api_keys || 0 },
+          { label: "Requests", value: logs.length },
+          { label: "Billing Events", value: billing.length },
+          { label: "Usage Rows", value: usage.length },
+          { label: "Auth Required", value: status.auth_required },
+        ]);
+        renderTable([
+          { metric: "snapshot", value: status.snapshot },
+          { metric: "routes", value: `${status.enabled_routes || 0}/${status.routes || 0}` },
+          { metric: "upstreams", value: `${status.enabled_upstreams || 0}/${status.upstreams || 0}` },
+        ], view.columns);
+        return;
+      }
+      renderMetrics([]);
+      if (viewName === "health") {
+        renderTable([payloads["/healthz"] || {}, payloads["/admin/v1/status"] || {}], view.columns);
+        return;
+      }
+      renderTable(listOf(payloads[view.endpoints[0]]), view.columns);
+    }
+
+    async function refresh() {
+      const view = views[state.view];
+      state.token = tokenInput.value.trim();
+      localStorage.setItem("ferrogate_admin_token", state.token);
+      setStatus("Loading...");
+      try {
+        const entries = await Promise.all(view.endpoints.map(async endpoint => [endpoint, await loadJson(endpoint)]));
+        const payloads = Object.fromEntries(entries);
+        state.cache[state.view] = payloads;
+        render(state.view, payloads);
+        setStatus("Updated");
+      } catch (error) {
+        metrics.replaceChildren();
+        tableWrap.replaceChildren();
+        setStatus(error.message, "error");
+      }
+    }
+
+    tabs.addEventListener("click", event => {
+      const button = event.target.closest("button[data-view]");
+      if (!button) return;
+      state.view = button.dataset.view;
+      for (const tab of tabs.querySelectorAll("button")) tab.classList.toggle("active", tab === button);
+      refresh();
+    });
+    refreshButton.addEventListener("click", refresh);
+    tokenInput.addEventListener("keydown", event => {
+      if (event.key === "Enter") refresh();
+    });
+    refresh();
+  </script>
+</body>
+</html>

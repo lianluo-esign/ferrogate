@@ -7,6 +7,7 @@ use std::{
 };
 
 const REQUESTS: usize = 100;
+const CONCURRENT_REQUESTS: usize = 16;
 
 fn ferrogate() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ferrogate"))
@@ -35,6 +36,16 @@ fn wait_for_gateway(addr: &str) {
         thread::sleep(Duration::from_millis(25));
     }
     panic!("gateway did not become ready at {addr}");
+}
+
+fn read_rss_kb(pid: u32) -> u64 {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 fn http_get(addr: &str, path: &str) -> String {
@@ -117,4 +128,73 @@ path_prefixes = ["/perf"]
     gateway.kill().unwrap();
     gateway.wait().unwrap();
     upstream_handle.join().unwrap();
+}
+
+#[test]
+fn admin_dashboard_static_debug_perf_smoke() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+    let pid = gateway.id();
+    let start_rss = read_rss_kb(pid);
+
+    let mut latencies = Vec::with_capacity(REQUESTS);
+    let started = Instant::now();
+    for _ in 0..REQUESTS {
+        let request_started = Instant::now();
+        let response = http_get(&gateway_addr, "/admin/");
+        latencies.push(request_started.elapsed());
+        assert!(response.contains("200 OK"));
+        assert!(response.contains("FerroGate Admin"));
+        assert!(response.contains("/admin/v1/status"));
+    }
+    latencies.sort();
+    let p95 = latencies[REQUESTS * 95 / 100];
+
+    let concurrent_started = Instant::now();
+    let mut workers = Vec::with_capacity(CONCURRENT_REQUESTS);
+    for _ in 0..CONCURRENT_REQUESTS {
+        let gateway_addr = gateway_addr.clone();
+        workers.push(thread::spawn(move || {
+            http_get(&gateway_addr, "/admin/dashboard")
+        }));
+    }
+    for worker in workers {
+        let response = worker.join().unwrap();
+        assert!(response.contains("200 OK"));
+        assert!(response.contains("FerroGate Admin"));
+    }
+    let end_rss = read_rss_kb(pid);
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "dashboard smoke exceeded 5s for {REQUESTS} requests"
+    );
+    assert!(
+        p95 < Duration::from_millis(100),
+        "dashboard p95 exceeded 100ms: {p95:?}"
+    );
+    assert!(
+        concurrent_started.elapsed() < Duration::from_secs(5),
+        "dashboard concurrent smoke exceeded 5s for {CONCURRENT_REQUESTS} requests"
+    );
+    assert!(
+        end_rss <= start_rss + 32 * 1024,
+        "gateway RSS grew too much: start={start_rss}KB end={end_rss}KB"
+    );
 }
