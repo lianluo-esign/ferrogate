@@ -21,6 +21,9 @@ The project is developed as the open-source gateway foundation behind
 - **Model registry and fallback routing** with logical model names, provider
   model mapping, priority fallback, weighted fallback, tenant visibility, and
   provider allow/deny controls.
+- **Caddy-style config file compatibility** through `Ferrogate/Caddyfile`
+  parsing for familiar reverse-proxy routes, matchers, TLS, logging, and
+  gateway settings, alongside structured TOML configuration.
 - **Virtual API keys and policy checks** with hashed keys, tenant context,
   scopes, disabled/expired keys, model/provider allowlists and denylists,
   minimal deny-rule policy evaluation, request rate limits, and token budgets.
