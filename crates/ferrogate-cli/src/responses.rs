@@ -31,6 +31,12 @@ pub(crate) struct AdminStatus<'a> {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminList<T> {
+    pub(crate) object: &'static str,
+    pub(crate) data: Vec<T>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct OpenAiModelList {
     pub(crate) object: &'static str,
     pub(crate) data: Vec<OpenAiModel>,

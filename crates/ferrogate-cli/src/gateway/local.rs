@@ -7,8 +7,8 @@ use crate::{
     auth::authenticate,
     config::config_snapshot_id,
     responses::{
-        write_json_error, write_json_response, write_raw_response, AdminStatus, HealthResponse,
-        OpenAiModel, OpenAiModelList,
+        write_json_error, write_json_response, write_raw_response, AdminList, AdminStatus,
+        HealthResponse, OpenAiModel, OpenAiModelList,
     },
 };
 
@@ -154,6 +154,87 @@ impl FerroGateway {
                     &ctx.request_id,
                 )
                 .await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_request_logs(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        match authenticate(&self.state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList {
+                    object: "list",
+                    data: self.state.request_logs(),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_billing_events(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        match authenticate(&self.state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList {
+                    object: "list",
+                    data: self.state.billing_events(),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_usage_aggregates(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        match authenticate(&self.state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList {
+                    object: "list",
+                    data: self.state.usage_aggregates(),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
                 write_json_error(

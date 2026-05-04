@@ -11,6 +11,7 @@ homepage.workspace = true
 [dependencies]
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-core = { path = "../ferrogate-core" }
+serde.workspace = true
 
 [features]
 default = []

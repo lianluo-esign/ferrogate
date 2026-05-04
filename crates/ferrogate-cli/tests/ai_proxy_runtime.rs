@@ -14,7 +14,7 @@ fn openai_models_and_chat_non_streaming_dispatch_work() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(
         2,
-        r#"{"id":"chatcmpl_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+        r#"{"id":"chatcmpl_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
     );
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
@@ -35,6 +35,8 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
 
 [[models]]
 name = "smart-chat"
@@ -52,6 +54,12 @@ organization_id = "org_demo"
 team_id = "team_platform"
 project_id = "project_gateway"
 user_id = "user_demo"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
 "#
         ),
     )
@@ -96,6 +104,68 @@ user_id = "user_demo"
         r#"{"model":"smart-chat","messages":[{"role":"user","content":"hello"}]}"#,
     );
     assert!(smart_chat.contains("200 OK"));
+
+    let admin_status = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/status",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(admin_status.contains("200 OK"));
+    assert!(admin_status.contains("\"runtime\":\"pingora\""));
+    assert!(admin_status.contains("\"auth_required\":true"));
+    assert!(!admin_status.contains("admin-secret"));
+
+    let request_logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(request_logs.contains("200 OK"));
+    assert!(request_logs.contains("\"logical_model\":\"fast-chat\""));
+    assert!(request_logs.contains("\"logical_model\":\"smart-chat\""));
+    assert!(request_logs.contains("\"status_code\":200"));
+    assert!(!request_logs.contains("client-secret"));
+
+    let billing_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/billing-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(billing_events.contains("200 OK"));
+    assert!(billing_events.contains("\"logical_model\":\"fast-chat\""));
+    assert!(billing_events.contains("\"provider\":\"openai\""));
+    assert!(billing_events.contains("\"total_tokens\":8"));
+    assert!(billing_events.contains("\"currency\":\"USD\""));
+
+    let usage_aggregates = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/usage-aggregates",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(usage_aggregates.contains("200 OK"));
+    assert!(usage_aggregates.contains("\"organization_id\":\"org_demo\""));
+    assert!(usage_aggregates.contains("\"api_key_id\":\"key_dev\""));
+    assert!(usage_aggregates.contains("\"logical_model\":\"fast-chat\""));
+    assert!(usage_aggregates.contains("\"logical_model\":\"smart-chat\""));
+    assert!(usage_aggregates.contains("\"total_tokens\":8"));
+
+    let denied_request_logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(denied_request_logs.contains("403 Forbidden"));
+    assert!(denied_request_logs.contains("scope_denied"));
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();

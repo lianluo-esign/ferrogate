@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
+use serde::{Deserialize, Serialize};
 
 pub trait Repository<T> {
     fn get(&self, id: &str) -> Option<T>;
@@ -27,7 +28,7 @@ pub trait AppendRepository<T> {
     fn list(&self) -> Vec<T>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiKey {
     pub id: String,
     pub name: String,
@@ -42,14 +43,14 @@ pub struct StoredApiKey {
     pub expires_at_unix: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredTenant {
     pub id: String,
     pub name: String,
     pub tenant: TenantContext,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredPolicyRule {
     pub id: String,
     pub name: String,
@@ -64,7 +65,7 @@ pub struct StoredPolicyRule {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRequestLog {
     pub request_id: String,
     pub trace_id: Option<String>,
@@ -83,7 +84,7 @@ pub struct StoredRequestLog {
     pub completed_at_unix: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredUsageAggregate {
     pub id: String,
     pub organization_id: Option<String>,

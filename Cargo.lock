@@ -785,6 +785,7 @@ version = "0.1.0"
 dependencies = [
  "ferrogate-billing",
  "ferrogate-core",
+ "serde",
 ]
 
 [[package]]

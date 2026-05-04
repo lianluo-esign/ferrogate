@@ -247,13 +247,11 @@ impl AppState {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn billing_events(&self) -> Vec<BillingEvent> {
+    pub(crate) fn billing_events(&self) -> Vec<BillingEvent> {
         self.billing_events.list()
     }
 
-    #[cfg(test)]
-    fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
+    pub(crate) fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
         self.usage_aggregates
             .lock()
             .map(|aggregates| aggregates.list())
@@ -359,8 +357,7 @@ impl AppState {
         self.config.telemetry.service_name.clone()
     }
 
-    #[cfg(test)]
-    fn request_logs(&self) -> Vec<StoredRequestLog> {
+    pub(crate) fn request_logs(&self) -> Vec<StoredRequestLog> {
         self.request_logs
             .lock()
             .map(|logs| logs.list())
