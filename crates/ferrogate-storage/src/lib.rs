@@ -19,6 +19,8 @@ pub trait PolicyRepository: Repository<StoredPolicyRule> {}
 
 pub trait RequestLogRepository: AppendRepository<StoredRequestLog> {}
 
+pub trait AuditLogRepository: AppendRepository<StoredAuditEvent> {}
+
 pub trait BillingEventRepository: AppendRepository<BillingEvent> {}
 
 pub trait UsageAggregateRepository: Repository<StoredUsageAggregate> {}
@@ -82,6 +84,19 @@ pub struct StoredRequestLog {
     pub response_body: Option<String>,
     pub started_at_unix: Option<u64>,
     pub completed_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAuditEvent {
+    pub id: String,
+    pub request_id: String,
+    pub trace_id: Option<String>,
+    pub actor_api_key_id: Option<String>,
+    pub action: String,
+    pub target: String,
+    pub outcome: String,
+    pub message: String,
+    pub occurred_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +169,8 @@ impl<T: Clone> AppendRepository<T> for InMemoryAppendRepository<T> {
 }
 
 impl RequestLogRepository for InMemoryAppendRepository<StoredRequestLog> {}
+
+impl AuditLogRepository for InMemoryAppendRepository<StoredAuditEvent> {}
 
 impl BillingEventRepository for InMemoryAppendRepository<BillingEvent> {}
 
@@ -278,5 +295,37 @@ mod tests {
 
         let aggregate = repository.get("org:project:key:fast-chat:openai").unwrap();
         assert_eq!(aggregate.usage.total_tokens, 8);
+    }
+
+    #[test]
+    fn in_memory_append_repository_keeps_audit_events_in_order() {
+        let mut repository = InMemoryAppendRepository::new();
+        repository.append(StoredAuditEvent {
+            id: "audit-1".into(),
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            actor_api_key_id: Some("admin".into()),
+            action: "config.validate".into(),
+            target: "candidate_config".into(),
+            outcome: "accepted".into(),
+            message: "candidate config valid".into(),
+            occurred_at_unix: Some(1),
+        });
+        repository.append(StoredAuditEvent {
+            id: "audit-2".into(),
+            request_id: "fg-2".into(),
+            trace_id: Some("fg-2".into()),
+            actor_api_key_id: Some("admin".into()),
+            action: "config.validate".into(),
+            target: "candidate_config".into(),
+            outcome: "rejected".into(),
+            message: "field listen: invalid listen address".into(),
+            occurred_at_unix: Some(2),
+        });
+
+        let events = repository.list();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].outcome, "accepted");
+        assert_eq!(events[1].outcome, "rejected");
     }
 }

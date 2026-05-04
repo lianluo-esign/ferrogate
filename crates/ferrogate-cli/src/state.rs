@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::config::{Config, Model, PolicyRule as ConfigPolicyRule, Provider, Upstream};
@@ -25,8 +26,8 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute,
 };
 use ferrogate_storage::{
-    AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredRequestLog,
-    StoredUsageAggregate,
+    AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredAuditEvent,
+    StoredRequestLog, StoredUsageAggregate,
 };
 
 #[derive(Debug, Clone)]
@@ -40,11 +41,23 @@ pub(crate) struct AppState {
     provider_adapters: Arc<ProviderAdapterRegistry>,
     billing_events: Arc<InMemoryBillingEventSink>,
     request_logs: Arc<Mutex<InMemoryAppendRepository<StoredRequestLog>>>,
+    audit_events: Arc<Mutex<InMemoryAppendRepository<StoredAuditEvent>>>,
     usage_aggregates: Arc<Mutex<InMemoryRepository<StoredUsageAggregate>>>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AdminAuditEventDraft {
+    pub(crate) request_id: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) actor_api_key_id: Option<String>,
+    pub(crate) action: String,
+    pub(crate) target: String,
+    pub(crate) outcome: String,
+    pub(crate) message: String,
 }
 
 impl AppState {
@@ -91,6 +104,7 @@ impl AppState {
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
             billing_events: Arc::new(InMemoryBillingEventSink::default()),
             request_logs: Arc::new(Mutex::new(InMemoryAppendRepository::new())),
+            audit_events: Arc::new(Mutex::new(InMemoryAppendRepository::new())),
             usage_aggregates: Arc::new(Mutex::new(InMemoryRepository::new())),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
@@ -291,6 +305,23 @@ impl AppState {
         }
     }
 
+    pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) {
+        if let Ok(mut events) = self.audit_events.lock() {
+            let id = format!("audit-{}", events.list().len() + 1);
+            events.append(StoredAuditEvent {
+                id,
+                request_id: event.request_id,
+                trace_id: event.trace_id,
+                actor_api_key_id: event.actor_api_key_id,
+                action: event.action,
+                target: event.target,
+                outcome: event.outcome,
+                message: event.message,
+                occurred_at_unix: now_unix_seconds(),
+            });
+        }
+    }
+
     pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
         let request_logs = self
             .request_logs
@@ -361,6 +392,13 @@ impl AppState {
         self.request_logs
             .lock()
             .map(|logs| logs.list())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn audit_events(&self) -> Vec<StoredAuditEvent> {
+        self.audit_events
+            .lock()
+            .map(|events| events.list())
             .unwrap_or_default()
     }
 
@@ -487,6 +525,13 @@ fn usage_aggregate_id(
         logical_model,
         provider
     )
+}
+
+fn now_unix_seconds() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn build_policy_engine(config_rules: &[ConfigPolicyRule]) -> BasicPolicyEngine {

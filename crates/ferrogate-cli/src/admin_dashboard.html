@@ -60,7 +60,7 @@
       gap: 8px;
       align-items: center;
     }
-    input, button {
+    input, textarea, button {
       height: 36px;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -68,9 +68,17 @@
       color: var(--text);
       font: inherit;
     }
-    input {
+    input, textarea {
       width: 100%;
       padding: 0 10px;
+    }
+    textarea {
+      height: 220px;
+      padding: 10px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.45;
     }
     button {
       display: inline-grid;
@@ -155,6 +163,21 @@
       border-radius: 8px;
       background: var(--panel);
     }
+    .action-panel {
+      display: grid;
+      gap: 10px;
+      max-width: 980px;
+      margin-bottom: 16px;
+    }
+    .action-result {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -223,6 +246,8 @@
       <button data-view="models">Models</button>
       <button data-view="requests">Request Logs</button>
       <button data-view="usage">Token Usage</button>
+      <button data-view="config">Config Check</button>
+      <button data-view="audit">Audit</button>
     </nav>
     <section class="content" aria-live="polite">
       <div class="toolbar">
@@ -230,6 +255,7 @@
         <div id="status" class="status"></div>
       </div>
       <div id="metrics" class="metrics"></div>
+      <div id="action" class="action-panel"></div>
       <div id="table" class="table-wrap"></div>
     </section>
   </main>
@@ -240,6 +266,7 @@
     const title = document.querySelector("#title");
     const statusLine = document.querySelector("#status");
     const metrics = document.querySelector("#metrics");
+    const action = document.querySelector("#action");
     const tableWrap = document.querySelector("#table");
     const state = {
       view: "overview",
@@ -284,6 +311,16 @@
         title: "Token Usage",
         endpoints: ["/admin/v1/usage-aggregates", "/admin/v1/billing-events"],
         columns: ["organization_id", "project_id", "api_key_id", "logical_model", "provider", "usage"],
+      },
+      config: {
+        title: "Config Check",
+        endpoints: ["/admin/v1/status"],
+        columns: ["valid", "snapshot", "error"],
+      },
+      audit: {
+        title: "Audit",
+        endpoints: ["/admin/v1/audit-events"],
+        columns: ["id", "request_id", "actor_api_key_id", "action", "target", "outcome", "message", "occurred_at_unix"],
       },
     };
 
@@ -363,6 +400,44 @@
       tableWrap.append(table);
     }
 
+    function clearAction() {
+      action.replaceChildren();
+    }
+
+    function renderConfigAction() {
+      action.replaceChildren();
+      const textarea = document.createElement("textarea");
+      textarea.id = "candidate-config";
+      textarea.value = 'listen = "127.0.0.1:8080"\n';
+      textarea.setAttribute("aria-label", "Candidate TOML config");
+      const button = document.createElement("button");
+      button.className = "primary";
+      button.textContent = "Validate";
+      const result = document.createElement("div");
+      result.className = "action-result";
+      button.addEventListener("click", async () => {
+        state.token = tokenInput.value.trim();
+        localStorage.setItem("ferrogate_admin_token", state.token);
+        result.textContent = "Validating...";
+        try {
+          const response = await fetch("/admin/v1/config/validate", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${state.token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ config_toml: textarea.value }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(JSON.stringify(payload));
+          result.textContent = JSON.stringify(payload, null, 2);
+        } catch (error) {
+          result.textContent = error.message;
+        }
+      });
+      action.append(textarea, button, result);
+    }
+
     function listOf(payload) {
       return payload && Array.isArray(payload.data) ? payload.data : [];
     }
@@ -370,6 +445,7 @@
     function render(viewName, payloads) {
       const view = views[viewName];
       title.textContent = view.title;
+      clearAction();
       if (viewName === "overview") {
         const status = payloads["/admin/v1/status"] || {};
         const billing = listOf(payloads["/admin/v1/billing-events"]);
@@ -393,6 +469,11 @@
         return;
       }
       renderMetrics([]);
+      if (viewName === "config") {
+        renderConfigAction();
+        renderTable([], view.columns);
+        return;
+      }
       if (viewName === "health") {
         renderTable([payloads["/healthz"] || {}, payloads["/admin/v1/status"] || {}], view.columns);
         return;

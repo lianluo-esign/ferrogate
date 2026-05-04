@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use http::{header, StatusCode};
 use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as PingoraResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 
 #[derive(Debug, Serialize)]
@@ -71,6 +71,18 @@ pub(crate) struct AdminTenantRef {
     pub(crate) project_id: Option<String>,
     pub(crate) user_id: Option<String>,
     pub(crate) api_key_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminConfigValidateRequest {
+    pub(crate) config_toml: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminConfigValidateResponse {
+    pub(crate) valid: bool,
+    pub(crate) snapshot: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

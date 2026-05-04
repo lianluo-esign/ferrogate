@@ -25,8 +25,12 @@ impl Config {
 
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
-        let config: Self = toml::from_str(&raw)
-            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        Self::from_toml_str(&raw)
+            .with_context(|| format!("failed to parse config file {}", path.display()))
+    }
+
+    pub(crate) fn from_toml_str(raw: &str) -> AnyResult<Self> {
+        let config: Self = toml::from_str(raw).context("failed to parse TOML config")?;
         config.validate()?;
         Ok(config)
     }

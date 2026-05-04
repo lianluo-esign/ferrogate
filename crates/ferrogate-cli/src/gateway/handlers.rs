@@ -54,6 +54,21 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/audit-events" {
+            let headers = req.headers.clone();
+            self.handle_admin_audit_events(session, ctx, &headers)
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/config/validate" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_config_validate(session, ctx, &headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/providers" {
             let headers = req.headers.clone();
             self.handle_admin_providers(session, ctx, &headers).await?;

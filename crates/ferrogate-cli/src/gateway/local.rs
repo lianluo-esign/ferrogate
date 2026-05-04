@@ -1,18 +1,21 @@
 use crate::dashboard::ADMIN_DASHBOARD_HTML;
 use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 
 use crate::{
     auth::authenticate,
-    config::config_snapshot_id,
+    config::{config_snapshot_id, Config},
     responses::{
-        write_json_error, write_json_response, write_raw_response, AdminApiKey, AdminList,
-        AdminProvider, AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
+        write_json_error, write_json_response, write_raw_response, AdminApiKey,
+        AdminConfigValidateRequest, AdminConfigValidateResponse, AdminList, AdminProvider,
+        AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
     },
+    state::AdminAuditEventDraft,
 };
 
+use super::body::read_request_body;
 use super::{FerroGateway, ProxyContext};
 
 impl FerroGateway {
@@ -209,6 +212,120 @@ impl FerroGateway {
                 .await
             }
         }
+    }
+
+    pub(super) async fn handle_admin_audit_events(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        match authenticate(&self.state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList {
+                    object: "list",
+                    data: self.state.audit_events(),
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_config_validate(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+    ) -> PingoraResult<()> {
+        if method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "config validation requires POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let auth = match authenticate(&self.state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = read_request_body(session, 256 * 1024).await?;
+        let payload = match serde_json::from_slice::<AdminConfigValidateRequest>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.state.record_admin_audit_event(admin_audit_event_draft(
+                    ctx,
+                    &auth,
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be JSON with config_toml",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let response = match Config::from_toml_str(&payload.config_toml) {
+            Ok(candidate) => {
+                let snapshot = config_snapshot_id(&candidate);
+                self.state.record_admin_audit_event(admin_audit_event_draft(
+                    ctx,
+                    &auth,
+                    "accepted",
+                    format!("candidate config valid: snapshot={snapshot}"),
+                ));
+                AdminConfigValidateResponse {
+                    valid: true,
+                    snapshot: Some(snapshot),
+                    error: None,
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.state.record_admin_audit_event(admin_audit_event_draft(
+                    ctx,
+                    &auth,
+                    "rejected",
+                    message.clone(),
+                ));
+                AdminConfigValidateResponse {
+                    valid: false,
+                    snapshot: None,
+                    error: Some(message),
+                }
+            }
+        };
+
+        write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
     }
 
     pub(super) async fn handle_admin_providers(
@@ -462,5 +579,22 @@ fn api_key_source(key: &crate::config::ApiKey) -> &'static str {
         "inline"
     } else {
         "none"
+    }
+}
+
+fn admin_audit_event_draft(
+    ctx: &ProxyContext,
+    auth: &crate::auth::AuthContext,
+    outcome: &str,
+    message: impl Into<String>,
+) -> AdminAuditEventDraft {
+    AdminAuditEventDraft {
+        request_id: ctx.request_id.clone(),
+        trace_id: ctx.trace_id.clone(),
+        actor_api_key_id: auth.api_key_id.clone(),
+        action: "config.validate".into(),
+        target: "candidate_config".into(),
+        outcome: outcome.into(),
+        message: message.into(),
     }
 }

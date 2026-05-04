@@ -59,7 +59,7 @@ user_id = "user_demo"
 id = "admin"
 name = "Admin"
 key = "admin-secret"
-scopes = ["admin.read"]
+scopes = ["admin.read", "admin.write"]
 
 [[policies]]
 name = "disabled smart chat audit"
@@ -134,9 +134,69 @@ enabled = false
     assert!(dashboard.contains("/admin/v1/status"));
     assert!(dashboard.contains("/admin/v1/api-keys"));
     assert!(dashboard.contains("/admin/v1/request-logs"));
+    assert!(dashboard.contains("/admin/v1/config/validate"));
+    assert!(dashboard.contains("/admin/v1/audit-events"));
     assert!(!dashboard.contains("admin-secret"));
     assert!(!dashboard.contains("client-secret"));
     assert!(!dashboard.contains("provider-secret"));
+
+    let valid_candidate = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/validate",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"config_toml":"listen = \"127.0.0.1:19090\"\n"}"#,
+    );
+    assert!(valid_candidate.contains("200 OK"));
+    assert!(valid_candidate.contains("\"valid\":true"));
+    assert!(valid_candidate.contains("\"snapshot\":"));
+    assert!(!valid_candidate.contains("admin-secret"));
+
+    let invalid_candidate = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/validate",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"config_toml":"listen = \"not-an-address\"\n"}"#,
+    );
+    assert!(invalid_candidate.contains("200 OK"));
+    assert!(invalid_candidate.contains("\"valid\":false"));
+    assert!(invalid_candidate.contains("field listen"));
+    assert!(!invalid_candidate.contains("admin-secret"));
+
+    let denied_write = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/validate",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"config_toml":"listen = \"127.0.0.1:19090\"\n"}"#,
+    );
+    assert!(denied_write.contains("403 Forbidden"));
+    assert!(denied_write.contains("scope_denied"));
+
+    let audit_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(audit_events.contains("200 OK"));
+    assert!(audit_events.contains("\"action\":\"config.validate\""));
+    assert!(audit_events.contains("\"actor_api_key_id\":\"admin\""));
+    assert!(audit_events.contains("\"outcome\":\"accepted\""));
+    assert!(audit_events.contains("\"outcome\":\"rejected\""));
+    assert!(!audit_events.contains("client-secret"));
+    assert!(!audit_events.contains("admin-secret"));
 
     let providers = http_request(
         &gateway_addr,
