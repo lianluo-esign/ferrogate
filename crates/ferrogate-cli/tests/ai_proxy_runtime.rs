@@ -60,6 +60,16 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read"]
+
+[[policies]]
+name = "disabled smart chat audit"
+effect = "deny"
+api_key_ids = ["key_dev"]
+models = ["smart-chat"]
+providers = ["openai"]
+code = "policy_disabled"
+message = "disabled policy"
+enabled = false
 "#
         ),
     )
@@ -116,6 +126,73 @@ scopes = ["admin.read"]
     assert!(admin_status.contains("\"runtime\":\"pingora\""));
     assert!(admin_status.contains("\"auth_required\":true"));
     assert!(!admin_status.contains("admin-secret"));
+
+    let providers = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/providers",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(providers.contains("200 OK"));
+    assert!(providers.contains("\"name\":\"openai\""));
+    assert!(providers.contains("\"kind\":\"openai\""));
+    assert!(providers.contains("\"has_api_key\":true"));
+    assert!(!providers.contains("FERROGATE_PROVIDER_SECRET"));
+    assert!(!providers.contains("provider-secret"));
+
+    let models_admin = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/models",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(models_admin.contains("200 OK"));
+    assert!(models_admin.contains("\"name\":\"fast-chat\""));
+    assert!(models_admin.contains("\"provider_model\":\"gpt-4o-mini\""));
+    assert!(models_admin.contains("\"input_price_per_1m\":1.0"));
+
+    let api_keys = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/api-keys",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(api_keys.contains("200 OK"));
+    assert!(api_keys.contains("\"id\":\"key_dev\""));
+    assert!(api_keys.contains("\"key_source\":\"inline\""));
+    assert!(api_keys.contains("\"organization_id\":\"org_demo\""));
+    assert!(!api_keys.contains("client-secret"));
+    assert!(!api_keys.contains("admin-secret"));
+    assert!(!api_keys.contains("key_hash"));
+    assert!(!api_keys.contains("key_env"));
+
+    let policies = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/policies",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(policies.contains("200 OK"));
+    assert!(policies.contains("\"name\":\"disabled smart chat audit\""));
+    assert!(policies.contains("\"enabled\":false"));
+
+    let tenants = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenants",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(tenants.contains("200 OK"));
+    assert!(tenants.contains("\"organization_id\":\"org_demo\""));
+    assert!(tenants.contains("\"team_id\":\"team_platform\""));
+    assert!(tenants.contains("\"project_id\":\"project_gateway\""));
+    assert!(tenants.contains("\"user_id\":\"user_demo\""));
+    assert!(tenants.contains("\"api_key_id\":\"key_dev\""));
 
     let request_logs = http_request(
         &gateway_addr,

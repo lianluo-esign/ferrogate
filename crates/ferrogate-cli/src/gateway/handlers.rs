@@ -49,6 +49,36 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/providers" {
+            let headers = req.headers.clone();
+            self.handle_admin_providers(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/models" {
+            let headers = req.headers.clone();
+            self.handle_admin_models(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/api-keys" {
+            let headers = req.headers.clone();
+            self.handle_admin_api_keys(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/policies" {
+            let headers = req.headers.clone();
+            self.handle_admin_policies(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/tenants" {
+            let headers = req.headers.clone();
+            self.handle_admin_tenants(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/billing-events" {
             let headers = req.headers.clone();
             self.handle_admin_billing_events(session, ctx, &headers)

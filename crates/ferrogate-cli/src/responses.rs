@@ -37,6 +37,43 @@ pub(crate) struct AdminList<T> {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminProvider {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) base_url: String,
+    pub(crate) has_api_key: bool,
+    pub(crate) enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminApiKey {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) enabled: bool,
+    pub(crate) key_source: &'static str,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) allowed_models: Vec<String>,
+    pub(crate) allowed_providers: Vec<String>,
+    pub(crate) organization_id: Option<String>,
+    pub(crate) team_id: Option<String>,
+    pub(crate) project_id: Option<String>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) monthly_token_budget: Option<u64>,
+    pub(crate) request_limit_per_minute: Option<u64>,
+    pub(crate) expires_at_unix: Option<u64>,
+    pub(crate) log_bodies: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminTenantRef {
+    pub(crate) organization_id: Option<String>,
+    pub(crate) team_id: Option<String>,
+    pub(crate) project_id: Option<String>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) api_key_id: String,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct OpenAiModelList {
     pub(crate) object: &'static str,
     pub(crate) data: Vec<OpenAiModel>,
