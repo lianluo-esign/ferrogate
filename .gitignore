@@ -5,6 +5,7 @@ Cargo.lock.bak
 .env
 .DS_Store
 .references/
+perf-reports/
 
 # Wiki build outputs
 ferrogate-wiki/wiki-site/node_modules/
