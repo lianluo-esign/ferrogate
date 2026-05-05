@@ -371,20 +371,24 @@ validation and reload require `admin.write`.
 
 ## Docker
 
-Build the image:
+Stable releases use date-based tags such as `v2026.05.05`.
+
+Pull the published GitHub Packages image and run it with a mounted config:
 
 ```bash
-docker build -t ferrogate .
-```
+docker pull ghcr.io/lianluo-esign/ferrogate:v2026.05.05
 
-Run with a mounted config:
-
-```bash
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/config/ferrogate.example.toml:/etc/ferrogate/ferrogate.toml:ro" \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ferrogate
+  ghcr.io/lianluo-esign/ferrogate:v2026.05.05
+```
+
+Build a local image when developing Docker changes:
+
+```bash
+docker build -t ferrogate .
 ```
 
 For automatic HTTPS, publish the relevant ports and mount ACME storage:
@@ -396,7 +400,7 @@ docker run --rm \
   -v /etc/ferrogate/ferrogate.toml:/etc/ferrogate/ferrogate.toml:ro \
   -v /var/lib/ferrogate/acme:/var/lib/ferrogate/acme \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ferrogate
+  ghcr.io/lianluo-esign/ferrogate:v2026.05.05
 ```
 
 ## Quality And Security
