@@ -394,6 +394,7 @@ cargo install cargo-audit --version 0.22.1 --locked
 ## 文档
 
 - 项目路线图：[`docs/roadmap.md`](docs/roadmap.md)
+- 性能测试指南：[`docs/performance-testing.md`](docs/performance-testing.md)
 - TOML 示例配置：[`config/ferrogate.example.toml`](config/ferrogate.example.toml)
 - 默认 Caddyfile 风格配置：[`Ferrogate/Caddyfile`](Ferrogate/Caddyfile)
 

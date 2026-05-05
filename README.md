@@ -436,6 +436,8 @@ are monitored separately from direct FerroGate code.
 ## Documentation
 
 - Project roadmap: [`docs/roadmap.md`](docs/roadmap.md)
+- Performance testing guide:
+  [`docs/performance-testing.md`](docs/performance-testing.md)
 - Example TOML configuration:
   [`config/ferrogate.example.toml`](config/ferrogate.example.toml)
 - Default Caddyfile-style configuration:
