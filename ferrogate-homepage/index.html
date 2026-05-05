@@ -26,7 +26,7 @@
       html,
       body {
         width: 100%;
-        height: 100%;
+        min-height: 100%;
         margin: 0;
         background: var(--bg);
         color: var(--text);
@@ -37,7 +37,7 @@
       }
 
       body {
-        overflow: hidden;
+        overflow-x: hidden;
       }
 
       body::before {
@@ -124,54 +124,15 @@
         color: var(--text);
       }
 
-      .pager {
-        position: fixed;
-        top: 50%;
-        right: clamp(18px, 3vw, 40px);
-        z-index: 10;
-        display: grid;
-        gap: 12px;
-        transform: translateY(-50%);
-      }
-
-      .pager a {
-        width: 7px;
-        height: 7px;
-        border: 1px solid rgba(255, 255, 255, 0.55);
-        border-radius: 50%;
-        opacity: 0.48;
-        transition:
-          opacity 220ms ease,
-          background 220ms ease;
-      }
-
-      .pager a.active,
-      .pager a:hover {
-        opacity: 1;
-        background: var(--text);
-      }
-
       .slides {
         position: relative;
         z-index: 3;
         width: 100%;
-        height: 100svh;
-        overflow-x: hidden;
-        overflow-y: auto;
-        overscroll-behavior: contain;
-        scroll-snap-type: y mandatory;
-        scrollbar-width: none;
-      }
-
-      .slides::-webkit-scrollbar {
-        display: none;
       }
 
       .slide {
         display: grid;
         min-height: 100svh;
-        scroll-snap-align: start;
-        scroll-snap-stop: always;
       }
 
       .inner {
@@ -356,26 +317,12 @@
         text-transform: uppercase;
       }
 
-      .scroll-cue {
-        position: fixed;
-        right: 50%;
-        bottom: 24px;
-        z-index: 10;
-        color: var(--dim);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.68rem;
-        letter-spacing: 0.12em;
-        transform: translateX(50%);
-      }
-
       @media (max-width: 900px) {
         .site-header {
           width: calc(100% - 28px);
         }
 
-        nav,
-        .pager,
-        .scroll-cue {
+        nav {
           display: none;
         }
 
@@ -462,14 +409,6 @@
         <a class="nav-link" href="https://github.com/lianluo-esign/ferrogate">GitHub</a>
       </nav>
     </header>
-
-    <aside class="pager" aria-label="Page navigation">
-      <a class="active" href="#intro" aria-label="Intro"></a>
-      <a href="#routing" aria-label="Routing"></a>
-      <a href="#policy" aria-label="Policy"></a>
-      <a href="#observability" aria-label="Observability"></a>
-      <a href="#deploy" aria-label="Deploy"></a>
-    </aside>
 
     <main class="slides">
       <section class="slide" id="intro">
@@ -666,141 +605,5 @@
       </section>
     </main>
 
-    <div class="scroll-cue" aria-hidden="true">SCROLL</div>
-
-    <script>
-      (() => {
-        const scroller = document.querySelector(".slides");
-        const slides = Array.from(document.querySelectorAll(".slide"));
-        const pagerLinks = Array.from(document.querySelectorAll(".pager a"));
-        const navLinks = Array.from(document.querySelectorAll('a[href^="#"]'));
-        const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-        let activeIndex = 0;
-        let animating = false;
-        let touchStartY = 0;
-
-        function clamp(index) {
-          return Math.max(0, Math.min(slides.length - 1, index));
-        }
-
-        function easeInOutCubic(t) {
-          return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-        }
-
-        function setActive(index) {
-          activeIndex = clamp(index);
-          pagerLinks.forEach((link, i) => link.classList.toggle("active", i === activeIndex));
-          const id = slides[activeIndex].id;
-          if (location.hash !== `#${id}`) {
-            history.replaceState(null, "", `#${id}`);
-          }
-        }
-
-        function animateTo(index) {
-          const targetIndex = clamp(index);
-          if (targetIndex === activeIndex && !animating) return;
-
-          const start = scroller.scrollTop;
-          const target = slides[targetIndex].offsetTop;
-          const distance = target - start;
-          const duration = prefersReducedMotion.matches ? 0 : 1150;
-          const started = performance.now();
-          animating = true;
-          setActive(targetIndex);
-
-          if (duration === 0 || Math.abs(distance) < 2) {
-            scroller.scrollTop = target;
-            animating = false;
-            return;
-          }
-
-          function frame(now) {
-            const progress = Math.min(1, (now - started) / duration);
-            scroller.scrollTop = start + distance * easeInOutCubic(progress);
-            if (progress < 1) {
-              requestAnimationFrame(frame);
-            } else {
-              scroller.scrollTop = target;
-              window.setTimeout(() => {
-                animating = false;
-              }, 80);
-            }
-          }
-
-          requestAnimationFrame(frame);
-        }
-
-        function syncFromScroll() {
-          if (animating) return;
-          const nearest = slides.reduce((best, slide, index) => {
-            const delta = Math.abs(slide.offsetTop - scroller.scrollTop);
-            return delta < best.delta ? { index, delta } : best;
-          }, { index: activeIndex, delta: Infinity });
-          setActive(nearest.index);
-        }
-
-        scroller.addEventListener("wheel", (event) => {
-          if (event.ctrlKey) return;
-          event.preventDefault();
-          if (animating || Math.abs(event.deltaY) < 8) return;
-          animateTo(activeIndex + (event.deltaY > 0 ? 1 : -1));
-        }, { passive: false });
-
-        scroller.addEventListener("touchstart", (event) => {
-          touchStartY = event.touches[0].clientY;
-        }, { passive: true });
-
-        scroller.addEventListener("touchmove", (event) => {
-          if (!touchStartY) return;
-          event.preventDefault();
-        }, { passive: false });
-
-        scroller.addEventListener("touchend", (event) => {
-          const endY = event.changedTouches[0].clientY;
-          const delta = touchStartY - endY;
-          touchStartY = 0;
-          if (Math.abs(delta) > 42) {
-            animateTo(activeIndex + (delta > 0 ? 1 : -1));
-          }
-        }, { passive: true });
-
-        window.addEventListener("keydown", (event) => {
-          if (["ArrowDown", "PageDown", " "].includes(event.key)) {
-            event.preventDefault();
-            animateTo(activeIndex + 1);
-          }
-          if (["ArrowUp", "PageUp"].includes(event.key)) {
-            event.preventDefault();
-            animateTo(activeIndex - 1);
-          }
-          if (event.key === "Home") {
-            event.preventDefault();
-            animateTo(0);
-          }
-          if (event.key === "End") {
-            event.preventDefault();
-            animateTo(slides.length - 1);
-          }
-        });
-
-        navLinks.forEach((link) => {
-          link.addEventListener("click", (event) => {
-            const id = link.getAttribute("href").slice(1);
-            const index = slides.findIndex((slide) => slide.id === id);
-            if (index >= 0) {
-              event.preventDefault();
-              animateTo(index);
-            }
-          });
-        });
-
-        scroller.addEventListener("scroll", syncFromScroll, { passive: true });
-        window.addEventListener("resize", () => animateTo(activeIndex));
-
-        const initialIndex = slides.findIndex((slide) => `#${slide.id}` === location.hash);
-        scroller.scrollTop = slides[Math.max(0, initialIndex)].offsetTop;
-        setActive(Math.max(0, initialIndex));
-      })();
-    </script>
   </body>
 </html>
