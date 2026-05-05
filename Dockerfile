@@ -1,5 +1,8 @@
 FROM rust:bookworm AS builder
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake \
+    && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
 COPY Ferrogate ./Ferrogate
