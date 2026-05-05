@@ -25,6 +25,11 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/docs" || path == "/docs.html" {
+            self.handle_docs(session, ctx).await?;
+            return Ok(true);
+        }
+
         if path == "/healthz" {
             self.handle_healthz(session, ctx).await?;
             return Ok(true);

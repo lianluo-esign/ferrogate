@@ -1,4 +1,4 @@
-use crate::dashboard::{ADMIN_DASHBOARD_HTML, HOMEPAGE_HTML};
+use crate::dashboard::{ADMIN_DASHBOARD_HTML, DOCS_HTML, HOMEPAGE_HTML};
 use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
 use http::{Method, StatusCode};
@@ -59,6 +59,21 @@ impl FerroGateway {
             StatusCode::OK,
             "text/html; charset=utf-8",
             Bytes::from_static(HOMEPAGE_HTML.as_bytes()),
+            &ctx.request_id,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_docs(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+    ) -> PingoraResult<()> {
+        write_raw_response(
+            session,
+            StatusCode::OK,
+            "text/html; charset=utf-8",
+            Bytes::from_static(DOCS_HTML.as_bytes()),
             &ctx.request_id,
         )
         .await

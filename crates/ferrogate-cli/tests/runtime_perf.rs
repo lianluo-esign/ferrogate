@@ -228,6 +228,15 @@ listen = "{gateway_addr}"
     assert!(index_response.contains("200 OK"));
     assert!(index_response.contains("Self-hosted AI gateway"));
 
+    let docs_response = http_get(&gateway_addr, "/docs.html");
+    assert!(docs_response.contains("200 OK"));
+    assert!(docs_response.contains("FerroGate Docs | Quick Start and Operations"));
+    assert!(docs_response.contains("Deployment Checklist"));
+
+    let docs_alias_response = http_get(&gateway_addr, "/docs");
+    assert!(docs_alias_response.contains("200 OK"));
+    assert!(docs_alias_response.contains("Docs directory"));
+
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
