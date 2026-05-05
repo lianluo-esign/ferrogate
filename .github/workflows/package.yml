@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Container version tag"
+        description: "Date-based container version tag, for example v2026.05.05"
         required: true
-        default: "0.1.0"
+        default: "v2026.05.05"
   push:
     tags:
       - "v*"
@@ -35,7 +35,11 @@ jobs:
           image="ghcr.io/${owner}/ferrogate"
           version="${{ github.event.inputs.version }}"
           if [[ -z "$version" ]]; then
-            version="${GITHUB_REF_NAME#v}"
+            version="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+            echo "::error::version must match vYYYY.MM.DD, got '${version}'"
+            exit 1
           fi
           short_sha="${GITHUB_SHA::12}"
 

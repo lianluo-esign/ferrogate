@@ -331,20 +331,24 @@ GET  /admin
 
 ## Docker
 
-构建镜像：
+稳定版本使用日期版本号，例如 `v2026.05.05`。
+
+拉取 GitHub Packages 发布镜像，并挂载配置运行：
 
 ```bash
-docker build -t ferrogate .
-```
+docker pull ghcr.io/lianluo-esign/ferrogate:v2026.05.05
 
-挂载配置运行：
-
-```bash
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/config/ferrogate.example.toml:/etc/ferrogate/ferrogate.toml:ro" \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ferrogate
+  ghcr.io/lianluo-esign/ferrogate:v2026.05.05
+```
+
+开发 Docker 改动时，可以构建本地镜像：
+
+```bash
+docker build -t ferrogate .
 ```
 
 如需自动 HTTPS，发布相关端口并挂载 ACME 存储：
@@ -356,7 +360,7 @@ docker run --rm \
   -v /etc/ferrogate/ferrogate.toml:/etc/ferrogate/ferrogate.toml:ro \
   -v /var/lib/ferrogate/acme:/var/lib/ferrogate/acme \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ferrogate
+  ghcr.io/lianluo-esign/ferrogate:v2026.05.05
 ```
 
 ## 质量与安全
