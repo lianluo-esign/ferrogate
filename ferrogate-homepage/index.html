@@ -6,21 +6,16 @@
     <title>FerroGate | AI Gateway Control Plane</title>
     <meta
       name="description"
-      content="FerroGate is a self-hosted AI gateway protocol surface for routing, virtual keys, policy, token budgets, observability, and automatic HTTPS."
+      content="FerroGate is a self-hosted AI gateway for routing, virtual keys, policy, token budgets, observability, and automatic HTTPS."
     />
     <style>
       :root {
         color-scheme: dark;
-        --bg: #030506;
-        --text: #eef5f6;
-        --muted: #8c999d;
-        --dim: #536065;
-        --line: rgba(238, 245, 246, 0.14);
-        --panel: rgba(6, 10, 11, 0.74);
-        --cyan: #42e8ff;
-        --green: #63f7b4;
-        --amber: #f4c95d;
-        --ink: #03100d;
+        --bg: #000;
+        --text: #fff;
+        --muted: rgba(255, 255, 255, 0.62);
+        --dim: rgba(255, 255, 255, 0.36);
+        --line: rgba(255, 255, 255, 0.16);
       }
 
       * {
@@ -32,7 +27,6 @@
         width: 100%;
         height: 100%;
         margin: 0;
-        overflow: hidden;
         background: var(--bg);
         color: var(--text);
         font-family:
@@ -41,21 +35,28 @@
         letter-spacing: 0;
       }
 
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        overflow: hidden;
+      }
+
       body::before {
         position: fixed;
         inset: 0;
         z-index: 0;
+        pointer-events: none;
         content: "";
         background:
-          linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-          radial-gradient(circle at 14% 22%, rgba(66, 232, 255, 0.11), transparent 28%),
-          radial-gradient(circle at 82% 64%, rgba(99, 247, 180, 0.09), transparent 30%),
-          #030506;
+          linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          radial-gradient(circle at 78% 18%, rgba(255, 255, 255, 0.08), transparent 22%),
+          #000;
         background-size:
-          56px 56px,
-          56px 56px,
-          auto,
+          72px 72px,
+          72px 72px,
           auto,
           auto;
       }
@@ -67,34 +68,8 @@
         pointer-events: none;
         content: "";
         background:
-          linear-gradient(118deg, transparent 0 46%, rgba(66, 232, 255, 0.07) 47%, transparent 48% 76%, rgba(244, 201, 93, 0.06) 77%, transparent 78%),
-          linear-gradient(180deg, rgba(3, 5, 6, 0.18), rgba(3, 5, 6, 0.82));
-      }
-
-      #particle-field {
-        position: fixed;
-        inset: 0;
-        z-index: 2;
-        width: 100%;
-        height: 100%;
-      }
-
-      .shell {
-        position: relative;
-        z-index: 3;
-        display: grid;
-        grid-template-rows: auto 1fr;
-        width: min(1180px, calc(100% - 48px));
-        height: 100svh;
-        margin: 0 auto;
-      }
-
-      header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        min-height: 74px;
-        gap: 24px;
+          linear-gradient(110deg, transparent 0 58%, rgba(255, 255, 255, 0.055) 59%, transparent 60%),
+          linear-gradient(180deg, rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.72));
       }
 
       a {
@@ -102,47 +77,38 @@
         text-decoration: none;
       }
 
+      .site-header {
+        position: fixed;
+        top: 0;
+        left: 50%;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: min(1180px, calc(100% - 48px));
+        min-height: 76px;
+        transform: translateX(-50%);
+      }
+
       .brand {
         display: inline-flex;
         align-items: center;
         gap: 12px;
-        min-width: 0;
         color: var(--text);
         font-weight: 720;
-        font-size: 0.98rem;
+        font-size: 0.96rem;
       }
 
       .mark {
-        position: relative;
-        width: 32px;
-        height: 32px;
-        flex: 0 0 auto;
-        border: 1px solid rgba(99, 247, 180, 0.62);
-        border-radius: 8px;
-        background: rgba(99, 247, 180, 0.06);
-      }
-
-      .mark::before,
-      .mark::after {
-        position: absolute;
-        content: "";
-        background: var(--green);
-      }
-
-      .mark::before {
-        top: 7px;
-        bottom: 7px;
-        left: 10px;
-        width: 1px;
-        box-shadow: 9px 0 0 var(--cyan);
-      }
-
-      .mark::after {
-        top: 15px;
-        left: 7px;
-        width: 18px;
-        height: 1px;
-        background: var(--amber);
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        color: var(--text);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 0.78rem;
       }
 
       nav {
@@ -161,91 +127,98 @@
         color: var(--text);
       }
 
-      .hero {
+      .pager {
+        position: fixed;
+        top: 50%;
+        right: clamp(18px, 3vw, 40px);
+        z-index: 10;
         display: grid;
-        grid-template-columns: minmax(0, 1.06fr) minmax(360px, 0.72fr);
-        align-items: center;
-        gap: clamp(40px, 7vw, 88px);
-        min-height: 0;
-        padding: 6px 0 34px;
+        gap: 12px;
+        transform: translateY(-50%);
       }
 
-      .paper {
-        min-width: 0;
-      }
-
-      .label {
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-        margin: 0 0 18px;
-        color: var(--green);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.78rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-
-      .label::before {
+      .pager a {
         width: 7px;
         height: 7px;
+        border: 1px solid rgba(255, 255, 255, 0.55);
         border-radius: 50%;
-        background: var(--green);
-        box-shadow: 0 0 0 7px rgba(99, 247, 180, 0.1);
-        content: "";
+        opacity: 0.52;
       }
 
-      h1 {
-        max-width: 760px;
-        margin: 0;
-        font-size: 4.4rem;
-        line-height: 0.94;
-        font-weight: 780;
+      .pager a:hover {
+        opacity: 1;
+        background: var(--text);
       }
 
-      .abstract {
-        max-width: 700px;
-        margin: 22px 0 0;
-        color: #c7d2d5;
-        font-size: 1.02rem;
-        line-height: 1.72;
+      .slides {
+        position: relative;
+        z-index: 3;
+        width: 100%;
+        height: 100svh;
+        overflow-x: hidden;
+        overflow-y: auto;
+        scroll-snap-type: y mandatory;
+        scrollbar-width: none;
       }
 
-      .paper-meta {
+      .slides::-webkit-scrollbar {
+        display: none;
+      }
+
+      .slide {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 12px;
-        margin-top: 26px;
+        min-height: 100svh;
+        scroll-snap-align: start;
+        scroll-snap-stop: always;
       }
 
-      .meta-item {
+      .inner {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(280px, 0.55fr);
+        align-items: center;
+        gap: clamp(40px, 9vw, 120px);
+        width: min(1180px, calc(100% - 48px));
+        min-height: 100svh;
+        margin: 0 auto;
+        padding: 104px 0 76px;
+      }
+
+      .copy {
         min-width: 0;
-        padding-top: 12px;
-        border-top: 1px solid var(--line);
       }
 
-      .meta-item span {
-        display: block;
-        color: var(--dim);
+      .kicker {
+        margin: 0 0 20px;
+        color: var(--muted);
         font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.68rem;
-        letter-spacing: 0.08em;
+        font-size: 0.72rem;
+        letter-spacing: 0.11em;
         text-transform: uppercase;
       }
 
-      .meta-item strong {
-        display: block;
-        margin-top: 7px;
+      h1,
+      h2 {
+        max-width: 760px;
+        margin: 0;
         color: var(--text);
-        font-size: 0.92rem;
-        font-weight: 680;
+        font-size: clamp(3.6rem, 8vw, 7.1rem);
+        font-weight: 760;
+        line-height: 0.9;
+      }
+
+      .lead {
+        max-width: 700px;
+        margin: 28px 0 0;
+        color: var(--muted);
+        font-size: clamp(1rem, 1.6vw, 1.18rem);
+        line-height: 1.75;
       }
 
       .actions {
         display: flex;
         flex-wrap: wrap;
         gap: 12px;
-        margin-top: 26px;
+        margin-top: 34px;
       }
 
       .button {
@@ -253,215 +226,163 @@
         align-items: center;
         justify-content: center;
         min-height: 44px;
-        padding: 0 17px;
+        padding: 0 18px;
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: 999px;
         color: var(--text);
         font-weight: 720;
         font-size: 0.9rem;
-        background: rgba(255, 255, 255, 0.035);
+        background: transparent;
       }
 
       .button.primary {
-        border-color: rgba(99, 247, 180, 0.64);
-        color: var(--ink);
-        background: linear-gradient(135deg, var(--green), var(--cyan));
+        color: #000;
+        background: #fff;
       }
 
       .button:hover {
-        border-color: rgba(99, 247, 180, 0.46);
+        border-color: rgba(255, 255, 255, 0.46);
       }
 
-      .docs-index {
+      .spec {
+        align-self: center;
+        min-width: 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        padding: 22px 0;
+      }
+
+      .spec-row {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
-        margin-top: 26px;
+        grid-template-columns: 86px minmax(0, 1fr);
+        gap: 18px;
+        padding: 13px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.09);
       }
 
-      .doc-link {
-        min-width: 0;
-        padding: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.11);
-        border-radius: 8px;
-        background: rgba(3, 7, 8, 0.58);
+      .spec-row:last-child {
+        border-bottom: 0;
       }
 
-      .doc-link span {
-        display: block;
-        color: var(--green);
+      .spec-row span {
+        color: var(--dim);
         font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.68rem;
+        font-size: 0.7rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
       }
 
-      .doc-link strong {
-        display: block;
-        margin-top: 8px;
+      .spec-row strong {
         color: var(--text);
-        font-size: 0.86rem;
+        font-size: 0.96rem;
+        font-weight: 650;
       }
 
-      .doc-link:hover {
-        border-color: rgba(66, 232, 255, 0.44);
-        background: rgba(66, 232, 255, 0.055);
+      .number {
+        display: block;
+        margin-bottom: 26px;
+        color: var(--dim);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 0.78rem;
+        letter-spacing: 0.12em;
       }
 
-      .protocol {
-        position: relative;
-        min-width: 0;
-        padding: 22px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--panel);
-        backdrop-filter: blur(18px);
+      .feature-list {
+        display: grid;
+        gap: 14px;
+        margin-top: 30px;
+        padding: 0;
+        list-style: none;
       }
 
-      .protocol::before {
-        position: absolute;
-        inset: -18px;
-        z-index: -1;
-        border: 1px solid rgba(255, 255, 255, 0.07);
-        border-radius: 14px;
+      .feature-list li {
+        display: grid;
+        grid-template-columns: 20px minmax(0, 1fr);
+        gap: 12px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .feature-list li::before {
+        margin-top: 0.72em;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--text);
         content: "";
-        transform: skewY(-2deg);
+        opacity: 0.78;
       }
 
-      .protocol-head {
+      .terminal {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(0, 0, 0, 0.44);
+      }
+
+      .terminal-head {
         display: flex;
         justify-content: space-between;
-        gap: 14px;
-        padding-bottom: 16px;
+        padding: 14px 16px;
         border-bottom: 1px solid var(--line);
-        color: var(--muted);
+        color: var(--dim);
         font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.76rem;
+        font-size: 0.72rem;
       }
 
-      .protocol-head strong {
-        color: var(--green);
-        font-weight: 680;
-      }
-
-      .stack {
-        display: grid;
-        gap: 12px;
-        margin-top: 18px;
-      }
-
-      .stack-row {
-        display: grid;
-        grid-template-columns: 28px minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 12px;
-        min-height: 54px;
-        padding: 0 12px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.035);
-      }
-
-      .node {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        background: var(--cyan);
-        box-shadow: 0 0 0 7px rgba(66, 232, 255, 0.08);
-      }
-
-      .stack-row:nth-child(2) .node,
-      .stack-row:nth-child(4) .node {
-        background: var(--green);
-        box-shadow: 0 0 0 7px rgba(99, 247, 180, 0.08);
-      }
-
-      .stack-row:nth-child(3) .node {
-        background: var(--amber);
-        box-shadow: 0 0 0 7px rgba(244, 201, 93, 0.08);
-      }
-
-      .stack-row strong {
-        display: block;
+      pre {
+        overflow-x: auto;
+        margin: 0;
+        padding: 18px;
         color: var(--text);
-        font-size: 0.92rem;
-      }
-
-      .stack-row span {
-        display: block;
-        margin-top: 4px;
-        color: var(--muted);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
         font-size: 0.78rem;
-      }
-
-      .stack-row code {
-        color: var(--green);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.74rem;
-      }
-
-      .trace {
-        margin-top: 18px;
-        padding-top: 14px;
-        border-top: 1px solid var(--line);
-        color: var(--muted);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.74rem;
         line-height: 1.7;
       }
 
-      @media (max-width: 980px) {
-        html,
+      .scroll-cue {
+        position: fixed;
+        right: 50%;
+        bottom: 24px;
+        z-index: 10;
+        color: var(--dim);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 0.68rem;
+        letter-spacing: 0.12em;
+        transform: translateX(50%);
+      }
+
+      @media (max-width: 900px) {
         body {
-          overflow: auto;
-          overflow-x: hidden;
+          overflow: hidden;
         }
 
-        .shell {
-          width: min(calc(100% - 28px), 720px);
-          height: auto;
-          min-height: 100svh;
+        .site-header {
+          width: calc(100% - 28px);
         }
 
         nav {
           display: none;
         }
 
-        .hero {
-          grid-template-columns: 1fr;
-          gap: 28px;
-          padding: 18px 0 34px;
-        }
-
-        h1 {
-          font-size: 3.12rem;
-        }
-
-        .paper-meta,
-        .docs-index {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
-        .protocol::before {
+        .pager {
           display: none;
         }
-      }
 
-      @media (max-width: 520px) {
-        .shell {
-          width: calc(100% - 24px);
-        }
-
-        h1 {
-          font-size: 2.58rem;
-          line-height: 0.98;
-        }
-
-        .abstract {
-          font-size: 0.98rem;
-        }
-
-        .paper-meta,
-        .docs-index {
+        .inner {
           grid-template-columns: 1fr;
+          gap: 34px;
+          width: calc(100% - 28px);
+          padding: 98px 0 54px;
+        }
+
+        h1,
+        h2 {
+          font-size: clamp(3rem, 14vw, 5rem);
+        }
+
+        .spec {
+          align-self: start;
         }
 
         .actions {
@@ -473,235 +394,190 @@
           width: 100%;
         }
 
-        .stack-row {
-          grid-template-columns: 22px minmax(0, 1fr);
-        }
-
-        .stack-row code {
+        .scroll-cue {
           display: none;
         }
       }
     </style>
   </head>
   <body>
-    <canvas id="particle-field" aria-hidden="true"></canvas>
-    <main class="shell">
-      <header>
-        <a class="brand" href="./" aria-label="FerroGate home">
-          <span class="mark" aria-hidden="true"></span>
-          <span>FerroGate</span>
-        </a>
-        <nav aria-label="Primary">
-          <a class="nav-link" href="./docs.html#abstract">Whitepaper</a>
-          <a class="nav-link" href="./docs.html#quick-start">Docs</a>
-          <a class="nav-link" href="./docs.html#deployment">Deploy</a>
-          <a class="nav-link" href="https://github.com/lianluo-esign/ferrogate">GitHub</a>
-        </nav>
-      </header>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="FerroGate home">
+        <span class="mark" aria-hidden="true">F</span>
+        <span>FerroGate</span>
+      </a>
+      <nav aria-label="Primary">
+        <a class="nav-link" href="#routing">Routing</a>
+        <a class="nav-link" href="#policy">Policy</a>
+        <a class="nav-link" href="#observability">Signals</a>
+        <a class="nav-link" href="./docs.html">Docs</a>
+        <a class="nav-link" href="https://github.com/lianluo-esign/ferrogate">GitHub</a>
+      </nav>
+    </header>
 
-      <section class="hero" aria-label="FerroGate homepage">
-        <div class="paper">
-          <p class="label">Whitepaper v0.1 / Self-hosted AI gateway</p>
-          <h1>Route every model through one control plane.</h1>
-          <p class="abstract">
-            FerroGate defines a minimal gateway layer for AI traffic: one
-            OpenAI-compatible surface, deterministic provider routing, virtual
-            API keys, policy checks, token-budget settlement, observability,
-            and automatic HTTPS. No lock-in, no hosted control plane required.
-          </p>
+    <aside class="pager" aria-label="Page navigation">
+      <a href="#intro" aria-label="Intro"></a>
+      <a href="#routing" aria-label="Routing"></a>
+      <a href="#policy" aria-label="Policy"></a>
+      <a href="#observability" aria-label="Observability"></a>
+      <a href="#deploy" aria-label="Deploy"></a>
+    </aside>
 
-          <div class="paper-meta" aria-label="Protocol properties">
-            <div class="meta-item">
+    <main class="slides">
+      <section class="slide" id="intro">
+        <div class="inner">
+          <div class="copy">
+            <p class="kicker">Whitepaper v0.1 / Self-hosted AI gateway</p>
+            <h1>Route every model through one control plane.</h1>
+            <p class="lead">
+              FerroGate is a black-box boundary for AI traffic: one
+              OpenAI-compatible surface in front of providers, keys, policy,
+              budgets, metrics, and TLS.
+            </p>
+            <div class="actions">
+              <a class="button primary" href="./docs.html">Read Docs</a>
+              <a class="button" href="https://github.com/lianluo-esign/ferrogate">GitHub</a>
+            </div>
+          </div>
+          <div class="spec" aria-label="Protocol summary">
+            <div class="spec-row">
               <span>Runtime</span>
               <strong>Pingora edge proxy</strong>
             </div>
-            <div class="meta-item">
-              <span>Interface</span>
+            <div class="spec-row">
+              <span>API</span>
               <strong>OpenAI-compatible</strong>
             </div>
-            <div class="meta-item">
-              <span>Control</span>
-              <strong>Tenant policies</strong>
+            <div class="spec-row">
+              <span>Mode</span>
+              <strong>Self-hosted control plane</strong>
             </div>
-            <div class="meta-item">
-              <span>Signals</span>
-              <strong>Metrics + billing</strong>
-            </div>
-          </div>
-
-          <div class="actions">
-            <a class="button primary" href="./docs.html">Read Whitepaper Docs</a>
-            <a class="button" href="https://github.com/lianluo-esign/ferrogate">Open Source Repository</a>
-          </div>
-
-          <div class="docs-index" aria-label="Documentation directory">
-            <a class="doc-link" href="./docs.html#quick-start">
-              <span>01</span>
-              <strong>Quick Start</strong>
-            </a>
-            <a class="doc-link" href="./docs.html#configuration">
-              <span>02</span>
-              <strong>Configuration</strong>
-            </a>
-            <a class="doc-link" href="./docs.html#api-usage">
-              <span>03</span>
-              <strong>API Usage</strong>
-            </a>
-            <a class="doc-link" href="./docs.html#operations">
-              <span>04</span>
-              <strong>Operations</strong>
-            </a>
           </div>
         </div>
+      </section>
 
-        <div class="protocol" aria-label="FerroGate protocol stack">
-          <div class="protocol-head">
-            <span>ferrogate://protocol-map</span>
-            <strong>live</strong>
+      <section class="slide" id="routing">
+        <div class="inner">
+          <div class="copy">
+            <span class="number">01 / ROUTING</span>
+            <h2>Provider routing without client rewrites.</h2>
+            <p class="lead">
+              Applications call one stable endpoint. FerroGate maps logical
+              models to OpenAI, Anthropic, Gemini, Grok, Azure, or any
+              OpenAI-compatible backend.
+            </p>
+            <ul class="feature-list">
+              <li>Logical model names stay stable while provider contracts change.</li>
+              <li>Fallback can be priority-based or weighted across providers.</li>
+              <li>Streaming and non-streaming chat completions share one gateway path.</li>
+            </ul>
           </div>
-          <div class="stack">
-            <div class="stack-row">
-              <i class="node" aria-hidden="true"></i>
-              <div>
-                <strong>Client Surface</strong>
-                <span>OpenAI-compatible models and chat completions</span>
-              </div>
-              <code>/v1/*</code>
+          <div class="terminal" aria-label="Routing example">
+            <div class="terminal-head">
+              <span>model-map</span>
+              <span>/v1/chat/completions</span>
             </div>
-            <div class="stack-row">
-              <i class="node" aria-hidden="true"></i>
-              <div>
-                <strong>Identity Boundary</strong>
-                <span>Virtual keys, tenant scopes, model allowlists</span>
-              </div>
-              <code>auth</code>
+            <pre>fast-chat
+  -> openai:gpt-4o-mini
+  -> azure:gpt-4o-mini
+
+safe-long
+  -> anthropic:claude
+  -> gemini:flash</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" id="policy">
+        <div class="inner">
+          <div class="copy">
+            <span class="number">02 / POLICY</span>
+            <h2>Virtual keys become the enforcement layer.</h2>
+            <p class="lead">
+              FerroGate turns client keys into scoped identities. Tenants,
+              models, providers, rate limits, and monthly token budgets are
+              checked before provider dispatch.
+            </p>
+            <ul class="feature-list">
+              <li>Scopes separate model listing, chat completions, and admin access.</li>
+              <li>Allow and deny rules constrain models and providers per key.</li>
+              <li>Token reservations prevent budget overspend during requests.</li>
+            </ul>
+          </div>
+          <div class="terminal" aria-label="Policy example">
+            <div class="terminal-head">
+              <span>api-key</span>
+              <span>tenant boundary</span>
             </div>
-            <div class="stack-row">
-              <i class="node" aria-hidden="true"></i>
-              <div>
-                <strong>Routing Kernel</strong>
-                <span>Provider mapping, fallback, streaming dispatch</span>
-              </div>
-              <code>route</code>
+            <pre>key_dev
+  scopes: models.read chat.completions
+  allowed_models: fast-chat
+  request_limit_per_minute: 60
+  monthly_token_budget: 1000000</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" id="observability">
+        <div class="inner">
+          <div class="copy">
+            <span class="number">03 / SIGNALS</span>
+            <h2>Every request leaves an operator trail.</h2>
+            <p class="lead">
+              Request logs, usage aggregates, billing events, Prometheus
+              metrics, and OTLP exports let teams operate AI traffic like
+              infrastructure, not application glue.
+            </p>
+            <ul class="feature-list">
+              <li>Request IDs and trace IDs cross gateway and provider boundaries.</li>
+              <li>Usage settlement uses provider-reported tokens or gateway estimates.</li>
+              <li>Admin endpoints expose status, models, providers, logs, and metrics.</li>
+            </ul>
+          </div>
+          <div class="terminal" aria-label="Observability example">
+            <div class="terminal-head">
+              <span>settlement</span>
+              <span>metrics + billing</span>
             </div>
-            <div class="stack-row">
-              <i class="node" aria-hidden="true"></i>
-              <div>
-                <strong>Settlement Layer</strong>
-                <span>Token usage, budgets, billing events, metrics</span>
-              </div>
-              <code>ledger</code>
+            <pre>request_id: fg_00042
+model: fast-chat
+provider: openai
+tokens_in: 728
+tokens_out: 184
+status: committed</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" id="deploy">
+        <div class="inner">
+          <div class="copy">
+            <span class="number">04 / DEPLOY</span>
+            <h2>Run the gateway inside your boundary.</h2>
+            <p class="lead">
+              Start locally with a Caddyfile-style config, validate every
+              candidate, then deploy with hashed keys, TLS, metrics, and reload
+              discipline.
+            </p>
+            <div class="actions">
+              <a class="button primary" href="./docs.html#quick-start">Quick Start</a>
+              <a class="button" href="./docs.html#deployment">Deployment Checklist</a>
             </div>
           </div>
-          <div class="trace">
-            REQUEST -> POLICY -> MODEL MAP -> PROVIDER FALLBACK -> USAGE SETTLEMENT
+          <div class="terminal" aria-label="Quick start">
+            <div class="terminal-head">
+              <span>quick-start</span>
+              <span>local</span>
+            </div>
+            <pre>cargo run -- run --config Ferrogate/Caddyfile
+curl http://127.0.0.1:8080/healthz
+curl -H 'Authorization: Bearer dev-secret' \
+  http://127.0.0.1:8080/v1/models</pre>
           </div>
         </div>
       </section>
     </main>
 
-    <script>
-      (() => {
-        const canvas = document.getElementById("particle-field");
-        const ctx = canvas.getContext("2d", { alpha: true });
-        const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-        const pointer = { x: 0, y: 0, active: false };
-        let width = 0;
-        let height = 0;
-        let particles = [];
-        let animationFrame = 0;
-        const colors = ["66,232,255", "99,247,180", "244,201,93"];
-
-        function resize() {
-          const dpr = Math.min(window.devicePixelRatio || 1, 2);
-          width = window.innerWidth;
-          height = window.innerHeight;
-          canvas.width = Math.floor(width * dpr);
-          canvas.height = Math.floor(height * dpr);
-          canvas.style.width = `${width}px`;
-          canvas.style.height = `${height}px`;
-          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-          seed();
-        }
-
-        function seed() {
-          const count = Math.min(72, Math.max(34, Math.floor((width * height) / 23000)));
-          particles = Array.from({ length: count }, (_, index) => ({
-            x: Math.random() * width,
-            y: Math.random() * height,
-            vx: (Math.random() - 0.5) * 0.22,
-            vy: (Math.random() - 0.5) * 0.22,
-            size: Math.random() * 1.2 + 0.6,
-            color: colors[index % colors.length],
-          }));
-        }
-
-        function draw() {
-          ctx.clearRect(0, 0, width, height);
-          ctx.lineWidth = 1;
-
-          for (let i = 0; i < particles.length; i += 1) {
-            const a = particles[i];
-            a.x += a.vx;
-            a.y += a.vy;
-            if (a.x < -16) a.x = width + 16;
-            if (a.x > width + 16) a.x = -16;
-            if (a.y < -16) a.y = height + 16;
-            if (a.y > height + 16) a.y = -16;
-
-            if (pointer.active) {
-              const dx = pointer.x - a.x;
-              const dy = pointer.y - a.y;
-              const dist = Math.hypot(dx, dy);
-              if (dist < 130 && dist > 0) {
-                a.x -= (dx / dist) * 0.22;
-                a.y -= (dy / dist) * 0.22;
-              }
-            }
-
-            ctx.beginPath();
-            ctx.fillStyle = `rgba(${a.color}, 0.72)`;
-            ctx.arc(a.x, a.y, a.size, 0, Math.PI * 2);
-            ctx.fill();
-
-            for (let j = i + 1; j < particles.length; j += 1) {
-              const b = particles[j];
-              const dist = Math.hypot(a.x - b.x, a.y - b.y);
-              if (dist < 108) {
-                ctx.strokeStyle = `rgba(${a.color}, ${(1 - dist / 108) * 0.2})`;
-                ctx.beginPath();
-                ctx.moveTo(a.x, a.y);
-                ctx.lineTo(b.x, b.y);
-                ctx.stroke();
-              }
-            }
-          }
-
-          animationFrame = requestAnimationFrame(draw);
-        }
-
-        function start() {
-          cancelAnimationFrame(animationFrame);
-          if (!prefersReducedMotion.matches) {
-            animationFrame = requestAnimationFrame(draw);
-          } else {
-            draw();
-          }
-        }
-
-        window.addEventListener("resize", resize, { passive: true });
-        window.addEventListener("pointermove", (event) => {
-          pointer.x = event.clientX;
-          pointer.y = event.clientY;
-          pointer.active = true;
-        }, { passive: true });
-        window.addEventListener("pointerleave", () => {
-          pointer.active = false;
-        }, { passive: true });
-        prefersReducedMotion.addEventListener("change", start);
-        resize();
-        start();
-      })();
-    </script>
+    <div class="scroll-cue" aria-hidden="true">SCROLL</div>
   </body>
 </html>
