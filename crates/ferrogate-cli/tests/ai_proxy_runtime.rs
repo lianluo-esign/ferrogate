@@ -1455,8 +1455,7 @@ fn wait_for_models_contains(addr: &str, token: &str, needle: &str) -> String {
                 .unwrap();
             write!(
                 stream,
-                "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{}\r\n\r\n",
-                auth
+                "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{auth}\r\n\r\n"
             )
             .unwrap();
             let mut response = String::new();
