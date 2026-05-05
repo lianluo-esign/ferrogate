@@ -102,6 +102,10 @@ external model providers unless the budget impact is intentional.
 
 By default reports are written under `perf-reports/<UTC timestamp>/`.
 
+Committed report snapshots live under `docs/performance-reports/`. The local
+workstation baseline for the first date-based release is available at
+`docs/performance-reports/v2026.05.05-local/`.
+
 Important files:
 
 - `summary.md`: human-readable stage summary.

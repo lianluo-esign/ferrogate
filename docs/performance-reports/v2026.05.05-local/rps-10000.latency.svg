@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" role="img" aria-label="Latency curve for 10000 RPS">
+<rect width="100%" height="100%" fill="#0b0b0c"/>
+<text x="72" y="34" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="20" font-weight="700">Latency curve for 10000 RPS</text>
+<text x="72" y="56" fill="#9ca3af" font-family="Arial, sans-serif" font-size="12">per-second latency curve, milliseconds</text>
+<line x1="72" y1="64.0" x2="928" y2="64.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="68.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">4</text>
+<line x1="72" y1="138.0" x2="928" y2="138.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="142.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">3</text>
+<line x1="72" y1="212.0" x2="928" y2="212.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="216.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">2</text>
+<line x1="72" y1="286.0" x2="928" y2="286.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="290.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">1</text>
+<line x1="72" y1="360.0" x2="928" y2="360.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="364.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">0</text>
+<line x1="72" y1="360" x2="928" y2="360" stroke="#3f4652" stroke-width="1"/>
+<polyline points="72.0,64.0 100.5,170.6 129.1,222.1 157.6,233.4 186.1,225.5 214.7,219.5 243.2,209.7 271.7,221.5 300.3,226.6 328.8,218.6 357.3,214.9 385.9,180.8 414.4,226.1 442.9,224.4 471.5,218.1 500.0,211.6 528.5,212.1 557.1,228.0 585.6,237.8 614.1,200.9 642.7,219.3 671.2,211.1 699.7,234.9 728.3,226.7 756.8,171.6 785.3,194.8 813.9,233.2 842.4,195.9 870.9,221.4 899.5,202.5 928.0,202.5 " fill="none" stroke="#6b7280" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="72.0,235.8 100.5,269.8 129.1,283.6 157.6,276.2 186.1,277.6 214.7,274.2 243.2,277.5 271.7,280.1 300.3,280.7 328.8,272.6 357.3,268.7 385.9,268.1 414.4,282.7 442.9,273.5 471.5,271.7 500.0,279.3 528.5,274.3 557.1,276.9 585.6,278.4 614.1,272.7 642.7,276.5 671.2,278.4 699.7,275.5 728.3,275.6 756.8,274.2 785.3,277.5 813.9,277.5 842.4,274.6 870.9,282.7 899.5,277.0 928.0,267.4 " fill="none" stroke="#f97316" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="72.0,320.1 100.5,323.1 129.1,324.8 157.6,321.3 186.1,324.0 214.7,323.6 243.2,322.7 271.7,323.9 300.3,323.8 328.8,320.6 357.3,322.1 385.9,322.0 414.4,324.2 442.9,322.7 471.5,322.8 500.0,324.9 528.5,324.6 557.1,323.3 585.6,324.7 614.1,323.5 642.7,324.4 671.2,324.5 699.7,323.3 728.3,324.1 756.8,323.0 785.3,323.6 813.9,322.3 842.4,322.0 870.9,324.7 899.5,322.7 928.0,320.0 " fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="72.0,350.7 100.5,349.8 129.1,350.5 157.6,350.7 186.1,349.9 214.7,350.2 243.2,348.8 271.7,349.2 300.3,349.1 328.8,349.9 357.3,347.7 385.9,346.5 414.4,343.2 442.9,346.0 471.5,349.9 500.0,349.8 528.5,348.9 557.1,347.7 585.6,349.6 614.1,348.2 642.7,349.9 671.2,350.0 699.7,350.6 728.3,348.1 756.8,348.1 785.3,347.9 813.9,349.3 842.4,349.7 870.9,349.1 899.5,350.5 928.0,349.6 " fill="none" stroke="#f8fafc" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760" cy="34" r="5" fill="#f8fafc"/><text x="772" y="38" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">p50</text>
+<circle cx="818" cy="34" r="5" fill="#38bdf8"/><text x="830" y="38" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">p95</text>
+<circle cx="876" cy="34" r="5" fill="#f97316"/><text x="888" y="38" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">p99</text>
+<circle cx="760" cy="54" r="5" fill="#6b7280"/><text x="772" y="58" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">max</text>
+<text x="72" y="400" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">start 1777991199</text>
+<text x="928" y="400" text-anchor="end" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">end 1777991229</text>
+</svg>
