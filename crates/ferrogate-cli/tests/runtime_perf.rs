@@ -198,3 +198,36 @@ listen = "{gateway_addr}"
         "gateway RSS grew too much: start={start_rss}KB end={end_rss}KB"
     );
 }
+
+#[test]
+fn homepage_static_debug_smoke() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = http_get(&gateway_addr, "/");
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("FerroGate | AI Gateway Control Plane"));
+    assert!(response.contains("Route every model through one control plane."));
+    assert!(response.contains("https://github.com/lianluo-esign/ferrogate"));
+    assert!(!response.contains("route_not_found"));
+
+    let index_response = http_get(&gateway_addr, "/index.html");
+    assert!(index_response.contains("200 OK"));
+    assert!(index_response.contains("Self-hosted AI gateway"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

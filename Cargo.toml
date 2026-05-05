@@ -22,7 +22,7 @@ edition = "2021"
 rust-version = "1.84"
 license = "Apache-2.0"
 repository = "https://github.com/lianluo-esign/ferrogate"
-homepage = "https://token4ai.cloud/ferrogate"
+homepage = "https://lianluo-esign.github.io/ferrogate/"
 
 [workspace.dependencies]
 anyhow = "1.0"

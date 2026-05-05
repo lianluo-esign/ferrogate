@@ -20,6 +20,11 @@ impl FerroGateway {
         let req = session.req_header();
         let path = req.uri.path().to_string();
 
+        if path == "/" || path == "/index.html" {
+            self.handle_homepage(session, ctx).await?;
+            return Ok(true);
+        }
+
         if path == "/healthz" {
             self.handle_healthz(session, ctx).await?;
             return Ok(true);
