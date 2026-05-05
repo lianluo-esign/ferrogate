@@ -13,9 +13,10 @@
         color-scheme: dark;
         --bg: #000;
         --text: #fff;
-        --muted: rgba(255, 255, 255, 0.62);
+        --muted: rgba(255, 255, 255, 0.64);
         --dim: rgba(255, 255, 255, 0.36);
         --line: rgba(255, 255, 255, 0.16);
+        --soft: rgba(255, 255, 255, 0.06);
       }
 
       * {
@@ -35,10 +36,6 @@
         letter-spacing: 0;
       }
 
-      html {
-        scroll-behavior: smooth;
-      }
-
       body {
         overflow: hidden;
       }
@@ -50,9 +47,9 @@
         pointer-events: none;
         content: "";
         background:
-          linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-          radial-gradient(circle at 78% 18%, rgba(255, 255, 255, 0.08), transparent 22%),
+          linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+          radial-gradient(circle at 78% 18%, rgba(255, 255, 255, 0.07), transparent 22%),
           #000;
         background-size:
           72px 72px,
@@ -68,8 +65,8 @@
         pointer-events: none;
         content: "";
         background:
-          linear-gradient(110deg, transparent 0 58%, rgba(255, 255, 255, 0.055) 59%, transparent 60%),
-          linear-gradient(180deg, rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.72));
+          linear-gradient(110deg, transparent 0 58%, rgba(255, 255, 255, 0.045) 59%, transparent 60%),
+          linear-gradient(180deg, rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.76));
       }
 
       a {
@@ -142,9 +139,13 @@
         height: 7px;
         border: 1px solid rgba(255, 255, 255, 0.55);
         border-radius: 50%;
-        opacity: 0.52;
+        opacity: 0.48;
+        transition:
+          opacity 220ms ease,
+          background 220ms ease;
       }
 
+      .pager a.active,
       .pager a:hover {
         opacity: 1;
         background: var(--text);
@@ -157,6 +158,7 @@
         height: 100svh;
         overflow-x: hidden;
         overflow-y: auto;
+        overscroll-behavior: contain;
         scroll-snap-type: y mandatory;
         scrollbar-width: none;
       }
@@ -174,25 +176,28 @@
 
       .inner {
         display: grid;
-        grid-template-columns: minmax(0, 0.9fr) minmax(280px, 0.55fr);
+        grid-template-columns: minmax(0, 0.86fr) minmax(320px, 0.68fr);
         align-items: center;
-        gap: clamp(40px, 9vw, 120px);
+        gap: clamp(44px, 8vw, 116px);
         width: min(1180px, calc(100% - 48px));
         min-height: 100svh;
         margin: 0 auto;
         padding: 104px 0 76px;
       }
 
-      .copy {
+      .copy,
+      .visual {
         min-width: 0;
       }
 
-      .kicker {
-        margin: 0 0 20px;
-        color: var(--muted);
+      .kicker,
+      .number {
+        display: block;
+        margin: 0 0 22px;
+        color: var(--dim);
         font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
         font-size: 0.72rem;
-        letter-spacing: 0.11em;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
       }
 
@@ -201,16 +206,16 @@
         max-width: 760px;
         margin: 0;
         color: var(--text);
-        font-size: clamp(3.6rem, 8vw, 7.1rem);
+        font-size: clamp(3.6rem, 7.4vw, 6.7rem);
         font-weight: 760;
         line-height: 0.9;
       }
 
       .lead {
-        max-width: 700px;
-        margin: 28px 0 0;
+        max-width: 690px;
+        margin: 30px 0 0;
         color: var(--muted);
-        font-size: clamp(1rem, 1.6vw, 1.18rem);
+        font-size: clamp(1rem, 1.55vw, 1.15rem);
         line-height: 1.75;
       }
 
@@ -244,53 +249,10 @@
         border-color: rgba(255, 255, 255, 0.46);
       }
 
-      .spec {
-        align-self: center;
-        min-width: 0;
-        border-top: 1px solid var(--line);
-        border-bottom: 1px solid var(--line);
-        padding: 22px 0;
-      }
-
-      .spec-row {
-        display: grid;
-        grid-template-columns: 86px minmax(0, 1fr);
-        gap: 18px;
-        padding: 13px 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.09);
-      }
-
-      .spec-row:last-child {
-        border-bottom: 0;
-      }
-
-      .spec-row span {
-        color: var(--dim);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.7rem;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-      }
-
-      .spec-row strong {
-        color: var(--text);
-        font-size: 0.96rem;
-        font-weight: 650;
-      }
-
-      .number {
-        display: block;
-        margin-bottom: 26px;
-        color: var(--dim);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.78rem;
-        letter-spacing: 0.12em;
-      }
-
       .feature-list {
         display: grid;
         gap: 14px;
-        margin-top: 30px;
+        margin: 30px 0 0;
         padding: 0;
         list-style: none;
       }
@@ -313,31 +275,85 @@
         opacity: 0.78;
       }
 
-      .terminal {
-        overflow: hidden;
+      .visual {
+        position: relative;
         border: 1px solid var(--line);
-        border-radius: 10px;
-        background: rgba(0, 0, 0, 0.44);
+        border-radius: 18px;
+        margin: 0;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent),
+          rgba(0, 0, 0, 0.52);
+        aspect-ratio: 1 / 1;
       }
 
-      .terminal-head {
+      .visual::before {
+        position: absolute;
+        inset: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        content: "";
+      }
+
+      .visual svg {
+        position: absolute;
+        inset: 8%;
+        width: 84%;
+        height: 84%;
+        overflow: visible;
+      }
+
+      .visual line,
+      .visual path,
+      .visual polyline,
+      .visual polygon,
+      .visual circle,
+      .visual rect {
+        vector-effect: non-scaling-stroke;
+      }
+
+      .stroke {
+        fill: none;
+        stroke: #fff;
+        stroke-width: 1.5;
+        opacity: 0.78;
+      }
+
+      .thin {
+        fill: none;
+        stroke: rgba(255, 255, 255, 0.45);
+        stroke-width: 1;
+      }
+
+      .fill-soft {
+        fill: rgba(255, 255, 255, 0.07);
+        stroke: rgba(255, 255, 255, 0.74);
+        stroke-width: 1.3;
+      }
+
+      .dot {
+        fill: #fff;
+      }
+
+      .label-text {
+        fill: rgba(255, 255, 255, 0.58);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 9px;
+        letter-spacing: 0.08em;
+      }
+
+      .visual-caption {
+        position: absolute;
+        left: 22px;
+        right: 22px;
+        bottom: 18px;
         display: flex;
         justify-content: space-between;
-        padding: 14px 16px;
-        border-bottom: 1px solid var(--line);
+        gap: 12px;
         color: var(--dim);
         font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.72rem;
-      }
-
-      pre {
-        overflow-x: auto;
-        margin: 0;
-        padding: 18px;
-        color: var(--text);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 0.78rem;
-        line-height: 1.7;
+        font-size: 0.68rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
       }
 
       .scroll-cue {
@@ -353,48 +369,80 @@
       }
 
       @media (max-width: 900px) {
-        body {
-          overflow: hidden;
-        }
-
         .site-header {
           width: calc(100% - 28px);
         }
 
-        nav {
-          display: none;
-        }
-
-        .pager {
+        nav,
+        .pager,
+        .scroll-cue {
           display: none;
         }
 
         .inner {
           grid-template-columns: 1fr;
-          gap: 34px;
+          gap: 22px;
           width: calc(100% - 28px);
-          padding: 98px 0 54px;
+          padding: 84px 0 28px;
         }
 
         h1,
         h2 {
-          font-size: clamp(3rem, 14vw, 5rem);
+          font-size: clamp(2.45rem, 11.5vw, 3.6rem);
         }
 
-        .spec {
-          align-self: start;
+        .kicker,
+        .number {
+          margin-bottom: 14px;
+          font-size: 0.66rem;
+        }
+
+        .lead {
+          margin-top: 18px;
+          font-size: 0.94rem;
+          line-height: 1.58;
+        }
+
+        .feature-list {
+          gap: 8px;
+          margin-top: 18px;
+          font-size: 0.88rem;
         }
 
         .actions {
           display: grid;
           grid-template-columns: 1fr;
+          gap: 10px;
+          margin-top: 22px;
         }
 
         .button {
           width: 100%;
         }
 
-        .scroll-cue {
+        .visual {
+          width: min(100%, 286px);
+          margin: 0 auto;
+        }
+
+        .visual::before {
+          inset: 12px;
+        }
+
+        .visual-caption {
+          left: 16px;
+          right: 16px;
+          bottom: 12px;
+          font-size: 0.58rem;
+        }
+      }
+
+      @media (max-height: 760px) and (max-width: 900px) {
+        .visual {
+          width: min(100%, 230px);
+        }
+
+        .feature-list {
           display: none;
         }
       }
@@ -416,7 +464,7 @@
     </header>
 
     <aside class="pager" aria-label="Page navigation">
-      <a href="#intro" aria-label="Intro"></a>
+      <a class="active" href="#intro" aria-label="Intro"></a>
       <a href="#routing" aria-label="Routing"></a>
       <a href="#policy" aria-label="Policy"></a>
       <a href="#observability" aria-label="Observability"></a>
@@ -439,20 +487,26 @@
               <a class="button" href="https://github.com/lianluo-esign/ferrogate">GitHub</a>
             </div>
           </div>
-          <div class="spec" aria-label="Protocol summary">
-            <div class="spec-row">
-              <span>Runtime</span>
-              <strong>Pingora edge proxy</strong>
-            </div>
-            <div class="spec-row">
-              <span>API</span>
-              <strong>OpenAI-compatible</strong>
-            </div>
-            <div class="spec-row">
-              <span>Mode</span>
-              <strong>Self-hosted control plane</strong>
-            </div>
-          </div>
+          <figure class="visual" aria-label="Control-plane boundary illustration">
+            <svg viewBox="0 0 300 300" role="img" aria-label="A central control plane surrounded by provider nodes">
+              <circle class="thin" cx="150" cy="150" r="104" />
+              <circle class="thin" cx="150" cy="150" r="68" />
+              <circle class="fill-soft" cx="150" cy="150" r="34" />
+              <line class="thin" x1="150" y1="46" x2="150" y2="116" />
+              <line class="thin" x1="254" y1="150" x2="184" y2="150" />
+              <line class="thin" x1="150" y1="254" x2="150" y2="184" />
+              <line class="thin" x1="46" y1="150" x2="116" y2="150" />
+              <circle class="dot" cx="150" cy="46" r="4" />
+              <circle class="dot" cx="254" cy="150" r="4" />
+              <circle class="dot" cx="150" cy="254" r="4" />
+              <circle class="dot" cx="46" cy="150" r="4" />
+              <text class="label-text" x="126" y="154">CONTROL</text>
+            </svg>
+            <figcaption class="visual-caption">
+              <span>one surface</span>
+              <span>many providers</span>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
@@ -472,19 +526,28 @@
               <li>Streaming and non-streaming chat completions share one gateway path.</li>
             </ul>
           </div>
-          <div class="terminal" aria-label="Routing example">
-            <div class="terminal-head">
-              <span>model-map</span>
-              <span>/v1/chat/completions</span>
-            </div>
-            <pre>fast-chat
-  -> openai:gpt-4o-mini
-  -> azure:gpt-4o-mini
-
-safe-long
-  -> anthropic:claude
-  -> gemini:flash</pre>
-          </div>
+          <figure class="visual" aria-label="Provider routing illustration">
+            <svg viewBox="0 0 300 300" role="img" aria-label="Logical models routed through a gateway to providers">
+              <rect class="fill-soft" x="34" y="120" width="72" height="60" rx="10" />
+              <rect class="fill-soft" x="194" y="48" width="72" height="42" rx="10" />
+              <rect class="fill-soft" x="194" y="129" width="72" height="42" rx="10" />
+              <rect class="fill-soft" x="194" y="210" width="72" height="42" rx="10" />
+              <circle class="fill-soft" cx="150" cy="150" r="28" />
+              <polyline class="stroke" points="106,150 122,150 122,150 150,150" />
+              <polyline class="thin" points="178,138 194,69" />
+              <polyline class="thin" points="178,150 194,150" />
+              <polyline class="thin" points="178,162 194,231" />
+              <circle class="dot" cx="150" cy="150" r="4" />
+              <text class="label-text" x="50" y="154">MODEL</text>
+              <text class="label-text" x="210" y="73">P01</text>
+              <text class="label-text" x="210" y="154">P02</text>
+              <text class="label-text" x="210" y="235">P03</text>
+            </svg>
+            <figcaption class="visual-caption">
+              <span>logical model</span>
+              <span>fallback graph</span>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
@@ -504,17 +567,28 @@ safe-long
               <li>Token reservations prevent budget overspend during requests.</li>
             </ul>
           </div>
-          <div class="terminal" aria-label="Policy example">
-            <div class="terminal-head">
-              <span>api-key</span>
-              <span>tenant boundary</span>
-            </div>
-            <pre>key_dev
-  scopes: models.read chat.completions
-  allowed_models: fast-chat
-  request_limit_per_minute: 60
-  monthly_token_budget: 1000000</pre>
-          </div>
+          <figure class="visual" aria-label="Policy key illustration">
+            <svg viewBox="0 0 300 300" role="img" aria-label="A virtual key passes through policy gates">
+              <circle class="fill-soft" cx="86" cy="150" r="28" />
+              <line class="stroke" x1="114" y1="150" x2="174" y2="150" />
+              <line class="stroke" x1="146" y1="134" x2="146" y2="166" />
+              <line class="stroke" x1="164" y1="138" x2="164" y2="162" />
+              <rect class="thin" x="184" y="78" width="54" height="144" rx="8" />
+              <line class="thin" x1="184" y1="114" x2="238" y2="114" />
+              <line class="thin" x1="184" y1="150" x2="238" y2="150" />
+              <line class="thin" x1="184" y1="186" x2="238" y2="186" />
+              <circle class="dot" cx="86" cy="150" r="5" />
+              <text class="label-text" x="60" y="205">KEY</text>
+              <text class="label-text" x="194" y="102">SCOPE</text>
+              <text class="label-text" x="194" y="138">MODEL</text>
+              <text class="label-text" x="194" y="174">RATE</text>
+              <text class="label-text" x="194" y="210">BUDGET</text>
+            </svg>
+            <figcaption class="visual-caption">
+              <span>identity</span>
+              <span>budget gate</span>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
@@ -534,18 +608,24 @@ safe-long
               <li>Admin endpoints expose status, models, providers, logs, and metrics.</li>
             </ul>
           </div>
-          <div class="terminal" aria-label="Observability example">
-            <div class="terminal-head">
+          <figure class="visual" aria-label="Observability signal illustration">
+            <svg viewBox="0 0 300 300" role="img" aria-label="Signals are collected into logs metrics and billing">
+              <polyline class="stroke" points="38,196 74,164 108,178 142,104 176,126 212,76 260,94" />
+              <line class="thin" x1="38" y1="224" x2="260" y2="224" />
+              <line class="thin" x1="58" y1="82" x2="58" y2="224" />
+              <rect class="fill-soft" x="78" y="204" width="28" height="20" rx="4" />
+              <rect class="fill-soft" x="126" y="166" width="28" height="58" rx="4" />
+              <rect class="fill-soft" x="174" y="140" width="28" height="84" rx="4" />
+              <rect class="fill-soft" x="222" y="112" width="28" height="112" rx="4" />
+              <circle class="dot" cx="142" cy="104" r="4" />
+              <circle class="dot" cx="212" cy="76" r="4" />
+              <text class="label-text" x="68" y="62">TRACE / USAGE / BILLING</text>
+            </svg>
+            <figcaption class="visual-caption">
+              <span>trace ids</span>
               <span>settlement</span>
-              <span>metrics + billing</span>
-            </div>
-            <pre>request_id: fg_00042
-model: fast-chat
-provider: openai
-tokens_in: 728
-tokens_out: 184
-status: committed</pre>
-          </div>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
@@ -564,20 +644,163 @@ status: committed</pre>
               <a class="button" href="./docs.html#deployment">Deployment Checklist</a>
             </div>
           </div>
-          <div class="terminal" aria-label="Quick start">
-            <div class="terminal-head">
-              <span>quick-start</span>
-              <span>local</span>
-            </div>
-            <pre>cargo run -- run --config Ferrogate/Caddyfile
-curl http://127.0.0.1:8080/healthz
-curl -H 'Authorization: Bearer dev-secret' \
-  http://127.0.0.1:8080/v1/models</pre>
-          </div>
+          <figure class="visual" aria-label="Deployment boundary illustration">
+            <svg viewBox="0 0 300 300" role="img" aria-label="A gateway server protected by TLS inside an infrastructure boundary">
+              <rect class="thin" x="58" y="54" width="184" height="192" rx="18" />
+              <rect class="fill-soft" x="90" y="86" width="120" height="34" rx="8" />
+              <rect class="fill-soft" x="90" y="136" width="120" height="34" rx="8" />
+              <rect class="fill-soft" x="90" y="186" width="120" height="34" rx="8" />
+              <circle class="dot" cx="108" cy="103" r="3" />
+              <circle class="dot" cx="108" cy="153" r="3" />
+              <circle class="dot" cx="108" cy="203" r="3" />
+              <path class="stroke" d="M222 119 h24 v74 h-54 v-74 h24 v-18 c0-18 30-18 30 0 v18" />
+              <line class="thin" x1="78" y1="252" x2="222" y2="252" />
+              <text class="label-text" x="102" y="270">SELF-HOSTED EDGE</text>
+            </svg>
+            <figcaption class="visual-caption">
+              <span>validated config</span>
+              <span>tls boundary</span>
+            </figcaption>
+          </figure>
         </div>
       </section>
     </main>
 
     <div class="scroll-cue" aria-hidden="true">SCROLL</div>
+
+    <script>
+      (() => {
+        const scroller = document.querySelector(".slides");
+        const slides = Array.from(document.querySelectorAll(".slide"));
+        const pagerLinks = Array.from(document.querySelectorAll(".pager a"));
+        const navLinks = Array.from(document.querySelectorAll('a[href^="#"]'));
+        const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+        let activeIndex = 0;
+        let animating = false;
+        let touchStartY = 0;
+
+        function clamp(index) {
+          return Math.max(0, Math.min(slides.length - 1, index));
+        }
+
+        function easeInOutCubic(t) {
+          return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        }
+
+        function setActive(index) {
+          activeIndex = clamp(index);
+          pagerLinks.forEach((link, i) => link.classList.toggle("active", i === activeIndex));
+          const id = slides[activeIndex].id;
+          if (location.hash !== `#${id}`) {
+            history.replaceState(null, "", `#${id}`);
+          }
+        }
+
+        function animateTo(index) {
+          const targetIndex = clamp(index);
+          if (targetIndex === activeIndex && !animating) return;
+
+          const start = scroller.scrollTop;
+          const target = slides[targetIndex].offsetTop;
+          const distance = target - start;
+          const duration = prefersReducedMotion.matches ? 0 : 1150;
+          const started = performance.now();
+          animating = true;
+          setActive(targetIndex);
+
+          if (duration === 0 || Math.abs(distance) < 2) {
+            scroller.scrollTop = target;
+            animating = false;
+            return;
+          }
+
+          function frame(now) {
+            const progress = Math.min(1, (now - started) / duration);
+            scroller.scrollTop = start + distance * easeInOutCubic(progress);
+            if (progress < 1) {
+              requestAnimationFrame(frame);
+            } else {
+              scroller.scrollTop = target;
+              window.setTimeout(() => {
+                animating = false;
+              }, 80);
+            }
+          }
+
+          requestAnimationFrame(frame);
+        }
+
+        function syncFromScroll() {
+          if (animating) return;
+          const nearest = slides.reduce((best, slide, index) => {
+            const delta = Math.abs(slide.offsetTop - scroller.scrollTop);
+            return delta < best.delta ? { index, delta } : best;
+          }, { index: activeIndex, delta: Infinity });
+          setActive(nearest.index);
+        }
+
+        scroller.addEventListener("wheel", (event) => {
+          if (event.ctrlKey) return;
+          event.preventDefault();
+          if (animating || Math.abs(event.deltaY) < 8) return;
+          animateTo(activeIndex + (event.deltaY > 0 ? 1 : -1));
+        }, { passive: false });
+
+        scroller.addEventListener("touchstart", (event) => {
+          touchStartY = event.touches[0].clientY;
+        }, { passive: true });
+
+        scroller.addEventListener("touchmove", (event) => {
+          if (!touchStartY) return;
+          event.preventDefault();
+        }, { passive: false });
+
+        scroller.addEventListener("touchend", (event) => {
+          const endY = event.changedTouches[0].clientY;
+          const delta = touchStartY - endY;
+          touchStartY = 0;
+          if (Math.abs(delta) > 42) {
+            animateTo(activeIndex + (delta > 0 ? 1 : -1));
+          }
+        }, { passive: true });
+
+        window.addEventListener("keydown", (event) => {
+          if (["ArrowDown", "PageDown", " "].includes(event.key)) {
+            event.preventDefault();
+            animateTo(activeIndex + 1);
+          }
+          if (["ArrowUp", "PageUp"].includes(event.key)) {
+            event.preventDefault();
+            animateTo(activeIndex - 1);
+          }
+          if (event.key === "Home") {
+            event.preventDefault();
+            animateTo(0);
+          }
+          if (event.key === "End") {
+            event.preventDefault();
+            animateTo(slides.length - 1);
+          }
+        });
+
+        navLinks.forEach((link) => {
+          link.addEventListener("click", (event) => {
+            const id = link.getAttribute("href").slice(1);
+            const index = slides.findIndex((slide) => slide.id === id);
+            if (index >= 0) {
+              event.preventDefault();
+              animateTo(index);
+            }
+          });
+        });
+
+        scroller.addEventListener("scroll", syncFromScroll, { passive: true });
+        window.addEventListener("resize", () => animateTo(activeIndex));
+
+        const initialIndex = slides.findIndex((slide) => `#${slide.id}` === location.hash);
+        scroller.scrollTop = slides[Math.max(0, initialIndex)].offsetTop;
+        setActive(Math.max(0, initialIndex));
+      })();
+    </script>
   </body>
 </html>
