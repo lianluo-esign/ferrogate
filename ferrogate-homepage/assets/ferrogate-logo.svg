@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">FerroGate logo</title>
+  <desc id="desc">A hexagonal gateway boundary with two gate pillars and a central routing node.</desc>
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M32 6 52 17v30L32 58 12 47V17L32 6Z" stroke-width="2.4"/>
+    <path d="M24 19v26M40 19v26M24 32h16" stroke-width="2.4"/>
+    <path d="M18 46 46 18" stroke-width="1.4" opacity=".42"/>
+  </g>
+  <circle cx="32" cy="32" r="3.6" fill="currentColor"/>
+</svg>

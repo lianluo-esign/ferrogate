@@ -107,36 +107,36 @@
       }
 
       .mark {
-        position: relative;
         width: 32px;
         height: 32px;
         flex: 0 0 auto;
-        border: 1px solid rgba(255, 255, 255, 0.34);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.035);
+        color: var(--text);
       }
 
-      .mark::before,
-      .mark::after {
-        position: absolute;
-        content: "";
-        background: var(--green);
+      .mark svg {
+        display: block;
+        width: 100%;
+        height: 100%;
       }
 
-      .mark::before {
-        top: 7px;
-        bottom: 7px;
-        left: 10px;
-        width: 1px;
-        box-shadow: 9px 0 0 var(--cyan);
+      .mark .stroke,
+      .mark .thin {
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
 
-      .mark::after {
-        top: 15px;
-        left: 7px;
-        width: 18px;
-        height: 1px;
-        background: var(--amber);
+      .mark .stroke {
+        stroke-width: 2.4;
+      }
+
+      .mark .thin {
+        stroke-width: 1.4;
+      }
+
+      .mark .dot {
+        fill: currentColor;
       }
 
       nav {
@@ -422,7 +422,14 @@
     <main class="page">
       <header>
         <a class="brand" href="./" aria-label="FerroGate home">
-          <span class="mark" aria-hidden="true"></span>
+          <span class="mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64" focusable="false">
+              <path class="thin" d="M32 6 52 17v30L32 58 12 47V17L32 6Z" />
+              <path class="stroke" d="M24 19v26M40 19v26M24 32h16" />
+              <path class="thin" d="M18 46 46 18" opacity=".42" />
+              <circle class="dot" cx="32" cy="32" r="3.6" />
+            </svg>
+          </span>
           <span>FerroGate</span>
         </a>
         <nav aria-label="Primary">

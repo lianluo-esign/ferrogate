@@ -16,3 +16,7 @@ The FerroGate runtime also embeds these pages:
 
 This keeps the product landing page and quick-start documentation aligned
 between the repository website and a running gateway.
+
+The standalone vector logo lives at `assets/ferrogate-logo.svg`. The embedded
+runtime pages inline the same mark so they do not depend on a separate static
+asset route.
