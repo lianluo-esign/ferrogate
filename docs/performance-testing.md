@@ -14,7 +14,9 @@ planning:
 - Staged target request rates: 20k, 50k, and 100k requests per second.
 - Five-minute sustained stages for stability observation.
 - FerroGate process CPU and RSS sampling during the full run.
+- Host network RX/TX throughput sampling during the full run.
 - Per-second latency curves with p50, p95, p99, and max latency.
+- Ready-to-share SVG charts embedded in the generated Markdown summary.
 - Raw Vegeta result files for deeper post-processing.
 
 ## Required Tools
@@ -51,6 +53,7 @@ then run:
 scripts/perf-gateway-report.sh \
   --url http://127.0.0.1:8088/local/proxy-check \
   --pid "$(pgrep -n ferrogate)" \
+  --net-device lo \
   --connections 10000 \
   --rates 20000,50000,100000 \
   --duration 5m
@@ -86,6 +89,7 @@ scripts/perf-gateway-report.sh \
   --header 'Content-Type: application/json' \
   --body-file /tmp/ferrogate-chat-body.json \
   --pid "$(pgrep -n ferrogate)" \
+  --net-device lo \
   --connections 10000 \
   --rates 20000,50000,100000 \
   --duration 5m
@@ -101,10 +105,14 @@ By default reports are written under `perf-reports/<UTC timestamp>/`.
 Important files:
 
 - `summary.md`: human-readable stage summary.
-- `process-metrics.csv`: timestamped CPU and RSS samples.
+- `overview.svg`: target RPS vs achieved RPS with p99 labels.
+- `resource-usage.svg`: CPU and RSS curves.
+- `network-io.svg`: RX/TX Mbps curves for the selected network device.
+- `process-metrics.csv`: timestamped CPU, RSS, RX, and TX samples.
 - `stages.csv`: stage index with paths to generated artifacts.
 - `rps-*.aggregate.json`: aggregate Vegeta metrics for each stage.
 - `rps-*.latency-curve.csv`: per-second p50/p95/p99/max latency curve.
+- `rps-*.latency.svg`: per-stage latency curve image.
 - `rps-*.histogram.txt`: latency histogram.
 - `rps-*.plot.html`: Vegeta HTML plot.
 - `rps-*.bin`: raw Vegeta binary results.
@@ -118,10 +126,14 @@ Treat a run as suspicious when:
 - p99 or max latency trends upward across the 5-minute stage.
 - RSS grows monotonically and does not stabilize after warmup.
 - CPU climbs over time at a fixed RPS without a matching throughput increase.
+- RX/TX throughput diverges unexpectedly from achieved RPS or keeps rising
+  after traffic stops.
 
-Use the latency curve CSVs to draw the time-series view. A stable stage should
-show mostly flat p95/p99 after warmup. A rising p99 curve under fixed RPS is a
-stronger regression signal than a single aggregate p99 number.
+Open `summary.md` first. It embeds `overview.svg`, `resource-usage.svg`,
+`network-io.svg`, and each per-stage `rps-*.latency.svg`. Use the latency CSVs
+when you need to feed the same data into external dashboards. A stable stage
+should show mostly flat p95/p99 after warmup. A rising p99 curve under fixed
+RPS is a stronger regression signal than a single aggregate p99 number.
 
 ## Why This Is Not In CI
 
