@@ -105,6 +105,8 @@ By default reports are written under `perf-reports/<UTC timestamp>/`.
 Committed report snapshots live under `docs/performance-reports/`. The local
 workstation baseline for the first date-based release is available at
 `docs/performance-reports/v2026.05.05-local/`.
+The local 100k-connection stress attempt and client-port limit finding report is
+available at `docs/performance-reports/v2026.05.05-local-100k/`.
 
 Important files:
 

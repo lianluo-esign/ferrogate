@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" role="img" aria-label="FerroGate performance overview">
+<rect width="100%" height="100%" fill="#0b0b0c"/>
+<text x="76" y="36" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="20" font-weight="700">FerroGate performance overview</text>
+<text x="76" y="58" fill="#9ca3af" font-family="Arial, sans-serif" font-size="12">target RPS vs achieved RPS, with p99 labels</text>
+<line x1="76" y1="72.0" x2="922" y2="72.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="76.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">100000</text>
+<line x1="76" y1="141.0" x2="922" y2="141.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="145.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">75000</text>
+<line x1="76" y1="210.0" x2="922" y2="210.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="214.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">50000</text>
+<line x1="76" y1="279.0" x2="922" y2="279.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="283.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">25000</text>
+<line x1="76" y1="348.0" x2="922" y2="348.0" stroke="#20242a" stroke-width="1"/>
+<text x="18" y="352.0" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">0</text>
+<rect x="152.0" y="292.8" width="62.0" height="55.2" fill="#334155" rx="3"/>
+<rect x="220.0" y="292.8" width="62.0" height="55.2" fill="#38bdf8" rx="3"/>
+<text x="217.0" y="372" text-anchor="middle" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">20000 RPS</text>
+<text x="217.0" y="284.8" text-anchor="middle" fill="#f97316" font-family="Arial, sans-serif" font-size="12">p99 5.2ms</text>
+<text x="217.0" y="392.0" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">success 1.000</text>
+<rect x="434.0" y="210.0" width="62.0" height="138.0" fill="#334155" rx="3"/>
+<rect x="502.0" y="342.6" width="62.0" height="5.4" fill="#38bdf8" rx="3"/>
+<text x="499.0" y="372" text-anchor="middle" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">50000 RPS</text>
+<text x="499.0" y="202.0" text-anchor="middle" fill="#f97316" font-family="Arial, sans-serif" font-size="12">p99 10249.8ms</text>
+<text x="499.0" y="392.0" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">success 0.230</text>
+<rect x="716.0" y="72.0" width="62.0" height="276.0" fill="#334155" rx="3"/>
+<rect x="784.0" y="338.1" width="62.0" height="9.9" fill="#38bdf8" rx="3"/>
+<text x="781.0" y="372" text-anchor="middle" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">100000 RPS</text>
+<text x="781.0" y="64.0" text-anchor="middle" fill="#f97316" font-family="Arial, sans-serif" font-size="12">p99 8093.9ms</text>
+<text x="781.0" y="392.0" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="11">success 0.400</text>
+<rect x="738" y="26" width="14" height="14" fill="#334155" rx="2"/><text x="758" y="38" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">target</text>
+<rect x="812" y="26" width="14" height="14" fill="#38bdf8" rx="2"/><text x="832" y="38" fill="#d1d5db" font-family="Arial, sans-serif" font-size="12">achieved</text>
+</svg>
