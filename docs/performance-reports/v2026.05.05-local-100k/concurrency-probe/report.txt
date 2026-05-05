@@ -1,0 +1,10 @@
+Requests      [total, rate, throughput]  89998, 2999.94, 886.65
+Duration      [total, attack, wait]      40.000130238s, 29.999915789s, 10.000214449s
+Latencies     [mean, 50, 95, 99, max]    3.949076973s, 2.623274ms, 10.001353735s, 10.140028679s, 10.816000334s
+Bytes In      [total, mean]              4149522, 46.11
+Bytes Out     [total, mean]              0, 0.00
+Success       [ratio]                    39.41%
+Status Codes  [code:count]               0:53702  200:35466  502:830  
+Error Set:
+Get "http://127.0.0.1:8088/local/proxy-check?sleep_ms=10000&from=concurrency-probe": dial tcp 0.0.0.0:0->127.0.0.1:8088: bind: address already in use
+502 Bad Gateway
