@@ -1,5 +1,7 @@
 # FerroGate
 
+**Language:** English | [简体中文](README.zh-CN.md)
+
 FerroGate is an open-source Rust API gateway and AI gateway built on
 Cloudflare Pingora. It gives teams a self-hostable control point for LLM
 traffic: routing, virtual API keys, provider adapters, policy checks, token
