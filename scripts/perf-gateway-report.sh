@@ -344,9 +344,27 @@ write_latency_curve() {
   echo "epoch,iso8601,count,p50_ms,p95_ms,p99_ms,max_ms" >"$curve_csv"
   vegeta encode -to=json "$results_bin" |
     jq -s -r '
+      def rfc3339_epoch:
+        capture("^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T(?<hour>[0-9]{2}):(?<minute>[0-9]{2}):(?<second>[0-9]{2})(?:\\.[0-9]+)?(?<tz>Z|(?<sign>[+-])(?<offset_hour>[0-9]{2}):(?<offset_minute>[0-9]{2}))$") as $ts
+        | ([
+            ($ts.year | tonumber),
+            (($ts.month | tonumber) - 1),
+            ($ts.day | tonumber),
+            ($ts.hour | tonumber),
+            ($ts.minute | tonumber),
+            ($ts.second | tonumber)
+          ] | mktime)
+        - (
+            if $ts.tz == "Z" then
+              0
+            else
+              ((if $ts.sign == "+" then 1 else -1 end)
+                * ((($ts.offset_hour | tonumber) * 3600) + (($ts.offset_minute | tonumber) * 60)))
+            end
+          );
       map(select(.error == "" or .error == null))
       | map([
-          ((.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) | floor),
+          ((.timestamp | rfc3339_epoch) | floor),
           (.latency / 1000000)
         ])
       | group_by(.[0])[]
