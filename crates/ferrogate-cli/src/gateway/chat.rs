@@ -7,7 +7,8 @@ use tracing::{info, warn};
 use crate::{
     auth::authenticate,
     responses::{
-        write_json_error, write_json_response, write_raw_response, write_streaming_response,
+        write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
+        write_streaming_response,
     },
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
@@ -62,7 +63,31 @@ impl FerroGateway {
             }
         };
 
-        let body = read_request_body(session, 1024 * 1024).await?;
+        let body = match read_request_body(session, 1024 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                self.record_chat_error_log(
+                    ctx,
+                    auth.tenant_context(),
+                    None,
+                    None,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                );
+                write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
         let body_json: serde_json::Value = match serde_json::from_slice(&body) {
             Ok(request) => request,
             Err(error) => {
@@ -199,6 +224,7 @@ impl FerroGateway {
         let estimated_usage = estimate_chat_completion_usage(&body_json);
         let dispatch_timeout = state.provider_dispatch_timeout();
         let max_dispatch_retries = state.provider_dispatch_max_retries();
+        let provider_response_body_max_bytes = state.provider_response_body_max_bytes();
         let mut token_reservation = None;
 
         'routes: for (candidate_index, model_route) in routes.iter().enumerate() {
@@ -566,7 +592,11 @@ impl FerroGateway {
 
             let mut attempt = 0;
             loop {
-                match dispatch_provider_request(&prepared, dispatch_timeout) {
+                match dispatch_provider_request(
+                    &prepared,
+                    dispatch_timeout,
+                    provider_response_body_max_bytes,
+                ) {
                     Ok(response) => {
                         if response.status.is_client_error() || response.status.is_server_error() {
                             let retryable_status = state

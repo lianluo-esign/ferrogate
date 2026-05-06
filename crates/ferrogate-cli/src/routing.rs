@@ -1,5 +1,7 @@
 use anyhow::{bail, Context, Result as AnyResult};
-use http::{HeaderMap, HeaderName, Uri};
+use http::Uri;
+#[cfg(test)]
+use http::{HeaderMap, HeaderName};
 
 use crate::config::RouteRule;
 
@@ -13,6 +15,7 @@ pub(crate) struct UpstreamEndpoint {
 }
 
 impl RouteRule {
+    #[cfg(test)]
     pub(crate) fn matches_request(
         &self,
         host: Option<&str>,
@@ -123,6 +126,7 @@ pub(crate) fn build_target_url(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn build_target_path_query(
     upstream_url: &str,
     route: &RouteRule,
@@ -131,17 +135,23 @@ pub(crate) fn build_target_path_query(
 ) -> AnyResult<String> {
     let endpoint = parse_upstream_endpoint(upstream_url)?;
     let rewritten = route.rewrite_path(original_path);
-    let mut path = join_url_path(&endpoint.base_path, &rewritten);
+    Ok(build_target_uri(&endpoint, &rewritten, query)?.to_string())
+}
+
+pub(crate) fn build_target_uri(
+    endpoint: &UpstreamEndpoint,
+    rewritten_path: &str,
+    query: Option<&str>,
+) -> AnyResult<Uri> {
+    let mut path = join_url_path(&endpoint.base_path, rewritten_path);
     if let Some(query) = query {
         if !query.is_empty() {
             path.push('?');
             path.push_str(query);
         }
     }
-    let _: Uri = path
-        .parse()
-        .with_context(|| format!("invalid target path {path}"))?;
-    Ok(path)
+    path.parse()
+        .with_context(|| format!("invalid target path {path}"))
 }
 
 fn ensure_leading_slash(path: &str) -> String {

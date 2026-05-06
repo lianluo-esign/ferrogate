@@ -1,16 +1,21 @@
 use bytes::Bytes;
 use pingora::{proxy::Session, Result as PingoraResult};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RequestBodyTooLarge {
+    pub(super) max_bytes: usize,
+}
+
 pub(super) async fn read_request_body(
     session: &mut Session,
     max_bytes: usize,
-) -> PingoraResult<Bytes> {
+) -> PingoraResult<Result<Bytes, RequestBodyTooLarge>> {
     let mut body = Vec::new();
     while let Some(chunk) = session.as_downstream_mut().read_request_body().await? {
         if body.len() + chunk.len() > max_bytes {
-            break;
+            return Ok(Err(RequestBodyTooLarge { max_bytes }));
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(Bytes::from(body))
+    Ok(Ok(Bytes::from(body)))
 }

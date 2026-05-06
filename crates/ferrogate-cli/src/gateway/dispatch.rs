@@ -41,20 +41,23 @@ impl Read for ProviderBodyReader {
 pub(super) fn dispatch_provider_request(
     request: &ProviderHttpRequest,
     timeout: Duration,
+    max_body_bytes: usize,
 ) -> AnyResult<ProviderHttpResponse> {
     let target = parse_provider_target(&request.endpoint)?;
     let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
     let mut stream = connect_provider(&target, timeout)?;
 
     match target.scheme {
-        ProviderScheme::Http => send_provider_http_request(&mut stream, &target, request, &body),
+        ProviderScheme::Http => {
+            send_provider_http_request(&mut stream, &target, request, &body, max_body_bytes)
+        }
         ProviderScheme::Https => {
             let server_name = ServerName::try_from(target.host.clone())
                 .with_context(|| format!("invalid provider TLS server name {}", target.host))?;
             let connection = ClientConnection::new(tls_client_config()?, server_name)
                 .context("failed to initialize provider TLS client")?;
             let mut tls_stream = StreamOwned::new(connection, stream);
-            send_provider_http_request(&mut tls_stream, &target, request, &body)
+            send_provider_http_request(&mut tls_stream, &target, request, &body, max_body_bytes)
         }
     }
 }
@@ -115,11 +118,16 @@ fn send_provider_http_request<S: Read + Write>(
     target: &ProviderTarget,
     request: &ProviderHttpRequest,
     body: &[u8],
+    max_body_bytes: usize,
 ) -> AnyResult<ProviderHttpResponse> {
     write_provider_http_request(stream, target, request, body)?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    parse_provider_response(&raw)
+    let (status, content_type, initial_body) = read_provider_response_head(stream)?;
+    let body = read_provider_response_body(stream, initial_body, max_body_bytes)?;
+    Ok(ProviderHttpResponse {
+        status,
+        content_type,
+        body,
+    })
 }
 
 fn write_provider_http_request<S: Write>(
@@ -236,6 +244,7 @@ fn parse_provider_target(raw: &str) -> AnyResult<ProviderTarget> {
     })
 }
 
+#[cfg(test)]
 fn parse_provider_response(raw: &[u8]) -> AnyResult<ProviderHttpResponse> {
     let split = raw
         .windows(4)
@@ -276,6 +285,34 @@ fn read_provider_response_head<S: Read>(
     let initial_body = raw[split + 4..].to_vec();
     let (status, content_type) = parse_provider_response_head(header_bytes)?;
     Ok((status, content_type, initial_body))
+}
+
+fn read_provider_response_body<S: Read>(
+    stream: &mut S,
+    mut body: Vec<u8>,
+    max_body_bytes: usize,
+) -> AnyResult<Vec<u8>> {
+    if body.len() > max_body_bytes {
+        bail!(
+            "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
+        );
+    }
+
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .context("failed to read provider response body")?;
+        if read == 0 {
+            return Ok(body);
+        }
+        if body.len() + read > max_body_bytes {
+            bail!(
+                "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
+            );
+        }
+        body.extend_from_slice(&buffer[..read]);
+    }
 }
 
 fn parse_provider_response_head(header_bytes: &[u8]) -> AnyResult<(StatusCode, String)> {
@@ -423,7 +460,8 @@ mod tests {
         };
 
         let started = Instant::now();
-        let error = dispatch_provider_request(&request, Duration::from_millis(50)).unwrap_err();
+        let error =
+            dispatch_provider_request(&request, Duration::from_millis(50), 16 * 1024).unwrap_err();
 
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(!error.to_string().is_empty());

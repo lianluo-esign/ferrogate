@@ -10,8 +10,10 @@ use std::{
 };
 
 use crate::config::{
-    config_snapshot_id, Config, Model, PolicyRule as ConfigPolicyRule, Provider, Upstream,
+    config_snapshot_id, resolve_env_placeholders, AccessLogMode, Config, HeaderMutation, Model,
+    PolicyRule as ConfigPolicyRule, Provider, RouteRule, StorageConfig, Upstream,
 };
+use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
     TokenUsage as BillingTokenUsage,
@@ -33,8 +35,9 @@ use ferrogate_storage::{
     AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredAuditEvent,
     StoredRequestLog, StoredUsageAggregate,
 };
-use http::Uri;
+use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 use serde::Serialize;
+use tracing::warn;
 
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
 pub(crate) const RELOAD_MODE_LISTENER_LEVEL_REQUIRED: &str = "listener-level-required";
@@ -148,6 +151,8 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     pub(crate) providers: Arc<HashMap<String, Provider>>,
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
+    runtime_routes: Arc<Vec<RuntimeRoute>>,
+    runtime_upstreams: Arc<HashMap<String, RuntimeUpstream>>,
     model_visibility: Arc<HashMap<String, ModelVisibility>>,
     model_prices: Arc<HashMap<String, ModelPrice>>,
     model_registry: Arc<ModelRegistry>,
@@ -160,10 +165,42 @@ pub(crate) struct AppState {
     request_logs: Arc<Mutex<InMemoryAppendRepository<StoredRequestLog>>>,
     audit_events: Arc<Mutex<InMemoryAppendRepository<StoredAuditEvent>>>,
     usage_aggregates: Arc<Mutex<InMemoryRepository<StoredUsageAggregate>>>,
+    metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
+    access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeRoute {
+    pub(crate) config: RouteRule,
+    match_headers: Vec<RuntimeHeaderMatcher>,
+    pub(crate) request_headers: Vec<RuntimeHeaderMutation>,
+    pub(crate) response_headers: Vec<RuntimeHeaderMutation>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeHeaderMatcher {
+    name: HeaderName,
+    value: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeHeaderMutation {
+    pub(crate) name: HeaderName,
+    pub(crate) value: HeaderValue,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeUpstream {
+    endpoints: Vec<RuntimeUpstreamEndpoint>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeUpstreamEndpoint {
+    pub(crate) endpoint: crate::routing::UpstreamEndpoint,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +212,240 @@ pub(crate) struct AdminAuditEventDraft {
     pub(crate) target: String,
     pub(crate) outcome: String,
     pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdminPagination {
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AdminPage<T> {
+    pub(crate) data: Vec<T>,
+    pub(crate) total: usize,
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+}
+
+#[derive(Debug, Default)]
+struct GatewayMetricsAccumulator {
+    request_log_total: u64,
+    request_error_total: u64,
+    request_status_totals: BTreeMap<u16, u64>,
+    billing_event_total: u64,
+    token_totals: TokenMetricTotals,
+    cost_totals: BTreeMap<String, f64>,
+    model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
+}
+
+#[derive(Debug)]
+struct AccessLogRateLimiter {
+    window_second: AtomicU64,
+    count: AtomicU64,
+}
+
+impl Default for AccessLogRateLimiter {
+    fn default() -> Self {
+        Self {
+            window_second: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AccessLogRateLimiter {
+    fn allow(&self, now_second: u64, limit: u64) -> bool {
+        let current = self.window_second.load(Ordering::Relaxed);
+        if current != now_second
+            && self
+                .window_second
+                .compare_exchange(current, now_second, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.count.store(0, Ordering::Relaxed);
+        }
+
+        self.count.fetch_add(1, Ordering::Relaxed) < limit
+    }
+}
+
+impl AdminPagination {
+    fn from_query(query: Option<&str>, default_limit: usize, max_limit: usize) -> Self {
+        let mut offset = 0;
+        let mut limit = default_limit;
+
+        if let Some(query) = query {
+            for (name, value) in query.split('&').filter_map(|part| part.split_once('=')) {
+                match name {
+                    "offset" => {
+                        offset = value.parse().unwrap_or(offset);
+                    }
+                    "limit" => {
+                        limit = value.parse().unwrap_or(limit);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if limit == 0 {
+            limit = default_limit;
+        }
+        limit = limit.min(max_limit);
+
+        Self { offset, limit }
+    }
+}
+
+impl GatewayMetricsAccumulator {
+    fn record_request_log(&mut self, log: &StoredRequestLog) {
+        self.request_log_total = self.request_log_total.saturating_add(1);
+        if log.status_code >= 400 || log.error_code.is_some() {
+            self.request_error_total = self.request_error_total.saturating_add(1);
+        }
+        *self
+            .request_status_totals
+            .entry(log.status_code)
+            .or_default() += 1;
+    }
+
+    fn record_billing_event(&mut self, event: &BillingEvent) {
+        self.billing_event_total = self.billing_event_total.saturating_add(1);
+        self.token_totals.prompt_tokens += event.usage.prompt_tokens;
+        self.token_totals.completion_tokens += event.usage.completion_tokens;
+        self.token_totals.total_tokens += event.usage.total_tokens;
+
+        if let Some(cost) = &event.cost {
+            *self.cost_totals.entry(cost.currency.clone()).or_default() += cost.total_cost;
+        }
+
+        let key = (event.logical_model.clone(), event.provider.clone());
+        let total =
+            self.model_provider_totals
+                .entry(key)
+                .or_insert_with(|| ModelProviderMetricTotal {
+                    logical_model: event.logical_model.clone(),
+                    provider: event.provider.clone(),
+                    requests: 0,
+                    total_tokens: 0,
+                });
+        total.requests += 1;
+        total.total_tokens += event.usage.total_tokens;
+    }
+
+    fn snapshot(&self, service_name: String) -> GatewayMetricsSnapshot {
+        GatewayMetricsSnapshot {
+            service_name,
+            request_log_total: self.request_log_total,
+            request_error_total: self.request_error_total,
+            request_status_totals: self
+                .request_status_totals
+                .iter()
+                .map(|(status_code, count)| RequestStatusMetric {
+                    status_code: *status_code,
+                    count: *count,
+                })
+                .collect(),
+            billing_event_total: self.billing_event_total,
+            token_totals: self.token_totals.clone(),
+            cost_estimates: self
+                .cost_totals
+                .iter()
+                .map(|(currency, amount)| CostMetricTotal {
+                    currency: currency.clone(),
+                    amount: *amount,
+                })
+                .collect(),
+            model_provider_totals: self.model_provider_totals.values().cloned().collect(),
+        }
+    }
+}
+
+impl RuntimeRoute {
+    fn from_config(route: &RouteRule) -> Self {
+        Self {
+            config: route.clone(),
+            match_headers: route
+                .match_headers
+                .iter()
+                .map(|header| RuntimeHeaderMatcher {
+                    name: HeaderName::from_bytes(header.name.as_bytes())
+                        .expect("config validation must reject invalid header names"),
+                    value: header.value.clone(),
+                })
+                .collect(),
+            request_headers: compile_header_mutations(&route.request_headers),
+            response_headers: compile_header_mutations(&route.response_headers),
+        }
+    }
+
+    fn matches_request(&self, host: Option<&str>, path: &str, headers: &HeaderMap) -> bool {
+        if !self.config.hosts.is_empty() {
+            let Some(host) = host else {
+                return false;
+            };
+            if !self
+                .config
+                .hosts
+                .iter()
+                .any(|configured| configured.eq_ignore_ascii_case(host))
+            {
+                return false;
+            }
+        }
+
+        let path_matches = self.config.path_prefixes.is_empty()
+            || self.config.path_prefixes.iter().any(|prefix| {
+                path == prefix || path.starts_with(&format!("{}/", prefix.trim_end_matches('/')))
+            });
+        if !path_matches {
+            return false;
+        }
+
+        self.match_headers.iter().all(|matcher| {
+            headers
+                .get(&matcher.name)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == matcher.value)
+        })
+    }
+
+    pub(crate) fn rewrite_path(&self, original_path: &str) -> String {
+        self.config.rewrite_path(original_path)
+    }
+}
+
+impl RuntimeUpstream {
+    fn from_config(upstream: &Upstream) -> Self {
+        Self {
+            endpoints: upstream
+                .endpoint_urls()
+                .into_iter()
+                .map(|raw_url| RuntimeUpstreamEndpoint {
+                    endpoint: parse_upstream_endpoint(raw_url)
+                        .expect("config validation must reject invalid upstream endpoints"),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn compile_header_mutations(headers: &[HeaderMutation]) -> Vec<RuntimeHeaderMutation> {
+    headers
+        .iter()
+        .filter_map(|header| {
+            let name = HeaderName::from_bytes(header.name.as_bytes())
+                .expect("config validation must reject invalid header names");
+            let Ok(value) = resolve_env_placeholders(&header.value) else {
+                warn!(header = %header.name, "skipping precompiled header with unresolved environment placeholder");
+                return None;
+            };
+            let value = HeaderValue::from_str(&value)
+                .expect("config validation must reject invalid literal header values");
+            Some(RuntimeHeaderMutation { name, value })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,6 +475,21 @@ impl AppState {
             .iter()
             .cloned()
             .map(|upstream| (upstream.name.clone(), upstream))
+            .collect();
+        let runtime_routes = config
+            .routes
+            .iter()
+            .map(RuntimeRoute::from_config)
+            .collect();
+        let runtime_upstreams = config
+            .upstreams
+            .iter()
+            .map(|upstream| {
+                (
+                    upstream.name.clone(),
+                    RuntimeUpstream::from_config(upstream),
+                )
+            })
             .collect();
         let model_visibility = config
             .models
@@ -240,11 +526,14 @@ impl AppState {
             .filter(|key| key.request_limit_per_minute.is_some())
             .map(|key| (key.id.clone(), ApiKeyRequestWindow::default()))
             .collect();
+        let storage = config.storage.clone();
 
         Self {
             config: Arc::new(config),
             providers: Arc::new(providers),
             upstreams: Arc::new(upstreams),
+            runtime_routes: Arc::new(runtime_routes),
+            runtime_upstreams: Arc::new(runtime_upstreams),
             model_visibility: Arc::new(model_visibility),
             model_prices: Arc::new(model_prices),
             model_registry: Arc::new(model_registry),
@@ -253,10 +542,18 @@ impl AppState {
             provider_circuits: Arc::new(provider_circuits),
             api_key_request_windows: Arc::new(api_key_request_windows),
             api_key_token_reservations: Arc::new(Mutex::new(HashMap::new())),
-            billing_events: Arc::new(InMemoryBillingEventSink::default()),
-            request_logs: Arc::new(Mutex::new(InMemoryAppendRepository::new())),
-            audit_events: Arc::new(Mutex::new(InMemoryAppendRepository::new())),
+            billing_events: Arc::new(InMemoryBillingEventSink::with_retention_limit(
+                storage.billing_event_retention_records,
+            )),
+            request_logs: Arc::new(Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                storage.request_log_retention_records,
+            ))),
+            audit_events: Arc::new(Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                storage.audit_event_retention_records,
+            ))),
             usage_aggregates: Arc::new(Mutex::new(InMemoryRepository::new())),
+            metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
+            access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
@@ -271,8 +568,22 @@ impl AppState {
         next.request_logs = Arc::clone(&self.request_logs);
         next.audit_events = Arc::clone(&self.audit_events);
         next.usage_aggregates = Arc::clone(&self.usage_aggregates);
+        next.metrics = Arc::clone(&self.metrics);
         next.request_ids = Arc::clone(&self.request_ids);
+        self.apply_storage_config(&next.config.storage);
         next
+    }
+
+    fn apply_storage_config(&self, storage: &StorageConfig) {
+        let _ = self
+            .billing_events
+            .set_retention_limit(storage.billing_event_retention_records);
+        if let Ok(mut logs) = self.request_logs.lock() {
+            logs.set_retention_limit(storage.request_log_retention_records);
+        }
+        if let Ok(mut events) = self.audit_events.lock() {
+            events.set_retention_limit(storage.audit_event_retention_records);
+        }
     }
 
     pub(crate) fn next_request_id(&self) -> String {
@@ -282,6 +593,47 @@ impl AppState {
 
     pub(crate) fn auth_required(&self) -> bool {
         !self.config.api_keys.is_empty()
+    }
+
+    pub(crate) fn should_log_access(
+        &self,
+        request_id: &str,
+        response_code: u16,
+        request_failed: bool,
+    ) -> bool {
+        self.should_log_access_at(
+            request_id,
+            response_code,
+            request_failed,
+            now_unix_seconds().unwrap_or_default(),
+        )
+    }
+
+    fn should_log_access_at(
+        &self,
+        request_id: &str,
+        response_code: u16,
+        request_failed: bool,
+        now_second: u64,
+    ) -> bool {
+        let is_error = request_failed || response_code == 0 || response_code >= 400;
+        match self.config.telemetry.access_log {
+            AccessLogMode::Off => false,
+            AccessLogMode::Error => self.should_log_error_access(is_error, now_second),
+            AccessLogMode::Sampled if is_error => self.should_log_error_access(true, now_second),
+            AccessLogMode::Sampled => {
+                sampled_request_id(request_id, self.config.telemetry.access_log_sample_rate)
+            }
+            AccessLogMode::All => !is_error || self.should_log_error_access(is_error, now_second),
+        }
+    }
+
+    fn should_log_error_access(&self, is_error: bool, now_second: u64) -> bool {
+        is_error
+            && self.access_log_error_limiter.allow(
+                now_second,
+                self.config.telemetry.access_log_error_rate_limit_per_sec,
+            )
     }
 
     pub(crate) fn prepare_chat_completions(
@@ -392,6 +744,13 @@ impl AppState {
             .reliability
             .provider_dispatch_max_retries
             .unwrap_or_default()
+    }
+
+    pub(crate) fn provider_response_body_max_bytes(&self) -> usize {
+        self.config
+            .reliability
+            .provider_response_body_max_bytes
+            .unwrap_or(16 * 1024 * 1024)
     }
 
     pub(crate) fn provider_health_checks(&self) -> Vec<ProviderHealthCheck> {
@@ -613,7 +972,8 @@ impl AppState {
             status_code: draft.status_code,
             occurred_at_unix: None,
         };
-        self.billing_events.record(event)?;
+        self.billing_events.record(event.clone())?;
+        self.record_billing_metrics(&event);
         self.record_usage_aggregate(
             &draft.request.tenant,
             draft.logical_model,
@@ -623,8 +983,23 @@ impl AppState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn billing_events(&self) -> Vec<BillingEvent> {
         self.billing_events.list()
+    }
+
+    pub(crate) fn billing_events_page(
+        &self,
+        pagination: AdminPagination,
+    ) -> AdminPage<BillingEvent> {
+        AdminPage {
+            data: self
+                .billing_events
+                .list_paginated(pagination.offset, pagination.limit),
+            total: self.billing_events.len(),
+            offset: pagination.offset,
+            limit: pagination.limit,
+        }
     }
 
     pub(crate) fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
@@ -662,8 +1037,21 @@ impl AppState {
     }
 
     pub(crate) fn record_request_log(&self, log: StoredRequestLog) {
+        self.record_request_metrics(&log);
         if let Ok(mut logs) = self.request_logs.lock() {
             logs.append(log);
+        }
+    }
+
+    fn record_request_metrics(&self, log: &StoredRequestLog) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_request_log(log);
+        }
+    }
+
+    fn record_billing_metrics(&self, event: &BillingEvent) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_billing_event(event);
         }
     }
 
@@ -685,65 +1073,19 @@ impl AppState {
     }
 
     pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
-        let request_logs = self
-            .request_logs
+        self.metrics
             .lock()
-            .map(|logs| logs.list())
-            .unwrap_or_default();
-        let billing_events = self.billing_events.list();
-
-        let mut status_totals = BTreeMap::<u16, u64>::new();
-        let mut token_totals = TokenMetricTotals::default();
-        let mut cost_totals = BTreeMap::<String, f64>::new();
-        let mut model_provider_totals =
-            BTreeMap::<(String, String), ModelProviderMetricTotal>::new();
-
-        for log in &request_logs {
-            *status_totals.entry(log.status_code).or_default() += 1;
-        }
-
-        for event in &billing_events {
-            token_totals.prompt_tokens += event.usage.prompt_tokens;
-            token_totals.completion_tokens += event.usage.completion_tokens;
-            token_totals.total_tokens += event.usage.total_tokens;
-
-            if let Some(cost) = &event.cost {
-                *cost_totals.entry(cost.currency.clone()).or_default() += cost.total_cost;
-            }
-
-            let key = (event.logical_model.clone(), event.provider.clone());
-            let total =
-                model_provider_totals
-                    .entry(key)
-                    .or_insert_with(|| ModelProviderMetricTotal {
-                        logical_model: event.logical_model.clone(),
-                        provider: event.provider.clone(),
-                        requests: 0,
-                        total_tokens: 0,
-                    });
-            total.requests += 1;
-            total.total_tokens += event.usage.total_tokens;
-        }
-
-        GatewayMetricsSnapshot {
-            service_name: self.state_service_name(),
-            request_log_total: request_logs.len() as u64,
-            request_error_total: request_logs
-                .iter()
-                .filter(|log| log.status_code >= 400 || log.error_code.is_some())
-                .count() as u64,
-            request_status_totals: status_totals
-                .into_iter()
-                .map(|(status_code, count)| RequestStatusMetric { status_code, count })
-                .collect(),
-            billing_event_total: billing_events.len() as u64,
-            token_totals,
-            cost_estimates: cost_totals
-                .into_iter()
-                .map(|(currency, amount)| CostMetricTotal { currency, amount })
-                .collect(),
-            model_provider_totals: model_provider_totals.into_values().collect(),
-        }
+            .map(|metrics| metrics.snapshot(self.state_service_name()))
+            .unwrap_or_else(|_| GatewayMetricsSnapshot {
+                service_name: self.state_service_name(),
+                request_log_total: 0,
+                request_error_total: 0,
+                request_status_totals: Vec::new(),
+                billing_event_total: 0,
+                token_totals: TokenMetricTotals::default(),
+                cost_estimates: Vec::new(),
+                model_provider_totals: Vec::new(),
+            })
     }
 
     fn state_service_name(&self) -> String {
@@ -766,13 +1108,87 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub(crate) fn audit_events(&self) -> Vec<StoredAuditEvent> {
-        self.audit_events
+    pub(crate) fn request_logs_page(
+        &self,
+        pagination: AdminPagination,
+    ) -> AdminPage<StoredRequestLog> {
+        self.request_logs
             .lock()
-            .map(|events| events.list())
-            .unwrap_or_default()
+            .map(|logs| AdminPage {
+                data: logs.list_paginated(pagination.offset, pagination.limit),
+                total: logs.len(),
+                offset: pagination.offset,
+                limit: pagination.limit,
+            })
+            .unwrap_or_else(|_| AdminPage {
+                data: Vec::new(),
+                total: 0,
+                offset: pagination.offset,
+                limit: pagination.limit,
+            })
     }
 
+    pub(crate) fn audit_events_page(
+        &self,
+        pagination: AdminPagination,
+    ) -> AdminPage<StoredAuditEvent> {
+        self.audit_events
+            .lock()
+            .map(|events| AdminPage {
+                data: events.list_paginated(pagination.offset, pagination.limit),
+                total: events.len(),
+                offset: pagination.offset,
+                limit: pagination.limit,
+            })
+            .unwrap_or_else(|_| AdminPage {
+                data: Vec::new(),
+                total: 0,
+                offset: pagination.offset,
+                limit: pagination.limit,
+            })
+    }
+
+    pub(crate) fn admin_pagination(&self, query: Option<&str>) -> AdminPagination {
+        AdminPagination::from_query(
+            query,
+            self.config.storage.admin_list_default_limit,
+            self.config.storage.admin_list_max_limit,
+        )
+    }
+
+    pub(crate) fn match_runtime_route(
+        &self,
+        host: Option<&str>,
+        path: &str,
+        headers: &HeaderMap,
+    ) -> Option<RuntimeRoute> {
+        self.runtime_routes
+            .iter()
+            .filter(|route| route.config.enabled)
+            .find(|route| route.matches_request(host, path, headers))
+            .cloned()
+    }
+
+    pub(crate) fn select_runtime_upstream_endpoint(
+        &self,
+        upstream_name: &str,
+    ) -> Option<RuntimeUpstreamEndpoint> {
+        let upstream = self.runtime_upstreams.get(upstream_name)?;
+        if upstream.endpoints.is_empty() {
+            return None;
+        }
+        let next = self
+            .upstream_counters
+            .get(upstream_name)
+            .map(|counter| counter.fetch_add(1, Ordering::Relaxed))
+            .unwrap_or(0);
+        upstream
+            .endpoints
+            .get(next as usize % upstream.endpoints.len())
+            .cloned()
+    }
+
+    #[cfg(test)]
     pub(crate) fn select_upstream_url(&self, upstream: &Upstream) -> Option<String> {
         let endpoints = upstream.endpoint_urls();
         if endpoints.is_empty() {
@@ -1155,6 +1571,13 @@ fn now_unix_seconds() -> Option<u64> {
         .map(|duration| duration.as_secs())
 }
 
+fn sampled_request_id(request_id: &str, sample_rate: u64) -> bool {
+    let Some(raw) = request_id.strip_prefix("fg-") else {
+        return false;
+    };
+    u64::from_str_radix(raw, 16).is_ok_and(|value| value % sample_rate == 0)
+}
+
 fn build_policy_engine(config_rules: &[ConfigPolicyRule]) -> BasicPolicyEngine {
     let mut rules = Vec::new();
     for rule in config_rules
@@ -1294,6 +1717,81 @@ mod tests {
             state.select_upstream_url(&upstream).as_deref(),
             Some("http://127.0.0.1:10001")
         );
+    }
+
+    #[test]
+    fn selects_runtime_upstream_endpoints_round_robin() {
+        let upstream = Upstream {
+            name: "pool".to_string(),
+            url: Some("http://127.0.0.1:10001/base".to_string()),
+            urls: vec!["https://example.com:9443/api".to_string()],
+            enabled: true,
+        };
+        let config = Config {
+            upstreams: vec![upstream],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        let first = state
+            .select_runtime_upstream_endpoint("pool")
+            .expect("first endpoint");
+        assert_eq!(first.endpoint.scheme, "http");
+        assert_eq!(first.endpoint.authority, "127.0.0.1:10001");
+        assert_eq!(first.endpoint.base_path, "/base");
+
+        let second = state
+            .select_runtime_upstream_endpoint("pool")
+            .expect("second endpoint");
+        assert_eq!(second.endpoint.scheme, "https");
+        assert_eq!(second.endpoint.authority, "example.com:9443");
+        assert_eq!(second.endpoint.base_path, "/api");
+    }
+
+    #[test]
+    fn matches_runtime_route_with_precompiled_headers() {
+        let config = Config {
+            routes: vec![RouteRule {
+                name: "api".into(),
+                upstream: "pool".into(),
+                hosts: vec!["api.example.com".into()],
+                path_prefixes: vec!["/v1".into()],
+                match_headers: vec![crate::config::HeaderMatcher {
+                    name: "x-tier".into(),
+                    value: "gold".into(),
+                }],
+                strip_prefix: Some("/v1".into()),
+                add_prefix: Some("/proxy".into()),
+                request_headers: vec![HeaderMutation {
+                    name: "x-added".into(),
+                    value: "enabled".into(),
+                }],
+                response_headers: vec![HeaderMutation {
+                    name: "x-response-added".into(),
+                    value: "done".into(),
+                }],
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tier", HeaderValue::from_static("gold"));
+
+        let route = state
+            .match_runtime_route(Some("api.example.com"), "/v1/chat", &headers)
+            .expect("runtime route must match");
+
+        assert_eq!(route.config.name, "api");
+        assert_eq!(route.rewrite_path("/v1/chat"), "/proxy/chat");
+        assert_eq!(route.request_headers[0].name.as_str(), "x-added");
+        assert_eq!(
+            route.request_headers[0].value,
+            HeaderValue::from_static("enabled")
+        );
+        assert!(state
+            .match_runtime_route(Some("api.example.com"), "/v1/chat", &HeaderMap::new())
+            .is_none());
     }
 
     #[test]
@@ -1630,12 +2128,141 @@ mod tests {
     }
 
     #[test]
+    fn in_memory_runtime_storage_retains_configured_window_with_paginated_admin_views() {
+        let state = AppState::new(Config {
+            storage: crate::config::StorageConfig {
+                request_log_retention_records: 2,
+                audit_event_retention_records: 2,
+                billing_event_retention_records: 2,
+                admin_list_default_limit: 1,
+                admin_list_max_limit: 2,
+            },
+            ..Config::default()
+        });
+
+        for (index, status_code) in [(1, 200), (2, 500), (3, 200)] {
+            state.record_request_log(StoredRequestLog {
+                request_id: format!("fg-{index}"),
+                trace_id: None,
+                tenant: ferrogate_core::TenantContext::default(),
+                route: None,
+                provider: None,
+                logical_model: None,
+                provider_model: None,
+                status_code,
+                error_code: None,
+                prompt_recorded: false,
+                response_recorded: false,
+                prompt_body: None,
+                response_body: None,
+                started_at_unix: None,
+                completed_at_unix: None,
+            });
+            state.record_admin_audit_event(AdminAuditEventDraft {
+                request_id: format!("fg-{index}"),
+                trace_id: None,
+                actor_api_key_id: None,
+                action: "config.validate".into(),
+                target: "config".into(),
+                outcome: "accepted".into(),
+                message: format!("audit {index}"),
+            });
+            state
+                .record_estimated_billing_event(
+                    &RequestContext {
+                        request_id: format!("fg-{index}"),
+                        trace_id: None,
+                        route: None,
+                        upstream: None,
+                        tenant: ferrogate_core::TenantContext::default(),
+                    },
+                    "fast-chat",
+                    "openai",
+                    "gpt-4o-mini",
+                    &BillingTokenUsage::new(index, index, index * 2),
+                    status_code,
+                )
+                .unwrap();
+        }
+
+        let first_page = state.request_logs_page(state.admin_pagination(None));
+        assert_eq!(first_page.total, 2);
+        assert_eq!(first_page.limit, 1);
+        assert_eq!(first_page.data[0].request_id, "fg-2");
+
+        let second_page = state.request_logs_page(state.admin_pagination(Some("offset=1&limit=9")));
+        assert_eq!(second_page.limit, 2);
+        assert_eq!(second_page.data.len(), 1);
+        assert_eq!(second_page.data[0].request_id, "fg-3");
+
+        let audit_page = state.audit_events_page(state.admin_pagination(None));
+        assert_eq!(audit_page.total, 2);
+        assert_eq!(audit_page.data[0].request_id, "fg-2");
+
+        let billing_page = state.billing_events_page(state.admin_pagination(None));
+        assert_eq!(billing_page.total, 2);
+        assert_eq!(billing_page.data[0].request_id, "fg-2");
+
+        let snapshot = state.prometheus_metrics_snapshot();
+        assert_eq!(snapshot.request_log_total, 3);
+        assert_eq!(snapshot.request_error_total, 1);
+        assert_eq!(snapshot.billing_event_total, 3);
+        assert_eq!(snapshot.token_totals.total_tokens, 12);
+    }
+
+    #[test]
+    fn access_log_modes_filter_success_and_error_requests() {
+        let mut config = Config::default();
+        config.telemetry.access_log = AccessLogMode::Error;
+        let state = AppState::new(config.clone());
+        assert!(!state.should_log_access("fg-0000000000000001", 200, false));
+        assert!(state.should_log_access("fg-0000000000000001", 500, false));
+        assert!(state.should_log_access("fg-0000000000000001", 200, true));
+
+        config.telemetry.access_log = AccessLogMode::Sampled;
+        config.telemetry.access_log_sample_rate = 10;
+        let state = AppState::new(config.clone());
+        assert!(state.should_log_access("fg-000000000000000a", 200, false));
+        assert!(!state.should_log_access("fg-000000000000000b", 200, false));
+        assert!(state.should_log_access("fg-000000000000000b", 404, false));
+
+        config.telemetry.access_log = AccessLogMode::All;
+        let state = AppState::new(config.clone());
+        assert!(state.should_log_access("fg-0000000000000001", 200, false));
+
+        config.telemetry.access_log = AccessLogMode::Off;
+        let state = AppState::new(config);
+        assert!(!state.should_log_access("fg-0000000000000001", 500, true));
+    }
+
+    #[test]
+    fn access_log_rate_limits_error_storms_per_second() {
+        let mut config = Config::default();
+        config.telemetry.access_log = AccessLogMode::Error;
+        config.telemetry.access_log_error_rate_limit_per_sec = 2;
+        let state = AppState::new(config.clone());
+
+        assert!(state.should_log_access_at("fg-0000000000000001", 500, false, 1_000));
+        assert!(state.should_log_access_at("fg-0000000000000002", 502, false, 1_000));
+        assert!(!state.should_log_access_at("fg-0000000000000003", 503, false, 1_000));
+        assert!(state.should_log_access_at("fg-0000000000000004", 500, false, 1_001));
+
+        config.telemetry.access_log = AccessLogMode::All;
+        let state = AppState::new(config);
+        assert!(state.should_log_access_at("fg-0000000000000001", 200, false, 1_000));
+        assert!(state.should_log_access_at("fg-0000000000000002", 500, false, 1_000));
+        assert!(state.should_log_access_at("fg-0000000000000003", 500, false, 1_000));
+        assert!(!state.should_log_access_at("fg-0000000000000004", 500, false, 1_000));
+    }
+
+    #[test]
     fn prometheus_metrics_snapshot_aggregates_request_logs_and_billing() {
         let config = Config {
             telemetry: crate::config::TelemetryConfig {
                 service_name: "ferrogate-test".into(),
                 log_bodies: false,
                 otlp_endpoint: None,
+                ..crate::config::TelemetryConfig::default()
             },
             models: vec![Model {
                 name: "fast-chat".into(),

@@ -34,6 +34,34 @@ pub(crate) struct AdminStatus<'a> {
 pub(crate) struct AdminList<T> {
     pub(crate) object: &'static str,
     pub(crate) data: Vec<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) limit: Option<usize>,
+}
+
+impl<T> AdminList<T> {
+    pub(crate) fn new(data: Vec<T>) -> Self {
+        Self {
+            object: "list",
+            data,
+            total: None,
+            offset: None,
+            limit: None,
+        }
+    }
+
+    pub(crate) fn paginated(data: Vec<T>, total: usize, offset: usize, limit: usize) -> Self {
+        Self {
+            object: "list",
+            data,
+            total: Some(total),
+            offset: Some(offset),
+            limit: Some(limit),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -228,4 +256,35 @@ pub(crate) async fn write_json_error(
         },
     };
     write_json_response(session, status, &body, request_id).await
+}
+
+pub(crate) async fn write_json_error_and_close(
+    session: &mut Session,
+    status: StatusCode,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    request_id: &str,
+) -> PingoraResult<()> {
+    let body = ErrorBody {
+        error: ErrorObject {
+            message: message.into(),
+            kind: "ferrogate_error",
+            code: code.into(),
+            request_id: Some(request_id.to_string()),
+        },
+    };
+    let body = serde_json::to_vec(&body).expect("JSON serialization should not fail");
+    let mut response = ResponseHeader::build(status, Some(4))?;
+    response.insert_header(header::CONTENT_TYPE, "application/json")?;
+    response.insert_header(header::CONTENT_LENGTH, body.len().to_string())?;
+    response.insert_header(header::CONNECTION, "close")?;
+    response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
+    response.insert_header("x-ferrogate-runtime", "pingora")?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session
+        .write_response_body(Some(Bytes::from(body)), true)
+        .await
 }

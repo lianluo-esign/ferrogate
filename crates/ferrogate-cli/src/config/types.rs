@@ -20,6 +20,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
+    pub(crate) storage: StorageConfig,
+    #[serde(default)]
     pub(crate) reliability: ReliabilityConfig,
     #[serde(default)]
     pub(crate) upstreams: Vec<Upstream>,
@@ -231,7 +233,37 @@ pub(crate) struct TelemetryConfig {
     #[serde(default)]
     pub(crate) log_bodies: bool,
     #[serde(default)]
+    pub(crate) access_log: AccessLogMode,
+    #[serde(default = "default_access_log_sample_rate")]
+    pub(crate) access_log_sample_rate: u64,
+    #[serde(default = "default_access_log_error_rate_limit_per_sec")]
+    pub(crate) access_log_error_rate_limit_per_sec: u64,
+    #[serde(default)]
     pub(crate) otlp_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AccessLogMode {
+    Off,
+    #[default]
+    Error,
+    Sampled,
+    All,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct StorageConfig {
+    #[serde(default = "default_request_log_retention_records")]
+    pub(crate) request_log_retention_records: usize,
+    #[serde(default = "default_audit_event_retention_records")]
+    pub(crate) audit_event_retention_records: usize,
+    #[serde(default = "default_billing_event_retention_records")]
+    pub(crate) billing_event_retention_records: usize,
+    #[serde(default = "default_admin_list_limit")]
+    pub(crate) admin_list_default_limit: usize,
+    #[serde(default = "default_admin_list_max_limit")]
+    pub(crate) admin_list_max_limit: usize,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -244,6 +276,8 @@ pub(crate) struct ReliabilityConfig {
     pub(crate) provider_dispatch_timeout_secs: Option<u64>,
     #[serde(default)]
     pub(crate) provider_dispatch_max_retries: Option<u32>,
+    #[serde(default)]
+    pub(crate) provider_response_body_max_bytes: Option<usize>,
     #[serde(default)]
     pub(crate) graceful_shutdown_grace_period_secs: Option<u64>,
     #[serde(default)]
@@ -349,12 +383,55 @@ fn default_policy_message() -> String {
     "request denied by policy".to_string()
 }
 
+fn default_access_log_sample_rate() -> u64 {
+    100
+}
+
+fn default_access_log_error_rate_limit_per_sec() -> u64 {
+    100
+}
+
+fn default_request_log_retention_records() -> usize {
+    10_000
+}
+
+fn default_audit_event_retention_records() -> usize {
+    10_000
+}
+
+fn default_billing_event_retention_records() -> usize {
+    10_000
+}
+
+fn default_admin_list_limit() -> usize {
+    100
+}
+
+fn default_admin_list_max_limit() -> usize {
+    1_000
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             service_name: default_service_name(),
             log_bodies: false,
+            access_log: AccessLogMode::default(),
+            access_log_sample_rate: default_access_log_sample_rate(),
+            access_log_error_rate_limit_per_sec: default_access_log_error_rate_limit_per_sec(),
             otlp_endpoint: None,
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            request_log_retention_records: default_request_log_retention_records(),
+            audit_event_retention_records: default_audit_event_retention_records(),
+            billing_event_retention_records: default_billing_event_retention_records(),
+            admin_list_default_limit: default_admin_list_limit(),
+            admin_list_max_limit: default_admin_list_max_limit(),
         }
     }
 }
@@ -370,6 +447,7 @@ impl Default for Config {
             api_keys: Vec::new(),
             policies: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            storage: StorageConfig::default(),
             reliability: ReliabilityConfig::default(),
             upstreams: Vec::new(),
             routes: Vec::new(),

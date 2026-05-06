@@ -3,7 +3,7 @@ use pingora::{proxy::Session, Result as PingoraResult};
 
 use crate::{
     responses::write_json_error,
-    routing::{build_target_path_query, normalize_host},
+    routing::{build_target_uri, normalize_host},
 };
 
 use super::{FerroGateway, ProxyContext};
@@ -60,14 +60,16 @@ impl FerroGateway {
 
         if path == "/admin/v1/request-logs" {
             let headers = req.headers.clone();
-            self.handle_admin_request_logs(session, ctx, &headers)
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_request_logs(session, ctx, &headers, query.as_deref())
                 .await?;
             return Ok(true);
         }
 
         if path == "/admin/v1/audit-events" {
             let headers = req.headers.clone();
-            self.handle_admin_audit_events(session, ctx, &headers)
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_audit_events(session, ctx, &headers, query.as_deref())
                 .await?;
             return Ok(true);
         }
@@ -127,7 +129,8 @@ impl FerroGateway {
 
         if path == "/admin/v1/billing-events" {
             let headers = req.headers.clone();
-            self.handle_admin_billing_events(session, ctx, &headers)
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_billing_events(session, ctx, &headers, query.as_deref())
                 .await?;
             return Ok(true);
         }
@@ -155,13 +158,8 @@ impl FerroGateway {
             .map(normalize_host)
             .filter(|value| !value.is_empty());
 
-        let Some(route) = state
-            .config
-            .routes
-            .iter()
-            .filter(|route| route.enabled)
-            .find(|route| route.matches_request(normalized_host.as_deref(), &path, &req.headers))
-            .cloned()
+        let Some(route) =
+            state.match_runtime_route(normalized_host.as_deref(), &path, &req.headers)
         else {
             write_json_error(
                 session,
@@ -174,14 +172,14 @@ impl FerroGateway {
             return Ok(true);
         };
 
-        let Some(upstream) = state.upstreams.get(&route.upstream).cloned() else {
+        let Some(upstream) = state.upstreams.get(&route.config.upstream).cloned() else {
             write_json_error(
                 session,
                 StatusCode::BAD_GATEWAY,
                 "upstream_not_found",
                 format!(
                     "route {} references missing upstream {}",
-                    route.name, route.upstream
+                    route.config.name, route.config.upstream
                 ),
                 &ctx.request_id,
             )
@@ -201,7 +199,7 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        let Some(upstream_url) = state.select_upstream_url(&upstream) else {
+        let Some(upstream_endpoint) = state.select_runtime_upstream_endpoint(&upstream.name) else {
             write_json_error(
                 session,
                 StatusCode::BAD_GATEWAY,
@@ -215,13 +213,18 @@ impl FerroGateway {
 
         ctx.tenant_id = None;
 
-        match build_target_path_query(&upstream_url, &route, &path, req.uri.query()) {
-            Ok(path_query) => {
+        let rewritten_path = route.rewrite_path(&path);
+        match build_target_uri(
+            &upstream_endpoint.endpoint,
+            &rewritten_path,
+            req.uri.query(),
+        ) {
+            Ok(target_uri) => {
                 ctx.original_host = host;
-                ctx.target_path_query = Some(path_query);
+                ctx.target_uri = Some(target_uri);
                 ctx.route = Some(route);
                 ctx.upstream = Some(upstream);
-                ctx.upstream_url = Some(upstream_url);
+                ctx.upstream_endpoint = Some(upstream_endpoint.endpoint);
                 Ok(false)
             }
             Err(error) => {

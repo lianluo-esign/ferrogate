@@ -32,9 +32,9 @@ The project is developed as the open-source gateway foundation behind
 - **Token usage and billing events** using provider-reported usage when
   available, gateway estimates when needed, and a request reservation /
   settlement flow inspired by production AI gateways.
-- **Observability** with structured request logs, billing events, usage
-  aggregates, Prometheus metrics, request/trace ID propagation, and OTLP/HTTP
-  metrics/logs/traces export.
+- **Observability** with structured request logs, billing events, configurable
+  in-memory retention, usage aggregates, Prometheus metrics, request/trace ID
+  propagation, and OTLP/HTTP metrics/logs/traces export.
 - **Admin API and dashboard** for gateway status, providers, models, API keys,
   tenants, policies, request logs, billing events, usage aggregates, audit
   events, provider health, config validation, and process-local reload.
@@ -191,11 +191,24 @@ listen = "0.0.0.0:8080"
 [admin]
 listen = "127.0.0.1:2019"
 
+[telemetry]
+access_log = "error"
+access_log_sample_rate = 100
+access_log_error_rate_limit_per_sec = 100
+
+[storage]
+request_log_retention_records = 10000
+audit_event_retention_records = 10000
+billing_event_retention_records = 10000
+admin_list_default_limit = 100
+admin_list_max_limit = 1000
+
 [reliability]
 provider_circuit_breaker_failure_threshold = 3
 provider_circuit_breaker_cooldown_secs = 30
 provider_dispatch_timeout_secs = 10
 provider_dispatch_max_retries = 1
+provider_response_body_max_bytes = 16777216
 graceful_shutdown_grace_period_secs = 3
 graceful_shutdown_timeout_secs = 15
 

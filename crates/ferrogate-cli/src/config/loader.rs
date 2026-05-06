@@ -136,6 +136,7 @@ impl Config {
                 .collect(),
             policies: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            storage: crate::config::StorageConfig::default(),
             reliability: crate::config::ReliabilityConfig::default(),
             upstreams: config
                 .upstreams

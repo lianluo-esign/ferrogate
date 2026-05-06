@@ -1,6 +1,6 @@
 //! Repository boundaries for tenant, key, usage, and request-log storage.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
@@ -147,24 +147,75 @@ impl UsageAggregateRepository for InMemoryRepository<StoredUsageAggregate> {}
 
 #[derive(Debug, Default)]
 pub struct InMemoryAppendRepository<T> {
-    records: Vec<T>,
+    records: VecDeque<T>,
+    retention_limit: Option<usize>,
+    appended_total: u64,
 }
 
 impl<T> InMemoryAppendRepository<T> {
     pub fn new() -> Self {
         Self {
-            records: Vec::new(),
+            records: VecDeque::new(),
+            retention_limit: None,
+            appended_total: 0,
+        }
+    }
+
+    pub fn with_retention_limit(retention_limit: usize) -> Self {
+        Self {
+            records: VecDeque::new(),
+            retention_limit: Some(retention_limit),
+            appended_total: 0,
+        }
+    }
+
+    pub fn set_retention_limit(&mut self, retention_limit: usize) {
+        self.retention_limit = Some(retention_limit);
+        self.enforce_retention_limit();
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn appended_total(&self) -> u64 {
+        self.appended_total
+    }
+
+    pub fn list_paginated(&self, offset: usize, limit: usize) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.records
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn enforce_retention_limit(&mut self) {
+        if let Some(limit) = self.retention_limit {
+            while self.records.len() > limit {
+                self.records.pop_front();
+            }
         }
     }
 }
 
 impl<T: Clone> AppendRepository<T> for InMemoryAppendRepository<T> {
     fn append(&mut self, record: T) {
-        self.records.push(record);
+        self.records.push_back(record);
+        self.appended_total = self.appended_total.saturating_add(1);
+        self.enforce_retention_limit();
     }
 
     fn list(&self) -> Vec<T> {
-        self.records.clone()
+        self.records.iter().cloned().collect()
     }
 }
 
@@ -275,6 +326,37 @@ mod tests {
         assert_eq!(logs.len(), 2);
         assert_eq!(logs[0].request_id, "fg-1");
         assert_eq!(logs[1].error_code.as_deref(), Some("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn in_memory_append_repository_enforces_retention_limit() {
+        let mut repository = InMemoryAppendRepository::with_retention_limit(2);
+        for id in ["fg-1", "fg-2", "fg-3"] {
+            repository.append(StoredRequestLog {
+                request_id: id.into(),
+                trace_id: None,
+                tenant: TenantContext::default(),
+                route: None,
+                provider: None,
+                logical_model: None,
+                provider_model: None,
+                status_code: 200,
+                error_code: None,
+                prompt_recorded: false,
+                response_recorded: false,
+                prompt_body: None,
+                response_body: None,
+                started_at_unix: None,
+                completed_at_unix: None,
+            });
+        }
+
+        let logs = repository.list();
+        assert_eq!(repository.len(), 2);
+        assert_eq!(repository.appended_total(), 3);
+        assert_eq!(logs[0].request_id, "fg-2");
+        assert_eq!(logs[1].request_id, "fg-3");
+        assert_eq!(repository.list_paginated(1, 1)[0].request_id, "fg-3");
     }
 
     #[test]

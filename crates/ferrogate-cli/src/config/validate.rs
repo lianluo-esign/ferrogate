@@ -24,6 +24,7 @@ impl Config {
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_tls()?;
         self.validate_telemetry()?;
+        self.validate_storage()?;
         self.validate_reliability()?;
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
@@ -188,6 +189,12 @@ impl Config {
         if self.telemetry.service_name.trim().is_empty() {
             bail!("field telemetry.service_name: cannot be empty");
         }
+        if self.telemetry.access_log_sample_rate == 0 {
+            bail!("field telemetry.access_log_sample_rate: must be greater than zero");
+        }
+        if self.telemetry.access_log_error_rate_limit_per_sec == 0 {
+            bail!("field telemetry.access_log_error_rate_limit_per_sec: must be greater than zero");
+        }
         if let Some(endpoint) = &self.telemetry.otlp_endpoint {
             if endpoint.trim().is_empty() {
                 bail!("field telemetry.otlp_endpoint: cannot be empty");
@@ -199,10 +206,35 @@ impl Config {
         Ok(())
     }
 
+    fn validate_storage(&self) -> AnyResult<()> {
+        if self.storage.request_log_retention_records == 0 {
+            bail!("field storage.request_log_retention_records: must be greater than zero");
+        }
+        if self.storage.audit_event_retention_records == 0 {
+            bail!("field storage.audit_event_retention_records: must be greater than zero");
+        }
+        if self.storage.billing_event_retention_records == 0 {
+            bail!("field storage.billing_event_retention_records: must be greater than zero");
+        }
+        if self.storage.admin_list_default_limit == 0 {
+            bail!("field storage.admin_list_default_limit: must be greater than zero");
+        }
+        if self.storage.admin_list_max_limit == 0 {
+            bail!("field storage.admin_list_max_limit: must be greater than zero");
+        }
+        if self.storage.admin_list_default_limit > self.storage.admin_list_max_limit {
+            bail!(
+                "field storage.admin_list_default_limit: must be less than or equal to storage.admin_list_max_limit"
+            );
+        }
+        Ok(())
+    }
+
     fn validate_reliability(&self) -> AnyResult<()> {
         let threshold = self.reliability.provider_circuit_breaker_failure_threshold;
         let cooldown = self.reliability.provider_circuit_breaker_cooldown_secs;
         let dispatch_timeout = self.reliability.provider_dispatch_timeout_secs;
+        let provider_body_max_bytes = self.reliability.provider_response_body_max_bytes;
         let shutdown_grace_period = self.reliability.graceful_shutdown_grace_period_secs;
         let shutdown_timeout = self.reliability.graceful_shutdown_timeout_secs;
         let graceful_upgrade_pid_file = self.reliability.graceful_upgrade_pid_file.as_deref();
@@ -226,6 +258,9 @@ impl Config {
 
         if dispatch_timeout == Some(0) {
             bail!("field reliability.provider_dispatch_timeout_secs: must be greater than zero");
+        }
+        if provider_body_max_bytes == Some(0) {
+            bail!("field reliability.provider_response_body_max_bytes: must be greater than zero");
         }
         if shutdown_grace_period == Some(0) {
             bail!(

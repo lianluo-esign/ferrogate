@@ -15,7 +15,7 @@ FerroGate 是一个基于 Cloudflare Pingora 构建的开源 Rust API 网关和 
 - **Caddy 风格配置兼容**：通过解析 `Ferrogate/Caddyfile` 支持熟悉的反向代理路由、匹配器、TLS、日志和网关设置，同时也支持结构化 TOML 配置。
 - **虚拟 API Key 与策略检查**：支持哈希 Key、租户上下文、Scope、禁用或过期 Key、模型和供应商白名单/黑名单、最小化 deny-rule 策略评估、请求频率限制和 Token 预算。
 - **Token 用量与计费事件**：优先使用供应商返回的 usage；缺失时由网关估算；并提供面向生产 AI 网关的请求预留与结算流程。
-- **可观测性**：包括结构化请求日志、计费事件、用量聚合、Prometheus 指标、请求/Trace ID 传播，以及 OTLP/HTTP metrics/logs/traces 导出。
+- **可观测性**：包括结构化请求日志、计费事件、可配置 in-memory retention、用量聚合、Prometheus 指标、请求/Trace ID 传播，以及 OTLP/HTTP metrics/logs/traces 导出。
 - **Admin API 与 Dashboard**：查看网关状态、供应商、模型、API Key、租户、策略、请求日志、计费事件、用量聚合、审计事件、供应商健康状态、配置验证和进程内 reload。
 - **自动 HTTPS**：支持手动 TLS、ACME HTTP-01，以及内置 Cloudflare provider 的 ACME DNS-01。ACME provider 凭据从 FerroGate 配置文件读取，不依赖环境变量或 Python 脚本。
 - **供应链与安全门禁**：包含格式化、clippy、锁定元数据、高置信度密钥扫描、cargo-deny、cargo-audit 和 GitHub Actions。
@@ -159,11 +159,24 @@ listen = "0.0.0.0:8080"
 [admin]
 listen = "127.0.0.1:2019"
 
+[telemetry]
+access_log = "error"
+access_log_sample_rate = 100
+access_log_error_rate_limit_per_sec = 100
+
+[storage]
+request_log_retention_records = 10000
+audit_event_retention_records = 10000
+billing_event_retention_records = 10000
+admin_list_default_limit = 100
+admin_list_max_limit = 1000
+
 [reliability]
 provider_circuit_breaker_failure_threshold = 3
 provider_circuit_breaker_cooldown_secs = 30
 provider_dispatch_timeout_secs = 10
 provider_dispatch_max_retries = 1
+provider_response_body_max_bytes = 16777216
 graceful_shutdown_grace_period_secs = 3
 graceful_shutdown_timeout_secs = 15
 

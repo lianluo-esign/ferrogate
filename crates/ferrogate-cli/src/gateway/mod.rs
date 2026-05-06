@@ -19,8 +19,9 @@ use tracing::info;
 
 use crate::{
     acme::{ensure_certificate, AcmeCertificatePaths},
-    config::{Config, RouteRule, Upstream},
-    state::SharedAppState,
+    config::{Config, Upstream},
+    routing::UpstreamEndpoint,
+    state::{RuntimeRoute, SharedAppState},
     telemetry::start_otlp_background_sender,
 };
 
@@ -29,10 +30,10 @@ pub(crate) struct ProxyContext {
     request_id: String,
     trace_id: Option<String>,
     tenant_id: Option<String>,
-    route: Option<RouteRule>,
+    route: Option<RuntimeRoute>,
     upstream: Option<Upstream>,
-    upstream_url: Option<String>,
-    target_path_query: Option<String>,
+    upstream_endpoint: Option<UpstreamEndpoint>,
+    target_uri: Option<http::Uri>,
     original_host: Option<String>,
 }
 

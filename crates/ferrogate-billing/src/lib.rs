@@ -1,6 +1,9 @@
 //! Token usage, cost estimation, and billing event boundaries.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use ferrogate_core::TenantContext;
 use serde::{Deserialize, Serialize};
@@ -111,23 +114,97 @@ pub trait BillingEventSink: Send + Sync {
 
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryBillingEventSink {
-    events: Arc<Mutex<Vec<BillingEvent>>>,
+    inner: Arc<Mutex<InMemoryBillingEventState>>,
+}
+
+#[derive(Debug, Default)]
+struct InMemoryBillingEventState {
+    events: VecDeque<BillingEvent>,
+    retention_limit: Option<usize>,
+    recorded_total: u64,
+}
+
+impl InMemoryBillingEventSink {
+    pub fn with_retention_limit(retention_limit: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InMemoryBillingEventState {
+                events: VecDeque::new(),
+                retention_limit: Some(retention_limit),
+                recorded_total: 0,
+            })),
+        }
+    }
+
+    pub fn set_retention_limit(&self, retention_limit: usize) -> Result<(), BillingError> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            BillingError::new("billing_sink_poisoned", "billing event sink lock poisoned")
+        })?;
+        inner.retention_limit = Some(retention_limit);
+        enforce_retention_limit(&mut inner);
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|inner| inner.events.len())
+            .unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.events.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub fn recorded_total(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|inner| inner.recorded_total)
+            .unwrap_or_default()
+    }
+
+    pub fn list_paginated(&self, offset: usize, limit: usize) -> Vec<BillingEvent> {
+        self.inner
+            .lock()
+            .map(|inner| {
+                inner
+                    .events
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl BillingEventSink for InMemoryBillingEventSink {
     fn record(&self, event: BillingEvent) -> Result<(), BillingError> {
-        let mut events = self.events.lock().map_err(|_| {
+        let mut inner = self.inner.lock().map_err(|_| {
             BillingError::new("billing_sink_poisoned", "billing event sink lock poisoned")
         })?;
-        events.push(event);
+        inner.events.push_back(event);
+        inner.recorded_total = inner.recorded_total.saturating_add(1);
+        enforce_retention_limit(&mut inner);
         Ok(())
     }
 
     fn list(&self) -> Vec<BillingEvent> {
-        self.events
+        self.inner
             .lock()
-            .map(|events| events.clone())
+            .map(|inner| inner.events.iter().cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+fn enforce_retention_limit(inner: &mut InMemoryBillingEventState) {
+    if let Some(limit) = inner.retention_limit {
+        while inner.events.len() > limit {
+            inner.events.pop_front();
+        }
     }
 }
 
@@ -176,5 +253,33 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].tenant.organization_id.as_deref(), Some("org"));
         assert_eq!(events[0].usage.total_tokens, 8);
+    }
+
+    #[test]
+    fn in_memory_sink_enforces_retention_limit() {
+        let sink = InMemoryBillingEventSink::with_retention_limit(2);
+        for request_id in ["fg-1", "fg-2", "fg-3"] {
+            sink.record(BillingEvent {
+                request_id: request_id.into(),
+                trace_id: None,
+                tenant: TenantContext::default(),
+                logical_model: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                usage: TokenUsage::new(1, 1, 2),
+                usage_source: BillingUsageSource::ProviderUsage,
+                cost: None,
+                status_code: 200,
+                occurred_at_unix: None,
+            })
+            .unwrap();
+        }
+
+        let events = sink.list();
+        assert_eq!(sink.len(), 2);
+        assert_eq!(sink.recorded_total(), 3);
+        assert_eq!(events[0].request_id, "fg-2");
+        assert_eq!(events[1].request_id, "fg-3");
+        assert_eq!(sink.list_paginated(1, 1)[0].request_id, "fg-3");
     }
 }

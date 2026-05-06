@@ -5,6 +5,16 @@ listen = "127.0.0.1:8080"
 [telemetry]
 service_name = "ferrogate"
 log_bodies = false
+access_log = "error"
+access_log_sample_rate = 100
+access_log_error_rate_limit_per_sec = 100
+
+[storage]
+request_log_retention_records = 10000
+audit_event_retention_records = 10000
+billing_event_retention_records = 10000
+admin_list_default_limit = 100
+admin_list_max_limit = 1000
 
 [tls]
 enabled = false
@@ -41,6 +51,7 @@ provider_circuit_breaker_failure_threshold = 3
 provider_circuit_breaker_cooldown_secs = 30
 provider_dispatch_timeout_secs = 10
 provider_dispatch_max_retries = 1
+provider_response_body_max_bytes = 16777216
 graceful_shutdown_grace_period_secs = 3
 graceful_shutdown_timeout_secs = 15
 # Pingora graceful upgrade uses SIGQUIT and FD transfer through this socket.

@@ -424,6 +424,7 @@ fn rejects_invalid_otlp_endpoint_with_field_name() {
             service_name: "ferrogate".into(),
             log_bodies: false,
             otlp_endpoint: Some("collector:4318".into()),
+            ..TelemetryConfig::default()
         },
         ..Config::default()
     };
@@ -474,6 +475,20 @@ fn rejects_zero_provider_dispatch_timeout() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field reliability.provider_dispatch_timeout_secs"));
+}
+
+#[test]
+fn rejects_zero_provider_response_body_max_bytes() {
+    let config = Config {
+        reliability: ReliabilityConfig {
+            provider_response_body_max_bytes: Some(0),
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.provider_response_body_max_bytes"));
 }
 
 #[test]
@@ -534,6 +549,35 @@ fn rejects_invalid_graceful_upgrade_settings() {
 }
 
 #[test]
+fn rejects_zero_access_log_sample_rate() {
+    let config = Config {
+        telemetry: TelemetryConfig {
+            access_log: AccessLogMode::Sampled,
+            access_log_sample_rate: 0,
+            ..TelemetryConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field telemetry.access_log_sample_rate"));
+}
+
+#[test]
+fn rejects_zero_access_log_error_rate_limit() {
+    let config = Config {
+        telemetry: TelemetryConfig {
+            access_log_error_rate_limit_per_sec: 0,
+            ..TelemetryConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field telemetry.access_log_error_rate_limit_per_sec"));
+}
+
+#[test]
 fn rejects_route_path_prefix_without_leading_slash() {
     let config = Config {
         upstreams: vec![upstream()],
@@ -561,6 +605,30 @@ fn rejects_invalid_request_header_name_with_route_context() {
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field routes[0].request_headers[0].name"));
     assert!(error.contains("invalid header name"));
+}
+
+#[test]
+fn rejects_invalid_storage_retention_and_admin_list_limits() {
+    let config = Config {
+        storage: StorageConfig {
+            request_log_retention_records: 0,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.request_log_retention_records"));
+
+    let config = Config {
+        storage: StorageConfig {
+            admin_list_default_limit: 200,
+            admin_list_max_limit: 100,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.admin_list_default_limit"));
 }
 
 fn upstream() -> Upstream {

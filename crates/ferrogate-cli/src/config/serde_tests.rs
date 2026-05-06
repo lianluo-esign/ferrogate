@@ -17,6 +17,7 @@ fn config_model_supports_serde_roundtrip() {
             service_name: "ferrogate-test".into(),
             log_bodies: false,
             otlp_endpoint: Some("http://127.0.0.1:4318".into()),
+            ..TelemetryConfig::default()
         },
         reliability: ReliabilityConfig {
             provider_circuit_breaker_failure_threshold: Some(2),
@@ -28,6 +29,7 @@ fn config_model_supports_serde_roundtrip() {
             graceful_upgrade_pid_file: Some("/tmp/ferrogate.pid".into()),
             graceful_upgrade_sock: Some("/tmp/ferrogate_upgrade.sock".into()),
             graceful_upgrade_sock_retries: Some(5),
+            ..ReliabilityConfig::default()
         },
         routes: vec![RouteRule {
             name: "api".into(),

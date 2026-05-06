@@ -8,10 +8,10 @@ use crate::{
     auth::authenticate,
     config::{config_snapshot_id, Config},
     responses::{
-        write_json_error, write_json_response, write_raw_response, AdminApiKey,
-        AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
-        AdminList, AdminProvider, AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel,
-        OpenAiModelList,
+        write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
+        AdminApiKey, AdminConfigReloadResponse, AdminConfigValidateRequest,
+        AdminConfigValidateResponse, AdminList, AdminProvider, AdminStatus, AdminTenantRef,
+        HealthResponse, OpenAiModel, OpenAiModelList,
     },
     state::AdminAuditEventDraft,
 };
@@ -201,14 +201,13 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state.request_logs(),
-                };
+                let page = state.request_logs_page(state.admin_pagination(query));
+                let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -229,14 +228,13 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state.audit_events(),
-                };
+                let page = state.audit_events_page(state.admin_pagination(query));
+                let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -285,7 +283,31 @@ impl FerroGateway {
             }
         };
 
-        let body = read_request_body(session, 256 * 1024).await?;
+        let body = match read_request_body(session, 256 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft(
+                    ctx,
+                    &auth,
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
         let payload = match serde_json::from_slice::<AdminConfigValidateRequest>(&body) {
             Ok(payload) => payload,
             Err(error) => {
@@ -383,7 +405,32 @@ impl FerroGateway {
             }
         };
 
-        let body = read_request_body(session, 256 * 1024).await?;
+        let body = match read_request_body(session, 256 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_action(
+                    ctx,
+                    &auth,
+                    "config.reload",
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
         let payload = match serde_json::from_slice::<AdminConfigValidateRequest>(&body) {
             Ok(payload) => payload,
             Err(error) => {
@@ -473,9 +520,8 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state
+                let body = AdminList::new(
+                    state
                         .config
                         .providers
                         .iter()
@@ -487,7 +533,7 @@ impl FerroGateway {
                             enabled: provider.enabled,
                         })
                         .collect(),
-                };
+                );
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -512,10 +558,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state.provider_health_checks(),
-                };
+                let body = AdminList::new(state.provider_health_checks());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -540,10 +583,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state.config.models.clone(),
-                };
+                let body = AdminList::new(state.config.models.clone());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -568,9 +608,8 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state
+                let body = AdminList::new(
+                    state
                         .config
                         .api_keys
                         .iter()
@@ -594,7 +633,7 @@ impl FerroGateway {
                             log_bodies: key.log_bodies.unwrap_or(false),
                         })
                         .collect(),
-                };
+                );
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -619,10 +658,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state.config.policies.clone(),
-                };
+                let body = AdminList::new(state.config.policies.clone());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -647,9 +683,8 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state
+                let body = AdminList::new(
+                    state
                         .config
                         .api_keys
                         .iter()
@@ -667,7 +702,7 @@ impl FerroGateway {
                             api_key_id: key.id.clone(),
                         })
                         .collect(),
-                };
+                );
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -688,14 +723,13 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state.billing_events(),
-                };
+                let page = state.billing_events_page(state.admin_pagination(query));
+                let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -720,10 +754,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList {
-                    object: "list",
-                    data: state.usage_aggregates(),
-                };
+                let body = AdminList::new(state.usage_aggregates());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
