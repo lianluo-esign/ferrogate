@@ -6,12 +6,13 @@ use pingora::{proxy::Session, Result as PingoraResult};
 
 use crate::{
     auth::authenticate,
-    config::{config_snapshot_id, Config},
+    config::{config_snapshot_id, ApiKey, Config, PolicyRule},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
-        AdminApiKey, AdminConfigReloadResponse, AdminConfigValidateRequest,
-        AdminConfigValidateResponse, AdminList, AdminProvider, AdminStatus, AdminTenantRef,
-        HealthResponse, OpenAiModel, OpenAiModelList,
+        AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse, AdminConfigReloadResponse,
+        AdminConfigValidateRequest, AdminConfigValidateResponse, AdminDeleteResponse, AdminList,
+        AdminPolicyMutation, AdminPolicyMutationResponse, AdminProvider, AdminStatus,
+        AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
     },
     state::AdminAuditEventDraft,
 };
@@ -604,44 +605,344 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let body = AdminList::new(
-                    state
-                        .config
-                        .api_keys
-                        .iter()
-                        .map(|key| AdminApiKey {
-                            id: key.id.clone(),
-                            name: key.name.clone(),
-                            enabled: key.enabled,
-                            key_source: api_key_source(key),
-                            scopes: key.scopes.clone(),
-                            allowed_models: key.allowed_models.clone(),
-                            denied_models: key.denied_models.clone(),
-                            allowed_providers: key.allowed_providers.clone(),
-                            denied_providers: key.denied_providers.clone(),
-                            organization_id: key.organization_id.clone(),
-                            team_id: key.team_id.clone(),
-                            project_id: key.project_id.clone(),
-                            user_id: key.user_id.clone(),
-                            monthly_token_budget: key.monthly_token_budget,
-                            request_limit_per_minute: key.request_limit_per_minute,
-                            expires_at_unix: key.expires_at_unix,
-                            log_bodies: key.log_bodies.unwrap_or(false),
-                        })
-                        .collect(),
-                );
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+        let id = path.strip_prefix("/admin/v1/api-keys/");
+        match (method, id) {
+            (&Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let body = AdminList::new(
+                            state.config.api_keys.iter().map(admin_api_key).collect(),
+                        );
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
             }
-            Err(error) => {
+            (&Method::GET, Some(id)) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let Some(key) = find_api_key(&state, id) else {
+                            return write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "api_key_not_found",
+                                format!("api key {id} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        };
+                        let body = AdminApiKeyMutationResponse {
+                            object: "api_key",
+                            key: admin_api_key(key),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::POST, None) => {
+                self.handle_admin_api_key_upsert(session, ctx, headers, None)
+                    .await
+            }
+            (&Method::PUT | &Method::PATCH, Some(id)) => {
+                self.handle_admin_api_key_upsert(session, ctx, headers, Some(id))
+                    .await
+            }
+            (&Method::DELETE, Some(id)) => {
+                self.handle_admin_api_key_delete(session, ctx, headers, id)
+                    .await
+            }
+            _ => {
                 write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "api key endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_api_key_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_id: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
                     session,
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let payload = match serde_json::from_slice::<AdminApiKeyMutation>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON API key object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let key = match api_key_from_mutation(path_id, payload) {
+            Ok(key) => key,
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.upsert",
+                    path_id.unwrap_or("new"),
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_api_key",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let key_id = key.id.clone();
+        let response_key = admin_api_key(&key);
+        match self.state.upsert_api_key(key) {
+            Ok(outcome) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.upsert",
+                    &key_id,
+                    "committed",
+                    format!(
+                        "api key {key_id} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminApiKeyMutationResponse {
+                    object: "api_key",
+                    key: response_key,
+                };
+                write_json_response(
+                    session,
+                    if path_id.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &body,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate API key config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.upsert",
+                    &key_id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "api_key_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.upsert",
+                    &key_id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_api_key",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_api_key_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match self.state.delete_api_key(id) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.delete",
+                    id,
+                    "committed",
+                    format!(
+                        "api key {id} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminDeleteResponse {
+                    object: "api_key",
+                    id: id.to_string(),
+                    deleted: true,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate API key config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.delete",
+                    id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "api_key_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "api_key_not_found",
+                    format!("api key {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "api_key.delete",
+                    id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_api_key_delete",
+                    message,
                     &ctx.request_id,
                 )
                 .await
@@ -654,19 +955,342 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let body = AdminList::new(state.config.policies.clone());
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+        let name = path.strip_prefix("/admin/v1/policies/");
+        match (method, name) {
+            (&Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let body = AdminList::new(state.config.policies.clone());
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
             }
-            Err(error) => {
+            (&Method::GET, Some(name)) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let Some(policy) = find_policy(&state, name) else {
+                            return write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "policy_not_found",
+                                format!("policy {name} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        };
+                        let body = AdminPolicyMutationResponse {
+                            object: "policy",
+                            policy: policy.clone(),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::POST, None) => {
+                self.handle_admin_policy_upsert(session, ctx, headers, None)
+                    .await
+            }
+            (&Method::PUT | &Method::PATCH, Some(name)) => {
+                self.handle_admin_policy_upsert(session, ctx, headers, Some(name))
+                    .await
+            }
+            (&Method::DELETE, Some(name)) => {
+                self.handle_admin_policy_delete(session, ctx, headers, name)
+                    .await
+            }
+            _ => {
                 write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "policy endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_policy_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_name: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
                     session,
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.upsert",
+                    path_name.unwrap_or("new"),
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let payload = match serde_json::from_slice::<AdminPolicyMutation>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.upsert",
+                    path_name.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON policy object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let policy = match policy_from_mutation(path_name, payload) {
+            Ok(policy) => policy,
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.upsert",
+                    path_name.unwrap_or("new"),
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_policy",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let policy_name = policy.name.clone();
+        let response_policy = policy.clone();
+        match self.state.upsert_policy(policy) {
+            Ok(outcome) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.upsert",
+                    &policy_name,
+                    "committed",
+                    format!(
+                        "policy {policy_name} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminPolicyMutationResponse {
+                    object: "policy",
+                    policy: response_policy,
+                };
+                write_json_response(
+                    session,
+                    if path_name.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &body,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate policy config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.upsert",
+                    &policy_name,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "policy_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.upsert",
+                    &policy_name,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_policy",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_policy_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        name: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match self.state.delete_policy(name) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.delete",
+                    name,
+                    "committed",
+                    format!(
+                        "policy {name} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminDeleteResponse {
+                    object: "policy",
+                    id: name.to_string(),
+                    deleted: true,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate policy config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.delete",
+                    name,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "policy_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "policy_not_found",
+                    format!("policy {name} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "policy.delete",
+                    name,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_policy_delete",
+                    message,
                     &ctx.request_id,
                 )
                 .await
@@ -783,6 +1407,111 @@ fn api_key_source(key: &crate::config::ApiKey) -> &'static str {
     }
 }
 
+fn admin_api_key(key: &crate::config::ApiKey) -> AdminApiKey {
+    AdminApiKey {
+        id: key.id.clone(),
+        name: key.name.clone(),
+        enabled: key.enabled,
+        key_source: api_key_source(key),
+        scopes: key.scopes.clone(),
+        allowed_models: key.allowed_models.clone(),
+        denied_models: key.denied_models.clone(),
+        allowed_providers: key.allowed_providers.clone(),
+        denied_providers: key.denied_providers.clone(),
+        organization_id: key.organization_id.clone(),
+        team_id: key.team_id.clone(),
+        project_id: key.project_id.clone(),
+        user_id: key.user_id.clone(),
+        monthly_token_budget: key.monthly_token_budget,
+        request_limit_per_minute: key.request_limit_per_minute,
+        expires_at_unix: key.expires_at_unix,
+        log_bodies: key.log_bodies.unwrap_or(false),
+    }
+}
+
+fn find_api_key<'a>(
+    state: &'a crate::state::AppState,
+    id: &str,
+) -> Option<&'a crate::config::ApiKey> {
+    state.config.api_keys.iter().find(|key| key.id == id)
+}
+
+fn api_key_from_mutation(
+    path_id: Option<&str>,
+    payload: AdminApiKeyMutation,
+) -> anyhow::Result<ApiKey> {
+    let id = payload
+        .id
+        .or_else(|| path_id.map(ToOwned::to_owned))
+        .ok_or_else(|| anyhow::anyhow!("field id is required"))?;
+    if path_id.is_some_and(|path_id| path_id != id) {
+        anyhow::bail!("request path id and body id must match");
+    }
+
+    Ok(ApiKey {
+        id,
+        name: payload
+            .name
+            .ok_or_else(|| anyhow::anyhow!("field name is required"))?,
+        key_env: payload.key_env,
+        key: payload.key,
+        key_hash: payload.key_hash,
+        enabled: payload.enabled.unwrap_or(true),
+        scopes: payload.scopes.unwrap_or_default(),
+        allowed_models: payload.allowed_models.unwrap_or_default(),
+        denied_models: payload.denied_models.unwrap_or_default(),
+        allowed_providers: payload.allowed_providers.unwrap_or_default(),
+        denied_providers: payload.denied_providers.unwrap_or_default(),
+        organization_id: payload.organization_id,
+        team_id: payload.team_id,
+        project_id: payload.project_id,
+        user_id: payload.user_id,
+        monthly_token_budget: payload.monthly_token_budget,
+        request_limit_per_minute: payload.request_limit_per_minute,
+        expires_at_unix: payload.expires_at_unix,
+        log_bodies: payload.log_bodies,
+    })
+}
+
+fn find_policy<'a>(
+    state: &'a crate::state::AppState,
+    name: &str,
+) -> Option<&'a crate::config::PolicyRule> {
+    state
+        .config
+        .policies
+        .iter()
+        .find(|policy| policy.name == name)
+}
+
+fn policy_from_mutation(
+    path_name: Option<&str>,
+    payload: AdminPolicyMutation,
+) -> anyhow::Result<PolicyRule> {
+    let name = payload
+        .name
+        .or_else(|| path_name.map(ToOwned::to_owned))
+        .ok_or_else(|| anyhow::anyhow!("field name is required"))?;
+    if path_name.is_some_and(|path_name| path_name != name) {
+        anyhow::bail!("request path name and body name must match");
+    }
+
+    Ok(PolicyRule {
+        name,
+        effect: payload.effect.unwrap_or_else(|| "deny".into()),
+        organization_ids: payload.organization_ids.unwrap_or_default(),
+        project_ids: payload.project_ids.unwrap_or_default(),
+        api_key_ids: payload.api_key_ids.unwrap_or_default(),
+        models: payload.models.unwrap_or_default(),
+        providers: payload.providers.unwrap_or_default(),
+        code: payload.code.unwrap_or_else(|| "policy_denied".into()),
+        message: payload
+            .message
+            .unwrap_or_else(|| "request denied by policy".into()),
+        enabled: payload.enabled.unwrap_or(true),
+    })
+}
+
 fn config_from_admin_payload(
     payload: &AdminConfigValidateRequest,
     state: &crate::state::SharedAppState,
@@ -829,12 +1558,23 @@ fn admin_audit_event_draft_for_action(
     outcome: &str,
     message: impl Into<String>,
 ) -> AdminAuditEventDraft {
+    admin_audit_event_draft_for_target(ctx, auth, action, "candidate_config", outcome, message)
+}
+
+fn admin_audit_event_draft_for_target(
+    ctx: &ProxyContext,
+    auth: &crate::auth::AuthContext,
+    action: impl Into<String>,
+    target: impl Into<String>,
+    outcome: &str,
+    message: impl Into<String>,
+) -> AdminAuditEventDraft {
     AdminAuditEventDraft {
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
         actor_api_key_id: auth.api_key_id.clone(),
         action: action.into(),
-        target: "candidate_config".into(),
+        target: target.into(),
         outcome: outcome.into(),
         message: message.into(),
     }

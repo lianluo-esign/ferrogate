@@ -38,7 +38,7 @@ FerroGate 是一个基于 Cloudflare Pingora 构建的开源 Rust API 网关和 
 仍有意留作下一阶段生产工作的范围：
 
 - API Key、租户、策略、计费、请求日志和审计日志的持久化存储实现。当前运行时状态主要由配置和内存 repository 驱动。
-- 完整 Admin API CRUD 控制面。
+- 当前 API key 和 policy 资源之外的完整 Admin API CRUD 控制面。
 - 后台 ACME 续期与热证书 reload。当前 ACME 行为是在启动时签发或复用证书。
 - 内置 Cloudflare provider 和通用外部 hook 边界之外的更多 DNS provider。
 

@@ -109,15 +109,19 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        if path == "/admin/v1/api-keys" {
+        if path == "/admin/v1/api-keys" || path.starts_with("/admin/v1/api-keys/") {
             let headers = req.headers.clone();
-            self.handle_admin_api_keys(session, ctx, &headers).await?;
+            let method = req.method.clone();
+            self.handle_admin_api_keys(session, ctx, &headers, &method, &path)
+                .await?;
             return Ok(true);
         }
 
-        if path == "/admin/v1/policies" {
+        if path == "/admin/v1/policies" || path.starts_with("/admin/v1/policies/") {
             let headers = req.headers.clone();
-            self.handle_admin_policies(session, ctx, &headers).await?;
+            let method = req.method.clone();
+            self.handle_admin_policies(session, ctx, &headers, &method, &path)
+                .await?;
             return Ok(true);
         }
 

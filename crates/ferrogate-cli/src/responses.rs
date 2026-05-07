@@ -94,6 +94,88 @@ pub(crate) struct AdminApiKey {
     pub(crate) log_bodies: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminApiKeyMutation {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) key_env: Option<String>,
+    #[serde(default)]
+    pub(crate) key: Option<String>,
+    #[serde(default)]
+    pub(crate) key_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) denied_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) allowed_providers: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) denied_providers: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) organization_id: Option<String>,
+    #[serde(default)]
+    pub(crate) team_id: Option<String>,
+    #[serde(default)]
+    pub(crate) project_id: Option<String>,
+    #[serde(default)]
+    pub(crate) user_id: Option<String>,
+    #[serde(default)]
+    pub(crate) monthly_token_budget: Option<u64>,
+    #[serde(default)]
+    pub(crate) request_limit_per_minute: Option<u64>,
+    #[serde(default)]
+    pub(crate) expires_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) log_bodies: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminApiKeyMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) key: AdminApiKey,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminDeleteResponse {
+    pub(crate) object: &'static str,
+    pub(crate) id: String,
+    pub(crate) deleted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminPolicyMutation {
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) effect: Option<String>,
+    #[serde(default)]
+    pub(crate) organization_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) project_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) api_key_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) models: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) providers: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) code: Option<String>,
+    #[serde(default)]
+    pub(crate) message: Option<String>,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPolicyMutationResponse<T> {
+    pub(crate) object: &'static str,
+    pub(crate) policy: T,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminTenantRef {
     pub(crate) organization_id: Option<String>,

@@ -633,6 +633,358 @@ scopes = ["admin.read", "admin.write"]
 }
 
 #[test]
+fn admin_api_key_crud_updates_runtime_auth_state() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://127.0.0.1:1/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[models]]
+name = "slow-chat"
+provider = "openai"
+provider_model = "gpt-4.1"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let create_body = serde_json::json!({
+        "id": "client",
+        "name": "Client key",
+        "key": "client-secret",
+        "scopes": ["models.read"],
+        "allowed_models": ["fast-chat"],
+        "organization_id": "org_admin_crud",
+        "log_bodies": true
+    })
+    .to_string();
+    let created = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/api-keys",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &create_body,
+    );
+    assert!(created.contains("201 Created"));
+    assert!(created.contains("\"object\":\"api_key\""));
+    assert!(created.contains("\"id\":\"client\""));
+    assert!(created.contains("\"key_source\":\"inline\""));
+    assert!(created.contains("\"organization_id\":\"org_admin_crud\""));
+    assert!(created.contains("\"log_bodies\":true"));
+    assert!(!created.contains("client-secret"));
+    assert!(!created.contains("admin-secret"));
+
+    let models_with_new_key = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(models_with_new_key.contains("200 OK"));
+    assert!(models_with_new_key.contains("\"id\":\"fast-chat\""));
+    assert!(models_with_new_key.contains("\"id\":\"slow-chat\""));
+
+    let update_body = serde_json::json!({
+        "id": "client",
+        "name": "Updated client key",
+        "key": "client-secret-2",
+        "scopes": ["models.read"],
+        "allowed_models": ["slow-chat"],
+        "enabled": true
+    })
+    .to_string();
+    let updated = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/api-keys/client",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &update_body,
+    );
+    assert!(updated.contains("200 OK"));
+    assert!(updated.contains("\"name\":\"Updated client key\""));
+    assert!(updated.contains("\"allowed_models\":[\"slow-chat\"]"));
+    assert!(!updated.contains("client-secret-2"));
+
+    let old_secret_rejected = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(old_secret_rejected.contains("401 Unauthorized"));
+    assert!(old_secret_rejected.contains("invalid_api_key"));
+
+    let new_secret_allowed = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret-2"],
+        "",
+    );
+    assert!(new_secret_allowed.contains("200 OK"));
+    assert!(new_secret_allowed.contains("\"id\":\"fast-chat\""));
+    assert!(new_secret_allowed.contains("\"id\":\"slow-chat\""));
+
+    let get_one = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/api-keys/client",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(get_one.contains("200 OK"));
+    assert!(get_one.contains("\"object\":\"api_key\""));
+    assert!(get_one.contains("\"id\":\"client\""));
+    assert!(!get_one.contains("client-secret-2"));
+
+    let delete = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/api-keys/client",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(delete.contains("200 OK"));
+    assert!(delete.contains("\"deleted\":true"));
+
+    let deleted_secret_rejected = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/models",
+        &["Authorization: Bearer client-secret-2"],
+        "",
+    );
+    assert!(deleted_secret_rejected.contains("401 Unauthorized"));
+    assert!(deleted_secret_rejected.contains("invalid_api_key"));
+
+    let audit_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(audit_events.contains("200 OK"));
+    assert!(audit_events.contains("\"action\":\"api_key.upsert\""));
+    assert!(audit_events.contains("\"action\":\"api_key.delete\""));
+    assert!(!audit_events.contains("client-secret"));
+    assert!(!audit_events.contains("client-secret-2"));
+    assert!(!audit_events.contains("admin-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
+fn admin_policy_crud_updates_runtime_policy_engine() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        2,
+        r#"{"id":"chatcmpl_policy","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let create_body = serde_json::json!({
+        "name": "block-client-fast-chat",
+        "api_key_ids": ["client"],
+        "models": ["fast-chat"],
+        "providers": ["openai"],
+        "code": "blocked_by_admin",
+        "message": "blocked by admin policy"
+    })
+    .to_string();
+    let created = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/policies",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &create_body,
+    );
+    assert!(created.contains("201 Created"));
+    assert!(created.contains("\"object\":\"policy\""));
+    assert!(created.contains("\"name\":\"block-client-fast-chat\""));
+    assert!(created.contains("\"enabled\":true"));
+    assert!(!created.contains("admin-secret"));
+    assert!(!created.contains("client-secret"));
+
+    let blocked_chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(blocked_chat.contains("403 Forbidden"));
+    assert!(blocked_chat.contains("blocked_by_admin"));
+    assert!(blocked_chat.contains("blocked by admin policy"));
+
+    let update_body = serde_json::json!({
+        "name": "block-client-fast-chat",
+        "api_key_ids": ["client"],
+        "models": ["fast-chat"],
+        "providers": ["openai"],
+        "code": "blocked_by_admin",
+        "message": "blocked by admin policy",
+        "enabled": false
+    })
+    .to_string();
+    let updated = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/policies/block-client-fast-chat",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &update_body,
+    );
+    assert!(updated.contains("200 OK"));
+    assert!(updated.contains("\"enabled\":false"));
+
+    let allowed_chat_after_disable = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(allowed_chat_after_disable.contains("200 OK"));
+    assert!(allowed_chat_after_disable.contains("\"id\":\"chatcmpl_policy\""));
+
+    let get_one = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/policies/block-client-fast-chat",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(get_one.contains("200 OK"));
+    assert!(get_one.contains("\"object\":\"policy\""));
+    assert!(get_one.contains("\"name\":\"block-client-fast-chat\""));
+
+    let delete = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/policies/block-client-fast-chat",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(delete.contains("200 OK"));
+    assert!(delete.contains("\"object\":\"policy\""));
+    assert!(delete.contains("\"deleted\":true"));
+
+    let allowed_chat_after_delete = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(allowed_chat_after_delete.contains("200 OK"));
+    assert!(allowed_chat_after_delete.contains("\"id\":\"chatcmpl_policy\""));
+
+    let audit_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(audit_events.contains("200 OK"));
+    assert!(audit_events.contains("\"action\":\"policy.upsert\""));
+    assert!(audit_events.contains("\"action\":\"policy.delete\""));
+    assert!(!audit_events.contains("admin-secret"));
+    assert!(!audit_events.contains("client-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
+}
+
+#[test]
 fn graceful_upgrade_reload_transfers_listener_to_new_process() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();

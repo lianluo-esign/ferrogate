@@ -56,7 +56,8 @@ Validated end-to-end:
 - Provider adapters and fallback routing.
 - Virtual API key auth, policy checks, rate limits, and token budget handling.
 - Request logs, billing events, usage aggregates, metrics, and OTLP planning.
-- Admin API, static dashboard, config validation, and process-local reload.
+- Admin API, API key and policy CRUD, static dashboard, config validation, and
+  process-local reload.
 - Manual TLS, ACME HTTP-01, and ACME DNS-01.
 - Real Let's Encrypt staging and production issuance for both HTTP-01 and
   Cloudflare DNS-01 during live validation.
@@ -66,7 +67,8 @@ Still intentionally scoped as next-stage production work:
 - Persistent storage implementations for API keys, tenants, policy, billing,
   request logs, and audit logs. Current runtime state is primarily config and
   in-memory repository driven.
-- Full Admin API CRUD control plane.
+- Full Admin API CRUD control plane beyond the current API key and policy
+  resources.
 - Background ACME renewal and hot certificate reload. Current ACME behavior is
   startup-time issuance/reuse.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the

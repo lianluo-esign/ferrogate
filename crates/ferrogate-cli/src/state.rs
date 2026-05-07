@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::config::{
-    config_snapshot_id, resolve_env_placeholders, AccessLogMode, Config, HeaderMutation, Model,
-    PolicyRule as ConfigPolicyRule, Provider, RouteRule, StorageConfig, Upstream,
+    config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config, HeaderMutation,
+    Model, PolicyRule as ConfigPolicyRule, Provider, RouteRule, StorageConfig, Upstream,
 };
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
@@ -143,6 +143,65 @@ impl SharedAppState {
             mode: RELOAD_MODE_PROCESS_LOCAL,
             reason: None,
         }
+    }
+
+    pub(crate) fn upsert_api_key(&self, key: ApiKey) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        if let Some(existing) = candidate
+            .api_keys
+            .iter_mut()
+            .find(|existing| existing.id == key.id)
+        {
+            *existing = key;
+        } else {
+            candidate.api_keys.push(key);
+        }
+        candidate.validate()?;
+        Ok(self.reload_process_local(candidate))
+    }
+
+    pub(crate) fn delete_api_key(&self, id: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        let before = candidate.api_keys.len();
+        candidate.api_keys.retain(|key| key.id != id);
+        if candidate.api_keys.len() == before {
+            return Ok(None);
+        }
+        candidate.validate()?;
+        Ok(Some(self.reload_process_local(candidate)))
+    }
+
+    pub(crate) fn upsert_policy(
+        &self,
+        policy: ConfigPolicyRule,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        if let Some(existing) = candidate
+            .policies
+            .iter_mut()
+            .find(|existing| existing.name == policy.name)
+        {
+            *existing = policy;
+        } else {
+            candidate.policies.push(policy);
+        }
+        candidate.validate()?;
+        Ok(self.reload_process_local(candidate))
+    }
+
+    pub(crate) fn delete_policy(&self, name: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        let before = candidate.policies.len();
+        candidate.policies.retain(|policy| policy.name != name);
+        if candidate.policies.len() == before {
+            return Ok(None);
+        }
+        candidate.validate()?;
+        Ok(Some(self.reload_process_local(candidate)))
     }
 }
 
