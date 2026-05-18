@@ -2,6 +2,7 @@
 
 mod anthropic;
 mod azure;
+mod canonical;
 mod gemini;
 mod grok;
 mod models;
@@ -20,5 +21,5 @@ pub use openai::OpenAiCompatibleAdapter;
 pub use registry::ProviderAdapterRegistry;
 pub use types::{
     AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
+    ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
 };

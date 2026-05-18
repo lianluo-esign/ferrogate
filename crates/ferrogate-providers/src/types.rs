@@ -17,6 +17,14 @@ pub struct ChatCompletionPlan {
     pub body: Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResponsesPlan {
+    pub logical_model: String,
+    pub provider_model: String,
+    pub stream: bool,
+    pub body: Value,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(String);
 
@@ -91,6 +99,16 @@ pub trait ProviderAdapter: Send + Sync {
         provider: ProviderConfig,
         request: ChatCompletionPlan,
     ) -> Result<ProviderHttpRequest, AdapterError>;
+
+    fn prepare_responses(
+        &self,
+        _provider: ProviderConfig,
+        _request: ResponsesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        Err(AdapterError::UnsupportedProviderKind {
+            kind: self.kind().to_string(),
+        })
+    }
 
     fn normalize_error_response(
         &self,

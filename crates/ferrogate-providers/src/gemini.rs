@@ -1,8 +1,9 @@
 use serde_json::{json, Map, Value};
 
 use crate::{
-    AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
+    canonical::CanonicalAiRequest, AdapterError, ChatCompletionPlan, ProviderAdapter,
+    ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage,
+    ResponsesPlan, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -53,6 +54,23 @@ impl ProviderAdapter for GeminiAdapter {
             stream: request.stream,
             headers,
         })
+    }
+
+    fn prepare_responses(
+        &self,
+        provider: ProviderConfig,
+        request: ResponsesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.prepare_chat_completions(
+            provider,
+            ChatCompletionPlan {
+                logical_model: request.logical_model,
+                provider_model: request.provider_model,
+                stream: request.stream,
+                body: CanonicalAiRequest::from_responses_body(request.body)?
+                    .into_chat_body_with_system_message(),
+            },
+        )
     }
 
     fn normalize_error_response(
@@ -336,6 +354,39 @@ mod tests {
             prepared.endpoint,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn converts_responses_plan_to_gemini_generate_content_request() {
+        let adapter = GeminiAdapter;
+        let prepared = adapter
+            .prepare_responses(
+                provider(Some("provider-secret")),
+                ResponsesPlan {
+                    logical_model: "flash-chat".into(),
+                    provider_model: "gemini-2.5-flash".into(),
+                    stream: false,
+                    body: json!({
+                        "model": "flash-chat",
+                        "instructions": "be concise",
+                        "input": [{"type": "input_text", "text": "hello"}],
+                        "max_output_tokens": 64
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+        assert_eq!(
+            prepared.body["systemInstruction"]["parts"][0]["text"],
+            "be concise"
+        );
+        assert_eq!(prepared.body["contents"][0]["role"], "user");
+        assert_eq!(prepared.body["contents"][0]["parts"][0]["text"], "hello");
+        assert_eq!(prepared.body["generationConfig"]["maxOutputTokens"], 64);
     }
 
     #[test]

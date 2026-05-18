@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use crate::{
     AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
+    ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -19,27 +19,35 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
         request: ChatCompletionPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
         validate_kind(&provider.kind)?;
-        let mut body = ensure_object_body(request.body)?;
+        let mut body = ensure_chat_object_body(request.body)?;
         body["model"] = Value::String(request.provider_model);
         body["stream"] = Value::Bool(request.stream);
-
-        let mut headers = vec![ProviderHeader {
-            name: "content-type".into(),
-            value: SecretValue::new("application/json"),
-        }];
-        if let Some(api_key) = provider.api_key.filter(|value| !value.trim().is_empty()) {
-            headers.push(ProviderHeader {
-                name: "authorization".into(),
-                value: SecretValue::new(format!("Bearer {api_key}")),
-            });
-        }
 
         Ok(ProviderHttpRequest {
             provider: provider.name,
             endpoint: chat_completions_endpoint(&provider.base_url),
             body,
             stream: request.stream,
-            headers,
+            headers: provider_headers(provider.api_key),
+        })
+    }
+
+    fn prepare_responses(
+        &self,
+        provider: ProviderConfig,
+        request: ResponsesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        let mut body = ensure_labeled_object_body(request.body, "responses request body")?;
+        body["model"] = Value::String(request.provider_model);
+        body["stream"] = Value::Bool(request.stream);
+
+        Ok(ProviderHttpRequest {
+            provider: provider.name.clone(),
+            endpoint: responses_endpoint(&provider.base_url),
+            body,
+            stream: request.stream,
+            headers: provider_headers(provider.api_key),
         })
     }
 
@@ -108,18 +116,40 @@ fn validate_kind(kind: &str) -> Result<(), AdapterError> {
     }
 }
 
-fn ensure_object_body(body: Value) -> Result<Value, AdapterError> {
+fn ensure_chat_object_body(body: Value) -> Result<Value, AdapterError> {
+    ensure_labeled_object_body(body, "chat completion request body")
+}
+
+fn ensure_labeled_object_body(body: Value, label: &str) -> Result<Value, AdapterError> {
     if body.is_object() {
         Ok(body)
     } else {
         Err(AdapterError::InvalidRequest {
-            message: "chat completion request body must be a JSON object".into(),
+            message: format!("{label} must be a JSON object"),
         })
     }
 }
 
+fn provider_headers(api_key: Option<String>) -> Vec<ProviderHeader> {
+    let mut headers = vec![ProviderHeader {
+        name: "content-type".into(),
+        value: SecretValue::new("application/json"),
+    }];
+    if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
+        headers.push(ProviderHeader {
+            name: "authorization".into(),
+            value: SecretValue::new(format!("Bearer {api_key}")),
+        });
+    }
+    headers
+}
+
 fn chat_completions_endpoint(base_url: &str) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+fn responses_endpoint(base_url: &str) -> String {
+    format!("{}/responses", base_url.trim_end_matches('/'))
 }
 
 fn fallback_error_message(parsed: Option<&Value>, body: &[u8]) -> Option<String> {
@@ -290,5 +320,35 @@ mod tests {
         assert_eq!(usage.completion_tokens, Some(7));
         assert_eq!(usage.total_tokens, Some(18));
         assert_eq!(adapter.extract_usage(br#"{"id":"chatcmpl"}"#), None);
+    }
+
+    #[test]
+    fn prepares_responses_request() {
+        let adapter = OpenAiCompatibleAdapter;
+        let prepared = adapter
+            .prepare_responses(
+                provider(Some("provider-secret")),
+                ResponsesPlan {
+                    logical_model: "fast-chat".into(),
+                    provider_model: "gpt-4.1-mini".into(),
+                    stream: true,
+                    body: json!({
+                        "model": "fast-chat",
+                        "input": "hello",
+                        "stream": false
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.endpoint, "https://api.openai.example/v1/responses");
+        assert_eq!(prepared.body["model"], "gpt-4.1-mini");
+        assert_eq!(prepared.body["input"], "hello");
+        assert_eq!(prepared.body["stream"], true);
+        assert!(prepared
+            .headers
+            .iter()
+            .any(|header| header.value.expose_secret() == "Bearer provider-secret"));
+        assert!(!format!("{prepared:?}").contains("provider-secret"));
     }
 }

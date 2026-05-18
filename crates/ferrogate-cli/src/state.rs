@@ -29,7 +29,7 @@ use ferrogate_policy::{
 use ferrogate_providers::{
     AdapterError, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry, ModelRegistryError,
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute,
+    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan,
 };
 use ferrogate_storage::{
     AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredAuditEvent,
@@ -711,6 +711,30 @@ impl AppState {
                 api_key: provider.api_key_value(),
             },
             ChatCompletionPlan {
+                logical_model,
+                provider_model: model_route.provider_model.clone(),
+                stream,
+                body,
+            },
+        )
+    }
+
+    pub(crate) fn prepare_responses(
+        &self,
+        provider: &Provider,
+        model_route: &ModelRoute,
+        logical_model: String,
+        stream: bool,
+        body: serde_json::Value,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.provider_adapters.prepare_responses(
+            ProviderConfig {
+                name: provider.name.clone(),
+                kind: provider.kind.clone(),
+                base_url: provider.base_url.clone(),
+                api_key: provider.api_key_value(),
+            },
+            ResponsesPlan {
                 logical_model,
                 provider_model: model_route.provider_model.clone(),
                 stream,

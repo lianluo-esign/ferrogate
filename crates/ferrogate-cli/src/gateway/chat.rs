@@ -6,15 +6,17 @@ use tracing::{info, warn};
 
 use crate::{
     auth::authenticate,
+    config::Provider,
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         write_streaming_response,
     },
+    state::AppState,
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
 use ferrogate_policy::PolicyDecision;
-use ferrogate_providers::ModelRegistryError;
+use ferrogate_providers::{ModelRegistryError, ModelRoute, ProviderHttpRequest};
 use ferrogate_storage::StoredRequestLog;
 
 use super::{
@@ -30,6 +32,35 @@ struct ChatCompletionRequest {
     stream: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AiEndpoint {
+    ChatCompletions,
+    Responses,
+}
+
+impl AiEndpoint {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat.completions",
+            Self::Responses => "responses.create",
+        }
+    }
+
+    fn route(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "openai.chat.completions",
+            Self::Responses => "openai.responses",
+        }
+    }
+
+    fn invalid_request_label(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "invalid chat completion request",
+            Self::Responses => "invalid responses request",
+        }
+    }
+}
+
 const DEFAULT_COMPLETION_TOKEN_RESERVATION: u64 = 512;
 
 impl FerroGateway {
@@ -39,17 +70,41 @@ impl FerroGateway {
         ctx: &ProxyContext,
         headers: HeaderMap,
     ) -> PingoraResult<()> {
+        self.handle_ai_request(session, ctx, headers, AiEndpoint::ChatCompletions)
+            .await
+    }
+
+    pub(super) async fn handle_responses(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: HeaderMap,
+    ) -> PingoraResult<()> {
+        self.handle_ai_request(session, ctx, headers, AiEndpoint::Responses)
+            .await
+    }
+
+    async fn handle_ai_request(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: HeaderMap,
+        endpoint: AiEndpoint,
+    ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, "chat.completions", &ctx.request_id) {
+        let auth = match authenticate(&state, &headers, endpoint.scope(), &ctx.request_id) {
             Ok(auth) => auth,
             Err(error) => {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    TenantContext::default(),
-                    None,
-                    None,
-                    error.status,
-                    error.code,
+                    AiErrorLog {
+                        tenant: TenantContext::default(),
+                        logical_model: None,
+                        provider: None,
+                        status: error.status,
+                        error_code: error.code,
+                    },
                 );
                 write_json_error(
                     session,
@@ -66,13 +121,16 @@ impl FerroGateway {
         let body = match read_request_body(session, 1024 * 1024).await? {
             Ok(body) => body,
             Err(limit) => {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    None,
-                    None,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: None,
+                        provider: None,
+                        status: StatusCode::PAYLOAD_TOO_LARGE,
+                        error_code: "payload_too_large",
+                    },
                 );
                 write_json_error_and_close(
                     session,
@@ -91,13 +149,16 @@ impl FerroGateway {
         let body_json: serde_json::Value = match serde_json::from_slice(&body) {
             Ok(request) => request,
             Err(error) => {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    None,
-                    None,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_json",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: None,
+                        provider: None,
+                        status: StatusCode::BAD_REQUEST,
+                        error_code: "invalid_json",
+                    },
                 );
                 write_json_error(
                     session,
@@ -113,19 +174,22 @@ impl FerroGateway {
         let request: ChatCompletionRequest = match serde_json::from_value(body_json.clone()) {
             Ok(request) => request,
             Err(error) => {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    None,
-                    None,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: None,
+                        provider: None,
+                        status: StatusCode::BAD_REQUEST,
+                        error_code: "invalid_request",
+                    },
                 );
                 write_json_error(
                     session,
                     StatusCode::BAD_REQUEST,
                     "invalid_request",
-                    format!("invalid chat completion request: {error}"),
+                    format!("{}: {error}", endpoint.invalid_request_label()),
                     &ctx.request_id,
                 )
                 .await?;
@@ -134,13 +198,16 @@ impl FerroGateway {
         };
 
         if !auth.can_use_model(&request.model) {
-            self.record_chat_error_log(
+            self.record_ai_error_log(
+                endpoint,
                 ctx,
-                auth.tenant_context(),
-                Some(&request.model),
-                None,
-                StatusCode::FORBIDDEN,
-                "model_not_allowed",
+                AiErrorLog {
+                    tenant: auth.tenant_context(),
+                    logical_model: Some(&request.model),
+                    provider: None,
+                    status: StatusCode::FORBIDDEN,
+                    error_code: "model_not_allowed",
+                },
             );
             write_json_error(
                 session,
@@ -156,13 +223,16 @@ impl FerroGateway {
         let model = match state.resolve_model(&request.model) {
             Ok(model) => model,
             Err(ModelRegistryError::ModelDisabled { .. }) => {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    Some(&request.model),
-                    None,
-                    StatusCode::BAD_REQUEST,
-                    "model_disabled",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: Some(&request.model),
+                        provider: None,
+                        status: StatusCode::BAD_REQUEST,
+                        error_code: "model_disabled",
+                    },
                 );
                 write_json_error(
                     session,
@@ -175,13 +245,16 @@ impl FerroGateway {
                 return Ok(());
             }
             Err(_) => {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    Some(&request.model),
-                    None,
-                    StatusCode::BAD_REQUEST,
-                    "model_not_found",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: Some(&request.model),
+                        provider: None,
+                        status: StatusCode::BAD_REQUEST,
+                        error_code: "model_not_found",
+                    },
                 );
                 write_json_error(
                     session,
@@ -200,13 +273,16 @@ impl FerroGateway {
             auth.organization_id.as_deref(),
             auth.project_id.as_deref(),
         ) {
-            self.record_chat_error_log(
+            self.record_ai_error_log(
+                endpoint,
                 ctx,
-                auth.tenant_context(),
-                Some(&request.model),
-                None,
-                StatusCode::FORBIDDEN,
-                "model_not_visible",
+                AiErrorLog {
+                    tenant: auth.tenant_context(),
+                    logical_model: Some(&request.model),
+                    provider: None,
+                    status: StatusCode::FORBIDDEN,
+                    error_code: "model_not_visible",
+                },
             );
             write_json_error(
                 session,
@@ -229,13 +305,16 @@ impl FerroGateway {
 
         'routes: for (candidate_index, model_route) in routes.iter().enumerate() {
             let Some(provider) = state.providers.get(&model_route.provider) else {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    Some(&request.model),
-                    Some(&model_route.provider),
-                    StatusCode::BAD_GATEWAY,
-                    "provider_not_found",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: Some(&request.model),
+                        provider: Some(&model_route.provider),
+                        status: StatusCode::BAD_GATEWAY,
+                        error_code: "provider_not_found",
+                    },
                 );
                 write_json_error(
                     session,
@@ -261,13 +340,16 @@ impl FerroGateway {
                     continue;
                 }
 
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    Some(&request.model),
-                    Some(&provider.name),
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "provider_circuit_open",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: Some(&request.model),
+                        provider: Some(&provider.name),
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        error_code: "provider_circuit_open",
+                    },
                 );
                 write_json_error(
                     session,
@@ -281,13 +363,16 @@ impl FerroGateway {
             }
 
             if !auth.can_use_provider(&provider.name) {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    auth.tenant_context(),
-                    Some(&request.model),
-                    Some(&provider.name),
-                    StatusCode::FORBIDDEN,
-                    "provider_not_allowed",
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: Some(&request.model),
+                        provider: Some(&provider.name),
+                        status: StatusCode::FORBIDDEN,
+                        error_code: "provider_not_allowed",
+                    },
                 );
                 write_json_error(
                     session,
@@ -303,20 +388,23 @@ impl FerroGateway {
             let policy_request = RequestContext {
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
-                route: Some("openai.chat.completions".into()),
+                route: Some(endpoint.route().into()),
                 upstream: Some(provider.name.clone()),
                 tenant: auth.tenant_context(),
             };
             if let PolicyDecision::Deny { code, message } =
                 state.evaluate_policy(&policy_request, Some(&request.model), Some(&provider.name))
             {
-                self.record_chat_error_log(
+                self.record_ai_error_log(
+                    endpoint,
                     ctx,
-                    policy_request.tenant.clone(),
-                    Some(&request.model),
-                    Some(&provider.name),
-                    StatusCode::FORBIDDEN,
-                    &code,
+                    AiErrorLog {
+                        tenant: policy_request.tenant.clone(),
+                        logical_model: Some(&request.model),
+                        provider: Some(&provider.name),
+                        status: StatusCode::FORBIDDEN,
+                        error_code: &code,
+                    },
                 );
                 write_json_error(
                     session,
@@ -349,13 +437,16 @@ impl FerroGateway {
                             token_reservation = Some(reservation);
                         }
                         None => {
-                            self.record_chat_error_log(
+                            self.record_ai_error_log(
+                                endpoint,
                                 ctx,
-                                policy_request.tenant.clone(),
-                                Some(&request.model),
-                                Some(&provider.name),
-                                StatusCode::TOO_MANY_REQUESTS,
-                                "token_budget_exceeded",
+                                AiErrorLog {
+                                    tenant: policy_request.tenant.clone(),
+                                    logical_model: Some(&request.model),
+                                    provider: Some(&provider.name),
+                                    status: StatusCode::TOO_MANY_REQUESTS,
+                                    error_code: "token_budget_exceeded",
+                                },
                             );
                             write_json_error(
                                 session,
@@ -371,7 +462,9 @@ impl FerroGateway {
                 }
             }
 
-            let prepared = match state.prepare_chat_completions(
+            let prepared = match prepare_ai_provider_request(
+                &state,
+                endpoint,
                 provider,
                 model_route,
                 request.model.clone(),
@@ -393,13 +486,16 @@ impl FerroGateway {
                     continue;
                 }
                 Err(error) => {
-                    self.record_chat_error_log(
+                    self.record_ai_error_log(
+                        endpoint,
                         ctx,
-                        policy_request.tenant.clone(),
-                        Some(&request.model),
-                        Some(&provider.name),
-                        StatusCode::BAD_GATEWAY,
-                        "provider_adapter_error",
+                        AiErrorLog {
+                            tenant: policy_request.tenant.clone(),
+                            logical_model: Some(&request.model),
+                            provider: Some(&provider.name),
+                            status: StatusCode::BAD_GATEWAY,
+                            error_code: "provider_adapter_error",
+                        },
                     );
                     write_json_error(
                         session,
@@ -413,23 +509,42 @@ impl FerroGateway {
                 }
             };
 
-            info!(
-                request_id = %ctx.request_id,
-                api_key_id = ?auth.api_key_id,
-                organization_id = ?auth.organization_id,
-                project_id = ?auth.project_id,
-                monthly_token_budget = ?auth.monthly_token_budget,
-                request_limit_per_minute = ?auth.request_limit_per_minute,
-                logical_model = %request.model,
-                provider = %provider.name,
-                provider_model = %model_route.provider_model,
-                candidate_index,
-                fallback_count = route_count.saturating_sub(1),
-                provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
-                provider_dispatch_max_retries = max_dispatch_retries,
-                stream = request.stream,
-                "chat completion route planned"
-            );
+            match endpoint {
+                AiEndpoint::ChatCompletions => info!(
+                    request_id = %ctx.request_id,
+                    api_key_id = ?auth.api_key_id,
+                    organization_id = ?auth.organization_id,
+                    project_id = ?auth.project_id,
+                    monthly_token_budget = ?auth.monthly_token_budget,
+                    request_limit_per_minute = ?auth.request_limit_per_minute,
+                    logical_model = %request.model,
+                    provider = %provider.name,
+                    provider_model = %model_route.provider_model,
+                    candidate_index,
+                    fallback_count = route_count.saturating_sub(1),
+                    provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
+                    provider_dispatch_max_retries = max_dispatch_retries,
+                    stream = request.stream,
+                    "chat completion route planned"
+                ),
+                AiEndpoint::Responses => info!(
+                    request_id = %ctx.request_id,
+                    api_key_id = ?auth.api_key_id,
+                    organization_id = ?auth.organization_id,
+                    project_id = ?auth.project_id,
+                    monthly_token_budget = ?auth.monthly_token_budget,
+                    request_limit_per_minute = ?auth.request_limit_per_minute,
+                    logical_model = %request.model,
+                    provider = %provider.name,
+                    provider_model = %model_route.provider_model,
+                    candidate_index,
+                    fallback_count = route_count.saturating_sub(1),
+                    provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
+                    provider_dispatch_max_retries = max_dispatch_retries,
+                    stream = request.stream,
+                    "responses route planned"
+                ),
+            }
 
             if request.stream {
                 let mut attempt = 0;
@@ -777,13 +892,16 @@ impl FerroGateway {
                             );
                             continue 'routes;
                         }
-                        self.record_chat_error_log(
+                        self.record_ai_error_log(
+                            endpoint,
                             ctx,
-                            auth.tenant_context(),
-                            Some(&request.model),
-                            None,
-                            StatusCode::BAD_GATEWAY,
-                            "provider_dispatch_error",
+                            AiErrorLog {
+                                tenant: auth.tenant_context(),
+                                logical_model: Some(&request.model),
+                                provider: None,
+                                status: StatusCode::BAD_GATEWAY,
+                                error_code: "provider_dispatch_error",
+                            },
                         );
                         write_json_error(
                             session,
@@ -809,25 +927,17 @@ impl FerroGateway {
         .await
     }
 
-    fn record_chat_error_log(
-        &self,
-        ctx: &ProxyContext,
-        tenant: TenantContext,
-        logical_model: Option<&str>,
-        provider: Option<&str>,
-        status: StatusCode,
-        error_code: &str,
-    ) {
+    fn record_ai_error_log(&self, endpoint: AiEndpoint, ctx: &ProxyContext, log: AiErrorLog<'_>) {
         self.state.record_request_log(StoredRequestLog {
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
-            tenant,
-            route: Some("openai.chat.completions".into()),
-            provider: provider.map(ToOwned::to_owned),
-            logical_model: logical_model.map(ToOwned::to_owned),
+            tenant: log.tenant,
+            route: Some(endpoint.route().into()),
+            provider: log.provider.map(ToOwned::to_owned),
+            logical_model: log.logical_model.map(ToOwned::to_owned),
             provider_model: None,
-            status_code: status.as_u16(),
-            error_code: Some(error_code.to_string()),
+            status_code: log.status.as_u16(),
+            error_code: Some(log.error_code.to_string()),
             prompt_recorded: false,
             response_recorded: false,
             prompt_body: None,
@@ -838,8 +948,35 @@ impl FerroGateway {
     }
 }
 
+struct AiErrorLog<'a> {
+    tenant: TenantContext,
+    logical_model: Option<&'a str>,
+    provider: Option<&'a str>,
+    status: StatusCode,
+    error_code: &'a str,
+}
+
 fn has_next_candidate(candidate_index: usize, route_count: usize) -> bool {
     candidate_index + 1 < route_count
+}
+
+fn prepare_ai_provider_request(
+    state: &AppState,
+    endpoint: AiEndpoint,
+    provider: &Provider,
+    model_route: &ModelRoute,
+    logical_model: String,
+    stream: bool,
+    body: serde_json::Value,
+) -> Result<ProviderHttpRequest, ferrogate_providers::AdapterError> {
+    match endpoint {
+        AiEndpoint::ChatCompletions => {
+            state.prepare_chat_completions(provider, model_route, logical_model, stream, body)
+        }
+        AiEndpoint::Responses => {
+            state.prepare_responses(provider, model_route, logical_model, stream, body)
+        }
+    }
 }
 
 fn estimate_chat_completion_usage(body: &serde_json::Value) -> BillingTokenUsage {
