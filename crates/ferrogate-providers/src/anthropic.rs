@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 
 use crate::{
-    AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
+    canonical::CanonicalAiRequest, AdapterError, ChatCompletionPlan, ProviderAdapter,
+    ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage,
+    ResponsesPlan, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -60,6 +61,23 @@ impl ProviderAdapter for AnthropicAdapter {
             stream: request.stream,
             headers,
         })
+    }
+
+    fn prepare_responses(
+        &self,
+        provider: ProviderConfig,
+        request: ResponsesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.prepare_chat_completions(
+            provider,
+            ChatCompletionPlan {
+                logical_model: request.logical_model,
+                provider_model: request.provider_model,
+                stream: request.stream,
+                body: CanonicalAiRequest::from_responses_body(request.body)?
+                    .into_chat_body_with_system_field(),
+            },
+        )
     }
 
     fn normalize_error_response(
@@ -221,6 +239,38 @@ mod tests {
                 message: "chat completion request body must be a JSON object".into()
             }
         );
+    }
+
+    #[test]
+    fn converts_responses_plan_to_anthropic_messages_request() {
+        let adapter = AnthropicAdapter;
+        let prepared = adapter
+            .prepare_responses(
+                provider(Some("provider-secret")),
+                ResponsesPlan {
+                    logical_model: "claude-chat".into(),
+                    provider_model: "claude-3-5-sonnet-latest".into(),
+                    stream: false,
+                    body: json!({
+                        "model": "claude-chat",
+                        "instructions": "be concise",
+                        "input": "hello",
+                        "max_output_tokens": 256
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.endpoint,
+            "https://api.anthropic.example/v1/messages"
+        );
+        assert_eq!(prepared.body["model"], "claude-3-5-sonnet-latest");
+        assert_eq!(prepared.body["messages"][0]["role"], "user");
+        assert_eq!(prepared.body["messages"][0]["content"], "hello");
+        assert_eq!(prepared.body["system"], "be concise");
+        assert_eq!(prepared.body["max_tokens"], 256);
+        assert_eq!(prepared.body["stream"], false);
     }
 
     #[test]

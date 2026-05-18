@@ -1,7 +1,7 @@
 use crate::{
     AdapterError, AnthropicAdapter, AzureOpenAiAdapter, ChatCompletionPlan, GeminiAdapter,
     GrokAdapter, OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage,
+    ProviderHttpRequest, ProviderUsage, ResponsesPlan,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -34,6 +34,15 @@ impl ProviderAdapterRegistry {
     ) -> Result<ProviderHttpRequest, AdapterError> {
         self.adapter_for(&provider.kind)?
             .prepare_chat_completions(provider, request)
+    }
+
+    pub fn prepare_responses(
+        &self,
+        provider: ProviderConfig,
+        request: ResponsesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        self.adapter_for(&provider.kind)?
+            .prepare_responses(provider, request)
     }
 
     pub fn normalize_error_response(
@@ -210,6 +219,31 @@ mod tests {
             "https://api.openai.example/v1/chat/completions"
         );
         assert_eq!(prepared.body["model"], "grok-4.20-fast");
+    }
+
+    #[test]
+    fn prepares_openai_responses_through_registry() {
+        let registry = ProviderAdapterRegistry::default();
+        let prepared = registry
+            .prepare_responses(
+                provider("openai"),
+                ResponsesPlan {
+                    logical_model: "fast-chat".into(),
+                    provider_model: "gpt-4.1-mini".into(),
+                    stream: false,
+                    body: json!({
+                        "model": "fast-chat",
+                        "input": "hello"
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.provider, "openai");
+        assert_eq!(prepared.endpoint, "https://api.openai.example/v1/responses");
+        assert_eq!(prepared.body["model"], "gpt-4.1-mini");
+        assert_eq!(prepared.body["input"], "hello");
+        assert_eq!(prepared.body["stream"], false);
     }
 
     #[test]

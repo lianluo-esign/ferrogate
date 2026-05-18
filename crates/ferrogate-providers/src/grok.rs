@@ -1,6 +1,6 @@
 use crate::{
     AdapterError, ChatCompletionPlan, OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig,
-    ProviderErrorResponse, ProviderHttpRequest, ProviderUsage,
+    ProviderErrorResponse, ProviderHttpRequest, ProviderUsage, ResponsesPlan,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -22,6 +22,16 @@ impl ProviderAdapter for GrokAdapter {
         provider.kind = "openai-compatible".into();
         self.openai_compatible
             .prepare_chat_completions(provider, request)
+    }
+
+    fn prepare_responses(
+        &self,
+        mut provider: ProviderConfig,
+        request: ResponsesPlan,
+    ) -> Result<ProviderHttpRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        provider.kind = "openai-compatible".into();
+        self.openai_compatible.prepare_responses(provider, request)
     }
 
     fn normalize_error_response(
@@ -109,6 +119,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(prepared.body["model"], "grok-4.20-fast");
+    }
+
+    #[test]
+    fn prepares_grok_responses_as_openai_compatible_request() {
+        let adapter = GrokAdapter::default();
+        let prepared = adapter
+            .prepare_responses(
+                provider("xai", None),
+                ResponsesPlan {
+                    logical_model: "grok-chat".into(),
+                    provider_model: "grok-4.20-fast".into(),
+                    stream: false,
+                    body: json!({"model": "grok-chat", "input": "hello"}),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.endpoint, "https://api.x.ai/v1/responses");
+        assert_eq!(prepared.body["model"], "grok-4.20-fast");
+        assert_eq!(prepared.body["input"], "hello");
     }
 
     #[test]

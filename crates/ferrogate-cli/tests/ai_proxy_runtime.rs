@@ -385,6 +385,165 @@ enabled = false
 }
 
 #[test]
+fn openai_responses_non_streaming_dispatch_work() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"resp_test","object":"response","output_text":"ok","usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4.1-mini"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["responses.create", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/responses",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","input":"hello"}"#,
+    );
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("\"object\":\"response\""));
+    assert!(!response.contains("provider-secret"));
+    assert!(!response.contains("client-secret"));
+
+    let logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(logs.contains("200 OK"));
+    assert!(logs.contains("\"route\":\"openai.responses\""));
+    assert!(logs.contains("\"logical_model\":\"fast-chat\""));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
+    let provider_request = &provider_requests[0];
+    assert!(provider_request.contains("POST /v1/responses HTTP/1.1"));
+    assert!(provider_request.contains("authorization: Bearer provider-secret"));
+    assert!(provider_request.contains(r#""model":"gpt-4.1-mini""#));
+    assert!(provider_request.contains(r#""input":"hello""#));
+    assert!(provider_request.contains(r#""stream":false"#));
+    assert!(!provider_request.contains("fast-chat"));
+    assert!(!provider_request.contains("client-secret"));
+}
+
+#[test]
+fn anthropic_responses_dispatch_converts_request_shape() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"msg_test","type":"message","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":5}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "anthropic"
+kind = "anthropic"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "claude-chat"
+provider = "anthropic"
+provider_model = "claude-3-5-sonnet-latest"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["responses.create"]
+allowed_models = ["claude-chat"]
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/responses",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"claude-chat","instructions":"be concise","input":"hello","max_output_tokens":64}"#,
+    );
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("\"type\":\"message\""));
+    assert!(!response.contains("provider-secret"));
+    assert!(!response.contains("client-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
+    let provider_request = &provider_requests[0];
+    assert!(provider_request.contains("POST /v1/messages HTTP/1.1"));
+    assert!(provider_request.contains("x-api-key: provider-secret"));
+    assert!(provider_request.contains("anthropic-version: 2023-06-01"));
+    assert!(provider_request.contains(r#""model":"claude-3-5-sonnet-latest""#));
+    assert!(provider_request.contains(r#""system":"be concise""#));
+    assert!(provider_request.contains(r#""content":"hello""#));
+    assert!(provider_request.contains(r#""max_tokens":64"#));
+    assert!(!provider_request.contains("claude-chat"));
+    assert!(!provider_request.contains("client-secret"));
+}
+
+#[test]
 fn admin_process_local_reload_swaps_request_state_without_rebinding_listener() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();

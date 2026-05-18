@@ -52,6 +52,12 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/v1/responses" {
+            self.handle_responses(session, ctx, req.headers.clone())
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/status" || path == "/admin/v1/status" {
             let headers = req.headers.clone();
             self.handle_admin_status(session, ctx, &headers).await?;

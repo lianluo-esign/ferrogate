@@ -15,9 +15,9 @@ The project is developed as the open-source gateway foundation behind
 - **Pingora gateway runtime** for HTTP reverse proxying, route matching,
   upstream pools, path/header rewrites, request IDs, tracing IDs, streaming
   responses, graceful shutdown, and listener-level graceful upgrade.
-- **OpenAI-compatible AI API** with `GET /v1/models` and
-  `POST /v1/chat/completions`, including non-streaming and streaming SSE
-  forwarding.
+- **OpenAI-compatible AI API** with `GET /v1/models`,
+  `POST /v1/chat/completions`, and `POST /v1/responses`, including
+  non-streaming and streaming SSE forwarding.
 - **Provider adapters** for OpenAI-compatible APIs, OpenAI, Anthropic, Gemini,
   Grok/xAI, and Azure OpenAI.
 - **Model registry and fallback routing** with logical model names, provider
@@ -128,6 +128,15 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
   -H 'Authorization: Bearer dev-secret' \
   -H 'Content-Type: application/json' \
   -d '{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Send an OpenAI-compatible Responses API request:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/responses \
+  -H 'Authorization: Bearer dev-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"fast-chat","input":"hello"}'
 ```
 
 Open the admin dashboard:
@@ -364,6 +373,9 @@ fingerprint do not change. Listener/TLS changes require graceful upgrade.
 Common endpoints:
 
 ```text
+GET  /v1/models
+POST /v1/chat/completions
+POST /v1/responses
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
@@ -381,8 +393,9 @@ GET  /metrics
 GET  /admin
 ```
 
-Read endpoints require `admin.read` when API keys are configured. Config
-validation and reload require `admin.write`.
+Read endpoints require `admin.read` when API keys are configured. Chat
+completions require `chat.completions`, Responses API requests require
+`responses.create`, and config validation and reload require `admin.write`.
 
 ## Docker
 
