@@ -295,9 +295,9 @@ impl FerroGateway {
             return Ok(());
         }
 
-        let routes = state.candidate_model_routes(&model);
-        let route_count = routes.len();
         let estimated_usage = estimate_chat_completion_usage(&body_json);
+        let routes = state.candidate_model_routes(&model, Some(&estimated_usage));
+        let route_count = routes.len();
         let dispatch_timeout = state.provider_dispatch_timeout();
         let max_dispatch_retries = state.provider_dispatch_max_retries();
         let provider_response_body_max_bytes = state.provider_response_body_max_bytes();

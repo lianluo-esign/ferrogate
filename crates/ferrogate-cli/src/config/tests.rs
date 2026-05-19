@@ -1,4 +1,5 @@
 use super::*;
+use ferrogate_providers::RoutingStrategy;
 
 #[test]
 fn default_config_uses_localhost_8080() {
@@ -54,6 +55,7 @@ api_key_env = "OPENAI_API_KEY"
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+routing_strategy = "lowest_cost"
 capabilities = ["chat", "streaming"]
 context_window = 128000
 input_price_per_1m = 0.15
@@ -64,6 +66,8 @@ visible_project_ids = ["project_gateway"]
 [[models.fallbacks]]
 provider = "openai"
 provider_model = "gpt-4.1-mini"
+input_price_per_1m = 0.10
+output_price_per_1m = 0.40
 priority = 10
 weight = 2
 
@@ -118,6 +122,7 @@ log_bodies = true
     assert_eq!(config.providers[0].name, "openai");
     assert_eq!(config.models.len(), 1);
     assert_eq!(config.models[0].name, "fast-chat");
+    assert_eq!(config.models[0].routing_strategy, RoutingStrategy::LowestCost);
     assert_eq!(config.models[0].fallbacks.len(), 1);
     assert_eq!(config.models[0].fallbacks[0].provider_model, "gpt-4.1-mini");
     assert_eq!(config.models[0].fallbacks[0].priority, Some(10));

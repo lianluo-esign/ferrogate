@@ -16,6 +16,7 @@ pub use gemini::GeminiAdapter;
 pub use grok::GrokAdapter;
 pub use models::{
     ModelRegistry, ModelRegistryEntry, ModelRegistryError, ModelRoute, ResolvedModelRoute,
+    RoutingStrategy,
 };
 pub use openai::OpenAiCompatibleAdapter;
 pub use registry::ProviderAdapterRegistry;

@@ -1,27 +1,43 @@
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingStrategy {
+    #[default]
+    Priority,
+    LowestCost,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelRoute {
     pub provider: String,
     pub provider_model: String,
+    pub input_price_per_1m: Option<f64>,
+    pub output_price_per_1m: Option<f64>,
     pub priority: u32,
     pub weight: u32,
 }
 
 impl ModelRoute {
     pub fn new(provider: impl Into<String>, provider_model: impl Into<String>) -> Self {
-        Self::with_routing(provider, provider_model, 0, 1)
+        Self::with_routing(provider, provider_model, None, None, 0, 1)
     }
 
     pub fn with_routing(
         provider: impl Into<String>,
         provider_model: impl Into<String>,
+        input_price_per_1m: Option<f64>,
+        output_price_per_1m: Option<f64>,
         priority: u32,
         weight: u32,
     ) -> Self {
         Self {
             provider: provider.into(),
             provider_model: provider_model.into(),
+            input_price_per_1m,
+            output_price_per_1m,
             priority,
             weight,
         }
@@ -37,6 +53,7 @@ pub struct ModelRegistryEntry {
     pub context_window: Option<u32>,
     pub input_price_per_1m: Option<f64>,
     pub output_price_per_1m: Option<f64>,
+    pub routing_strategy: RoutingStrategy,
     pub enabled: bool,
 }
 
@@ -54,14 +71,16 @@ impl ModelRegistryEntry {
             context_window: None,
             input_price_per_1m: None,
             output_price_per_1m: None,
+            routing_strategy: RoutingStrategy::Priority,
             enabled: true,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedModelRoute {
     pub logical_model: String,
+    pub routing_strategy: RoutingStrategy,
     pub primary: ModelRoute,
     pub fallbacks: Vec<ModelRoute>,
 }
@@ -121,6 +140,7 @@ impl ModelRegistry {
 
         Ok(ResolvedModelRoute {
             logical_model: entry.name.clone(),
+            routing_strategy: entry.routing_strategy,
             primary: entry.primary.clone(),
             fallbacks,
         })
@@ -217,9 +237,9 @@ mod tests {
     fn resolves_fallback_routes_by_priority_then_weight() {
         let mut entry = ModelRegistryEntry::new("fast-chat", "openai", "gpt-4o-mini");
         entry.fallbacks = vec![
-            ModelRoute::with_routing("gemini", "gemini-2.5-flash", 20, 10),
-            ModelRoute::with_routing("anthropic", "claude-3-5-sonnet-latest", 10, 1),
-            ModelRoute::with_routing("grok", "grok-4.20-fast", 20, 20),
+            ModelRoute::with_routing("gemini", "gemini-2.5-flash", None, None, 20, 10),
+            ModelRoute::with_routing("anthropic", "claude-3-5-sonnet-latest", None, None, 10, 1),
+            ModelRoute::with_routing("grok", "grok-4.20-fast", None, None, 20, 20),
         ];
         let registry = ModelRegistry::new([entry]).unwrap();
 
