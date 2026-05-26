@@ -7,6 +7,7 @@ mod gemini;
 mod grok;
 mod models;
 mod openai;
+mod openrouter;
 mod registry;
 mod types;
 
@@ -19,6 +20,7 @@ pub use models::{
     RoutingStrategy,
 };
 pub use openai::OpenAiCompatibleAdapter;
+pub use openrouter::OpenRouterAdapter;
 pub use registry::ProviderAdapterRegistry;
 pub use types::{
     AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,

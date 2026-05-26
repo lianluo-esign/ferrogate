@@ -690,6 +690,8 @@ fn provider() -> Provider {
         kind: "openai".into(),
         base_url: "http://127.0.0.1:8081/v1".into(),
         api_key_env: None,
+        openrouter_http_referer: None,
+        openrouter_x_title: None,
         enabled: true,
     }
 }

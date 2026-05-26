@@ -21,6 +21,8 @@ mod tests {
             kind: "openai".into(),
             base_url: "https://api.openai.example/v1".into(),
             api_key_env: Some("FERROGATE_PROVIDER_TEST_KEY".into()),
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
             enabled: true,
         };
 
@@ -35,6 +37,8 @@ mod tests {
             kind: "openai".into(),
             base_url: "https://api.openai.example/v1".into(),
             api_key_env: Some("FERROGATE_PROVIDER_EMPTY_KEY".into()),
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
             enabled: true,
         };
 

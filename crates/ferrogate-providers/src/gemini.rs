@@ -285,6 +285,8 @@ mod tests {
             kind: "gemini".into(),
             base_url: "https://generativelanguage.googleapis.com/v1beta/".into(),
             api_key: api_key.map(str::to_string),
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
         }
     }
 

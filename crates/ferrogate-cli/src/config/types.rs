@@ -119,6 +119,10 @@ pub(crate) struct Provider {
     pub(crate) base_url: String,
     #[serde(default)]
     pub(crate) api_key_env: Option<String>,
+    #[serde(default)]
+    pub(crate) openrouter_http_referer: Option<String>,
+    #[serde(default)]
+    pub(crate) openrouter_x_title: Option<String>,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
 }
@@ -166,7 +170,6 @@ pub(crate) struct ModelFallback {
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
 }
-
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ApiKey {

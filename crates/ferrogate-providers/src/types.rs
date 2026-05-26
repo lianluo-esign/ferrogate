@@ -7,6 +7,8 @@ pub struct ProviderConfig {
     pub kind: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    pub openrouter_http_referer: Option<String>,
+    pub openrouter_x_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

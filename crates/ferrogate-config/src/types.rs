@@ -73,6 +73,10 @@ pub struct GatewayProvider {
     pub kind: String,
     pub base_url: String,
     pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub openrouter_http_referer: Option<String>,
+    #[serde(default)]
+    pub openrouter_x_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -29,8 +29,7 @@ use ferrogate_policy::{
 use ferrogate_providers::{
     AdapterError, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry, ModelRegistryError,
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan,
-    RoutingStrategy,
+    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_storage::{
     AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredAuditEvent,
@@ -710,6 +709,8 @@ impl AppState {
                 kind: provider.kind.clone(),
                 base_url: provider.base_url.clone(),
                 api_key: provider.api_key_value(),
+                openrouter_http_referer: provider.openrouter_http_referer.clone(),
+                openrouter_x_title: provider.openrouter_x_title.clone(),
             },
             ChatCompletionPlan {
                 logical_model,
@@ -734,6 +735,8 @@ impl AppState {
                 kind: provider.kind.clone(),
                 base_url: provider.base_url.clone(),
                 api_key: provider.api_key_value(),
+                openrouter_http_referer: provider.openrouter_http_referer.clone(),
+                openrouter_x_title: provider.openrouter_x_title.clone(),
             },
             ResponsesPlan {
                 logical_model,
@@ -1773,6 +1776,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             ..Config::default()
@@ -1950,6 +1955,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
                 Provider {
@@ -1957,6 +1964,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
                 Provider {
@@ -1964,6 +1973,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
             ],
@@ -2036,6 +2047,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
                 Provider {
@@ -2043,6 +2056,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
                 Provider {
@@ -2050,6 +2065,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
             ],
@@ -2115,6 +2132,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             ..Config::default()
@@ -2138,6 +2157,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             ..Config::default()
@@ -2157,6 +2178,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: false,
             }],
             ..Config::default()
@@ -2225,6 +2248,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             models: vec![Model {
@@ -2494,12 +2519,12 @@ mod tests {
             },
             models: vec![Model {
                 name: "fast-chat".into(),
-        provider: "openai".into(),
-        provider_model: "gpt-4o-mini".into(),
-        routing_strategy: RoutingStrategy::Priority,
-        fallbacks: vec![],
-        visible_organization_ids: vec![],
-        visible_project_ids: vec![],
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
                 capabilities: vec![],
                 context_window: None,
                 input_price_per_1m: Some(1.0),
