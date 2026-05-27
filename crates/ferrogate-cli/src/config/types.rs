@@ -89,6 +89,14 @@ pub(crate) struct TlsAcmeConfig {
     pub(crate) dns_hook_cleanup: Option<String>,
     #[serde(default = "default_dns_propagation_delay_secs")]
     pub(crate) dns_propagation_delay_secs: u64,
+    #[serde(default = "default_acme_renewal_window_secs")]
+    pub(crate) renewal_window_secs: u64,
+    #[serde(default = "default_acme_renewal_check_interval_secs")]
+    pub(crate) renewal_check_interval_secs: u64,
+    #[serde(default = "default_acme_renewal_retry_interval_secs")]
+    pub(crate) renewal_retry_interval_secs: u64,
+    #[serde(default = "default_true")]
+    pub(crate) auto_graceful_reload: bool,
 }
 
 impl Default for TlsAcmeConfig {
@@ -107,6 +115,10 @@ impl Default for TlsAcmeConfig {
             dns_hook_set: None,
             dns_hook_cleanup: None,
             dns_propagation_delay_secs: default_dns_propagation_delay_secs(),
+            renewal_window_secs: default_acme_renewal_window_secs(),
+            renewal_check_interval_secs: default_acme_renewal_check_interval_secs(),
+            renewal_retry_interval_secs: default_acme_renewal_retry_interval_secs(),
+            auto_graceful_reload: true,
         }
     }
 }
@@ -381,6 +393,18 @@ fn default_acme_storage_dir() -> String {
 
 fn default_dns_propagation_delay_secs() -> u64 {
     30
+}
+
+fn default_acme_renewal_window_secs() -> u64 {
+    30 * 24 * 60 * 60
+}
+
+fn default_acme_renewal_check_interval_secs() -> u64 {
+    12 * 60 * 60
+}
+
+fn default_acme_renewal_retry_interval_secs() -> u64 {
+    30 * 60
 }
 
 fn default_policy_effect() -> String {

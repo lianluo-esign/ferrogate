@@ -69,8 +69,6 @@ Still intentionally scoped as next-stage production work:
   in-memory repository driven.
 - Full Admin API CRUD control plane beyond the current API key and policy
   resources.
-- Background ACME renewal and hot certificate reload. Current ACME behavior is
-  startup-time issuance/reuse.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the
   generic external hook boundary.
 
@@ -332,6 +330,10 @@ terms_agreed = true
 challenge = "http-01"
 http_challenge_listen = "0.0.0.0:80"
 storage_dir = "/var/lib/ferrogate/acme-http"
+renewal_window_secs = 2592000
+renewal_check_interval_secs = 43200
+renewal_retry_interval_secs = 1800
+auto_graceful_reload = true
 ```
 
 ### ACME DNS-01 With Built-In Cloudflare
@@ -358,6 +360,10 @@ storage_dir = "/var/lib/ferrogate/acme-dns"
 dns_provider = "cloudflare"
 dns_config = { api_token = "cf-token", zone_name = "example.com" }
 dns_propagation_delay_secs = 30
+renewal_window_secs = 2592000
+renewal_check_interval_secs = 43200
+renewal_retry_interval_secs = 1800
+auto_graceful_reload = true
 ```
 
 Caddyfile-style DNS-01:
@@ -369,6 +375,10 @@ api.example.com {
             email ops@example.com
         }
         storage /var/lib/ferrogate/acme-dns
+        renewal_window_secs 2592000
+        renewal_check_interval_secs 43200
+        renewal_retry_interval_secs 1800
+        auto_graceful_reload true
         dns cloudflare {
             api_token cf-token
             zone_name example.com
@@ -384,6 +394,21 @@ are invoked as:
 ```text
 <hook> <set|cleanup> <payload-json-path>
 ```
+
+When ACME is enabled, FerroGate starts a background renewal loop after the
+startup certificate has been issued or loaded from cache. Renewal starts when
+the leaf certificate enters `renewal_window_secs` before expiry, failed renewal
+attempts are logged and retried after `renewal_retry_interval_secs`, and current
+certificate expiry plus the last renewal result are exposed on
+`GET /admin/v1/status`.
+
+With the Rustls listener used by the current Pingora runtime, renewed certificate
+files require listener-level reload before new TLS handshakes use them. If
+`auto_graceful_reload = true` and `reliability.graceful_upgrade_pid_file` plus
+`reliability.graceful_upgrade_sock` are configured, FerroGate triggers the
+existing graceful-upgrade reload path after a successful renewal. Otherwise,
+admin status reports `reload_required: true` and `reload_mode:
+"listener-level-required"` so operators can run `ferrogate reload --graceful-upgrade`.
 
 ## Reloading
 

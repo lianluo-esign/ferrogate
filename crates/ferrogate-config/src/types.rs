@@ -33,6 +33,10 @@ pub struct GatewayTlsAcmeConfig {
     pub dns_config: BTreeMap<String, String>,
     pub dns_hook_set: Option<String>,
     pub dns_hook_cleanup: Option<String>,
+    pub renewal_window_secs: Option<u64>,
+    pub renewal_check_interval_secs: Option<u64>,
+    pub renewal_retry_interval_secs: Option<u64>,
+    pub auto_graceful_reload: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -9,10 +9,10 @@ use crate::{
     config::{config_snapshot_id, ApiKey, Config, PolicyRule},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
-        AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse, AdminConfigReloadResponse,
-        AdminConfigValidateRequest, AdminConfigValidateResponse, AdminDeleteResponse, AdminList,
-        AdminPolicyMutation, AdminPolicyMutationResponse, AdminProvider, AdminStatus,
-        AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
+        AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse,
+        AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
+        AdminDeleteResponse, AdminList, AdminPolicyMutation, AdminPolicyMutationResponse,
+        AdminProvider, AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
     },
     state::AdminAuditEventDraft,
 };
@@ -149,6 +149,21 @@ impl FerroGateway {
                     routes: state.config.routes.len(),
                     enabled_routes: state.config.routes.iter().filter(|r| r.enabled).count(),
                     auth_required: state.auth_required(),
+                    acme: state.acme_renewal_status().map(|status| AdminAcmeStatus {
+                        enabled: status.enabled,
+                        domains: status.domains,
+                        cert_path: status.cert_path,
+                        key_path: status.key_path,
+                        certificate_expires_at_unix: status.certificate_expires_at_unix,
+                        renewal_window_secs: status.renewal_window_secs,
+                        renewal_due: status.renewal_due,
+                        last_renewal_status: status.last_renewal_status,
+                        last_renewal_at_unix: status.last_renewal_at_unix,
+                        last_renewal_error: status.last_renewal_error,
+                        next_check_at_unix: status.next_check_at_unix,
+                        reload_required: status.reload_required,
+                        reload_mode: status.reload_mode,
+                    }),
                 };
                 write_json_response(session, StatusCode::OK, &status, &ctx.request_id).await
             }

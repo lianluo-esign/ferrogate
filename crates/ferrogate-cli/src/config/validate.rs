@@ -117,6 +117,15 @@ impl Config {
         if acme.dns_propagation_delay_secs == 0 {
             bail!("field tls.acme.dns_propagation_delay_secs: must be greater than zero");
         }
+        if acme.renewal_window_secs == 0 {
+            bail!("field tls.acme.renewal_window_secs: must be greater than zero");
+        }
+        if acme.renewal_check_interval_secs == 0 {
+            bail!("field tls.acme.renewal_check_interval_secs: must be greater than zero");
+        }
+        if acme.renewal_retry_interval_secs == 0 {
+            bail!("field tls.acme.renewal_retry_interval_secs: must be greater than zero");
+        }
 
         Ok(())
     }
