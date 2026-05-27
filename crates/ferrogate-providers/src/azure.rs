@@ -173,6 +173,8 @@ mod tests {
             kind: kind.into(),
             base_url: "https://example.openai.azure.com/?api-version=2024-02-15-preview".into(),
             api_key: api_key.map(str::to_string),
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
         }
     }
 

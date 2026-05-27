@@ -1,4 +1,5 @@
 use super::*;
+use ferrogate_providers::RoutingStrategy;
 
 #[test]
 fn default_config_uses_localhost_8080() {
@@ -49,11 +50,14 @@ strip_prefix = "/proxy"
 name = "openai"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+openrouter_http_referer = "https://ferrogate.example"
+openrouter_x_title = "FerroGate"
 
 [[models]]
 name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
+routing_strategy = "lowest_cost"
 capabilities = ["chat", "streaming"]
 context_window = 128000
 input_price_per_1m = 0.15
@@ -64,6 +68,8 @@ visible_project_ids = ["project_gateway"]
 [[models.fallbacks]]
 provider = "openai"
 provider_model = "gpt-4.1-mini"
+input_price_per_1m = 0.10
+output_price_per_1m = 0.40
 priority = 10
 weight = 2
 
@@ -116,8 +122,20 @@ log_bodies = true
     assert_eq!(config.reliability.graceful_upgrade_sock_retries, Some(5));
     assert_eq!(config.providers.len(), 1);
     assert_eq!(config.providers[0].name, "openai");
+    assert_eq!(
+        config.providers[0].openrouter_http_referer.as_deref(),
+        Some("https://ferrogate.example")
+    );
+    assert_eq!(
+        config.providers[0].openrouter_x_title.as_deref(),
+        Some("FerroGate")
+    );
     assert_eq!(config.models.len(), 1);
     assert_eq!(config.models[0].name, "fast-chat");
+    assert_eq!(
+        config.models[0].routing_strategy,
+        RoutingStrategy::LowestCost
+    );
     assert_eq!(config.models[0].fallbacks.len(), 1);
     assert_eq!(config.models[0].fallbacks[0].provider_model, "gpt-4.1-mini");
     assert_eq!(config.models[0].fallbacks[0].priority, Some(10));
@@ -275,6 +293,8 @@ fn parses_caddyfile_ai_gateway_into_valid_runtime_config() {
             kind openai
             base_url https://api.openai.com/v1
             api_key {env.OPENAI_API_KEY}
+            openrouter_http_referer https://ferrogate.example
+            openrouter_x_title FerroGate Local
         }
         model fast-chat -> openai:gpt-4o-mini {
             capabilities chat streaming
@@ -305,6 +325,14 @@ fn parses_caddyfile_ai_gateway_into_valid_runtime_config() {
     assert_eq!(
         config.providers[0].api_key_env.as_deref(),
         Some("OPENAI_API_KEY")
+    );
+    assert_eq!(
+        config.providers[0].openrouter_http_referer.as_deref(),
+        Some("https://ferrogate.example")
+    );
+    assert_eq!(
+        config.providers[0].openrouter_x_title.as_deref(),
+        Some("FerroGate Local")
     );
     assert_eq!(config.models.len(), 1);
     assert_eq!(config.models[0].capabilities, ["chat", "streaming"]);

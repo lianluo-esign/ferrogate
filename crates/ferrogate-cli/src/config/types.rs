@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use ferrogate_providers::RoutingStrategy;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Config {
     #[serde(default = "default_listen")]
@@ -117,6 +119,10 @@ pub(crate) struct Provider {
     pub(crate) base_url: String,
     #[serde(default)]
     pub(crate) api_key_env: Option<String>,
+    #[serde(default)]
+    pub(crate) openrouter_http_referer: Option<String>,
+    #[serde(default)]
+    pub(crate) openrouter_x_title: Option<String>,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
 }
@@ -129,6 +135,8 @@ pub(crate) struct Model {
     pub(crate) provider: String,
     /// Actual model name sent to the upstream provider.
     pub(crate) provider_model: String,
+    #[serde(default)]
+    pub(crate) routing_strategy: RoutingStrategy,
     #[serde(default)]
     pub(crate) fallbacks: Vec<ModelFallback>,
     #[serde(default)]
@@ -151,6 +159,10 @@ pub(crate) struct Model {
 pub(crate) struct ModelFallback {
     pub(crate) provider: String,
     pub(crate) provider_model: String,
+    #[serde(default)]
+    pub(crate) input_price_per_1m: Option<f64>,
+    #[serde(default)]
+    pub(crate) output_price_per_1m: Option<f64>,
     #[serde(default)]
     pub(crate) priority: Option<u32>,
     #[serde(default)]

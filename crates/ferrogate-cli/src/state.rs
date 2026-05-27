@@ -29,7 +29,7 @@ use ferrogate_policy::{
 use ferrogate_providers::{
     AdapterError, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry, ModelRegistryError,
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan,
+    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_storage::{
     AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredAuditEvent,
@@ -709,6 +709,8 @@ impl AppState {
                 kind: provider.kind.clone(),
                 base_url: provider.base_url.clone(),
                 api_key: provider.api_key_value(),
+                openrouter_http_referer: provider.openrouter_http_referer.clone(),
+                openrouter_x_title: provider.openrouter_x_title.clone(),
             },
             ChatCompletionPlan {
                 logical_model,
@@ -733,6 +735,8 @@ impl AppState {
                 kind: provider.kind.clone(),
                 base_url: provider.base_url.clone(),
                 api_key: provider.api_key_value(),
+                openrouter_http_referer: provider.openrouter_http_referer.clone(),
+                openrouter_x_title: provider.openrouter_x_title.clone(),
             },
             ResponsesPlan {
                 logical_model,
@@ -750,22 +754,42 @@ impl AppState {
         self.model_registry.resolve(logical_model)
     }
 
-    pub(crate) fn candidate_model_routes(&self, model: &ResolvedModelRoute) -> Vec<ModelRoute> {
-        let mut routes = vec![model.primary.clone()];
-        let mut cursor = self.model_route_counter.fetch_add(1, Ordering::Relaxed);
-        let mut fallbacks = model.fallbacks.as_slice();
-
-        while let Some((priority, group_end)) = fallback_priority_group(fallbacks) {
-            let group = &fallbacks[..group_end];
-            let start = weighted_start_index(group, cursor);
-            routes.extend(group[start..].iter().cloned());
-            routes.extend(group[..start].iter().cloned());
-            cursor /= total_weight(group);
-            fallbacks = &fallbacks[group_end..];
-            debug_assert!(group.iter().all(|route| route.priority == priority));
+    pub(crate) fn candidate_model_routes(
+        &self,
+        model: &ResolvedModelRoute,
+        estimated_usage: Option<&BillingTokenUsage>,
+    ) -> Vec<ModelRoute> {
+        match model.routing_strategy {
+            RoutingStrategy::Priority => {
+                let mut routes = vec![model.primary.clone()];
+                let mut cursor = self.model_route_counter.fetch_add(1, Ordering::Relaxed);
+                let mut fallbacks = model.fallbacks.as_slice();
+                while let Some((priority, group_end)) = fallback_priority_group(fallbacks) {
+                    let group = &fallbacks[..group_end];
+                    let start = weighted_start_index(group, cursor);
+                    routes.extend(group[start..].iter().cloned());
+                    routes.extend(group[..start].iter().cloned());
+                    cursor /= total_weight(group);
+                    fallbacks = &fallbacks[group_end..];
+                    debug_assert!(group.iter().all(|route| route.priority == priority));
+                }
+                routes
+            }
+            RoutingStrategy::LowestCost => {
+                let mut routes = vec![model.primary.clone()];
+                routes.extend(model.fallbacks.iter().cloned());
+                routes.sort_by(|left, right| {
+                    route_estimated_cost(left, estimated_usage)
+                        .partial_cmp(&route_estimated_cost(right, estimated_usage))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| left.priority.cmp(&right.priority))
+                        .then_with(|| right.weight.cmp(&left.weight))
+                        .then_with(|| left.provider.cmp(&right.provider))
+                        .then_with(|| left.provider_model.cmp(&right.provider_model))
+                });
+                routes
+            }
         }
-
-        routes
     }
 
     pub(crate) fn can_tenant_use_model(
@@ -1039,8 +1063,8 @@ impl AppState {
     ) -> Result<(), ferrogate_billing::BillingError> {
         let usage = draft.usage.clone().estimate_missing_total();
         let cost = self
-            .model_prices
-            .get(draft.logical_model)
+            .route_price(draft.logical_model, draft.provider, draft.provider_model)
+            .or_else(|| self.model_prices.get(draft.logical_model).cloned())
             .map(|price| price.estimate(&usage));
         let event = BillingEvent {
             request_id: draft.request.request_id.clone(),
@@ -1117,6 +1141,22 @@ impl AppState {
         aggregate.usage.completion_tokens += usage.completion_tokens;
         aggregate.usage.total_tokens += usage.total_tokens;
         aggregates.insert(id, aggregate);
+    }
+
+    fn route_price(
+        &self,
+        logical_model: &str,
+        provider: &str,
+        provider_model: &str,
+    ) -> Option<ModelPrice> {
+        let resolved = self.model_registry.resolve(logical_model).ok()?;
+        let route = std::iter::once(resolved.primary)
+            .chain(resolved.fallbacks)
+            .find(|route| route.provider == provider && route.provider_model == provider_model)?;
+        match (route.input_price_per_1m, route.output_price_per_1m) {
+            (Some(input), Some(output)) => Some(ModelPrice::usd(input, output)),
+            _ => None,
+        }
     }
 
     pub(crate) fn record_request_log(&self, log: StoredRequestLog) {
@@ -1605,7 +1645,10 @@ fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
     entry.context_window = model.context_window;
     entry.input_price_per_1m = model.input_price_per_1m;
     entry.output_price_per_1m = model.output_price_per_1m;
+    entry.routing_strategy = model.routing_strategy;
     entry.enabled = model.enabled;
+    entry.primary.input_price_per_1m = model.input_price_per_1m;
+    entry.primary.output_price_per_1m = model.output_price_per_1m;
     entry.fallbacks = model
         .fallbacks
         .iter()
@@ -1614,6 +1657,8 @@ fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
             ModelRoute::with_routing(
                 fallback.provider.clone(),
                 fallback.provider_model.clone(),
+                fallback.input_price_per_1m,
+                fallback.output_price_per_1m,
                 fallback.priority.unwrap_or(100),
                 fallback.weight.unwrap_or(1),
             )
@@ -1629,6 +1674,28 @@ fn model_price(model: &Model) -> Option<ModelPrice> {
             input.unwrap_or_default(),
             output.unwrap_or_default(),
         )),
+    }
+}
+
+fn route_estimated_cost(route: &ModelRoute, usage: Option<&BillingTokenUsage>) -> f64 {
+    let Some(usage) = usage else {
+        return route_estimated_unit_cost(route);
+    };
+    match (route.input_price_per_1m, route.output_price_per_1m) {
+        (Some(input), Some(output)) => {
+            let price = ModelPrice::usd(input, output);
+            price.estimate(usage).total_cost
+        }
+        _ => route_estimated_unit_cost(route),
+    }
+}
+
+fn route_estimated_unit_cost(route: &ModelRoute) -> f64 {
+    match (route.input_price_per_1m, route.output_price_per_1m) {
+        (Some(input), Some(output)) => input + output,
+        (Some(input), None) => input,
+        (None, Some(output)) => output,
+        (None, None) => f64::INFINITY,
     }
 }
 
@@ -1709,6 +1776,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             ..Config::default()
@@ -1886,6 +1955,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
                 Provider {
@@ -1893,6 +1964,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
                 Provider {
@@ -1900,6 +1973,8 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
                     api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
                     enabled: true,
                 },
             ],
@@ -1907,10 +1982,13 @@ mod tests {
                 name: "fast-chat".into(),
                 provider: "primary".into(),
                 provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
                 fallbacks: vec![
                     crate::config::ModelFallback {
                         provider: "backup-a".into(),
                         provider_model: "gpt-4.1-mini".into(),
+                        input_price_per_1m: Some(2.0),
+                        output_price_per_1m: Some(2.0),
                         priority: Some(10),
                         weight: Some(1),
                         enabled: true,
@@ -1918,6 +1996,8 @@ mod tests {
                     crate::config::ModelFallback {
                         provider: "backup-b".into(),
                         provider_model: "gpt-4.1".into(),
+                        input_price_per_1m: Some(1.0),
+                        output_price_per_1m: Some(1.0),
                         priority: Some(10),
                         weight: Some(2),
                         enabled: true,
@@ -1938,17 +2018,17 @@ mod tests {
         let resolved = state.resolve_model("fast-chat").unwrap();
 
         let first = state
-            .candidate_model_routes(&resolved)
+            .candidate_model_routes(&resolved, None)
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
         let second = state
-            .candidate_model_routes(&resolved)
+            .candidate_model_routes(&resolved, None)
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
         let third = state
-            .candidate_model_routes(&resolved)
+            .candidate_model_routes(&resolved, None)
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
@@ -1956,6 +2036,87 @@ mod tests {
         assert_eq!(first, ["primary", "backup-b", "backup-a"]);
         assert_eq!(second, ["primary", "backup-b", "backup-a"]);
         assert_eq!(third, ["primary", "backup-a", "backup-b"]);
+    }
+
+    #[test]
+    fn orders_lowest_cost_routes_by_estimated_price() {
+        let config = Config {
+            providers: vec![
+                Provider {
+                    name: "primary".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10001/v1".into(),
+                    api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
+                    enabled: true,
+                },
+                Provider {
+                    name: "backup-a".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10002/v1".into(),
+                    api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
+                    enabled: true,
+                },
+                Provider {
+                    name: "backup-b".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10003/v1".into(),
+                    api_key_env: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
+                    enabled: true,
+                },
+            ],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "primary".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::LowestCost,
+                fallbacks: vec![
+                    crate::config::ModelFallback {
+                        provider: "backup-a".into(),
+                        provider_model: "gpt-4.1-mini".into(),
+                        input_price_per_1m: Some(2.0),
+                        output_price_per_1m: Some(2.0),
+                        priority: Some(10),
+                        weight: Some(1),
+                        enabled: true,
+                    },
+                    crate::config::ModelFallback {
+                        provider: "backup-b".into(),
+                        provider_model: "gpt-4.1".into(),
+                        input_price_per_1m: Some(1.0),
+                        output_price_per_1m: Some(1.0),
+                        priority: Some(10),
+                        weight: Some(2),
+                        enabled: true,
+                    },
+                ],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: Some(5.0),
+                output_price_per_1m: Some(5.0),
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let state = AppState::new(config);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+        let usage = BillingTokenUsage::new(1_000, 2_000, 3_000);
+
+        let providers = state
+            .candidate_model_routes(&resolved, Some(&usage))
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+
+        assert_eq!(providers, ["backup-b", "backup-a", "primary"]);
     }
 
     #[test]
@@ -1971,6 +2132,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             ..Config::default()
@@ -1994,6 +2157,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             ..Config::default()
@@ -2013,6 +2178,8 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: false,
             }],
             ..Config::default()
@@ -2081,12 +2248,15 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
                 enabled: true,
             }],
             models: vec![Model {
                 name: "fast-chat".into(),
                 provider: "openai".into(),
                 provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
                 fallbacks: vec![],
                 visible_organization_ids: vec![],
                 visible_project_ids: vec![],
@@ -2351,6 +2521,7 @@ mod tests {
                 name: "fast-chat".into(),
                 provider: "openai".into(),
                 provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
                 fallbacks: vec![],
                 visible_organization_ids: vec![],
                 visible_project_ids: vec![],

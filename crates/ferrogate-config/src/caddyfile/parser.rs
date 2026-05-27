@@ -352,6 +352,8 @@ impl<'a> Parser<'a> {
             kind: "openai".to_string(),
             base_url: String::new(),
             api_key_env: None,
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
         };
 
         if !self.consume_lbrace() {
@@ -387,11 +389,17 @@ impl<'a> Parser<'a> {
                         provider.api_key_env = env_reference(value);
                     }
                 }
+                "openrouter_http_referer" => {
+                    provider.openrouter_http_referer = args.first().cloned();
+                }
+                "openrouter_x_title" => {
+                    provider.openrouter_x_title = Some(args.join(" "));
+                }
                 _ => {
                     return Err(self.unsupported(
                         &token,
                         directive,
-                        "inside provider blocks, FerroGate supports kind, base_url and api_key env.NAME/{env.NAME}".to_string(),
+                        "inside provider blocks, FerroGate supports kind, base_url, api_key env.NAME/{env.NAME}, openrouter_http_referer and openrouter_x_title".to_string(),
                     ));
                 }
             }

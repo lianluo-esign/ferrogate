@@ -4,6 +4,7 @@ use pingora::tls::load_certs_and_key_files;
 use std::collections::HashSet;
 
 use crate::routing::parse_upstream_endpoint;
+use ferrogate_providers::RoutingStrategy;
 
 use super::Config;
 
@@ -301,6 +302,20 @@ impl Config {
             if provider.api_key_env.as_deref().is_some_and(str::is_empty) {
                 bail!("field providers[{index}].api_key_env: cannot be empty");
             }
+            if provider
+                .openrouter_http_referer
+                .as_deref()
+                .is_some_and(str::is_empty)
+            {
+                bail!("field providers[{index}].openrouter_http_referer: cannot be empty");
+            }
+            if provider
+                .openrouter_x_title
+                .as_deref()
+                .is_some_and(str::is_empty)
+            {
+                bail!("field providers[{index}].openrouter_x_title: cannot be empty");
+            }
         }
         Ok(names)
     }
@@ -330,6 +345,13 @@ impl Config {
             if model.provider_model.trim().is_empty() {
                 bail!("field models[{index}].provider_model: cannot be empty");
             }
+            if matches!(model.routing_strategy, RoutingStrategy::LowestCost)
+                && (model.input_price_per_1m.is_none() || model.output_price_per_1m.is_none())
+            {
+                bail!(
+                    "field models[{index}].routing_strategy: lowest_cost requires input_price_per_1m and output_price_per_1m on the primary model"
+                );
+            }
             for (fallback_index, fallback) in model.fallbacks.iter().enumerate() {
                 if !fallback.enabled {
                     continue;
@@ -344,6 +366,14 @@ impl Config {
                 if fallback.provider_model.trim().is_empty() {
                     bail!(
                         "field models[{index}].fallbacks[{fallback_index}].provider_model: cannot be empty"
+                    );
+                }
+                if matches!(model.routing_strategy, RoutingStrategy::LowestCost)
+                    && (fallback.input_price_per_1m.is_none()
+                        || fallback.output_price_per_1m.is_none())
+                {
+                    bail!(
+                        "field models[{index}].fallbacks[{fallback_index}]: lowest_cost requires input_price_per_1m and output_price_per_1m"
                     );
                 }
                 if fallback.weight == Some(0) {

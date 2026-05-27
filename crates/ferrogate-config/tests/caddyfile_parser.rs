@@ -216,6 +216,8 @@ fn parses_ai_gateway_typed_config_subset() {
         provider openai {
             base_url https://api.openai.com/v1
             api_key {env.OPENAI_API_KEY}
+            openrouter_http_referer https://ferrogate.example
+            openrouter_x_title FerroGate Local
         }
         model fast-chat -> openai:gpt-4o-mini {
             capabilities chat streaming
@@ -238,6 +240,14 @@ fn parses_ai_gateway_typed_config_subset() {
     assert_eq!(
         config.providers[0].api_key_env.as_deref(),
         Some("OPENAI_API_KEY")
+    );
+    assert_eq!(
+        config.providers[0].openrouter_http_referer.as_deref(),
+        Some("https://ferrogate.example")
+    );
+    assert_eq!(
+        config.providers[0].openrouter_x_title.as_deref(),
+        Some("FerroGate Local")
     );
     assert_eq!(config.models[0].provider_model, "gpt-4o-mini");
     assert_eq!(config.api_keys[0].denied_models, ["fast-chat"]);

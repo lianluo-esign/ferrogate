@@ -1,7 +1,7 @@
 use crate::{
     AdapterError, AnthropicAdapter, AzureOpenAiAdapter, ChatCompletionPlan, GeminiAdapter,
-    GrokAdapter, OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResponsesPlan,
+    GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderConfig,
+    ProviderErrorResponse, ProviderHttpRequest, ProviderUsage, ResponsesPlan,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -10,6 +10,7 @@ pub struct ProviderAdapterRegistry {
     anthropic: AnthropicAdapter,
     gemini: GeminiAdapter,
     grok: GrokAdapter,
+    openrouter: OpenRouterAdapter,
     azure_openai: AzureOpenAiAdapter,
 }
 
@@ -20,6 +21,7 @@ impl ProviderAdapterRegistry {
             "anthropic" => Ok(&self.anthropic),
             "gemini" => Ok(&self.gemini),
             "grok" | "xai" => Ok(&self.grok),
+            "openrouter" => Ok(&self.openrouter),
             "azure" | "azure-openai" => Ok(&self.azure_openai),
             other => Err(AdapterError::UnsupportedProviderKind {
                 kind: other.to_string(),
@@ -103,6 +105,16 @@ mod tests {
         assert_eq!(
             registry.adapter_for(" OpenAI-Compatible ").unwrap().kind(),
             "openai-compatible"
+        );
+    }
+
+    #[test]
+    fn resolves_openrouter_adapter() {
+        let registry = ProviderAdapterRegistry::default();
+
+        assert_eq!(
+            registry.adapter_for("openrouter").unwrap().kind(),
+            "openrouter"
         );
     }
 
@@ -373,6 +385,8 @@ mod tests {
             kind: kind.into(),
             base_url: "https://api.openai.example/v1".into(),
             api_key: Some("provider-secret".into()),
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
         }
     }
 }

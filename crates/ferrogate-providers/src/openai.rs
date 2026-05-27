@@ -172,6 +172,8 @@ mod tests {
             kind: "openai".into(),
             base_url: "https://api.openai.example/v1/".into(),
             api_key: api_key.map(str::to_string),
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
         }
     }
 

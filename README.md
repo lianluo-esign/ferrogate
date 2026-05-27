@@ -254,6 +254,49 @@ development keys.
 ferrogate hash-key --secret 'your-client-secret'
 ```
 
+### OpenRouter Provider
+
+OpenRouter is available as a first-class provider kind while using the same
+OpenAI-compatible chat completions and Responses API dispatch path.
+
+```toml
+[[providers]]
+name = "openrouter"
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+openrouter_http_referer = "https://example.com"
+openrouter_x_title = "Example FerroGate"
+
+[[models]]
+name = "router-chat"
+provider = "openrouter"
+provider_model = "openai/gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+```
+
+The optional `openrouter_http_referer` and `openrouter_x_title` settings are
+sent upstream as `HTTP-Referer` and `X-Title` headers. They are not client API
+keys and do not replace `api_key_env`.
+
+Caddyfile-style provider configuration supports the same fields:
+
+```caddyfile
+ai_gateway {
+    provider openrouter {
+        kind openrouter
+        base_url https://openrouter.ai/api/v1
+        api_key {env.OPENROUTER_API_KEY}
+        openrouter_http_referer https://example.com
+        openrouter_x_title Example FerroGate
+    }
+
+    model router-chat -> openrouter:openai/gpt-4o-mini {
+        capabilities chat streaming
+    }
+}
+```
+
 ## Automatic HTTPS
 
 FerroGate supports manual TLS certificates and startup-time ACME issuance.

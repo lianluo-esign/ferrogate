@@ -1,4 +1,5 @@
 use super::*;
+use ferrogate_providers::RoutingStrategy;
 
 #[test]
 fn rejects_model_with_unknown_provider() {
@@ -7,6 +8,7 @@ fn rejects_model_with_unknown_provider() {
             name: "fast-chat".into(),
             provider: "missing".into(),
             provider_model: "gpt-4o-mini".into(),
+            routing_strategy: RoutingStrategy::Priority,
             fallbacks: vec![],
             visible_organization_ids: vec![],
             visible_project_ids: vec![],
@@ -29,6 +31,8 @@ fn rejects_model_with_unknown_fallback_provider() {
     model.fallbacks = vec![ModelFallback {
         provider: "missing".into(),
         provider_model: "gpt-4.1-mini".into(),
+        input_price_per_1m: None,
+        output_price_per_1m: None,
         priority: Some(10),
         weight: Some(1),
         enabled: true,
@@ -49,6 +53,8 @@ fn rejects_model_fallback_with_zero_weight() {
     model.fallbacks = vec![ModelFallback {
         provider: "openai".into(),
         provider_model: "gpt-4.1-mini".into(),
+        input_price_per_1m: None,
+        output_price_per_1m: None,
         priority: Some(10),
         weight: Some(0),
         enabled: true,
@@ -61,6 +67,44 @@ fn rejects_model_fallback_with_zero_weight() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("fallbacks[0].weight"));
+}
+
+#[test]
+fn accepts_model_lowest_cost_strategy_with_prices() {
+    let mut model = model();
+    model.routing_strategy = RoutingStrategy::LowestCost;
+    model.input_price_per_1m = Some(1.0);
+    model.output_price_per_1m = Some(2.0);
+    model.fallbacks = vec![ModelFallback {
+        provider: "openai".into(),
+        provider_model: "gpt-4.1-mini".into(),
+        input_price_per_1m: Some(0.5),
+        output_price_per_1m: Some(1.0),
+        priority: Some(10),
+        weight: Some(1),
+        enabled: true,
+    }];
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_model_lowest_cost_strategy_without_prices() {
+    let mut model = model();
+    model.routing_strategy = RoutingStrategy::LowestCost;
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("lowest_cost requires input_price_per_1m and output_price_per_1m"));
 }
 
 #[test]
@@ -646,6 +690,8 @@ fn provider() -> Provider {
         kind: "openai".into(),
         base_url: "http://127.0.0.1:8081/v1".into(),
         api_key_env: None,
+        openrouter_http_referer: None,
+        openrouter_x_title: None,
         enabled: true,
     }
 }
@@ -655,6 +701,7 @@ fn model() -> Model {
         name: "fast-chat".into(),
         provider: "openai".into(),
         provider_model: "gpt-4o-mini".into(),
+        routing_strategy: RoutingStrategy::Priority,
         fallbacks: vec![],
         visible_organization_ids: vec![],
         visible_project_ids: vec![],
