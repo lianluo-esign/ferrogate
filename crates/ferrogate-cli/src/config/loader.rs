@@ -210,6 +210,18 @@ impl Config {
         if let Some(storage_dir) = acme.storage_dir {
             tls_acme.storage_dir = storage_dir;
         }
+        if let Some(renewal_window_secs) = acme.renewal_window_secs {
+            tls_acme.renewal_window_secs = renewal_window_secs;
+        }
+        if let Some(renewal_check_interval_secs) = acme.renewal_check_interval_secs {
+            tls_acme.renewal_check_interval_secs = renewal_check_interval_secs;
+        }
+        if let Some(renewal_retry_interval_secs) = acme.renewal_retry_interval_secs {
+            tls_acme.renewal_retry_interval_secs = renewal_retry_interval_secs;
+        }
+        if let Some(auto_graceful_reload) = acme.auto_graceful_reload {
+            tls_acme.auto_graceful_reload = auto_graceful_reload;
+        }
         TlsConfig {
             enabled: true,
             cert_path: None,

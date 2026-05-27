@@ -20,7 +20,7 @@ use std::{
         Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info, warn};
 
@@ -30,6 +30,62 @@ use crate::config::TlsAcmeConfig;
 pub(crate) struct AcmeCertificatePaths {
     pub(crate) cert_path: String,
     pub(crate) key_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct AcmeRenewalStatus {
+    pub(crate) enabled: bool,
+    pub(crate) domains: Vec<String>,
+    pub(crate) cert_path: String,
+    pub(crate) key_path: String,
+    pub(crate) certificate_expires_at_unix: Option<u64>,
+    pub(crate) renewal_window_secs: u64,
+    pub(crate) renewal_due: bool,
+    pub(crate) last_renewal_status: &'static str,
+    pub(crate) last_renewal_at_unix: Option<u64>,
+    pub(crate) last_renewal_error: Option<String>,
+    pub(crate) next_check_at_unix: Option<u64>,
+    pub(crate) reload_required: bool,
+    pub(crate) reload_mode: &'static str,
+}
+
+#[derive(Debug)]
+pub(crate) struct AcmeRenewalHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SharedAcmeRenewalState {
+    inner: Mutex<AcmeRenewalStatus>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcmeRenewalDecision {
+    RenewNow,
+    WaitUntil(u64),
+}
+
+pub(crate) trait AcmeCertificateRenewer: Send + Sync + 'static {
+    fn renew(&self, acme: &TlsAcmeConfig, paths: &AcmeCertificatePaths) -> AnyResult<()>;
+}
+
+pub(crate) trait AcmeCertificateReloader: Send + Sync + 'static {
+    fn reload(&self) -> AnyResult<()>;
+}
+
+#[derive(Debug, Default)]
+struct IssuingAcmeRenewer;
+
+struct AcmeRenewalRuntime<S>
+where
+    S: Fn(Duration),
+{
+    renewer: Arc<dyn AcmeCertificateRenewer>,
+    reloader: Arc<dyn AcmeCertificateReloader>,
+    stop: Arc<AtomicBool>,
+    now: fn() -> u64,
+    sleep: S,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +159,43 @@ impl Drop for Http01ChallengeServer {
     }
 }
 
+impl SharedAcmeRenewalState {
+    pub(crate) fn new(acme: &TlsAcmeConfig, paths: &AcmeCertificatePaths) -> Self {
+        Self {
+            inner: Mutex::new(initial_renewal_status(acme, paths)),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> AcmeRenewalStatus {
+        match self.inner.lock() {
+            Ok(status) => status.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn update(&self, update: impl FnOnce(&mut AcmeRenewalStatus)) {
+        match self.inner.lock() {
+            Ok(mut status) => update(&mut status),
+            Err(poisoned) => update(&mut poisoned.into_inner()),
+        }
+    }
+}
+
+impl Drop for AcmeRenewalHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl AcmeCertificateRenewer for IssuingAcmeRenewer {
+    fn renew(&self, acme: &TlsAcmeConfig, paths: &AcmeCertificatePaths) -> AnyResult<()> {
+        issue_certificate_blocking(acme, paths)
+    }
+}
+
 pub(crate) fn ensure_certificate(acme: &TlsAcmeConfig) -> AnyResult<AcmeCertificatePaths> {
     let paths = certificate_paths(acme);
     if existing_certificate_is_usable(&paths)? {
@@ -121,12 +214,161 @@ pub(crate) fn ensure_certificate(acme: &TlsAcmeConfig) -> AnyResult<AcmeCertific
         )
     })?;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("failed to start ACME runtime")?;
-    runtime.block_on(issue_certificate(acme, &paths))?;
+    issue_certificate_blocking(acme, &paths)?;
     Ok(paths)
+}
+
+pub(crate) fn start_renewal_scheduler(
+    acme: TlsAcmeConfig,
+    paths: AcmeCertificatePaths,
+    state: Arc<SharedAcmeRenewalState>,
+    reloader: Arc<dyn AcmeCertificateReloader>,
+) -> AcmeRenewalHandle {
+    start_renewal_scheduler_with(
+        acme,
+        paths,
+        state,
+        Arc::new(IssuingAcmeRenewer),
+        reloader,
+        system_time_unix_seconds,
+        thread::sleep,
+    )
+}
+
+fn start_renewal_scheduler_with(
+    acme: TlsAcmeConfig,
+    paths: AcmeCertificatePaths,
+    state: Arc<SharedAcmeRenewalState>,
+    renewer: Arc<dyn AcmeCertificateRenewer>,
+    reloader: Arc<dyn AcmeCertificateReloader>,
+    now: fn() -> u64,
+    sleep: fn(Duration),
+) -> AcmeRenewalHandle {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        let runtime = AcmeRenewalRuntime {
+            renewer,
+            reloader,
+            stop: thread_stop,
+            now,
+            sleep,
+        };
+        run_renewal_loop(acme, paths, state, runtime);
+    });
+    AcmeRenewalHandle {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+fn run_renewal_loop(
+    acme: TlsAcmeConfig,
+    paths: AcmeCertificatePaths,
+    state: Arc<SharedAcmeRenewalState>,
+    runtime: AcmeRenewalRuntime<impl Fn(Duration)>,
+) {
+    while !runtime.stop.load(Ordering::Relaxed) {
+        let current = (runtime.now)();
+        let expires_at = certificate_expires_at_unix(&paths).ok().flatten();
+        let decision = renewal_decision(
+            current,
+            expires_at,
+            acme.renewal_window_secs,
+            acme.renewal_check_interval_secs,
+        );
+        match decision {
+            AcmeRenewalDecision::WaitUntil(next_check) => {
+                state.update(|status| {
+                    status.certificate_expires_at_unix = expires_at;
+                    status.renewal_due = false;
+                    status.next_check_at_unix = Some(next_check);
+                });
+                interruptible_sleep(
+                    Duration::from_secs(next_check.saturating_sub(current)),
+                    &runtime.stop,
+                    &runtime.sleep,
+                );
+            }
+            AcmeRenewalDecision::RenewNow => {
+                state.update(|status| {
+                    status.certificate_expires_at_unix = expires_at;
+                    status.renewal_due = true;
+                    status.next_check_at_unix = None;
+                });
+                let renewal_started = (runtime.now)();
+                match runtime.renewer.renew(&acme, &paths) {
+                    Ok(()) => {
+                        let renewed_expires_at = certificate_expires_at_unix(&paths).ok().flatten();
+                        let next_check = next_successful_check_at(
+                            (runtime.now)(),
+                            renewed_expires_at,
+                            acme.renewal_window_secs,
+                            acme.renewal_check_interval_secs,
+                        );
+                        state.update(|status| {
+                            status.certificate_expires_at_unix = renewed_expires_at;
+                            status.renewal_due = false;
+                            status.last_renewal_status = "success";
+                            status.last_renewal_at_unix = Some(renewal_started);
+                            status.last_renewal_error = None;
+                            status.next_check_at_unix = Some(next_check);
+                            status.reload_required = true;
+                        });
+                        if acme.auto_graceful_reload {
+                            match runtime.reloader.reload() {
+                                Ok(()) => state.update(|status| {
+                                    status.reload_required = false;
+                                    status.reload_mode = "listener-level-graceful-upgrade";
+                                }),
+                                Err(error) => {
+                                    warn!(error = %error, "ACME renewed certificate but automatic reload failed");
+                                    state.update(|status| {
+                                        status.reload_required = true;
+                                        status.reload_mode = "listener-level-required";
+                                        status.last_renewal_error = Some(format!(
+                                            "certificate renewed but reload failed: {error}"
+                                        ));
+                                    });
+                                }
+                            }
+                        }
+                        interruptible_sleep(
+                            Duration::from_secs(next_check.saturating_sub((runtime.now)())),
+                            &runtime.stop,
+                            &runtime.sleep,
+                        );
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "ACME background renewal failed; will retry");
+                        let retry_at =
+                            (runtime.now)().saturating_add(acme.renewal_retry_interval_secs);
+                        state.update(|status| {
+                            status.renewal_due = true;
+                            status.last_renewal_status = "failed";
+                            status.last_renewal_at_unix = Some(renewal_started);
+                            status.last_renewal_error = Some(error.to_string());
+                            status.next_check_at_unix = Some(retry_at);
+                        });
+                        interruptible_sleep(
+                            Duration::from_secs(acme.renewal_retry_interval_secs),
+                            &runtime.stop,
+                            &runtime.sleep,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn interruptible_sleep(duration: Duration, stop: &AtomicBool, sleep: &impl Fn(Duration)) {
+    let mut remaining = duration.as_secs();
+    while remaining > 0 && !stop.load(Ordering::Relaxed) {
+        let step = remaining.min(1);
+        sleep(Duration::from_secs(step));
+        remaining -= step;
+    }
 }
 
 fn existing_certificate_is_usable(paths: &AcmeCertificatePaths) -> AnyResult<bool> {
@@ -147,6 +389,14 @@ fn existing_certificate_is_usable(paths: &AcmeCertificatePaths) -> AnyResult<boo
         );
         Ok(false)
     }
+}
+
+fn issue_certificate_blocking(acme: &TlsAcmeConfig, paths: &AcmeCertificatePaths) -> AnyResult<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start ACME runtime")?;
+    runtime.block_on(issue_certificate(acme, paths))
 }
 
 async fn issue_certificate(acme: &TlsAcmeConfig, paths: &AcmeCertificatePaths) -> AnyResult<()> {
@@ -780,6 +1030,262 @@ pub(crate) fn certificate_paths(acme: &TlsAcmeConfig) -> AcmeCertificatePaths {
     }
 }
 
+pub(crate) fn certificate_expires_at_unix(paths: &AcmeCertificatePaths) -> AnyResult<Option<u64>> {
+    let raw = fs::read_to_string(&paths.cert_path)
+        .with_context(|| format!("failed to read certificate {}", paths.cert_path))?;
+    Ok(first_pem_certificate_not_after_unix(&raw))
+}
+
+fn initial_renewal_status(acme: &TlsAcmeConfig, paths: &AcmeCertificatePaths) -> AcmeRenewalStatus {
+    let now = system_time_unix_seconds();
+    let expires_at = certificate_expires_at_unix(paths).ok().flatten();
+    let decision = renewal_decision(
+        now,
+        expires_at,
+        acme.renewal_window_secs,
+        acme.renewal_check_interval_secs,
+    );
+    AcmeRenewalStatus {
+        enabled: true,
+        domains: acme.domains.clone(),
+        cert_path: paths.cert_path.clone(),
+        key_path: paths.key_path.clone(),
+        certificate_expires_at_unix: expires_at,
+        renewal_window_secs: acme.renewal_window_secs,
+        renewal_due: matches!(decision, AcmeRenewalDecision::RenewNow),
+        last_renewal_status: "never",
+        last_renewal_at_unix: None,
+        last_renewal_error: None,
+        next_check_at_unix: match decision {
+            AcmeRenewalDecision::RenewNow => Some(now),
+            AcmeRenewalDecision::WaitUntil(next_check) => Some(next_check),
+        },
+        reload_required: false,
+        reload_mode: "listener-level-required",
+    }
+}
+
+pub(crate) fn renewal_decision(
+    now: u64,
+    expires_at: Option<u64>,
+    renewal_window_secs: u64,
+    check_interval_secs: u64,
+) -> AcmeRenewalDecision {
+    let Some(expires_at) = expires_at else {
+        return AcmeRenewalDecision::RenewNow;
+    };
+    let renew_at = expires_at.saturating_sub(renewal_window_secs);
+    if now >= renew_at {
+        AcmeRenewalDecision::RenewNow
+    } else {
+        AcmeRenewalDecision::WaitUntil(now.saturating_add(check_interval_secs).min(renew_at))
+    }
+}
+
+fn next_successful_check_at(
+    now: u64,
+    expires_at: Option<u64>,
+    renewal_window_secs: u64,
+    check_interval_secs: u64,
+) -> u64 {
+    match renewal_decision(now, expires_at, renewal_window_secs, check_interval_secs) {
+        AcmeRenewalDecision::RenewNow => now.saturating_add(check_interval_secs),
+        AcmeRenewalDecision::WaitUntil(next_check) => next_check,
+    }
+}
+
+fn system_time_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn first_pem_certificate_not_after_unix(pem: &str) -> Option<u64> {
+    let mut in_certificate = false;
+    let mut b64 = String::new();
+    for line in pem.lines().map(str::trim) {
+        match line {
+            "-----BEGIN CERTIFICATE-----" => {
+                in_certificate = true;
+                b64.clear();
+            }
+            "-----END CERTIFICATE-----" if in_certificate => {
+                let der = decode_base64_der(&b64).ok()?;
+                return certificate_not_after_unix_from_der(&der);
+            }
+            _ if in_certificate => b64.push_str(line),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn certificate_not_after_unix_from_der(der: &[u8]) -> Option<u64> {
+    let (cert, _) = der_read_sequence(der, 0)?;
+    let (tbs, _) = der_read_sequence(cert, 0)?;
+    let mut offset = 0;
+    if tbs.get(offset) == Some(&0xa0) {
+        let (_, _, consumed) = der_read_tlv(tbs, offset)?;
+        offset = offset.checked_add(consumed)?;
+    }
+    for _ in 0..3 {
+        let (_, _, consumed) = der_read_tlv(tbs, offset)?;
+        offset = offset.checked_add(consumed)?;
+    }
+    let (validity, _) = der_read_sequence(tbs, offset)?;
+    let (not_before, consumed) = der_read_time(validity, 0)?;
+    let _ = not_before;
+    let (not_after, _) = der_read_time(validity, consumed)?;
+    Some(not_after)
+}
+
+fn der_read_sequence(input: &[u8], offset: usize) -> Option<(&[u8], usize)> {
+    let (tag, content, consumed) = der_read_tlv(input, offset)?;
+    (tag == 0x30).then_some((content, consumed))
+}
+
+fn der_read_time(input: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let (tag, content, consumed) = der_read_tlv(input, offset)?;
+    let value = std::str::from_utf8(content).ok()?;
+    let unix = match tag {
+        0x17 => parse_utc_time_unix(value)?,
+        0x18 => parse_generalized_time_unix(value)?,
+        _ => return None,
+    };
+    Some((unix, consumed))
+}
+
+fn der_read_tlv(input: &[u8], offset: usize) -> Option<(u8, &[u8], usize)> {
+    let tag = *input.get(offset)?;
+    let length_first = *input.get(offset + 1)?;
+    let (length, length_bytes) = if length_first & 0x80 == 0 {
+        (length_first as usize, 1)
+    } else {
+        let count = (length_first & 0x7f) as usize;
+        if count == 0 || count > 4 {
+            return None;
+        }
+        let mut length = 0usize;
+        for byte in input.get(offset + 2..offset + 2 + count)? {
+            length = length.checked_mul(256)?.checked_add(*byte as usize)?;
+        }
+        (length, 1 + count)
+    };
+    let content_start = offset.checked_add(1 + length_bytes)?;
+    let content_end = content_start.checked_add(length)?;
+    let content = input.get(content_start..content_end)?;
+    Some((tag, content, content_end - offset))
+}
+
+fn parse_utc_time_unix(value: &str) -> Option<u64> {
+    if value.len() != 13 || !value.ends_with('Z') {
+        return None;
+    }
+    let year = value.get(0..2)?.parse::<i32>().ok()?;
+    let full_year = if year >= 50 { 1900 + year } else { 2000 + year };
+    parse_ymdhms_unix(
+        full_year,
+        value.get(2..4)?.parse().ok()?,
+        value.get(4..6)?.parse().ok()?,
+        value.get(6..8)?.parse().ok()?,
+        value.get(8..10)?.parse().ok()?,
+        value.get(10..12)?.parse().ok()?,
+    )
+}
+
+fn parse_generalized_time_unix(value: &str) -> Option<u64> {
+    if value.len() != 15 || !value.ends_with('Z') {
+        return None;
+    }
+    parse_ymdhms_unix(
+        value.get(0..4)?.parse().ok()?,
+        value.get(4..6)?.parse().ok()?,
+        value.get(6..8)?.parse().ok()?,
+        value.get(8..10)?.parse().ok()?,
+        value.get(10..12)?.parse().ok()?,
+        value.get(12..14)?.parse().ok()?,
+    )
+}
+
+fn parse_ymdhms_unix(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<u64> {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(hour as i64 * 3_600 + minute as i64 * 60 + second as i64)?;
+    u64::try_from(seconds).ok()
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) as i64)
+}
+
+fn decode_base64_der(value: &str) -> AnyResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(value.len() * 3 / 4);
+    let mut chunk = [0u8; 4];
+    let mut chunk_len = 0usize;
+    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        chunk[chunk_len] = byte;
+        chunk_len += 1;
+        if chunk_len == 4 {
+            decode_base64_chunk(&chunk, &mut out)?;
+            chunk_len = 0;
+        }
+    }
+    if chunk_len != 0 {
+        bail!("base64 certificate body has incomplete final quantum");
+    }
+    Ok(out)
+}
+
+fn decode_base64_chunk(chunk: &[u8; 4], out: &mut Vec<u8>) -> AnyResult<()> {
+    let mut values = [0u8; 4];
+    let mut padding = 0usize;
+    for (index, byte) in chunk.iter().copied().enumerate() {
+        values[index] = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                padding += 1;
+                0
+            }
+            _ => bail!("invalid base64 byte in certificate"),
+        };
+    }
+    out.push((values[0] << 2) | (values[1] >> 4));
+    if padding < 2 {
+        out.push((values[1] << 4) | (values[2] >> 2));
+    }
+    if padding == 0 {
+        out.push((values[2] << 6) | values[3]);
+    }
+    Ok(())
+}
+
 fn certificate_storage_dir(acme: &TlsAcmeConfig) -> PathBuf {
     Path::new(&acme.storage_dir)
         .join("certificates")
@@ -850,6 +1356,7 @@ fn write_private_file(path: &Path, bytes: &[u8], mode: u32) -> AnyResult<()> {
 mod tests {
     use super::*;
     use crate::config::TlsAcmeConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn dns01_record_name_strips_wildcard_and_adds_fqdn_dot() {
@@ -880,6 +1387,174 @@ mod tests {
             .starts_with("/tmp/ferrogate-acme/certificates/"));
         assert!(paths.cert_path.ends_with("/fullchain.pem"));
         assert!(paths.key_path.ends_with("/privkey.pem"));
+    }
+
+    #[test]
+    fn renewal_decision_renews_inside_window_or_when_expiry_is_unknown() {
+        assert_eq!(
+            renewal_decision(100, None, 30, 10),
+            AcmeRenewalDecision::RenewNow
+        );
+        assert_eq!(
+            renewal_decision(80, Some(100), 30, 10),
+            AcmeRenewalDecision::RenewNow
+        );
+        assert_eq!(
+            renewal_decision(50, Some(100), 30, 10),
+            AcmeRenewalDecision::WaitUntil(60)
+        );
+        assert_eq!(
+            renewal_decision(50, Some(100), 30, 60),
+            AcmeRenewalDecision::WaitUntil(70)
+        );
+    }
+
+    #[test]
+    fn parses_certificate_expiry_from_pem() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        if !write_test_certificate(&cert, &key, "1") {
+            return;
+        }
+        let paths = AcmeCertificatePaths {
+            cert_path: cert.to_string_lossy().into_owned(),
+            key_path: key.to_string_lossy().into_owned(),
+        };
+
+        let expires_at = certificate_expires_at_unix(&paths).unwrap().unwrap();
+
+        assert!(expires_at > system_time_unix_seconds());
+        assert!(expires_at < system_time_unix_seconds() + 2 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn failed_renewal_updates_retry_status_without_clearing_existing_certificate() {
+        struct FailingRenewer {
+            calls: AtomicUsize,
+        }
+        struct TestReloader;
+        impl AcmeCertificateRenewer for FailingRenewer {
+            fn renew(&self, _acme: &TlsAcmeConfig, _paths: &AcmeCertificatePaths) -> AnyResult<()> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                anyhow::bail!("mock renewal failed")
+            }
+        }
+        impl AcmeCertificateReloader for TestReloader {
+            fn reload(&self) -> AnyResult<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        write_unparseable_certificate(&cert, &key);
+        let acme = TlsAcmeConfig {
+            enabled: true,
+            domains: vec!["api.example.com".into()],
+            email: Some("ops@example.com".into()),
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            renewal_window_secs: 90 * 24 * 60 * 60,
+            renewal_check_interval_secs: 60,
+            renewal_retry_interval_secs: 30,
+            ..TlsAcmeConfig::default()
+        };
+        let paths = AcmeCertificatePaths {
+            cert_path: cert.to_string_lossy().into_owned(),
+            key_path: key.to_string_lossy().into_owned(),
+        };
+        let state = Arc::new(SharedAcmeRenewalState::new(&acme, &paths));
+        let stop = Arc::new(AtomicBool::new(false));
+        let renewer = Arc::new(FailingRenewer {
+            calls: AtomicUsize::new(0),
+        });
+
+        run_renewal_loop(
+            acme,
+            paths.clone(),
+            Arc::clone(&state),
+            AcmeRenewalRuntime {
+                renewer: renewer.clone(),
+                reloader: Arc::new(TestReloader),
+                stop: Arc::clone(&stop),
+                now: || 1_700_000_000,
+                sleep: |_| stop.store(true, Ordering::Relaxed),
+            },
+        );
+
+        let status = state.snapshot();
+        assert_eq!(renewer.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(status.last_renewal_status, "failed");
+        assert!(status
+            .last_renewal_error
+            .unwrap()
+            .contains("mock renewal failed"));
+        assert_eq!(status.next_check_at_unix, Some(1_700_000_030));
+        assert!(std::path::Path::new(&paths.cert_path).exists());
+    }
+
+    #[test]
+    fn successful_renewal_marks_reload_complete_when_reloader_succeeds() {
+        struct SuccessfulRenewer;
+        struct SuccessfulReloader {
+            calls: AtomicUsize,
+        }
+        impl AcmeCertificateRenewer for SuccessfulRenewer {
+            fn renew(&self, _acme: &TlsAcmeConfig, _paths: &AcmeCertificatePaths) -> AnyResult<()> {
+                Ok(())
+            }
+        }
+        impl AcmeCertificateReloader for SuccessfulReloader {
+            fn reload(&self) -> AnyResult<()> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        write_unparseable_certificate(&cert, &key);
+        let acme = TlsAcmeConfig {
+            enabled: true,
+            domains: vec!["api.example.com".into()],
+            email: Some("ops@example.com".into()),
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            renewal_window_secs: 90 * 24 * 60 * 60,
+            renewal_check_interval_secs: 60,
+            renewal_retry_interval_secs: 30,
+            auto_graceful_reload: true,
+            ..TlsAcmeConfig::default()
+        };
+        let paths = AcmeCertificatePaths {
+            cert_path: cert.to_string_lossy().into_owned(),
+            key_path: key.to_string_lossy().into_owned(),
+        };
+        let state = Arc::new(SharedAcmeRenewalState::new(&acme, &paths));
+        let stop = Arc::new(AtomicBool::new(false));
+        let reloader = Arc::new(SuccessfulReloader {
+            calls: AtomicUsize::new(0),
+        });
+
+        run_renewal_loop(
+            acme,
+            paths,
+            Arc::clone(&state),
+            AcmeRenewalRuntime {
+                renewer: Arc::new(SuccessfulRenewer),
+                reloader: reloader.clone(),
+                stop: Arc::clone(&stop),
+                now: || 1_700_000_000,
+                sleep: |_| stop.store(true, Ordering::Relaxed),
+            },
+        );
+
+        let status = state.snapshot();
+        assert_eq!(status.last_renewal_status, "success");
+        assert_eq!(reloader.calls.load(Ordering::Relaxed), 1);
+        assert!(!status.reload_required);
+        assert_eq!(status.reload_mode, "listener-level-graceful-upgrade");
     }
 
     #[test]
@@ -942,5 +1617,37 @@ mod tests {
 
         assert_eq!(status, "200");
         assert_eq!(body, "{\"ok\":1}");
+    }
+
+    fn write_test_certificate(cert: &Path, key: &Path, days: &str) -> bool {
+        let Ok(status) = Command::new("openssl")
+            .env("OPENSSL_CONF", "/dev/null")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-subj",
+                "/CN=localhost",
+                "-keyout",
+                key.to_str().unwrap(),
+                "-out",
+                cert.to_str().unwrap(),
+                "-days",
+                days,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        else {
+            return false;
+        };
+        status.success()
+    }
+
+    fn write_unparseable_certificate(cert: &Path, key: &Path) {
+        fs::write(cert, "not a pem certificate").unwrap();
+        fs::write(key, "not a private key").unwrap();
     }
 }

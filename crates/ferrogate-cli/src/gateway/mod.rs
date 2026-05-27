@@ -14,12 +14,16 @@ use pingora::{
         Server,
     },
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tracing::info;
 
 use crate::{
-    acme::{ensure_certificate, AcmeCertificatePaths},
+    acme::{
+        ensure_certificate, start_renewal_scheduler, AcmeCertificatePaths, AcmeCertificateReloader,
+        AcmeRenewalHandle, SharedAcmeRenewalState,
+    },
     config::{Config, Upstream},
+    lifecycle::execute_graceful_upgrade_reload,
     routing::UpstreamEndpoint,
     state::{RuntimeRoute, SharedAppState},
     telemetry::start_otlp_background_sender,
@@ -47,8 +51,17 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let tls = config.tls.clone();
     write_runtime_pid_file(&config)?;
     let server_conf = pingora_server_conf(&config);
-    let state = SharedAppState::with_source_path(config, source_path);
+    let resolved_tls = resolve_tls_certificate_paths(&tls)?;
+    let acme_renewal_state = resolved_tls.as_ref().and_then(|paths| {
+        tls.acme
+            .enabled
+            .then(|| Arc::new(SharedAcmeRenewalState::new(&tls.acme, paths)))
+    });
+    let state = SharedAppState::with_source_path(config, source_path)
+        .with_acme_renewal_state(acme_renewal_state.clone());
     let _otlp_sender = start_otlp_background_sender(state.current());
+    let _acme_renewal =
+        start_acme_renewal_if_configured(&tls, resolved_tls.as_ref(), acme_renewal_state, &state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -59,7 +72,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     server.bootstrap();
 
     let mut service = http_proxy_service(&server.configuration, gateway);
-    if let Some(paths) = resolve_tls_certificate_paths(&tls)? {
+    if let Some(paths) = resolved_tls {
         let mut tls_settings = TlsSettings::intermediate(&paths.cert_path, &paths.key_path)
             .context("failed to configure TLS listener")?;
         if tls.http2 {
@@ -87,6 +100,52 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     server.add_service(service);
 
     server.run_forever();
+}
+
+fn start_acme_renewal_if_configured(
+    tls: &crate::config::TlsConfig,
+    paths: Option<&AcmeCertificatePaths>,
+    state: Option<Arc<SharedAcmeRenewalState>>,
+    app_state: &SharedAppState,
+) -> Option<AcmeRenewalHandle> {
+    let paths = paths?.clone();
+    let state = state?;
+    if !tls.acme.enabled {
+        return None;
+    }
+    let reloader: Arc<dyn AcmeCertificateReloader> = Arc::new(GracefulUpgradeAcmeReloader {
+        config: app_state.current().config.as_ref().clone(),
+        source_path: app_state.source_path().cloned(),
+    });
+    Some(start_renewal_scheduler(
+        tls.acme.clone(),
+        paths,
+        state,
+        reloader,
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct GracefulUpgradeAcmeReloader {
+    config: Config,
+    source_path: Option<PathBuf>,
+}
+
+impl AcmeCertificateReloader for GracefulUpgradeAcmeReloader {
+    fn reload(&self) -> AnyResult<()> {
+        let source_path = self
+            .source_path
+            .as_deref()
+            .context("runtime was not started from a config file")?;
+        if self.config.reliability.graceful_upgrade_pid_file.is_none()
+            || self.config.reliability.graceful_upgrade_sock.is_none()
+        {
+            anyhow::bail!(
+                "automatic ACME certificate reload requires reliability.graceful_upgrade_pid_file and reliability.graceful_upgrade_sock"
+            );
+        }
+        execute_graceful_upgrade_reload(source_path, &self.config).map(|_| ())
+    }
 }
 
 fn resolve_tls_certificate_paths(

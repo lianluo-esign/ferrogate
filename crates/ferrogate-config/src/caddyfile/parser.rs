@@ -160,6 +160,10 @@ impl<'a> Parser<'a> {
                         dns_config: Default::default(),
                         dns_hook_set: None,
                         dns_hook_cleanup: None,
+                        renewal_window_secs: None,
+                        renewal_check_interval_secs: None,
+                        renewal_retry_interval_secs: None,
+                        auto_graceful_reload: None,
                     });
                 }
                 Ok(())
@@ -200,6 +204,10 @@ impl<'a> Parser<'a> {
             dns_config: Default::default(),
             dns_hook_set: None,
             dns_hook_cleanup: None,
+            renewal_window_secs: None,
+            renewal_check_interval_secs: None,
+            renewal_retry_interval_secs: None,
+            auto_graceful_reload: None,
         };
 
         loop {
@@ -232,6 +240,17 @@ impl<'a> Parser<'a> {
                 }
                 "dns_hook_set" => acme.dns_hook_set = args.first().cloned(),
                 "dns_hook_cleanup" => acme.dns_hook_cleanup = args.first().cloned(),
+                "renewal_window_secs" => acme.renewal_window_secs = parse_first_u64(&args),
+                "renewal_check_interval_secs" => {
+                    acme.renewal_check_interval_secs = parse_first_u64(&args);
+                }
+                "renewal_retry_interval_secs" => {
+                    acme.renewal_retry_interval_secs = parse_first_u64(&args);
+                }
+                "auto_graceful_reload" => {
+                    acme.auto_graceful_reload =
+                        args.first().and_then(|value| value.parse::<bool>().ok());
+                }
                 "issuer" if args.first().is_some_and(|value| value == "acme") => {
                     self.parse_tls_issuer_acme_block(&mut acme)?;
                 }
@@ -239,7 +258,7 @@ impl<'a> Parser<'a> {
                     return Err(self.unsupported(
                         &token,
                         directive,
-                        "inside tls blocks, FerroGate supports domain(s), email, ca/dir, storage, dns <provider> { ... }, dns exec <set-hook> <cleanup-hook> { ... }, dns_hook_set, dns_hook_cleanup, and issuer acme".to_string(),
+                        "inside tls blocks, FerroGate supports domain(s), email, ca/dir, storage, dns <provider> { ... }, dns exec <set-hook> <cleanup-hook> { ... }, dns_hook_set, dns_hook_cleanup, renewal settings, and issuer acme".to_string(),
                     ));
                 }
             }
@@ -291,11 +310,22 @@ impl<'a> Parser<'a> {
             match directive.as_str() {
                 "email" => acme.email = args.first().cloned(),
                 "ca" | "dir" | "directory_url" => acme.directory_url = args.first().cloned(),
+                "renewal_window_secs" => acme.renewal_window_secs = parse_first_u64(&args),
+                "renewal_check_interval_secs" => {
+                    acme.renewal_check_interval_secs = parse_first_u64(&args);
+                }
+                "renewal_retry_interval_secs" => {
+                    acme.renewal_retry_interval_secs = parse_first_u64(&args);
+                }
+                "auto_graceful_reload" => {
+                    acme.auto_graceful_reload =
+                        args.first().and_then(|value| value.parse::<bool>().ok());
+                }
                 _ => {
                     return Err(self.unsupported(
                         &token,
                         directive,
-                        "inside tls issuer acme, FerroGate supports email and ca/dir".to_string(),
+                        "inside tls issuer acme, FerroGate supports email, ca/dir, and renewal settings".to_string(),
                     ));
                 }
             }
@@ -632,4 +662,8 @@ impl<'a> Parser<'a> {
         });
         Ok(())
     }
+}
+
+fn parse_first_u64(args: &[String]) -> Option<u64> {
+    args.first().and_then(|value| value.parse().ok())
 }

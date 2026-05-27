@@ -28,6 +28,24 @@ pub(crate) struct AdminStatus<'a> {
     pub(crate) routes: usize,
     pub(crate) enabled_routes: usize,
     pub(crate) auth_required: bool,
+    pub(crate) acme: Option<AdminAcmeStatus>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub(crate) struct AdminAcmeStatus {
+    pub(crate) enabled: bool,
+    pub(crate) domains: Vec<String>,
+    pub(crate) cert_path: String,
+    pub(crate) key_path: String,
+    pub(crate) certificate_expires_at_unix: Option<u64>,
+    pub(crate) renewal_window_secs: u64,
+    pub(crate) renewal_due: bool,
+    pub(crate) last_renewal_status: &'static str,
+    pub(crate) last_renewal_at_unix: Option<u64>,
+    pub(crate) last_renewal_error: Option<String>,
+    pub(crate) next_check_at_unix: Option<u64>,
+    pub(crate) reload_required: bool,
+    pub(crate) reload_mode: &'static str,
 }
 
 #[derive(Debug, Serialize)]

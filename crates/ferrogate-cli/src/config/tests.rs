@@ -205,6 +205,10 @@ dns_provider = "cloudflare"
 dns_config = { api_token = "cf-token", zone_id = "zone-123" }
 dns_hook_set = "./hooks/dns-set"
 dns_hook_cleanup = "./hooks/dns-cleanup"
+renewal_window_secs = 1209600
+renewal_check_interval_secs = 300
+renewal_retry_interval_secs = 60
+auto_graceful_reload = false
 "#,
     )
     .unwrap();
@@ -239,6 +243,10 @@ dns_hook_cleanup = "./hooks/dns-cleanup"
                 .as_ref()
         )
     );
+    assert_eq!(config.tls.acme.renewal_window_secs, 1_209_600);
+    assert_eq!(config.tls.acme.renewal_check_interval_secs, 300);
+    assert_eq!(config.tls.acme.renewal_retry_interval_secs, 60);
+    assert!(!config.tls.acme.auto_graceful_reload);
 }
 
 #[test]
@@ -254,6 +262,10 @@ api.example.com {
             email ops@example.com
         }
         storage ./acme
+        renewal_window_secs 1209600
+        renewal_check_interval_secs 300
+        renewal_retry_interval_secs 60
+        auto_graceful_reload false
         dns exec ./hooks/dns-set ./hooks/dns-cleanup {
             provider cloudflare
             api_token cf-token
@@ -278,6 +290,10 @@ api.example.com {
         config.tls.acme.storage_dir,
         dir.path().join("acme").to_string_lossy().into_owned()
     );
+    assert_eq!(config.tls.acme.renewal_window_secs, 1_209_600);
+    assert_eq!(config.tls.acme.renewal_check_interval_secs, 300);
+    assert_eq!(config.tls.acme.renewal_retry_interval_secs, 60);
+    assert!(!config.tls.acme.auto_graceful_reload);
 }
 
 #[test]

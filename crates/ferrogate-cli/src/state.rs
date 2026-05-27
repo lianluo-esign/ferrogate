@@ -9,6 +9,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::acme::{AcmeRenewalStatus, SharedAcmeRenewalState};
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config, HeaderMutation,
     Model, PolicyRule as ConfigPolicyRule, Provider, RouteRule, StorageConfig, Upstream,
@@ -82,6 +83,19 @@ impl SharedAppState {
             Ok(state) => state.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
+    }
+
+    pub(crate) fn with_acme_renewal_state(
+        self,
+        acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
+    ) -> Self {
+        if let Some(acme_renewal) = acme_renewal {
+            match self.inner.write() {
+                Ok(mut state) => state.acme_renewal = Some(acme_renewal),
+                Err(poisoned) => poisoned.into_inner().acme_renewal = Some(acme_renewal),
+            }
+        }
+        self
     }
 
     pub(crate) fn next_request_id(&self) -> String {
@@ -230,6 +244,7 @@ pub(crate) struct AppState {
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
+    acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -617,6 +632,7 @@ impl AppState {
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
             request_ids: Arc::new(AtomicU64::new(1)),
+            acme_renewal: None,
         }
     }
 
@@ -629,6 +645,7 @@ impl AppState {
         next.usage_aggregates = Arc::clone(&self.usage_aggregates);
         next.metrics = Arc::clone(&self.metrics);
         next.request_ids = Arc::clone(&self.request_ids);
+        next.acme_renewal = self.acme_renewal.clone();
         self.apply_storage_config(&next.config.storage);
         next
     }
@@ -652,6 +669,10 @@ impl AppState {
 
     pub(crate) fn auth_required(&self) -> bool {
         !self.config.api_keys.is_empty()
+    }
+
+    pub(crate) fn acme_renewal_status(&self) -> Option<AcmeRenewalStatus> {
+        self.acme_renewal.as_ref().map(|state| state.snapshot())
     }
 
     pub(crate) fn should_log_access(
