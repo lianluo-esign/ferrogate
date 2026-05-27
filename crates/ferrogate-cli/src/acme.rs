@@ -1449,9 +1449,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cert = dir.path().join("cert.pem");
         let key = dir.path().join("key.pem");
-        if !write_test_certificate(&cert, &key, "1") {
-            return;
-        }
+        write_unparseable_certificate(&cert, &key);
         let acme = TlsAcmeConfig {
             enabled: true,
             domains: vec!["api.example.com".into()],
@@ -1517,9 +1515,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cert = dir.path().join("cert.pem");
         let key = dir.path().join("key.pem");
-        if !write_test_certificate(&cert, &key, "1") {
-            return;
-        }
+        write_unparseable_certificate(&cert, &key);
         let acme = TlsAcmeConfig {
             enabled: true,
             domains: vec!["api.example.com".into()],
@@ -1625,6 +1621,7 @@ mod tests {
 
     fn write_test_certificate(cert: &Path, key: &Path, days: &str) -> bool {
         let Ok(status) = Command::new("openssl")
+            .env("OPENSSL_CONF", "/dev/null")
             .args([
                 "req",
                 "-x509",
@@ -1647,5 +1644,10 @@ mod tests {
             return false;
         };
         status.success()
+    }
+
+    fn write_unparseable_certificate(cert: &Path, key: &Path) {
+        fs::write(cert, "not a pem certificate").unwrap();
+        fs::write(key, "not a private key").unwrap();
     }
 }
