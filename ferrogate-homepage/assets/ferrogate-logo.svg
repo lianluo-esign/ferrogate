@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">FerroGate logo</title>
-  <desc id="desc">A flat gateway mark with two gate pillars and a centered routing passage.</desc>
-  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="12" y="12" width="40" height="40" rx="8" stroke-width="2.8"/>
-    <path d="M24 22v20M40 22v20M24 32h16" stroke-width="3.2"/>
-    <path d="M8 32h8M48 32h8" stroke-width="2"/>
-  </g>
-</svg>

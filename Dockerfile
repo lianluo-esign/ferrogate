@@ -7,7 +7,6 @@ COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
 COPY Ferrogate ./Ferrogate
 COPY config ./config
-COPY ferrogate-homepage ./ferrogate-homepage
 RUN cargo build --release -p ferrogate-cli --locked
 
 FROM debian:bookworm-slim
