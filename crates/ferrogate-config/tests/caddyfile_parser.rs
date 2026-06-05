@@ -6,7 +6,7 @@ fn parses_minimal_site_block_from_ferrogate_caddyfile() {
 
     let config = parse_caddyfile(raw, "Ferrogate/Caddyfile").unwrap();
 
-    assert_eq!(config.listen, "127.0.0.1:8080");
+    assert_eq!(config.listen, "0.0.0.0:8080");
     assert_eq!(config.admin.as_deref(), Some("localhost:2019"));
     assert_eq!(config.upstreams.len(), 1);
     assert_eq!(
