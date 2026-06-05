@@ -3,7 +3,7 @@
     debug
 }
 
-:8080 {
+0.0.0.0:8080 {
     log
 
     respond /healthz "ok" 200
