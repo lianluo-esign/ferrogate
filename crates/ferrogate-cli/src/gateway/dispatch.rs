@@ -9,6 +9,7 @@ use std::{
 };
 
 use ferrogate_providers::ProviderHttpRequest;
+use tokio::task;
 
 #[derive(Debug, Clone)]
 pub(super) struct ProviderHttpResponse {
@@ -38,7 +39,28 @@ impl Read for ProviderBodyReader {
     }
 }
 
-pub(super) fn dispatch_provider_request(
+pub(super) async fn dispatch_provider_request(
+    request: ProviderHttpRequest,
+    timeout: Duration,
+    max_body_bytes: usize,
+) -> AnyResult<ProviderHttpResponse> {
+    task::spawn_blocking(move || {
+        dispatch_provider_request_blocking(&request, timeout, max_body_bytes)
+    })
+    .await
+    .context("provider dispatch task failed")?
+}
+
+pub(super) async fn dispatch_provider_streaming_request(
+    request: ProviderHttpRequest,
+    timeout: Duration,
+) -> AnyResult<ProviderStreamingResponse> {
+    task::spawn_blocking(move || dispatch_provider_streaming_request_blocking(&request, timeout))
+        .await
+        .context("provider streaming dispatch task failed")?
+}
+
+fn dispatch_provider_request_blocking(
     request: &ProviderHttpRequest,
     timeout: Duration,
     max_body_bytes: usize,
@@ -62,7 +84,7 @@ pub(super) fn dispatch_provider_request(
     }
 }
 
-pub(super) fn dispatch_provider_streaming_request(
+fn dispatch_provider_streaming_request_blocking(
     request: &ProviderHttpRequest,
     timeout: Duration,
 ) -> AnyResult<ProviderStreamingResponse> {
@@ -461,7 +483,8 @@ mod tests {
 
         let started = Instant::now();
         let error =
-            dispatch_provider_request(&request, Duration::from_millis(50), 16 * 1024).unwrap_err();
+            dispatch_provider_request_blocking(&request, Duration::from_millis(50), 16 * 1024)
+                .unwrap_err();
 
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(!error.to_string().is_empty());

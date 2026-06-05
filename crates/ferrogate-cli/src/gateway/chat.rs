@@ -549,7 +549,9 @@ impl FerroGateway {
             if request.stream {
                 let mut attempt = 0;
                 loop {
-                    match dispatch_provider_streaming_request(&prepared, dispatch_timeout) {
+                    match dispatch_provider_streaming_request(prepared.clone(), dispatch_timeout)
+                        .await
+                    {
                         Ok(mut response) => {
                             if response.status.is_client_error()
                                 || response.status.is_server_error()
@@ -708,10 +710,12 @@ impl FerroGateway {
             let mut attempt = 0;
             loop {
                 match dispatch_provider_request(
-                    &prepared,
+                    prepared.clone(),
                     dispatch_timeout,
                     provider_response_body_max_bytes,
-                ) {
+                )
+                .await
+                {
                     Ok(response) => {
                         if response.status.is_client_error() || response.status.is_server_error() {
                             let retryable_status = state

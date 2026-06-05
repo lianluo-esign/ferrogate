@@ -3,6 +3,7 @@ use http::{header, StatusCode};
 use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use tokio::{sync::mpsc, task};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct HealthResponse<'a> {
@@ -303,12 +304,12 @@ pub(crate) async fn write_raw_response(
     session.write_response_body(Some(body), true).await
 }
 
-pub(crate) async fn write_streaming_response<R: Read>(
+pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(
     session: &mut Session,
     status: StatusCode,
     content_type: &str,
     initial_body: Vec<u8>,
-    mut reader: R,
+    reader: R,
     request_id: &str,
 ) -> PingoraResult<()> {
     let mut response = ResponseHeader::build(status, Some(4))?;
@@ -326,17 +327,43 @@ pub(crate) async fn write_streaming_response<R: Read>(
             .await?;
     }
 
+    let (sender, mut receiver) = mpsc::channel::<std::io::Result<Bytes>>(8);
+    let read_task = task::spawn_blocking(move || {
+        read_streaming_body_chunks(reader, sender);
+    });
+
+    while let Some(chunk) = receiver.recv().await {
+        let chunk = chunk.or_err(ErrorType::ReadError, "reading provider streaming response")?;
+        session.write_response_body(Some(chunk), false).await?;
+    }
+
+    read_task
+        .await
+        .or_err(ErrorType::ReadError, "joining provider streaming reader")?;
+    session.write_response_body(None, true).await
+}
+
+fn read_streaming_body_chunks<R: Read>(
+    mut reader: R,
+    sender: mpsc::Sender<std::io::Result<Bytes>>,
+) {
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = reader
-            .read(&mut buffer)
-            .or_err(ErrorType::ReadError, "reading provider streaming response")?;
-        if read == 0 {
-            return session.write_response_body(None, true).await;
+        match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => {
+                if sender
+                    .blocking_send(Ok(Bytes::copy_from_slice(&buffer[..read])))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = sender.blocking_send(Err(error));
+                return;
+            }
         }
-        session
-            .write_response_body(Some(Bytes::copy_from_slice(&buffer[..read])), false)
-            .await?;
     }
 }
 

@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use ferrogate_core::{ToolCall, ToolDef, ToolResult};
+
 use crate::{
     AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
     ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
@@ -105,6 +107,76 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
             || extracted.total_tokens.is_some())
         .then_some(extracted)
     }
+
+    fn inject_tools(&self, body: Value, tools: &[ToolDef]) -> Result<Value, AdapterError> {
+        let mut body = ensure_labeled_object_body(body, "tool-enabled request body")?;
+        if tools.is_empty() {
+            return Ok(body);
+        }
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    let mut function = json!({
+                        "name": tool.name,
+                        "parameters": tool.input_schema,
+                    });
+                    if let Some(description) = &tool.description {
+                        function["description"] = Value::String(description.clone());
+                    }
+                    json!({
+                        "type": "function",
+                        "function": function,
+                    })
+                })
+                .collect(),
+        );
+        Ok(body)
+    }
+
+    fn extract_tool_calls(&self, body: &[u8]) -> Result<Vec<ToolCall>, AdapterError> {
+        let value = serde_json::from_slice::<Value>(body).map_err(|error| {
+            AdapterError::InvalidRequest {
+                message: format!("provider response body must be JSON: {error}"),
+            }
+        })?;
+        Ok(value
+            .get("choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|choice| choice.get("message"))
+            .filter_map(|message| message.get("tool_calls"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(openai_tool_call_to_canonical)
+            .collect())
+    }
+
+    fn append_tool_results(
+        &self,
+        body: Value,
+        results: &[ToolResult],
+    ) -> Result<Value, AdapterError> {
+        let mut body = ensure_labeled_object_body(body, "tool-result request body")?;
+        if results.is_empty() {
+            return Ok(body);
+        }
+        if !body.get("messages").is_some_and(Value::is_array) {
+            body["messages"] = json!([]);
+        }
+        let messages = body["messages"]
+            .as_array_mut()
+            .expect("messages initialized as array");
+        messages.extend(results.iter().map(|result| {
+            json!({
+                "role": "tool",
+                "tool_call_id": result.tool_call_id,
+                "content": tool_result_content_to_string(&result.content),
+            })
+        }));
+        Ok(body)
+    }
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {
@@ -159,6 +231,29 @@ fn fallback_error_message(parsed: Option<&Value>, body: &[u8]) -> Option<String>
             let text = std::str::from_utf8(body).ok()?.trim();
             (!text.is_empty()).then(|| text.chars().take(512).collect())
         })
+}
+
+fn openai_tool_call_to_canonical(value: &Value) -> Option<ToolCall> {
+    let function = value.get("function")?;
+    Some(ToolCall {
+        id: value.get("id")?.as_str()?.to_string(),
+        name: function.get("name")?.as_str()?.to_string(),
+        arguments: parse_json_string_or_clone(function.get("arguments")?),
+    })
+}
+
+fn parse_json_string_or_clone(value: &Value) -> Value {
+    value
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .unwrap_or_else(|| value.clone())
+}
+
+fn tool_result_content_to_string(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
 }
 
 #[cfg(test)]
@@ -352,5 +447,59 @@ mod tests {
             .iter()
             .any(|header| header.value.expose_secret() == "Bearer provider-secret"));
         assert!(!format!("{prepared:?}").contains("provider-secret"));
+    }
+
+    #[test]
+    fn injects_openai_tools_and_round_trips_tool_calls() {
+        let adapter = OpenAiCompatibleAdapter;
+        let body = adapter
+            .inject_tools(
+                json!({"model": "gpt", "messages": []}),
+                &[ToolDef {
+                    name: "lookup_weather".into(),
+                    description: Some("Lookup weather".into()),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}}
+                    }),
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "lookup_weather");
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["properties"]["city"]["type"],
+            "string"
+        );
+
+        let calls = adapter
+            .extract_tool_calls(
+                br#"{"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_weather","arguments":"{\"city\":\"Shanghai\"}"}}]}}]}"#,
+            )
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "lookup_weather");
+        assert_eq!(calls[0].arguments["city"], "Shanghai");
+    }
+
+    #[test]
+    fn appends_openai_tool_results_as_tool_messages() {
+        let adapter = OpenAiCompatibleAdapter;
+        let body = adapter
+            .append_tool_results(
+                json!({"messages": [{"role": "user", "content": "weather?"}]}),
+                &[ToolResult {
+                    tool_call_id: "call_1".into(),
+                    content: json!({"temp_c": 21}),
+                    is_error: false,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
+        assert_eq!(body["messages"][1]["content"], r#"{"temp_c":21}"#);
     }
 }

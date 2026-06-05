@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use ferrogate_core::{ToolCall, ToolDef, ToolResult};
+
 use crate::{
     canonical::CanonicalAiRequest, AdapterError, ChatCompletionPlan, ProviderAdapter,
     ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage,
@@ -134,6 +136,79 @@ impl ProviderAdapter for AnthropicAdapter {
             || extracted.total_tokens.is_some())
         .then_some(extracted)
     }
+
+    fn inject_tools(&self, body: Value, tools: &[ToolDef]) -> Result<Value, AdapterError> {
+        let mut body = ensure_object_body(body)?;
+        if tools.is_empty() {
+            return Ok(body);
+        }
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    let mut value = json!({
+                        "name": tool.name,
+                        "input_schema": tool.input_schema,
+                    });
+                    if let Some(description) = &tool.description {
+                        value["description"] = Value::String(description.clone());
+                    }
+                    value
+                })
+                .collect(),
+        );
+        Ok(body)
+    }
+
+    fn extract_tool_calls(&self, body: &[u8]) -> Result<Vec<ToolCall>, AdapterError> {
+        let value = serde_json::from_slice::<Value>(body).map_err(|error| {
+            AdapterError::InvalidRequest {
+                message: format!("provider response body must be JSON: {error}"),
+            }
+        })?;
+        Ok(value
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|block| {
+                block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == "tool_use")
+            })
+            .filter_map(anthropic_tool_use_to_canonical)
+            .collect())
+    }
+
+    fn append_tool_results(
+        &self,
+        body: Value,
+        results: &[ToolResult],
+    ) -> Result<Value, AdapterError> {
+        let mut body = ensure_object_body(body)?;
+        if results.is_empty() {
+            return Ok(body);
+        }
+        if !body.get("messages").is_some_and(Value::is_array) {
+            body["messages"] = json!([]);
+        }
+        let messages = body["messages"]
+            .as_array_mut()
+            .expect("messages initialized as array");
+        messages.push(json!({
+            "role": "user",
+            "content": results.iter().map(|result| {
+                json!({
+                    "type": "tool_result",
+                    "tool_use_id": result.tool_call_id,
+                    "content": tool_result_content_to_string(&result.content),
+                    "is_error": result.is_error,
+                })
+            }).collect::<Vec<_>>(),
+        }));
+        Ok(body)
+    }
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {
@@ -166,6 +241,21 @@ fn fallback_error_message(parsed: Option<&Value>, body: &[u8]) -> Option<String>
             let text = std::str::from_utf8(body).ok()?.trim();
             (!text.is_empty()).then(|| text.chars().take(512).collect())
         })
+}
+
+fn anthropic_tool_use_to_canonical(value: &Value) -> Option<ToolCall> {
+    Some(ToolCall {
+        id: value.get("id")?.as_str()?.to_string(),
+        name: value.get("name")?.as_str()?.to_string(),
+        arguments: value.get("input").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn tool_result_content_to_string(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
 }
 
 #[cfg(test)]
@@ -304,5 +394,62 @@ mod tests {
         assert_eq!(usage.prompt_tokens, Some(13));
         assert_eq!(usage.completion_tokens, Some(8));
         assert_eq!(usage.total_tokens, Some(21));
+    }
+
+    #[test]
+    fn injects_anthropic_tools_and_round_trips_tool_calls() {
+        let adapter = AnthropicAdapter;
+        let body = adapter
+            .inject_tools(
+                json!({"model": "claude", "messages": []}),
+                &[ToolDef {
+                    name: "lookup_weather".into(),
+                    description: Some("Lookup weather".into()),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}}
+                    }),
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(body["tools"][0]["name"], "lookup_weather");
+        assert_eq!(
+            body["tools"][0]["input_schema"]["properties"]["city"]["type"],
+            "string"
+        );
+
+        let calls = adapter
+            .extract_tool_calls(
+                br#"{"stop_reason":"tool_use","content":[{"type":"text","text":"checking"},{"type":"tool_use","id":"toolu_1","name":"lookup_weather","input":{"city":"Shanghai"}}]}"#,
+            )
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "toolu_1");
+        assert_eq!(calls[0].name, "lookup_weather");
+        assert_eq!(calls[0].arguments["city"], "Shanghai");
+    }
+
+    #[test]
+    fn appends_anthropic_tool_results_as_content_blocks() {
+        let adapter = AnthropicAdapter;
+        let body = adapter
+            .append_tool_results(
+                json!({"messages": [{"role": "user", "content": "weather?"}]}),
+                &[ToolResult {
+                    tool_call_id: "toolu_1".into(),
+                    content: json!({"temp_c": 21}),
+                    is_error: false,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"][0]["type"], "tool_result");
+        assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], "toolu_1");
+        assert_eq!(
+            body["messages"][1]["content"][0]["content"],
+            r#"{"temp_c":21}"#
+        );
     }
 }

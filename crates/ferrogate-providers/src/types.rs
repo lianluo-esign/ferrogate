@@ -1,3 +1,4 @@
+use ferrogate_core::{ToolCall, ToolDef, ToolResult};
 use serde_json::Value;
 use std::fmt;
 
@@ -121,6 +122,22 @@ pub trait ProviderAdapter: Send + Sync {
     ) -> ProviderErrorResponse;
 
     fn extract_usage(&self, body: &[u8]) -> Option<ProviderUsage>;
+
+    fn inject_tools(&self, body: Value, _tools: &[ToolDef]) -> Result<Value, AdapterError> {
+        Ok(body)
+    }
+
+    fn extract_tool_calls(&self, _body: &[u8]) -> Result<Vec<ToolCall>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    fn append_tool_results(
+        &self,
+        body: Value,
+        _results: &[ToolResult],
+    ) -> Result<Value, AdapterError> {
+        Ok(body)
+    }
 
     fn is_retryable_status(&self, status: u16) -> bool {
         status == 429 || (500..=599).contains(&status)

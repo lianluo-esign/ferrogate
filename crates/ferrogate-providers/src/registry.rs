@@ -1,3 +1,6 @@
+use ferrogate_core::{ToolCall, ToolDef, ToolResult};
+use serde_json::Value;
+
 use crate::{
     AdapterError, AnthropicAdapter, AzureOpenAiAdapter, ChatCompletionPlan, GeminiAdapter,
     GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderConfig,
@@ -69,6 +72,33 @@ impl ProviderAdapterRegistry {
         body: &[u8],
     ) -> Result<Option<ProviderUsage>, AdapterError> {
         Ok(self.adapter_for(provider_kind)?.extract_usage(body))
+    }
+
+    pub fn inject_tools(
+        &self,
+        provider_kind: &str,
+        body: Value,
+        tools: &[ToolDef],
+    ) -> Result<Value, AdapterError> {
+        self.adapter_for(provider_kind)?.inject_tools(body, tools)
+    }
+
+    pub fn extract_tool_calls(
+        &self,
+        provider_kind: &str,
+        body: &[u8],
+    ) -> Result<Vec<ToolCall>, AdapterError> {
+        self.adapter_for(provider_kind)?.extract_tool_calls(body)
+    }
+
+    pub fn append_tool_results(
+        &self,
+        provider_kind: &str,
+        body: Value,
+        results: &[ToolResult],
+    ) -> Result<Value, AdapterError> {
+        self.adapter_for(provider_kind)?
+            .append_tool_results(body, results)
     }
 
     pub fn is_retryable_status(

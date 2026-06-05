@@ -804,6 +804,7 @@ name = "ferrogate-core"
 version = "2026.5.5"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
