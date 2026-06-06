@@ -14,6 +14,64 @@ use support::{
 };
 
 #[test]
+fn clustered_gateways_report_shared_cluster_and_distinct_nodes() {
+    let first_addr = free_addr();
+    let second_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let first_config = dir.path().join("ferrogate-node-a.toml");
+    let second_config = dir.path().join("ferrogate-node-b.toml");
+    std::fs::write(
+        &first_config,
+        cluster_status_config(&first_addr, "test-node-a", "admin-secret-a"),
+    )
+    .unwrap();
+    std::fs::write(
+        &second_config,
+        cluster_status_config(&second_addr, "test-node-b", "admin-secret-b"),
+    )
+    .unwrap();
+
+    let mut first_gateway = start_gateway(&first_config);
+    let mut second_gateway = start_gateway(&second_config);
+    wait_for_gateway(&first_addr);
+    wait_for_gateway(&second_addr);
+
+    let first_status = admin_status_json(&first_addr, "admin-secret-a");
+    let second_status = admin_status_json(&second_addr, "admin-secret-b");
+    let first_cluster = &first_status["cluster"];
+    let second_cluster = &second_status["cluster"];
+
+    assert_eq!(first_cluster["enabled"], true);
+    assert_eq!(second_cluster["enabled"], true);
+    assert_eq!(first_cluster["cluster_id"], "test-cluster");
+    assert_eq!(second_cluster["cluster_id"], "test-cluster");
+    assert_eq!(first_cluster["node_id"], "test-node-a");
+    assert_eq!(second_cluster["node_id"], "test-node-b");
+    assert_ne!(first_cluster["node_id"], second_cluster["node_id"]);
+    assert_eq!(first_cluster["node_region"], "local");
+    assert_eq!(second_cluster["node_region"], "local");
+    assert_eq!(first_cluster["node_zone"], "local-a");
+    assert_eq!(second_cluster["node_zone"], "local-b");
+    assert_eq!(first_cluster["state_backend"], "local");
+    assert_eq!(second_cluster["state_backend"], "local");
+    assert_eq!(first_cluster["counter_backend"], "local");
+    assert_eq!(second_cluster["counter_backend"], "local");
+    assert!(first_cluster["active_revision"].as_str().unwrap().len() >= 16);
+    assert!(second_cluster["active_revision"].as_str().unwrap().len() >= 16);
+    assert!(first_cluster["last_sync_at_unix"].as_u64().is_some());
+    assert!(second_cluster["last_sync_at_unix"].as_u64().is_some());
+    assert!(first_cluster["last_sync_error"].is_null());
+    assert!(second_cluster["last_sync_error"].is_null());
+    assert_eq!(first_cluster["stale"], false);
+    assert_eq!(second_cluster["stale"], false);
+
+    first_gateway.kill().unwrap();
+    first_gateway.wait().unwrap();
+    second_gateway.kill().unwrap();
+    second_gateway.wait().unwrap();
+}
+
+#[test]
 fn openai_models_and_chat_non_streaming_dispatch_work() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(
@@ -419,6 +477,47 @@ enabled = false
     assert!(provider_requests[1].contains(r#""model":"gpt-4.1""#));
     assert!(!provider_requests[1].contains("smart-chat"));
     assert!(!provider_requests[1].contains("client-secret"));
+}
+
+fn cluster_status_config(addr: &str, node_id: &str, admin_secret: &str) -> String {
+    let node_zone = if node_id.ends_with("-a") {
+        "local-a"
+    } else {
+        "local-b"
+    };
+    format!(
+        r#"
+listen = "{addr}"
+
+[cluster]
+enabled = true
+cluster_id = "test-cluster"
+node_id = "{node_id}"
+node_region = "local"
+node_zone = "{node_zone}"
+state_backend = "local"
+counter_backend = "local"
+heartbeat_interval_secs = 10
+config_poll_interval_secs = 5
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "{admin_secret}"
+scopes = ["admin.read"]
+"#
+    )
+}
+
+fn admin_status_json(addr: &str, admin_secret: &str) -> serde_json::Value {
+    let auth = format!("Authorization: Bearer {admin_secret}");
+    let response = http_request(addr, "GET", "/admin/v1/status", &[auth.as_str()], "");
+    assert!(response.contains("200 OK"), "{response}");
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or_else(|| panic!("admin status response missing body: {response}"));
+    serde_json::from_str(body).unwrap()
 }
 
 #[test]
