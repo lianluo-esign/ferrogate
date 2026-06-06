@@ -29,7 +29,7 @@ pub(crate) struct AdminStatus<'a> {
     pub(crate) routes: usize,
     pub(crate) enabled_routes: usize,
     pub(crate) auth_required: bool,
-    pub(crate) cluster: crate::state::ClusterIdentity,
+    pub(crate) cluster: crate::state::ClusterStatus,
     pub(crate) acme: Option<AdminAcmeStatus>,
 }
 

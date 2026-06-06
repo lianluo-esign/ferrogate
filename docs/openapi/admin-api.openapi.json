@@ -1102,7 +1102,11 @@
           "node_region",
           "node_zone",
           "state_backend",
-          "counter_backend"
+          "counter_backend",
+          "active_revision",
+          "last_sync_at_unix",
+          "last_sync_error",
+          "stale"
         ],
         "properties": {
           "enabled": {
@@ -1125,6 +1129,19 @@
           },
           "counter_backend": {
             "type": "string"
+          },
+          "active_revision": {
+            "type": "string"
+          },
+          "last_sync_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "last_sync_error": {
+            "type": ["string", "null"]
+          },
+          "stale": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false

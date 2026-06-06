@@ -148,6 +148,10 @@ enabled = false
     assert!(admin_status.contains("\"node_zone\":\"local-a\""));
     assert!(admin_status.contains("\"state_backend\":\"local\""));
     assert!(admin_status.contains("\"counter_backend\":\"local\""));
+    assert!(admin_status.contains("\"active_revision\":\""));
+    assert!(admin_status.contains("\"last_sync_at_unix\":"));
+    assert!(admin_status.contains("\"last_sync_error\":null"));
+    assert!(admin_status.contains("\"stale\":false"));
     assert!(!admin_status.contains("admin-secret"));
 
     let dashboard = http_request(&gateway_addr, "GET", "/admin/", &[], "");

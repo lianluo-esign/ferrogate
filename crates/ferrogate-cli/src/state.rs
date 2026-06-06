@@ -224,6 +224,7 @@ impl SharedAppState {
 pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     cluster_identity: Arc<ClusterIdentity>,
+    cluster_sync: Arc<ClusterSyncStatus>,
     pub(crate) providers: Arc<HashMap<String, Provider>>,
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
     runtime_routes: Arc<Vec<RuntimeRoute>>,
@@ -261,6 +262,29 @@ pub(crate) struct ClusterIdentity {
     pub(crate) counter_backend: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ClusterSyncStatus {
+    pub(crate) active_revision: String,
+    pub(crate) last_sync_at_unix: Option<u64>,
+    pub(crate) last_sync_error: Option<String>,
+    pub(crate) stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ClusterStatus {
+    pub(crate) enabled: bool,
+    pub(crate) cluster_id: String,
+    pub(crate) node_id: String,
+    pub(crate) node_region: Option<String>,
+    pub(crate) node_zone: Option<String>,
+    pub(crate) state_backend: String,
+    pub(crate) counter_backend: String,
+    pub(crate) active_revision: String,
+    pub(crate) last_sync_at_unix: Option<u64>,
+    pub(crate) last_sync_error: Option<String>,
+    pub(crate) stale: bool,
+}
+
 impl ClusterIdentity {
     fn from_config(config: &Config) -> Self {
         Self {
@@ -271,6 +295,24 @@ impl ClusterIdentity {
             node_zone: config.cluster.node_zone.clone(),
             state_backend: config.cluster.state_backend.clone(),
             counter_backend: config.cluster.counter_backend.clone(),
+        }
+    }
+}
+
+impl ClusterStatus {
+    fn new(identity: &ClusterIdentity, sync: &ClusterSyncStatus) -> Self {
+        Self {
+            enabled: identity.enabled,
+            cluster_id: identity.cluster_id.clone(),
+            node_id: identity.node_id.clone(),
+            node_region: identity.node_region.clone(),
+            node_zone: identity.node_zone.clone(),
+            state_backend: identity.state_backend.clone(),
+            counter_backend: identity.counter_backend.clone(),
+            active_revision: sync.active_revision.clone(),
+            last_sync_at_unix: sync.last_sync_at_unix,
+            last_sync_error: sync.last_sync_error.clone(),
+            stale: sync.stale,
         }
     }
 }
@@ -731,9 +773,16 @@ impl AppState {
             .map(|key| (key.id.clone(), ApiKeyRequestWindow::default()))
             .collect();
         let storage = config.storage.clone();
+        let active_revision = config_snapshot_id(&config);
 
         Self {
             cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
+            cluster_sync: Arc::new(ClusterSyncStatus {
+                active_revision,
+                last_sync_at_unix: now_unix_seconds(),
+                last_sync_error: None,
+                stale: false,
+            }),
             config: Arc::new(config),
             providers: Arc::new(providers),
             upstreams: Arc::new(upstreams),
@@ -805,8 +854,8 @@ impl AppState {
         !self.config.api_keys.is_empty()
     }
 
-    pub(crate) fn cluster_identity(&self) -> &ClusterIdentity {
-        &self.cluster_identity
+    pub(crate) fn cluster_status(&self) -> ClusterStatus {
+        ClusterStatus::new(&self.cluster_identity, &self.cluster_sync)
     }
 
     pub(crate) fn acme_renewal_status(&self) -> Option<AcmeRenewalStatus> {
