@@ -1480,7 +1480,7 @@ impl FerroGateway {
         }
     }
 
-    pub(super) async fn handle_admin_billing_events(
+    pub(super) async fn handle_admin_metering_events(
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
@@ -1490,7 +1490,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let page = state.billing_events_page(state.admin_pagination(query));
+                let page = state.metering_events_page(state.admin_pagination(query));
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -1505,6 +1505,17 @@ impl FerroGateway {
                 .await
             }
         }
+    }
+
+    pub(super) async fn handle_admin_billing_events(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        self.handle_admin_metering_events(session, ctx, headers, query)
+            .await
     }
 
     pub(super) async fn handle_admin_usage_aggregates(

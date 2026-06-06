@@ -25,6 +25,7 @@ impl Config {
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_tls()?;
         self.validate_telemetry()?;
+        self.validate_metering()?;
         self.validate_storage()?;
         self.validate_reliability()?;
         self.validate_cluster()?;
@@ -213,6 +214,36 @@ impl Config {
             if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
                 bail!("field telemetry.otlp_endpoint: must start with http:// or https://");
             }
+        }
+        Ok(())
+    }
+
+    fn validate_metering(&self) -> AnyResult<()> {
+        if self.metering.export_endpoint.trim().is_empty() {
+            bail!("field metering.export_endpoint: cannot be empty");
+        }
+        if !self.metering.export_endpoint.starts_with("http://")
+            && !self.metering.export_endpoint.starts_with("https://")
+        {
+            bail!("field metering.export_endpoint: must start with http:// or https://");
+        }
+        if self.metering.export_timeout_secs == 0 {
+            bail!("field metering.export_timeout_secs: must be greater than zero");
+        }
+        let has_token_env = self
+            .metering
+            .export_token_env
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_inline_token = self
+            .metering
+            .export_token
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if self.metering.export_enabled && !has_token_env && !has_inline_token {
+            bail!(
+                "field metering.export_token_env: required when metering export is enabled unless metering.export_token is set"
+            );
         }
         Ok(())
     }

@@ -16,6 +16,7 @@ use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config, HeaderMutation,
     Model, PolicyRule as ConfigPolicyRule, Provider, RouteRule, StorageConfig, Upstream,
 };
+use crate::metering::MeteringExporter;
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
@@ -23,8 +24,7 @@ use ferrogate_billing::{
 };
 use ferrogate_core::RequestContext;
 use ferrogate_observability::{
-    CostMetricTotal, GatewayMetricsSnapshot, ModelProviderMetricTotal, RequestStatusMetric,
-    TokenMetricTotals,
+    GatewayMetricsSnapshot, ModelProviderMetricTotal, RequestStatusMetric, TokenMetricTotals,
 };
 use ferrogate_policy::{
     BasicPolicyEngine, PolicyDecision, PolicyEngine, PolicyRule, PolicySubject,
@@ -451,7 +451,6 @@ pub(crate) struct AppState {
     runtime_routes: Arc<Vec<RuntimeRoute>>,
     runtime_upstreams: Arc<HashMap<String, RuntimeUpstream>>,
     model_visibility: Arc<HashMap<String, ModelVisibility>>,
-    model_prices: Arc<HashMap<String, ModelPrice>>,
     model_registry: Arc<ModelRegistry>,
     provider_adapters: Arc<ProviderAdapterRegistry>,
     provider_circuit_config: Option<ProviderCircuitConfig>,
@@ -459,7 +458,8 @@ pub(crate) struct AppState {
     provider_routing_metrics: Arc<Mutex<ProviderRoutingMetrics>>,
     api_key_request_windows: Arc<HashMap<String, ApiKeyRequestWindow>>,
     api_key_token_reservations: Arc<Mutex<HashMap<String, u64>>>,
-    billing_events: Arc<InMemoryBillingEventSink>,
+    metering_events: Arc<InMemoryBillingEventSink>,
+    metering_exporter: Option<Arc<MeteringExporter>>,
     request_logs: Arc<Mutex<InMemoryAppendRepository<StoredRequestLog>>>,
     audit_events: Arc<Mutex<InMemoryAppendRepository<StoredAuditEvent>>>,
     usage_aggregates: Arc<Mutex<InMemoryRepository<StoredUsageAggregate>>>,
@@ -630,7 +630,6 @@ struct GatewayMetricsAccumulator {
     request_status_totals: BTreeMap<u16, u64>,
     billing_event_total: u64,
     token_totals: TokenMetricTotals,
-    cost_totals: BTreeMap<String, f64>,
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
 }
 
@@ -812,10 +811,6 @@ impl GatewayMetricsAccumulator {
         self.token_totals.completion_tokens += event.usage.completion_tokens;
         self.token_totals.total_tokens += event.usage.total_tokens;
 
-        if let Some(cost) = &event.cost {
-            *self.cost_totals.entry(cost.currency.clone()).or_default() += cost.total_cost;
-        }
-
         let key = (event.logical_model.clone(), event.provider.clone());
         let total =
             self.model_provider_totals
@@ -845,14 +840,6 @@ impl GatewayMetricsAccumulator {
                 .collect(),
             billing_event_total: self.billing_event_total,
             token_totals: self.token_totals.clone(),
-            cost_estimates: self
-                .cost_totals
-                .iter()
-                .map(|(currency, amount)| CostMetricTotal {
-                    currency: currency.clone(),
-                    amount: *amount,
-                })
-                .collect(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
         }
     }
@@ -995,11 +982,6 @@ impl AppState {
             .iter()
             .map(|model| (model.name.clone(), ModelVisibility::from(model)))
             .collect();
-        let model_prices = config
-            .models
-            .iter()
-            .filter_map(|model| model_price(model).map(|price| (model.name.clone(), price)))
-            .collect();
         let upstream_counters = config
             .upstreams
             .iter()
@@ -1027,6 +1009,10 @@ impl AppState {
             .collect();
         let storage = config.storage.clone();
         let active_revision = config_snapshot_id(&config);
+        let metering_exporter = MeteringExporter::from_config(&config.metering)
+            .ok()
+            .flatten()
+            .map(Arc::new);
 
         Self {
             cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
@@ -1042,7 +1028,6 @@ impl AppState {
             runtime_routes: Arc::new(runtime_routes),
             runtime_upstreams: Arc::new(runtime_upstreams),
             model_visibility: Arc::new(model_visibility),
-            model_prices: Arc::new(model_prices),
             model_registry: Arc::new(model_registry),
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
             provider_circuit_config,
@@ -1050,9 +1035,10 @@ impl AppState {
             provider_routing_metrics: Arc::new(Mutex::new(ProviderRoutingMetrics::default())),
             api_key_request_windows: Arc::new(api_key_request_windows),
             api_key_token_reservations: Arc::new(Mutex::new(HashMap::new())),
-            billing_events: Arc::new(InMemoryBillingEventSink::with_retention_limit(
+            metering_events: Arc::new(InMemoryBillingEventSink::with_retention_limit(
                 storage.billing_event_retention_records,
             )),
+            metering_exporter,
             request_logs: Arc::new(Mutex::new(InMemoryAppendRepository::with_retention_limit(
                 storage.request_log_retention_records,
             ))),
@@ -1076,7 +1062,7 @@ impl AppState {
         next.cluster_identity = Arc::clone(&self.cluster_identity);
         next.api_key_token_reservations = Arc::clone(&self.api_key_token_reservations);
         next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
-        next.billing_events = Arc::clone(&self.billing_events);
+        next.metering_events = Arc::clone(&self.metering_events);
         next.request_logs = Arc::clone(&self.request_logs);
         next.audit_events = Arc::clone(&self.audit_events);
         next.usage_aggregates = Arc::clone(&self.usage_aggregates);
@@ -1090,7 +1076,7 @@ impl AppState {
 
     fn apply_storage_config(&self, storage: &StorageConfig) {
         let _ = self
-            .billing_events
+            .metering_events
             .set_retention_limit(storage.billing_event_retention_records);
         if let Ok(mut logs) = self.request_logs.lock() {
             logs.set_retention_limit(storage.request_log_retention_records);
@@ -1632,10 +1618,6 @@ impl AppState {
         draft: BillingTokenUsageDraft<'_>,
     ) -> Result<(), ferrogate_billing::BillingError> {
         let usage = draft.usage.clone().estimate_missing_total();
-        let cost = self
-            .route_price(draft.logical_model, draft.provider, draft.provider_model)
-            .or_else(|| self.model_prices.get(draft.logical_model).cloned())
-            .map(|price| price.estimate(&usage));
         let event = BillingEvent {
             request_id: draft.request.request_id.clone(),
             trace_id: draft.request.trace_id.clone(),
@@ -1647,12 +1629,14 @@ impl AppState {
             provider_model: draft.provider_model.into(),
             usage: usage.clone(),
             usage_source: draft.usage_source,
-            cost,
             status_code: draft.status_code,
             occurred_at_unix: None,
         };
-        self.billing_events.record(event.clone())?;
+        self.metering_events.record(event.clone())?;
         self.record_billing_metrics(&event);
+        if let Some(exporter) = &self.metering_exporter {
+            exporter.export_event(event.clone());
+        }
         self.record_usage_aggregate(
             &draft.request.tenant,
             draft.logical_model,
@@ -1664,18 +1648,18 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn billing_events(&self) -> Vec<BillingEvent> {
-        self.billing_events.list()
+        self.metering_events.list()
     }
 
-    pub(crate) fn billing_events_page(
+    pub(crate) fn metering_events_page(
         &self,
         pagination: AdminPagination,
     ) -> AdminPage<BillingEvent> {
         AdminPage {
             data: self
-                .billing_events
+                .metering_events
                 .list_paginated(pagination.offset, pagination.limit),
-            total: self.billing_events.len(),
+            total: self.metering_events.len(),
             offset: pagination.offset,
             limit: pagination.limit,
         }
@@ -1713,22 +1697,6 @@ impl AppState {
         aggregate.usage.completion_tokens += usage.completion_tokens;
         aggregate.usage.total_tokens += usage.total_tokens;
         aggregates.insert(id, aggregate);
-    }
-
-    fn route_price(
-        &self,
-        logical_model: &str,
-        provider: &str,
-        provider_model: &str,
-    ) -> Option<ModelPrice> {
-        let resolved = self.model_registry.resolve(logical_model).ok()?;
-        let route = std::iter::once(resolved.primary)
-            .chain(resolved.fallbacks)
-            .find(|route| route.provider == provider && route.provider_model == provider_model)?;
-        match (route.input_price_per_1m, route.output_price_per_1m) {
-            (Some(input), Some(output)) => Some(ModelPrice::usd(input, output)),
-            _ => None,
-        }
     }
 
     pub(crate) fn record_request_log(&self, mut log: StoredRequestLog) {
@@ -1785,7 +1753,6 @@ impl AppState {
                 request_status_totals: Vec::new(),
                 billing_event_total: 0,
                 token_totals: TokenMetricTotals::default(),
-                cost_estimates: Vec::new(),
                 model_provider_totals: Vec::new(),
             })
     }
@@ -2244,16 +2211,6 @@ fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
         })
         .collect();
     entry
-}
-
-fn model_price(model: &Model) -> Option<ModelPrice> {
-    match (model.input_price_per_1m, model.output_price_per_1m) {
-        (None, None) => None,
-        (input, output) => Some(ModelPrice::usd(
-            input.unwrap_or_default(),
-            output.unwrap_or_default(),
-        )),
-    }
 }
 
 fn route_estimated_cost(route: &ModelRoute, usage: Option<&BillingTokenUsage>) -> f64 {
@@ -2972,7 +2929,7 @@ mod tests {
     }
 
     #[test]
-    fn records_billing_event_with_model_price() {
+    fn records_token_metering_event_without_gateway_cost() {
         let config = Config {
             providers: vec![Provider {
                 name: "openai".into(),
@@ -3034,7 +2991,6 @@ mod tests {
         assert_eq!(events[0].tenant.organization_id.as_deref(), Some("org"));
         assert_eq!(events[0].usage.total_tokens, 8);
         assert_eq!(events[0].usage_source, BillingUsageSource::ProviderUsage);
-        assert_eq!(events[0].cost.as_ref().unwrap().currency, "USD");
 
         let aggregates = state.usage_aggregates();
         assert_eq!(aggregates.len(), 1);
@@ -3187,9 +3143,9 @@ mod tests {
         assert_eq!(audit_page.total, 2);
         assert_eq!(audit_page.data[0].request_id, "fg-2");
 
-        let billing_page = state.billing_events_page(state.admin_pagination(None));
-        assert_eq!(billing_page.total, 2);
-        assert_eq!(billing_page.data[0].request_id, "fg-2");
+        let metering_page = state.metering_events_page(state.admin_pagination(None));
+        assert_eq!(metering_page.total, 2);
+        assert_eq!(metering_page.data[0].request_id, "fg-2");
 
         let snapshot = state.prometheus_metrics_snapshot();
         assert_eq!(snapshot.request_log_total, 3);

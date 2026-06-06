@@ -457,20 +457,32 @@ enabled = false
     assert!(request_logs.contains("\"status_code\":200"));
     assert!(!request_logs.contains("client-secret"));
 
-    let billing_events = http_request(
+    let metering_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/metering-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(metering_events.contains("200 OK"));
+    assert!(metering_events.contains("\"logical_model\":\"fast-chat\""));
+    assert!(metering_events.contains("\"provider\":\"openai\""));
+    assert!(metering_events.contains("\"cluster_id\":\"test-cluster\""));
+    assert!(metering_events.contains("\"node_id\":\"test-node-a\""));
+    assert!(metering_events.contains("\"total_tokens\":8"));
+    assert!(!metering_events.contains("\"cost\""));
+    assert!(!metering_events.contains("\"currency\""));
+
+    let billing_alias = http_request(
         &gateway_addr,
         "GET",
         "/admin/v1/billing-events",
         &["Authorization: Bearer admin-secret"],
         "",
     );
-    assert!(billing_events.contains("200 OK"));
-    assert!(billing_events.contains("\"logical_model\":\"fast-chat\""));
-    assert!(billing_events.contains("\"provider\":\"openai\""));
-    assert!(billing_events.contains("\"cluster_id\":\"test-cluster\""));
-    assert!(billing_events.contains("\"node_id\":\"test-node-a\""));
-    assert!(billing_events.contains("\"total_tokens\":8"));
-    assert!(billing_events.contains("\"currency\":\"USD\""));
+    assert!(billing_alias.contains("200 OK"));
+    assert!(billing_alias.contains("\"total_tokens\":8"));
+    assert!(!billing_alias.contains("\"cost\""));
 
     let usage_aggregates = http_request(
         &gateway_addr,
@@ -509,6 +521,116 @@ enabled = false
     assert!(provider_requests[1].contains(r#""model":"gpt-4.1""#));
     assert!(!provider_requests[1].contains("smart-chat"));
     assert!(!provider_requests[1].contains("client-secret"));
+}
+
+#[test]
+fn token_metering_export_posts_normalized_usage_without_gateway_cost() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_metering","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let (metering_addr, metering_handle) = spawn_metering_service();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[metering]
+export_enabled = true
+export_endpoint = "http://{metering_addr}/v1/metering/events"
+export_token = "metering-token"
+export_timeout_secs = 2
+
+[[providers]]
+name = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(chat.contains("200 OK"), "{chat}");
+
+    let metering_request = metering_handle.join().unwrap();
+    assert!(metering_request.contains("POST /v1/metering/events HTTP/1.1"));
+    assert!(metering_request.contains("Authorization: Bearer metering-token"));
+    assert!(metering_request.contains(r#""object":"token_metering_event""#));
+    assert!(metering_request.contains(r#""idempotency_key":"ferrogate:"#));
+    assert!(metering_request.contains(r#""organization_id":"org_demo""#));
+    assert!(metering_request.contains(r#""project_id":"project_gateway""#));
+    assert!(metering_request.contains(r#""api_key_id":"key_dev""#));
+    assert!(metering_request.contains(r#""logical_model":"fast-chat""#));
+    assert!(metering_request.contains(r#""provider":"openai""#));
+    assert!(metering_request.contains(r#""total_tokens":8"#));
+    assert!(!metering_request.contains(r#""cost""#));
+    assert!(!metering_request.contains(r#""currency""#));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    provider_handle.join().unwrap();
+}
+
+fn spawn_metering_service() -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n")
+                && String::from_utf8_lossy(&request).contains("\"token_metering_event\"")
+            {
+                break;
+            }
+        }
+        stream
+            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .unwrap();
+        String::from_utf8_lossy(&request).into_owned()
+    });
+    (addr, handle)
 }
 
 fn cluster_status_config(addr: &str, node_id: &str, admin_secret: &str) -> String {

@@ -339,7 +339,6 @@ pub struct GatewayMetricsSnapshot {
     pub request_status_totals: Vec<RequestStatusMetric>,
     pub billing_event_total: u64,
     pub token_totals: TokenMetricTotals,
-    pub cost_estimates: Vec<CostMetricTotal>,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
 }
 
@@ -354,12 +353,6 @@ pub struct TokenMetricTotals {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CostMetricTotal {
-    pub currency: String,
-    pub amount: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,7 +413,7 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     push_help(
         &mut output,
         "ferrogate_billing_events_total",
-        "Total billing events recorded by FerroGate.",
+        "Total token metering events recorded by FerroGate.",
         "counter",
     );
     output.push_str(&format!(
@@ -431,7 +424,7 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     push_help(
         &mut output,
         "ferrogate_tokens_total",
-        "Total AI provider token usage recorded by billing events.",
+        "Total AI provider token usage recorded by metering events.",
         "counter",
     );
     output.push_str(&format!(
@@ -446,20 +439,6 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
         "ferrogate_tokens_total{{type=\"total\"}} {}\n",
         snapshot.token_totals.total_tokens
     ));
-
-    push_help(
-        &mut output,
-        "ferrogate_cost_estimated_total",
-        "Estimated model cost recorded by billing events, grouped by currency.",
-        "counter",
-    );
-    for cost in &snapshot.cost_estimates {
-        let currency = escape_label_value(&cost.currency);
-        output.push_str(&format!(
-            "ferrogate_cost_estimated_total{{currency=\"{currency}\"}} {}\n",
-            format_float(cost.amount)
-        ));
-    }
 
     push_help(
         &mut output,
@@ -647,25 +626,25 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
         ),
         sum_metric_json(
             "ferrogate.billing_events",
-            "Total billing events recorded by FerroGate.",
+            "Total token metering events recorded by FerroGate.",
             snapshot.billing_event_total as f64,
             vec![],
         ),
         sum_metric_json(
             "ferrogate.tokens",
-            "Total prompt tokens recorded by billing events.",
+            "Total prompt tokens recorded by metering events.",
             snapshot.token_totals.prompt_tokens as f64,
             vec![OtlpAttribute::new("type", "prompt")],
         ),
         sum_metric_json(
             "ferrogate.tokens",
-            "Total completion tokens recorded by billing events.",
+            "Total completion tokens recorded by metering events.",
             snapshot.token_totals.completion_tokens as f64,
             vec![OtlpAttribute::new("type", "completion")],
         ),
         sum_metric_json(
             "ferrogate.tokens",
-            "Total tokens recorded by billing events.",
+            "Total tokens recorded by metering events.",
             snapshot.token_totals.total_tokens as f64,
             vec![OtlpAttribute::new("type", "total")],
         ),
@@ -680,15 +659,6 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
                 "status_code",
                 status.status_code.to_string(),
             )],
-        ));
-    }
-
-    for cost in &snapshot.cost_estimates {
-        metrics.push(sum_metric_json(
-            "ferrogate.cost_estimated",
-            "Estimated model cost recorded by billing events.",
-            cost.amount,
-            vec![OtlpAttribute::new("currency", cost.currency.as_str())],
         ));
     }
 
@@ -780,14 +750,6 @@ fn escape_label_value(value: &str) -> String {
         .replace('\\', r"\\")
         .replace('\n', r"\n")
         .replace('"', r#"\""#)
-}
-
-fn format_float(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.0}")
-    } else {
-        value.to_string()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -885,7 +847,7 @@ pub const PROVIDER_DISPATCH_SPAN: GatewaySpanTemplate = GatewaySpanTemplate::new
 );
 
 pub const BILLING_WRITE_SPAN: GatewaySpanTemplate = GatewaySpanTemplate::new(
-    "ferrogate.billing.write",
+    "ferrogate.metering.write",
     GatewaySpanKind::BillingWrite,
     &[
         "request_id",
@@ -895,7 +857,6 @@ pub const BILLING_WRITE_SPAN: GatewaySpanTemplate = GatewaySpanTemplate::new(
         "logical_model",
         "provider",
         "total_tokens",
-        "cost",
         "result",
     ],
 );
@@ -926,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn span_templates_cover_prd_request_provider_and_billing_hierarchy() {
+    fn span_templates_cover_prd_request_provider_and_metering_hierarchy() {
         let templates = default_span_templates();
 
         assert_eq!(templates[0].name, "ferrogate.gateway.request");
@@ -936,8 +897,9 @@ mod tests {
         assert!(templates
             .iter()
             .any(|template| template.kind == GatewaySpanKind::BillingWrite
+                && template.name == "ferrogate.metering.write"
                 && template.fields.contains(&"total_tokens")
-                && template.fields.contains(&"cost")));
+                && template.fields.contains(&"result")));
     }
 
     #[test]
@@ -1038,10 +1000,6 @@ mod tests {
                 completion_tokens: 5,
                 total_tokens: 8,
             },
-            cost_estimates: vec![CostMetricTotal {
-                currency: "USD".into(),
-                amount: 0.000_006,
-            }],
             model_provider_totals: vec![ModelProviderMetricTotal {
                 logical_model: "fast-chat".into(),
                 provider: "openai".into(),

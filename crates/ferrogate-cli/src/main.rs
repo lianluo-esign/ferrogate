@@ -5,6 +5,7 @@ mod config;
 mod dashboard;
 mod gateway;
 mod lifecycle;
+mod metering;
 mod responses;
 mod routing;
 #[cfg(test)]

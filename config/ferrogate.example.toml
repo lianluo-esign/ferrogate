@@ -9,6 +9,12 @@ access_log = "error"
 access_log_sample_rate = 100
 access_log_error_rate_limit_per_sec = 100
 
+[metering]
+export_enabled = false
+export_endpoint = "https://api.token4ai.cloud/v1/metering/events"
+# export_token_env = "FERROGATE_METERING_TOKEN"
+# export_timeout_secs = 3
+
 [storage]
 request_log_retention_records = 10000
 audit_event_retention_records = 10000

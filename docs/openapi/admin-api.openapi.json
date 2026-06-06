@@ -38,7 +38,9 @@
     "/healthz": {
       "get": {
         "operationId": "getHealthz",
-        "tags": ["public"],
+        "tags": [
+          "public"
+        ],
         "summary": "Return gateway health.",
         "security": [],
         "responses": {
@@ -58,7 +60,9 @@
     "/readyz": {
       "get": {
         "operationId": "getReadyz",
-        "tags": ["public"],
+        "tags": [
+          "public"
+        ],
         "summary": "Return gateway readiness.",
         "security": [],
         "responses": {
@@ -81,7 +85,9 @@
     "/admin": {
       "get": {
         "operationId": "getAdminDashboard",
-        "tags": ["public"],
+        "tags": [
+          "public"
+        ],
         "summary": "Serve the built-in Admin dashboard HTML.",
         "security": [],
         "responses": {
@@ -101,7 +107,9 @@
     "/admin/v1/status": {
       "get": {
         "operationId": "getAdminStatus",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "Return gateway status and configured resource counts.",
         "responses": {
           "200": {
@@ -126,7 +134,9 @@
     "/admin/status": {
       "get": {
         "operationId": "getAdminStatusAlias",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "Compatibility alias for /admin/v1/status.",
         "responses": {
           "200": {
@@ -151,7 +161,9 @@
     "/admin/v1/providers": {
       "get": {
         "operationId": "listAdminProviders",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List configured providers without exposing provider secrets.",
         "responses": {
           "200": {
@@ -176,7 +188,9 @@
     "/admin/v1/provider-health": {
       "get": {
         "operationId": "listAdminProviderHealth",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List provider health and circuit-breaker status.",
         "responses": {
           "200": {
@@ -201,7 +215,9 @@
     "/admin/v1/models": {
       "get": {
         "operationId": "listAdminModels",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List configured logical models.",
         "responses": {
           "200": {
@@ -226,7 +242,9 @@
     "/admin/v1/api-keys": {
       "get": {
         "operationId": "listAdminApiKeys",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List configured API keys with secret material redacted.",
         "responses": {
           "200": {
@@ -249,7 +267,9 @@
       },
       "post": {
         "operationId": "createAdminApiKey",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Create an API key and apply it through process-local reload.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminApiKeyMutation"
@@ -284,7 +304,9 @@
       ],
       "get": {
         "operationId": "getAdminApiKey",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "Get one API key with secret material redacted.",
         "responses": {
           "200": {
@@ -303,7 +325,9 @@
       },
       "put": {
         "operationId": "putAdminApiKey",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Replace or create an API key by id.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminApiKeyMutation"
@@ -331,7 +355,9 @@
       },
       "patch": {
         "operationId": "patchAdminApiKey",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Upsert an API key by id.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminApiKeyMutation"
@@ -359,7 +385,9 @@
       },
       "delete": {
         "operationId": "deleteAdminApiKey",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Delete an API key and apply the change through process-local reload.",
         "responses": {
           "200": {
@@ -386,7 +414,9 @@
     "/admin/v1/tenants": {
       "get": {
         "operationId": "listAdminTenants",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List tenant references derived from API key configuration.",
         "responses": {
           "200": {
@@ -411,7 +441,9 @@
     "/admin/v1/policies": {
       "get": {
         "operationId": "listAdminPolicies",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List configured policy rules.",
         "responses": {
           "200": {
@@ -434,7 +466,9 @@
       },
       "post": {
         "operationId": "createAdminPolicy",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Create a policy rule and apply it through process-local reload.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminPolicyMutation"
@@ -469,7 +503,9 @@
       ],
       "get": {
         "operationId": "getAdminPolicy",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "Get one policy rule.",
         "responses": {
           "200": {
@@ -488,7 +524,9 @@
       },
       "put": {
         "operationId": "putAdminPolicy",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Replace or create a policy by name.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminPolicyMutation"
@@ -516,7 +554,9 @@
       },
       "patch": {
         "operationId": "patchAdminPolicy",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Upsert a policy by name.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminPolicyMutation"
@@ -544,7 +584,9 @@
       },
       "delete": {
         "operationId": "deleteAdminPolicy",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Delete a policy rule and apply the change through process-local reload.",
         "responses": {
           "200": {
@@ -571,7 +613,9 @@
     "/admin/v1/request-logs": {
       "get": {
         "operationId": "listAdminRequestLogs",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List retained request logs.",
         "parameters": [
           {
@@ -603,9 +647,11 @@
     },
     "/admin/v1/billing-events": {
       "get": {
-        "operationId": "listAdminBillingEvents",
-        "tags": ["admin-read"],
-        "summary": "List retained billing events.",
+        "operationId": "listAdminBillingEventsCompat",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Compatibility alias for /admin/v1/metering-events.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Offset"
@@ -616,11 +662,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Paginated billing event list.",
+            "description": "Paginated token metering event list.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BillingEventList"
+                  "$ref": "#/components/schemas/TokenMeteringEventList"
                 }
               }
             }
@@ -631,13 +677,16 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/admin/v1/usage-aggregates": {
       "get": {
         "operationId": "listAdminUsageAggregates",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List in-memory token usage aggregates by tenant/model/provider.",
         "responses": {
           "200": {
@@ -662,7 +711,9 @@
     "/admin/v1/audit-events": {
       "get": {
         "operationId": "listAdminAuditEvents",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "List retained Admin API audit events.",
         "parameters": [
           {
@@ -695,7 +746,9 @@
     "/admin/v1/config/validate": {
       "post": {
         "operationId": "validateAdminConfig",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Validate a candidate TOML, Caddyfile, or source-file config without committing it.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminConfigValidateRequest"
@@ -729,7 +782,9 @@
     "/admin/v1/config/reload": {
       "post": {
         "operationId": "reloadAdminConfig",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Validate and apply a process-local config reload when the candidate can be committed without listener replacement.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminConfigValidateRequest"
@@ -763,7 +818,9 @@
     "/admin/v1/drain": {
       "get": {
         "operationId": "getAdminDrain",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "Return the node drain status.",
         "responses": {
           "200": {
@@ -786,7 +843,9 @@
       },
       "post": {
         "operationId": "setAdminDrain",
-        "tags": ["admin-write"],
+        "tags": [
+          "admin-write"
+        ],
         "summary": "Set or clear node drain mode for rolling maintenance.",
         "requestBody": {
           "$ref": "#/components/requestBodies/AdminDrainRequest"
@@ -820,7 +879,9 @@
     "/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "tags": ["admin-read"],
+        "tags": [
+          "admin-read"
+        ],
         "summary": "Return Prometheus text metrics.",
         "responses": {
           "200": {
@@ -829,6 +890,41 @@
               "text/plain": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/metering-events": {
+      "get": {
+        "operationId": "listAdminMeteringEvents",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List retained token metering events.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated token metering event list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenMeteringEventList"
                 }
               }
             }
@@ -904,8 +1000,14 @@
                   "id": "key_dev",
                   "name": "Development key",
                   "key_env": "FERROGATE_DEV_API_KEY",
-                  "scopes": ["models.read", "chat.completions", "admin.read"],
-                  "allowed_models": ["fast-chat"]
+                  "scopes": [
+                    "models.read",
+                    "chat.completions",
+                    "admin.read"
+                  ],
+                  "allowed_models": [
+                    "fast-chat"
+                  ]
                 }
               }
             }
@@ -925,8 +1027,12 @@
                 "value": {
                   "name": "deny-expensive-provider",
                   "effect": "deny",
-                  "api_key_ids": ["key_dev"],
-                  "providers": ["premium"],
+                  "api_key_ids": [
+                    "key_dev"
+                  ],
+                  "providers": [
+                    "premium"
+                  ],
                   "code": "provider_denied",
                   "message": "provider is not allowed for this key"
                 }
@@ -1090,7 +1196,12 @@
     "schemas": {
       "HealthResponse": {
         "type": "object",
-        "required": ["status", "service", "version", "runtime"],
+        "required": [
+          "status",
+          "service",
+          "version",
+          "runtime"
+        ],
         "properties": {
           "status": {
             "type": "string",
@@ -1111,11 +1222,20 @@
       },
       "ReadinessResponse": {
         "type": "object",
-        "required": ["status", "service", "version", "runtime", "cluster"],
+        "required": [
+          "status",
+          "service",
+          "version",
+          "runtime",
+          "cluster"
+        ],
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ready", "not_ready"]
+            "enum": [
+              "ready",
+              "not_ready"
+            ]
           },
           "service": {
             "type": "string"
@@ -1251,14 +1371,23 @@
             "type": "string"
           },
           "node_region": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "node_zone": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "state_backend": {
             "type": "string",
-            "enum": ["local", "file"],
+            "enum": [
+              "local",
+              "file"
+            ],
             "description": "Cluster control-plane state backend. local is process-local; file uses a shared JSON file for lightweight multi-node API key and policy propagation."
           },
           "counter_backend": {
@@ -1268,11 +1397,17 @@
             "type": "string"
           },
           "last_sync_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "last_sync_error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "stale": {
             "type": "boolean"
@@ -1329,7 +1464,10 @@
             "type": "string"
           },
           "certificate_expires_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "renewal_window_secs": {
@@ -1343,14 +1481,23 @@
             "type": "string"
           },
           "last_renewal_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "last_renewal_error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "next_check_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "reload_required": {
@@ -1364,7 +1511,13 @@
       },
       "AdminProvider": {
         "type": "object",
-        "required": ["name", "kind", "base_url", "has_api_key", "enabled"],
+        "required": [
+          "name",
+          "kind",
+          "base_url",
+          "has_api_key",
+          "enabled"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1426,11 +1579,17 @@
             "minimum": 0
           },
           "checked_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "routing": {
             "$ref": "#/components/schemas/ProviderRoutingHealth"
@@ -1477,7 +1636,10 @@
             "minimum": 0
           },
           "average_latency_ms": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "failure_rate": {
@@ -1505,7 +1667,13 @@
       },
       "Model": {
         "type": "object",
-        "required": ["name", "provider", "provider_model", "fallbacks", "enabled"],
+        "required": [
+          "name",
+          "provider",
+          "provider_model",
+          "fallbacks",
+          "enabled"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1545,14 +1713,23 @@
             }
           },
           "context_window": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "input_price_per_1m": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "output_price_per_1m": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "enabled": {
             "type": "boolean"
@@ -1562,7 +1739,11 @@
       },
       "ModelFallback": {
         "type": "object",
-        "required": ["provider", "provider_model", "enabled"],
+        "required": [
+          "provider",
+          "provider_model",
+          "enabled"
+        ],
         "properties": {
           "provider": {
             "type": "string"
@@ -1571,17 +1752,29 @@
             "type": "string"
           },
           "input_price_per_1m": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "output_price_per_1m": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "priority": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "weight": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "enabled": {
@@ -1616,7 +1809,12 @@
           },
           "key_source": {
             "type": "string",
-            "enum": ["env", "hash", "inline", "none"],
+            "enum": [
+              "env",
+              "hash",
+              "inline",
+              "none"
+            ],
             "description": "Redacted source classification; secret values are never returned."
           },
           "scopes": {
@@ -1638,27 +1836,48 @@
             "$ref": "#/components/schemas/StringList"
           },
           "organization_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "team_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "project_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "user_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "monthly_token_budget": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "request_limit_per_minute": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "expires_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "log_bodies": {
@@ -1739,7 +1958,10 @@
       },
       "AdminApiKeyMutationResponse": {
         "type": "object",
-        "required": ["object", "key"],
+        "required": [
+          "object",
+          "key"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -1771,7 +1993,10 @@
           },
           "effect": {
             "type": "string",
-            "enum": ["allow", "deny"]
+            "enum": [
+              "allow",
+              "deny"
+            ]
           },
           "organization_ids": {
             "$ref": "#/components/schemas/StringList"
@@ -1808,7 +2033,10 @@
           },
           "effect": {
             "type": "string",
-            "enum": ["allow", "deny"],
+            "enum": [
+              "allow",
+              "deny"
+            ],
             "default": "deny"
           },
           "organization_ids": {
@@ -1843,7 +2071,10 @@
       },
       "AdminPolicyMutationResponse": {
         "type": "object",
-        "required": ["object", "policy"],
+        "required": [
+          "object",
+          "policy"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -1887,7 +2118,11 @@
       },
       "DeleteResponse": {
         "type": "object",
-        "required": ["object", "id", "deleted"],
+        "required": [
+          "object",
+          "id",
+          "deleted"
+        ],
         "properties": {
           "object": {
             "type": "string"
@@ -1904,19 +2139,33 @@
       },
       "AdminTenantRef": {
         "type": "object",
-        "required": ["api_key_id"],
+        "required": [
+          "api_key_id"
+        ],
         "properties": {
           "organization_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "team_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "project_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "user_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "api_key_id": {
             "type": "string"
@@ -1939,7 +2188,9 @@
           },
           "source": {
             "type": "string",
-            "enum": ["file"],
+            "enum": [
+              "file"
+            ],
             "description": "Use source=file to read the config file that started the current process."
           }
         },
@@ -1947,32 +2198,51 @@
       },
       "AdminConfigValidateResponse": {
         "type": "object",
-        "required": ["valid", "listener_reload_required"],
+        "required": [
+          "valid",
+          "listener_reload_required"
+        ],
         "properties": {
           "valid": {
             "type": "boolean"
           },
           "snapshot": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "reload_mode": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "listener_reload_required": {
             "type": "boolean"
           },
           "reload_reason": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
       },
       "AdminConfigReloadResponse": {
         "type": "object",
-        "required": ["valid", "committed", "mode"],
+        "required": [
+          "valid",
+          "committed",
+          "mode"
+        ],
         "properties": {
           "valid": {
             "type": "boolean"
@@ -1984,20 +2254,31 @@
             "type": "string"
           },
           "active_snapshot": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "candidate_snapshot": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
       },
       "AdminDrainRequest": {
         "type": "object",
-        "required": ["drain"],
+        "required": [
+          "drain"
+        ],
         "properties": {
           "drain": {
             "type": "boolean"
@@ -2007,7 +2288,12 @@
       },
       "AdminDrainResponse": {
         "type": "object",
-        "required": ["object", "draining", "accepting_new_requests", "drain_reason"],
+        "required": [
+          "object",
+          "draining",
+          "accepting_new_requests",
+          "drain_reason"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2021,7 +2307,10 @@
           },
           "drain_reason": {
             "type": "string",
-            "enum": ["not_draining", "operator_drain"]
+            "enum": [
+              "not_draining",
+              "operator_drain"
+            ]
           }
         },
         "additionalProperties": false
@@ -2033,28 +2322,49 @@
             "type": "string"
           },
           "trace_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "cluster_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "node_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tenant": {
             "$ref": "#/components/schemas/TenantContext"
           },
           "route": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "logical_model": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider_model": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status_code": {
             "type": "integer",
@@ -2062,7 +2372,10 @@
             "maximum": 599
           },
           "error_code": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "prompt_recorded": {
             "type": "boolean"
@@ -2071,82 +2384,29 @@
             "type": "boolean"
           },
           "prompt_body": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "response_body": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "started_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "completed_at_unix": {
-            "type": ["integer", "null"],
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
-      "BillingEvent": {
-        "type": "object",
-        "required": [
-          "request_id",
-          "logical_model",
-          "provider",
-          "provider_model",
-          "usage",
-          "usage_source",
-          "status_code"
-        ],
-        "properties": {
-          "request_id": {
-            "type": "string"
-          },
-          "trace_id": {
-            "type": ["string", "null"]
-          },
-          "cluster_id": {
-            "type": ["string", "null"]
-          },
-          "node_id": {
-            "type": ["string", "null"]
-          },
-          "tenant": {
-            "$ref": "#/components/schemas/TenantContext"
-          },
-          "logical_model": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "provider_model": {
-            "type": "string"
-          },
-          "usage": {
-            "$ref": "#/components/schemas/TokenUsage"
-          },
-          "usage_source": {
-            "type": "string",
-            "enum": ["provider_usage", "gateway_estimate"]
-          },
-          "cost": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/CostEstimate"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "status_code": {
-            "type": "integer",
-            "minimum": 100,
-            "maximum": 599
-          },
-          "occurred_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           }
         },
@@ -2154,19 +2414,33 @@
       },
       "StoredUsageAggregate": {
         "type": "object",
-        "required": ["id", "logical_model", "provider", "usage"],
+        "required": [
+          "id",
+          "logical_model",
+          "provider",
+          "usage"
+        ],
         "properties": {
           "id": {
             "type": "string"
           },
           "organization_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "project_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "api_key_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "logical_model": {
             "type": "string"
@@ -2199,16 +2473,28 @@
             "type": "string"
           },
           "trace_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "cluster_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "node_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "actor_api_key_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "action": {
             "type": "string"
@@ -2223,7 +2509,10 @@
             "type": "string"
           },
           "occurred_at_unix": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           }
         },
@@ -2233,26 +2522,45 @@
         "type": "object",
         "properties": {
           "organization_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "team_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "project_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "user_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "api_key_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
       },
       "TokenUsage": {
         "type": "object",
-        "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+        "required": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
         "properties": {
           "prompt_tokens": {
             "type": "integer",
@@ -2265,25 +2573,6 @@
           "total_tokens": {
             "type": "integer",
             "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
-      "CostEstimate": {
-        "type": "object",
-        "required": ["input_cost", "output_cost", "total_cost", "currency"],
-        "properties": {
-          "input_cost": {
-            "type": "number"
-          },
-          "output_cost": {
-            "type": "number"
-          },
-          "total_cost": {
-            "type": "number"
-          },
-          "currency": {
-            "type": "string"
           }
         },
         "additionalProperties": false
@@ -2315,9 +2604,6 @@
       "RequestLogList": {
         "$ref": "#/components/schemas/PaginatedList_RequestLog"
       },
-      "BillingEventList": {
-        "$ref": "#/components/schemas/PaginatedList_BillingEvent"
-      },
       "UsageAggregateList": {
         "$ref": "#/components/schemas/AdminList_StoredUsageAggregate"
       },
@@ -2326,7 +2612,10 @@
       },
       "AdminList_AdminProvider": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2343,7 +2632,10 @@
       },
       "AdminList_ProviderHealthCheck": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2360,7 +2652,10 @@
       },
       "AdminList_Model": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2377,7 +2672,10 @@
       },
       "AdminList_AdminApiKey": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2394,7 +2692,10 @@
       },
       "AdminList_AdminTenantRef": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2411,7 +2712,10 @@
       },
       "AdminList_PolicyRule": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2428,7 +2732,10 @@
       },
       "AdminList_StoredUsageAggregate": {
         "type": "object",
-        "required": ["object", "data"],
+        "required": [
+          "object",
+          "data"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2445,7 +2752,13 @@
       },
       "PaginatedList_RequestLog": {
         "type": "object",
-        "required": ["object", "data", "total", "offset", "limit"],
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2472,38 +2785,15 @@
         },
         "additionalProperties": false
       },
-      "PaginatedList_BillingEvent": {
-        "type": "object",
-        "required": ["object", "data", "total", "offset", "limit"],
-        "properties": {
-          "object": {
-            "type": "string",
-            "const": "list"
-          },
-          "data": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/BillingEvent"
-            }
-          },
-          "total": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "offset": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "limit": {
-            "type": "integer",
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
       "PaginatedList_StoredAuditEvent": {
         "type": "object",
-        "required": ["object", "data", "total", "offset", "limit"],
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
         "properties": {
           "object": {
             "type": "string",
@@ -2532,11 +2822,18 @@
       },
       "ErrorResponse": {
         "type": "object",
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "object",
-            "required": ["message", "type", "code", "request_id"],
+            "required": [
+              "message",
+              "type",
+              "code",
+              "request_id"
+            ],
             "properties": {
               "message": {
                 "type": "string"
@@ -2549,10 +2846,121 @@
                 "type": "string"
               },
               "request_id": {
-                "type": ["string", "null"]
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "TokenMeteringEvent": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "logical_model",
+          "provider",
+          "provider_model",
+          "usage",
+          "usage_source",
+          "status_code"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cluster_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "logical_model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "provider_model": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/TokenUsage"
+          },
+          "usage_source": {
+            "type": "string",
+            "enum": [
+              "provider_usage",
+              "gateway_estimate"
+            ]
+          },
+          "status_code": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "occurred_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "TokenMeteringEventList": {
+        "$ref": "#/components/schemas/PaginatedList_TokenMeteringEvent"
+      },
+      "PaginatedList_TokenMeteringEvent": {
+        "type": "object",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenMeteringEvent"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "additionalProperties": false

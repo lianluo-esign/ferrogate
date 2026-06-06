@@ -1,0 +1,262 @@
+use anyhow::{bail, Context, Result as AnyResult};
+use http::{HeaderValue, StatusCode, Uri};
+use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use std::{
+    io::{Read, Write},
+    net::{TcpStream, ToSocketAddrs},
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+
+use ferrogate_billing::BillingEvent;
+use serde::Serialize;
+use tokio::task;
+
+use crate::config::MeteringConfig;
+
+#[derive(Debug, Clone)]
+pub(crate) struct MeteringExporter {
+    endpoint: String,
+    bearer_token: String,
+    timeout: Duration,
+}
+
+#[derive(Debug, Serialize)]
+struct MeteringExportEnvelope<'a> {
+    object: &'static str,
+    idempotency_key: String,
+    event: &'a BillingEvent,
+}
+
+impl MeteringExporter {
+    pub(crate) fn from_config(config: &MeteringConfig) -> anyhow::Result<Option<Self>> {
+        if !config.export_enabled {
+            return Ok(None);
+        }
+        let bearer_token = match config.export_token.as_deref() {
+            Some(token) if !token.trim().is_empty() => token.trim().to_string(),
+            _ => {
+                let env_name = config
+                    .export_token_env
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("metering.export_token_env is required"))?;
+                std::env::var(env_name).with_context(|| {
+                    format!("failed to read metering export token env {env_name}")
+                })?
+            }
+        };
+        Ok(Some(Self {
+            endpoint: config.export_endpoint.clone(),
+            bearer_token,
+            timeout: Duration::from_secs(config.export_timeout_secs),
+        }))
+    }
+
+    pub(crate) fn export_event(&self, event: BillingEvent) {
+        let exporter = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = exporter.export_event_async(&event).await {
+                tracing::warn!(
+                    request_id = %event.request_id,
+                    error = %error,
+                    "token metering export failed"
+                );
+            }
+        });
+    }
+
+    async fn export_event_async(&self, event: &BillingEvent) -> AnyResult<()> {
+        let endpoint = self.endpoint.clone();
+        let bearer_token = self.bearer_token.clone();
+        let timeout = self.timeout;
+        let event = event.clone();
+        task::spawn_blocking(move || {
+            let body = serde_json::to_vec(&MeteringExportEnvelope {
+                object: "token_metering_event",
+                idempotency_key: format!("ferrogate:{}", event.request_id),
+                event: &event,
+            })
+            .context("failed to serialize metering event")?;
+            post_json(&endpoint, &bearer_token, &body, timeout)
+        })
+        .await
+        .context("metering export task failed")?
+    }
+}
+
+fn post_json(endpoint: &str, bearer_token: &str, body: &[u8], timeout: Duration) -> AnyResult<()> {
+    let target = parse_target(endpoint)?;
+    let mut stream = connect(&target, timeout)?;
+    match target.scheme {
+        Scheme::Http => send_request(&mut stream, &target, bearer_token, body),
+        Scheme::Https => {
+            let server_name = ServerName::try_from(target.host.clone())
+                .with_context(|| format!("invalid metering TLS server name {}", target.host))?;
+            let connection = ClientConnection::new(tls_client_config()?, server_name)
+                .context("failed to initialize metering TLS client")?;
+            let mut tls_stream = StreamOwned::new(connection, stream);
+            send_request(&mut tls_stream, &target, bearer_token, body)
+        }
+    }
+}
+
+fn send_request<S: Read + Write>(
+    stream: &mut S,
+    target: &Target,
+    bearer_token: &str,
+    body: &[u8],
+) -> AnyResult<()> {
+    let bearer_header = HeaderValue::from_str(bearer_token)
+        .context("metering export token is not a valid header")?;
+    write!(
+        stream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
+        target.path_query,
+        target.authority,
+        bearer_header.to_str().unwrap_or_default(),
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()?;
+
+    let (status, _) = read_response_head(stream)?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        bail!("metering service returned status {status}");
+    }
+}
+
+fn connect(target: &Target, timeout: Duration) -> AnyResult<TcpStream> {
+    let address = (target.host.as_str(), target.port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve metering endpoint {}", target.authority))?
+        .next()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "metering endpoint {} resolved no addresses",
+                target.authority
+            )
+        })?;
+    let stream = TcpStream::connect_timeout(&address, timeout)
+        .with_context(|| format!("failed to connect metering endpoint {}", target.authority))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    Ok(stream)
+}
+
+fn read_response_head<S: Read>(stream: &mut S) -> AnyResult<(StatusCode, Vec<u8>)> {
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    let split = loop {
+        let read = stream
+            .read(&mut buffer)
+            .context("failed to read metering response head")?;
+        if read == 0 {
+            bail!("metering response missing header terminator");
+        }
+        raw.extend_from_slice(&buffer[..read]);
+        if raw.len() > 64 * 1024 {
+            bail!("metering response headers exceed 64KiB");
+        }
+        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break split;
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&raw[..split]);
+    let status_line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("metering response missing status line"))?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("metering response missing status code"))?
+        .parse::<u16>()
+        .context("metering response has invalid status code")?;
+    Ok((
+        StatusCode::from_u16(status_code).context("metering service returned invalid status")?,
+        raw[split + 4..].to_vec(),
+    ))
+}
+
+fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
+    static TLS_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    if let Some(config) = TLS_CLIENT_CONFIG.get() {
+        return Ok(Arc::clone(config));
+    }
+
+    let mut roots = RootCertStore::empty();
+    let native_certs = rustls_native_certs::load_native_certs();
+    if !native_certs.errors.is_empty() {
+        anyhow::bail!(
+            "failed to load platform native certificates: {:?}",
+            native_certs.errors
+        );
+    }
+    for cert in native_certs.certs {
+        roots
+            .add(cert)
+            .context("failed to add platform native certificate")?;
+    }
+    let config = Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let _ = TLS_CLIENT_CONFIG.set(Arc::clone(&config));
+    Ok(TLS_CLIENT_CONFIG.get().map(Arc::clone).unwrap_or(config))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scheme {
+    Http,
+    Https,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    scheme: Scheme,
+    host: String,
+    port: u16,
+    authority: String,
+    path_query: String,
+}
+
+fn parse_target(raw: &str) -> AnyResult<Target> {
+    let uri: Uri = raw
+        .parse()
+        .with_context(|| format!("invalid metering endpoint {raw}"))?;
+    let scheme = match uri.scheme_str() {
+        Some("http") => Scheme::Http,
+        Some("https") => Scheme::Https,
+        Some(other) => bail!("metering export supports http and https endpoints only, got {other}"),
+        None => bail!("metering endpoint must include scheme"),
+    };
+    let authority = uri
+        .authority()
+        .ok_or_else(|| anyhow::anyhow!("metering endpoint must include authority"))?;
+    let host = authority.host().to_string();
+    let default_port = match scheme {
+        Scheme::Http => 80,
+        Scheme::Https => 443,
+    };
+    let port = authority.port_u16().unwrap_or(default_port);
+    let authority = if port == default_port {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+    let path_query = uri
+        .path_and_query()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    Ok(Target {
+        scheme,
+        host,
+        port,
+        authority,
+        path_query,
+    })
+}

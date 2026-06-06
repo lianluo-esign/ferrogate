@@ -1,4 +1,4 @@
-//! Token usage, cost estimation, and billing event boundaries.
+//! Token usage metering and local event retention boundaries.
 
 use std::{
     collections::VecDeque,
@@ -89,7 +89,6 @@ pub struct BillingEvent {
     pub usage: TokenUsage,
     #[serde(default)]
     pub usage_source: BillingUsageSource,
-    pub cost: Option<CostEstimate>,
     pub status_code: u16,
     pub occurred_at_unix: Option<u64>,
 }
@@ -247,7 +246,6 @@ mod tests {
             provider_model: "gpt-4o-mini".into(),
             usage: TokenUsage::new(3, 5, 8),
             usage_source: BillingUsageSource::ProviderUsage,
-            cost: Some(ModelPrice::usd(1.0, 2.0).estimate(&TokenUsage::new(3, 5, 8))),
             status_code: 200,
             occurred_at_unix: Some(1),
         })
@@ -274,7 +272,6 @@ mod tests {
                 provider_model: "gpt-4o-mini".into(),
                 usage: TokenUsage::new(1, 1, 2),
                 usage_source: BillingUsageSource::ProviderUsage,
-                cost: None,
                 status_code: 200,
                 occurred_at_unix: None,
             })

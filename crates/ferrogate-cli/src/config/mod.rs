@@ -19,6 +19,6 @@ pub(crate) use self::snapshot::config_snapshot_id;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
     AccessLogMode, AdminConfig, ApiKey, ClusterConfig, Config, HeaderMatcher, HeaderMutation,
-    Model, ModelFallback, PolicyRule, Provider, ReliabilityConfig, RouteRule, StorageConfig,
-    TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    MeteringConfig, Model, ModelFallback, PolicyRule, Provider, ReliabilityConfig, RouteRule,
+    StorageConfig, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
 };

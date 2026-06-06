@@ -123,6 +123,24 @@ fn rejects_model_lowest_cost_strategy_without_prices() {
 }
 
 #[test]
+fn validates_optional_metering_export_boundary() {
+    let config = Config::default();
+    assert_eq!(
+        config.metering.export_endpoint,
+        "https://api.token4ai.cloud/v1/metering/events"
+    );
+    config.validate().unwrap();
+
+    let mut enabled = Config::default();
+    enabled.metering.export_enabled = true;
+    let error = enabled.validate().unwrap_err().to_string();
+    assert!(error.contains("metering.export_token_env"));
+
+    enabled.metering.export_token_env = Some("FERROGATE_METERING_TOKEN".into());
+    enabled.validate().unwrap();
+}
+
+#[test]
 fn rejects_route_with_unknown_upstream() {
     let config = Config {
         routes: vec![route("missing", vec!["/"])],

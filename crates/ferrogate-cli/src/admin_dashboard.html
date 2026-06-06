@@ -279,7 +279,7 @@
     const views = {
       overview: {
         title: "Overview",
-        endpoints: ["/admin/v1/status", "/admin/v1/billing-events", "/admin/v1/request-logs", "/admin/v1/usage-aggregates"],
+        endpoints: ["/admin/v1/status", "/admin/v1/metering-events", "/admin/v1/request-logs", "/admin/v1/usage-aggregates"],
         columns: ["metric", "value"],
       },
       health: {
@@ -309,7 +309,7 @@
       },
       usage: {
         title: "Token Usage",
-        endpoints: ["/admin/v1/usage-aggregates", "/admin/v1/billing-events"],
+        endpoints: ["/admin/v1/usage-aggregates", "/admin/v1/metering-events"],
         columns: ["organization_id", "project_id", "api_key_id", "logical_model", "provider", "usage"],
       },
       config: {
@@ -467,7 +467,7 @@
       clearAction();
       if (viewName === "overview") {
         const status = payloads["/admin/v1/status"] || {};
-        const billing = listOf(payloads["/admin/v1/billing-events"]);
+        const metering = listOf(payloads["/admin/v1/metering-events"]);
         const logs = listOf(payloads["/admin/v1/request-logs"]);
         const usage = listOf(payloads["/admin/v1/usage-aggregates"]);
         renderMetrics([
@@ -476,7 +476,7 @@
           { label: "Models", value: `${status.enabled_models || 0}/${status.models || 0}` },
           { label: "API Keys", value: status.api_keys || 0 },
           { label: "Requests", value: logs.length },
-          { label: "Billing Events", value: billing.length },
+          { label: "Metering Events", value: metering.length },
           { label: "Usage Rows", value: usage.length },
           { label: "Auth Required", value: status.auth_required },
         ]);

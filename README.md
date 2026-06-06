@@ -29,14 +29,14 @@ The project is developed as the open-source gateway foundation behind
 - **Virtual API keys and policy checks** with hashed keys, tenant context,
   scopes, disabled/expired keys, model/provider allowlists and denylists,
   minimal deny-rule policy evaluation, request rate limits, and token budgets.
-- **Token usage and billing events** using provider-reported usage when
+- **Token usage metering events** using provider-reported usage when
   available, gateway estimates when needed, and a request reservation /
   settlement flow inspired by production AI gateways.
-- **Observability** with structured request logs, billing events, configurable
+- **Observability** with structured request logs, token metering events, configurable
   in-memory retention, usage aggregates, Prometheus metrics, request/trace ID
   propagation, and OTLP/HTTP metrics/logs/traces export.
 - **Admin API and dashboard** for gateway status, providers, models, API keys,
-  tenants, policies, request logs, billing events, usage aggregates, audit
+  tenants, policies, request logs, metering events, usage aggregates, audit
   events, provider health, config validation, and process-local reload.
 - **Automatic HTTPS** with manual TLS, ACME HTTP-01, and ACME DNS-01 through a
   built-in Cloudflare provider. ACME provider credentials are read from the
@@ -55,7 +55,7 @@ Validated end-to-end:
 - OpenAI-compatible AI gateway paths.
 - Provider adapters and fallback routing.
 - Virtual API key auth, policy checks, rate limits, and token budget handling.
-- Request logs, billing events, usage aggregates, metrics, and OTLP planning.
+- Request logs, token metering events, usage aggregates, metrics, and OTLP planning.
 - Admin API, API key and policy CRUD, static dashboard, config validation, and
   process-local reload.
 - Manual TLS, ACME HTTP-01, and ACME DNS-01.
@@ -82,7 +82,7 @@ crates/
   ferrogate-auth            Tenant and RBAC domain models
   ferrogate-policy          Policy decision models and engine
   ferrogate-storage         Repository traits and in-memory storage
-  ferrogate-billing         Token usage, cost, and billing event models
+  ferrogate-billing         Token usage metering models and local event retention
   ferrogate-observability   Metrics, spans, exporter contracts
   ferrogate-runtime         Reload and runtime lifecycle state machine
 config/                     Example TOML configuration
@@ -204,6 +204,11 @@ listen = "127.0.0.1:2019"
 access_log = "error"
 access_log_sample_rate = 100
 access_log_error_rate_limit_per_sec = 100
+
+[metering]
+export_enabled = false
+export_endpoint = "https://api.token4ai.cloud/v1/metering/events"
+# export_token_env = "FERROGATE_METERING_TOKEN"
 
 [storage]
 request_log_retention_records = 10000
@@ -455,7 +460,8 @@ GET  /admin/v1/api-keys
 GET  /admin/v1/tenants
 GET  /admin/v1/policies
 GET  /admin/v1/request-logs
-GET  /admin/v1/billing-events
+GET  /admin/v1/metering-events
+GET  /admin/v1/billing-events  # compatibility alias
 GET  /admin/v1/usage-aggregates
 GET  /admin/v1/audit-events
 POST /admin/v1/config/validate

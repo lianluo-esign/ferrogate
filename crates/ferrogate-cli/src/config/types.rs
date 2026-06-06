@@ -22,6 +22,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
+    pub(crate) metering: MeteringConfig,
+    #[serde(default)]
     pub(crate) storage: StorageConfig,
     #[serde(default)]
     pub(crate) reliability: ReliabilityConfig,
@@ -292,6 +294,20 @@ pub(crate) struct TelemetryConfig {
     pub(crate) otlp_endpoint: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct MeteringConfig {
+    #[serde(default)]
+    pub(crate) export_enabled: bool,
+    #[serde(default = "default_metering_export_endpoint")]
+    pub(crate) export_endpoint: String,
+    #[serde(default)]
+    pub(crate) export_token_env: Option<String>,
+    #[serde(default)]
+    pub(crate) export_token: Option<String>,
+    #[serde(default = "default_metering_export_timeout_secs")]
+    pub(crate) export_timeout_secs: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AccessLogMode {
@@ -477,6 +493,14 @@ fn default_access_log_error_rate_limit_per_sec() -> u64 {
     100
 }
 
+fn default_metering_export_endpoint() -> String {
+    "https://api.token4ai.cloud/v1/metering/events".to_string()
+}
+
+fn default_metering_export_timeout_secs() -> u64 {
+    3
+}
+
 fn default_request_log_retention_records() -> usize {
     10_000
 }
@@ -506,6 +530,18 @@ impl Default for TelemetryConfig {
             access_log_sample_rate: default_access_log_sample_rate(),
             access_log_error_rate_limit_per_sec: default_access_log_error_rate_limit_per_sec(),
             otlp_endpoint: None,
+        }
+    }
+}
+
+impl Default for MeteringConfig {
+    fn default() -> Self {
+        Self {
+            export_enabled: false,
+            export_endpoint: default_metering_export_endpoint(),
+            export_token_env: None,
+            export_token: None,
+            export_timeout_secs: default_metering_export_timeout_secs(),
         }
     }
 }
@@ -550,6 +586,7 @@ impl Default for Config {
             api_keys: Vec::new(),
             policies: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            metering: MeteringConfig::default(),
             storage: StorageConfig::default(),
             reliability: ReliabilityConfig::default(),
             cluster: ClusterConfig::default(),
