@@ -1242,7 +1242,9 @@
           "reachable",
           "circuit_open",
           "consecutive_failures",
-          "routing"
+          "routing",
+          "local_observations",
+          "cluster_observations"
         ],
         "properties": {
           "name": {
@@ -1279,6 +1281,20 @@
           },
           "routing": {
             "$ref": "#/components/schemas/ProviderRoutingHealth"
+          },
+          "local_observations": {
+            "$ref": "#/components/schemas/ProviderRoutingHealth"
+          },
+          "cluster_observations": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderRoutingHealth"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cluster-wide provider observations when a shared aggregation backend is configured. Null means this node only has local observations."
           }
         },
         "additionalProperties": false

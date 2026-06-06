@@ -706,6 +706,8 @@ pub(crate) struct ProviderHealthCheck {
     pub(crate) checked_at_unix: Option<u64>,
     pub(crate) error: Option<String>,
     pub(crate) routing: ProviderRoutingHealth,
+    pub(crate) local_observations: ProviderRoutingHealth,
+    pub(crate) cluster_observations: Option<ProviderRoutingHealth>,
 }
 
 impl AppState {
@@ -1171,7 +1173,7 @@ impl AppState {
     fn provider_health_check(&self, provider: &Provider) -> ProviderHealthCheck {
         let checked_at_unix = now_unix_seconds();
         let circuit = self.provider_circuit_snapshot(&provider.name);
-        let routing = self.provider_routing_health(provider, circuit.open);
+        let local_observations = self.provider_routing_health(provider, circuit.open);
         if !provider.enabled {
             return ProviderHealthCheck {
                 name: provider.name.clone(),
@@ -1184,7 +1186,9 @@ impl AppState {
                 consecutive_failures: circuit.consecutive_failures,
                 checked_at_unix,
                 error: None,
-                routing,
+                routing: local_observations,
+                local_observations,
+                cluster_observations: None,
             };
         }
 
@@ -1209,7 +1213,9 @@ impl AppState {
             consecutive_failures: circuit.consecutive_failures,
             checked_at_unix,
             error: probe.err(),
-            routing,
+            routing: local_observations,
+            local_observations,
+            cluster_observations: None,
         }
     }
 

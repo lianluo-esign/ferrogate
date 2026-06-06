@@ -348,6 +348,8 @@ enabled = false
     assert!(provider_health.contains("\"status\":"));
     assert!(provider_health.contains("\"reachable\":"));
     assert!(provider_health.contains("\"routing\":"));
+    assert!(provider_health.contains("\"local_observations\":"));
+    assert!(provider_health.contains("\"cluster_observations\":null"));
     assert!(provider_health.contains("\"observed_requests\":2"));
     assert!(provider_health.contains("\"successful_requests\":2"));
     assert!(provider_health.contains("\"failed_requests\":0"));
@@ -2065,6 +2067,8 @@ scopes = ["admin.read"]
     assert!(health.contains("\"name\":\"openai\""));
     assert!(health.contains("\"status\":\"healthy\""));
     assert!(health.contains("\"reachable\":true"));
+    assert!(health.contains("\"local_observations\":"));
+    assert!(health.contains("\"cluster_observations\":null"));
     assert!(!health.contains("FERROGATE_PROVIDER_SECRET"));
     assert!(!health.contains("provider-secret"));
     assert!(!health.contains("admin-secret"));
