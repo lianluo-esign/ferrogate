@@ -55,6 +55,29 @@
         }
       }
     },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadyz",
+        "tags": ["public"],
+        "summary": "Return gateway readiness.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Gateway is ready to serve traffic with a loaded state revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Gateway is not ready to serve traffic."
+          }
+        }
+      }
+    },
     "/admin": {
       "get": {
         "operationId": "getAdminDashboard",
@@ -1005,6 +1028,30 @@
         },
         "additionalProperties": false
       },
+      "ReadinessResponse": {
+        "type": "object",
+        "required": ["status", "service", "version", "runtime", "cluster"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ready", "not_ready"]
+          },
+          "service": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string",
+            "const": "pingora"
+          },
+          "cluster": {
+            "$ref": "#/components/schemas/ClusterStatus"
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminStatus": {
         "type": "object",
         "required": [
@@ -1106,7 +1153,9 @@
           "active_revision",
           "last_sync_at_unix",
           "last_sync_error",
-          "stale"
+          "stale",
+          "ready",
+          "readiness_reason"
         ],
         "properties": {
           "enabled": {
@@ -1142,6 +1191,13 @@
           },
           "stale": {
             "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "readiness_reason": {
+            "type": "string",
+            "enum": ["state_loaded", "sync_error", "revision_missing"]
           }
         },
         "additionalProperties": false

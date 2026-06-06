@@ -25,6 +25,11 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/readyz" {
+            self.handle_readyz(session, ctx).await?;
+            return Ok(true);
+        }
+
         if path == "/admin" || path == "/admin/" || path == "/admin/dashboard" {
             self.handle_admin_dashboard(session, ctx).await?;
             return Ok(true);

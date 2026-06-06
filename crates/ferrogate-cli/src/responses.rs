@@ -14,6 +14,15 @@ pub(crate) struct HealthResponse<'a> {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct ReadinessResponse<'a> {
+    pub(crate) status: &'a str,
+    pub(crate) service: &'a str,
+    pub(crate) version: &'a str,
+    pub(crate) runtime: &'a str,
+    pub(crate) cluster: crate::state::ClusterStatus,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AdminStatus<'a> {
     pub(crate) service: &'a str,
     pub(crate) version: &'a str,

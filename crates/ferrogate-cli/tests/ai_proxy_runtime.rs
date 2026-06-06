@@ -38,6 +38,8 @@ fn clustered_gateways_report_shared_cluster_and_distinct_nodes() {
 
     let first_status = admin_status_json(&first_addr, "admin-secret-a");
     let second_status = admin_status_json(&second_addr, "admin-secret-b");
+    let first_ready = readiness_json(&first_addr);
+    let second_ready = readiness_json(&second_addr);
     let first_cluster = &first_status["cluster"];
     let second_cluster = &second_status["cluster"];
 
@@ -64,6 +66,16 @@ fn clustered_gateways_report_shared_cluster_and_distinct_nodes() {
     assert!(second_cluster["last_sync_error"].is_null());
     assert_eq!(first_cluster["stale"], false);
     assert_eq!(second_cluster["stale"], false);
+    assert_eq!(first_cluster["ready"], true);
+    assert_eq!(second_cluster["ready"], true);
+    assert_eq!(first_cluster["readiness_reason"], "state_loaded");
+    assert_eq!(second_cluster["readiness_reason"], "state_loaded");
+    assert_eq!(first_ready["status"], "ready");
+    assert_eq!(second_ready["status"], "ready");
+    assert_eq!(first_ready["cluster"]["cluster_id"], "test-cluster");
+    assert_eq!(second_ready["cluster"]["cluster_id"], "test-cluster");
+    assert_eq!(first_ready["cluster"]["node_id"], "test-node-a");
+    assert_eq!(second_ready["cluster"]["node_id"], "test-node-b");
 
     first_gateway.kill().unwrap();
     first_gateway.wait().unwrap();
@@ -210,6 +222,8 @@ enabled = false
     assert!(admin_status.contains("\"last_sync_at_unix\":"));
     assert!(admin_status.contains("\"last_sync_error\":null"));
     assert!(admin_status.contains("\"stale\":false"));
+    assert!(admin_status.contains("\"ready\":true"));
+    assert!(admin_status.contains("\"readiness_reason\":\"state_loaded\""));
     assert!(!admin_status.contains("admin-secret"));
 
     let dashboard = http_request(&gateway_addr, "GET", "/admin/", &[], "");
@@ -519,6 +533,16 @@ fn admin_status_json(addr: &str, admin_secret: &str) -> serde_json::Value {
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .unwrap_or_else(|| panic!("admin status response missing body: {response}"));
+    serde_json::from_str(body).unwrap()
+}
+
+fn readiness_json(addr: &str) -> serde_json::Value {
+    let response = http_request(addr, "GET", "/readyz", &[], "");
+    assert!(response.contains("200 OK"), "{response}");
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or_else(|| panic!("readiness response missing body: {response}"));
     serde_json::from_str(body).unwrap()
 }
 

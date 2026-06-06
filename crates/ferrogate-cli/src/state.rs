@@ -283,6 +283,8 @@ pub(crate) struct ClusterStatus {
     pub(crate) last_sync_at_unix: Option<u64>,
     pub(crate) last_sync_error: Option<String>,
     pub(crate) stale: bool,
+    pub(crate) ready: bool,
+    pub(crate) readiness_reason: &'static str,
 }
 
 impl ClusterIdentity {
@@ -301,6 +303,14 @@ impl ClusterIdentity {
 
 impl ClusterStatus {
     fn new(identity: &ClusterIdentity, sync: &ClusterSyncStatus) -> Self {
+        let ready = !sync.active_revision.trim().is_empty() && sync.last_sync_error.is_none();
+        let readiness_reason = if ready {
+            "state_loaded"
+        } else if sync.last_sync_error.is_some() {
+            "sync_error"
+        } else {
+            "revision_missing"
+        };
         Self {
             enabled: identity.enabled,
             cluster_id: identity.cluster_id.clone(),
@@ -313,6 +323,8 @@ impl ClusterStatus {
             last_sync_at_unix: sync.last_sync_at_unix,
             last_sync_error: sync.last_sync_error.clone(),
             stale: sync.stale,
+            ready,
+            readiness_reason,
         }
     }
 }

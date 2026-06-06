@@ -13,6 +13,7 @@ use crate::{
         AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
         AdminDeleteResponse, AdminList, AdminPolicyMutation, AdminPolicyMutationResponse,
         AdminProvider, AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
+        ReadinessResponse,
     },
     state::AdminAuditEventDraft,
 };
@@ -33,6 +34,29 @@ impl FerroGateway {
             runtime: "pingora",
         };
         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+    }
+
+    pub(super) async fn handle_readyz(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let cluster = state.cluster_status();
+        let status = if cluster.ready { "ready" } else { "not_ready" };
+        let status_code = if cluster.ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        let body = ReadinessResponse {
+            status,
+            service: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
+            runtime: "pingora",
+            cluster,
+        };
+        write_json_response(session, status_code, &body, &ctx.request_id).await
     }
 
     pub(super) async fn handle_admin_dashboard(
