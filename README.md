@@ -263,6 +263,10 @@ reservation/settlement across gateway replicas. Redis counters are fail-closed:
 if the counter backend is unavailable, guarded AI requests return a governance
 backend error instead of falling back to per-process counters.
 
+For the full Kubernetes-first, not Kubernetes-only cluster deployment contract,
+including readiness, drain, shared state, Redis counters, and non-Kubernetes
+paths, see [Cluster Deployment](docs/cluster-deployment.md).
+
 ### OpenRouter Provider
 
 OpenRouter is available as a first-class provider kind while using the same
@@ -501,6 +505,11 @@ Build a local image when developing Docker changes:
 ```bash
 docker build -t ferrogate .
 ```
+
+For two or more Docker, VM, ECS/Fargate, Nomad, or Kubernetes replicas, follow
+the cluster deployment runbook instead of relying on Docker alone for gateway
+state consistency. Docker runs the process; FerroGate cluster mode owns shared
+state revisioning, readiness, drain, and distributed counters.
 
 For automatic HTTPS, publish the relevant ports and mount ACME storage:
 
