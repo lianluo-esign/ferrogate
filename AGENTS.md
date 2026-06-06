@@ -78,6 +78,17 @@ Future work should push toward:
   lock behavior with tests first.
 - Delete dead code before adding new layers.
 
+## Dynamic Workflow
+
+When the user asks to continue development without naming a specific issue, use
+the repo-local dynamic workflow in `docs/dynamic-workflow.md`: refresh the live
+GitHub issue queue, choose the highest-value E2E slice, implement it narrowly,
+verify it, commit and push it, update the issue, then continue.
+
+Do not treat broad epics as single-turn promises. Close only the slice that is
+actually implemented and keep the parent issue open with a progress comment
+until all acceptance criteria are satisfied.
+
 ## AI Gateway Standards
 
 For AI gateway changes, verify these surfaces deliberately:
