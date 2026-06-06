@@ -4,7 +4,7 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -218,6 +218,12 @@ impl SharedAppState {
         candidate.validate()?;
         Ok(Some(self.reload_process_local(candidate)))
     }
+
+    pub(crate) fn set_drain(&self, drain: bool) -> DrainStatus {
+        let state = self.current();
+        state.drain.store(drain, Ordering::Relaxed);
+        state.drain_status()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -248,7 +254,15 @@ pub(crate) struct AppState {
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
+    drain: Arc<AtomicBool>,
     acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DrainStatus {
+    pub(crate) draining: bool,
+    pub(crate) accepting_new_requests: bool,
+    pub(crate) drain_reason: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -285,6 +299,8 @@ pub(crate) struct ClusterStatus {
     pub(crate) stale: bool,
     pub(crate) ready: bool,
     pub(crate) readiness_reason: &'static str,
+    pub(crate) draining: bool,
+    pub(crate) accepting_new_requests: bool,
 }
 
 impl ClusterIdentity {
@@ -302,9 +318,12 @@ impl ClusterIdentity {
 }
 
 impl ClusterStatus {
-    fn new(identity: &ClusterIdentity, sync: &ClusterSyncStatus) -> Self {
-        let ready = !sync.active_revision.trim().is_empty() && sync.last_sync_error.is_none();
-        let readiness_reason = if ready {
+    fn new(identity: &ClusterIdentity, sync: &ClusterSyncStatus, drain: &DrainStatus) -> Self {
+        let state_ready = !sync.active_revision.trim().is_empty() && sync.last_sync_error.is_none();
+        let ready = state_ready && drain.accepting_new_requests;
+        let readiness_reason = if drain.draining {
+            "operator_drain"
+        } else if state_ready {
             "state_loaded"
         } else if sync.last_sync_error.is_some() {
             "sync_error"
@@ -325,6 +344,8 @@ impl ClusterStatus {
             stale: sync.stale,
             ready,
             readiness_reason,
+            draining: drain.draining,
+            accepting_new_requests: drain.accepting_new_requests,
         }
     }
 }
@@ -827,6 +848,7 @@ impl AppState {
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
             request_ids: Arc::new(AtomicU64::new(1)),
+            drain: Arc::new(AtomicBool::new(false)),
             acme_renewal: None,
         }
     }
@@ -842,6 +864,7 @@ impl AppState {
         next.usage_aggregates = Arc::clone(&self.usage_aggregates);
         next.metrics = Arc::clone(&self.metrics);
         next.request_ids = Arc::clone(&self.request_ids);
+        next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
         self.apply_storage_config(&next.config.storage);
         next
@@ -869,7 +892,28 @@ impl AppState {
     }
 
     pub(crate) fn cluster_status(&self) -> ClusterStatus {
-        ClusterStatus::new(&self.cluster_identity, &self.cluster_sync)
+        ClusterStatus::new(
+            &self.cluster_identity,
+            &self.cluster_sync,
+            &self.drain_status(),
+        )
+    }
+
+    pub(crate) fn drain_status(&self) -> DrainStatus {
+        let draining = self.drain.load(Ordering::Relaxed);
+        DrainStatus {
+            draining,
+            accepting_new_requests: !draining,
+            drain_reason: if draining {
+                "operator_drain"
+            } else {
+                "not_draining"
+            },
+        }
+    }
+
+    pub(crate) fn is_draining(&self) -> bool {
+        self.drain.load(Ordering::Relaxed)
     }
 
     pub(crate) fn acme_renewal_status(&self) -> Option<AcmeRenewalStatus> {

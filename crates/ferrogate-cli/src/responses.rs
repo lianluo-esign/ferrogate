@@ -246,6 +246,19 @@ pub(crate) struct AdminConfigReloadResponse {
     pub(crate) error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminDrainRequest {
+    pub(crate) drain: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminDrainResponse {
+    pub(crate) object: &'static str,
+    pub(crate) draining: bool,
+    pub(crate) accepting_new_requests: bool,
+    pub(crate) drain_reason: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct OpenAiModelList {
     pub(crate) object: &'static str,

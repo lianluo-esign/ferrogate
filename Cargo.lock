@@ -808,6 +808,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrogate-e2e-harness"
+version = "2026.5.5"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ferrogate-observability"
 version = "2026.5.5"
 dependencies = [

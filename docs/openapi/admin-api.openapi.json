@@ -760,6 +760,63 @@
         }
       }
     },
+    "/admin/v1/drain": {
+      "get": {
+        "operationId": "getAdminDrain",
+        "tags": ["admin-read"],
+        "summary": "Return the node drain status.",
+        "responses": {
+          "200": {
+            "description": "Drain status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminDrainResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "setAdminDrain",
+        "tags": ["admin-write"],
+        "summary": "Set or clear node drain mode for rolling maintenance.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminDrainRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Updated drain status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminDrainResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
     "/metrics": {
       "get": {
         "operationId": "getMetrics",
@@ -897,6 +954,30 @@
                 "value": {
                   "filename": "candidate.Caddyfile",
                   "config_caddyfile": ":8080 {\n  admin localhost:2019\n}\n"
+                }
+              }
+            }
+          }
+        }
+      },
+      "AdminDrainRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminDrainRequest"
+            },
+            "examples": {
+              "enableDrain": {
+                "summary": "Start draining this node.",
+                "value": {
+                  "drain": true
+                }
+              },
+              "disableDrain": {
+                "summary": "Resume accepting new AI requests.",
+                "value": {
+                  "drain": false
                 }
               }
             }
@@ -1155,7 +1236,9 @@
           "last_sync_error",
           "stale",
           "ready",
-          "readiness_reason"
+          "readiness_reason",
+          "draining",
+          "accepting_new_requests"
         ],
         "properties": {
           "enabled": {
@@ -1197,7 +1280,13 @@
           },
           "readiness_reason": {
             "type": "string",
-            "enum": ["state_loaded", "sync_error", "revision_missing"]
+            "enum": ["state_loaded", "sync_error", "revision_missing", "operator_drain"]
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "accepting_new_requests": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -1894,6 +1983,37 @@
           },
           "error": {
             "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminDrainRequest": {
+        "type": "object",
+        "required": ["drain"],
+        "properties": {
+          "drain": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminDrainResponse": {
+        "type": "object",
+        "required": ["object", "draining", "accepting_new_requests", "drain_reason"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "drain_status"
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "accepting_new_requests": {
+            "type": "boolean"
+          },
+          "drain_reason": {
+            "type": "string",
+            "enum": ["not_draining", "operator_drain"]
           }
         },
         "additionalProperties": false

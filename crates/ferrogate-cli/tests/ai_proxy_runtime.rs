@@ -224,7 +224,22 @@ enabled = false
     assert!(admin_status.contains("\"stale\":false"));
     assert!(admin_status.contains("\"ready\":true"));
     assert!(admin_status.contains("\"readiness_reason\":\"state_loaded\""));
+    assert!(admin_status.contains("\"draining\":false"));
+    assert!(admin_status.contains("\"accepting_new_requests\":true"));
     assert!(!admin_status.contains("admin-secret"));
+
+    let drain_status = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/drain",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(drain_status.contains("200 OK"));
+    assert!(drain_status.contains("\"object\":\"drain_status\""));
+    assert!(drain_status.contains("\"draining\":false"));
+    assert!(drain_status.contains("\"accepting_new_requests\":true"));
+    assert!(drain_status.contains("\"drain_reason\":\"not_draining\""));
 
     let dashboard = http_request(&gateway_addr, "GET", "/admin/", &[], "");
     assert!(dashboard.contains("200 OK"));
@@ -484,6 +499,7 @@ enabled = false
     gateway.kill().unwrap();
     gateway.wait().unwrap();
     let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
     assert!(provider_requests[0].contains("POST /v1/chat/completions HTTP/1.1"));
     assert!(provider_requests[0].contains("authorization: Bearer provider-secret"));
     assert!(provider_requests[0].contains(r#""model":"gpt-4o-mini""#));

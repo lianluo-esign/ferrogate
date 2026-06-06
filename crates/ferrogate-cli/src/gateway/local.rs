@@ -11,9 +11,9 @@ use crate::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse,
         AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
-        AdminDeleteResponse, AdminList, AdminPolicyMutation, AdminPolicyMutationResponse,
-        AdminProvider, AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
-        ReadinessResponse,
+        AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse, AdminList, AdminPolicyMutation,
+        AdminPolicyMutationResponse, AdminProvider, AdminStatus, AdminTenantRef, HealthResponse,
+        OpenAiModel, OpenAiModelList, ReadinessResponse,
     },
     state::AdminAuditEventDraft,
 };
@@ -520,6 +520,134 @@ impl FerroGateway {
         };
 
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+    }
+
+    pub(super) async fn handle_admin_drain(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+    ) -> PingoraResult<()> {
+        match *method {
+            Method::GET => {
+                let state = self.state.current();
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let drain = state.drain_status();
+                        let body = AdminDrainResponse {
+                            object: "drain_status",
+                            draining: drain.draining,
+                            accepting_new_requests: drain.accepting_new_requests,
+                            drain_reason: drain.drain_reason,
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            Method::POST => {
+                let state = self.state.current();
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+
+                let body = match read_request_body(session, 16 * 1024).await? {
+                    Ok(body) => body,
+                    Err(limit) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "drain.set",
+                            "node",
+                            "error",
+                            format!(
+                                "request body exceeds maximum size of {} bytes",
+                                limit.max_bytes
+                            ),
+                        ));
+                        return write_json_error_and_close(
+                            session,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "payload_too_large",
+                            format!(
+                                "request body exceeds maximum size of {} bytes",
+                                limit.max_bytes
+                            ),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let payload = match serde_json::from_slice::<AdminDrainRequest>(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "drain.set",
+                            "node",
+                            "error",
+                            format!("invalid request body: {error}"),
+                        ));
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_json",
+                            format!("invalid request body: {error}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+
+                let drain = self.state.set_drain(payload.drain);
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "drain.set",
+                    "node",
+                    "success",
+                    format!("draining={}", drain.draining),
+                ));
+                let body = AdminDrainResponse {
+                    object: "drain_status",
+                    draining: drain.draining,
+                    accepting_new_requests: drain.accepting_new_requests,
+                    drain_reason: drain.drain_reason,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "drain endpoint supports GET and POST",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
     }
 
     pub(super) async fn handle_admin_providers(

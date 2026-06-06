@@ -118,6 +118,29 @@ impl FerroGateway {
             }
         };
 
+        if state.is_draining() {
+            self.record_ai_error_log(
+                endpoint,
+                ctx,
+                AiErrorLog {
+                    tenant: auth.tenant_context(),
+                    logical_model: None,
+                    provider: None,
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_code: "node_draining",
+                },
+            );
+            write_json_error(
+                session,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "node_draining",
+                "gateway node is draining and is not accepting new AI requests",
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(());
+        }
+
         let body = match read_request_body(session, 1024 * 1024).await? {
             Ok(body) => body,
             Err(limit) => {

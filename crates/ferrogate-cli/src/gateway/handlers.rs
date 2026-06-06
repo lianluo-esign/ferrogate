@@ -91,6 +91,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/drain" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_drain(session, ctx, &headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/providers" {
             let headers = req.headers.clone();
             self.handle_admin_providers(session, ctx, &headers).await?;

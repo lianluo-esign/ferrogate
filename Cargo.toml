@@ -6,6 +6,7 @@ members = [
     "crates/ferrogate-cli",
     "crates/ferrogate-config",
     "crates/ferrogate-core",
+    "crates/ferrogate-e2e-harness",
     "crates/ferrogate-observability",
     "crates/ferrogate-policy",
     "crates/ferrogate-providers",
