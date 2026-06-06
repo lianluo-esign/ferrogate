@@ -1,0 +1,2232 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FerroGate Admin API",
+    "summary": "Control-plane API for inspecting and mutating process-local FerroGate gateway state.",
+    "version": "2026.5.5",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080",
+      "description": "Default local gateway listener"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "admin-read",
+      "description": "Read-only Admin API endpoints requiring the admin.read scope when API keys are configured."
+    },
+    {
+      "name": "admin-write",
+      "description": "Mutating Admin API endpoints requiring the admin.write scope when API keys are configured."
+    },
+    {
+      "name": "public",
+      "description": "Unauthenticated utility endpoints."
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealthz",
+        "tags": ["public"],
+        "summary": "Return gateway health.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Gateway health response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin": {
+      "get": {
+        "operationId": "getAdminDashboard",
+        "tags": ["public"],
+        "summary": "Serve the built-in Admin dashboard HTML.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Admin dashboard HTML.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/v1/status": {
+      "get": {
+        "operationId": "getAdminStatus",
+        "tags": ["admin-read"],
+        "summary": "Return gateway status and configured resource counts.",
+        "responses": {
+          "200": {
+            "description": "Gateway status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/status": {
+      "get": {
+        "operationId": "getAdminStatusAlias",
+        "tags": ["admin-read"],
+        "summary": "Compatibility alias for /admin/v1/status.",
+        "responses": {
+          "200": {
+            "description": "Gateway status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/providers": {
+      "get": {
+        "operationId": "listAdminProviders",
+        "tags": ["admin-read"],
+        "summary": "List configured providers without exposing provider secrets.",
+        "responses": {
+          "200": {
+            "description": "Provider list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminProviderList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/provider-health": {
+      "get": {
+        "operationId": "listAdminProviderHealth",
+        "tags": ["admin-read"],
+        "summary": "List provider health and circuit-breaker status.",
+        "responses": {
+          "200": {
+            "description": "Provider health list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderHealthList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/models": {
+      "get": {
+        "operationId": "listAdminModels",
+        "tags": ["admin-read"],
+        "summary": "List configured logical models.",
+        "responses": {
+          "200": {
+            "description": "Model list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminModelList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/api-keys": {
+      "get": {
+        "operationId": "listAdminApiKeys",
+        "tags": ["admin-read"],
+        "summary": "List configured API keys with secret material redacted.",
+        "responses": {
+          "200": {
+            "description": "API key list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminApiKeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAdminApiKey",
+        "tags": ["admin-write"],
+        "summary": "Create an API key and apply it through process-local reload.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminApiKeyMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminApiKeyMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/api-keys/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ApiKeyId"
+        }
+      ],
+      "get": {
+        "operationId": "getAdminApiKey",
+        "tags": ["admin-read"],
+        "summary": "Get one API key with secret material redacted.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminApiKeyMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminApiKey",
+        "tags": ["admin-write"],
+        "summary": "Replace or create an API key by id.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminApiKeyMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminApiKeyMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminApiKey",
+        "tags": ["admin-write"],
+        "summary": "Upsert an API key by id.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminApiKeyMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminApiKeyMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminApiKey",
+        "tags": ["admin-write"],
+        "summary": "Delete an API key and apply the change through process-local reload.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteApiKeyOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/tenants": {
+      "get": {
+        "operationId": "listAdminTenants",
+        "tags": ["admin-read"],
+        "summary": "List tenant references derived from API key configuration.",
+        "responses": {
+          "200": {
+            "description": "Tenant reference list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTenantRefList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/policies": {
+      "get": {
+        "operationId": "listAdminPolicies",
+        "tags": ["admin-read"],
+        "summary": "List configured policy rules.",
+        "responses": {
+          "200": {
+            "description": "Policy list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyRuleList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAdminPolicy",
+        "tags": ["admin-write"],
+        "summary": "Create a policy rule and apply it through process-local reload.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminPolicyMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminPolicyMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/policies/{name}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PolicyName"
+        }
+      ],
+      "get": {
+        "operationId": "getAdminPolicy",
+        "tags": ["admin-read"],
+        "summary": "Get one policy rule.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminPolicyMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminPolicy",
+        "tags": ["admin-write"],
+        "summary": "Replace or create a policy by name.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminPolicyMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminPolicyMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminPolicy",
+        "tags": ["admin-write"],
+        "summary": "Upsert a policy by name.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminPolicyMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminPolicyMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminPolicy",
+        "tags": ["admin-write"],
+        "summary": "Delete a policy rule and apply the change through process-local reload.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeletePolicyOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/request-logs": {
+      "get": {
+        "operationId": "listAdminRequestLogs",
+        "tags": ["admin-read"],
+        "summary": "List retained request logs.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated request log list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestLogList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/billing-events": {
+      "get": {
+        "operationId": "listAdminBillingEvents",
+        "tags": ["admin-read"],
+        "summary": "List retained billing events.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated billing event list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingEventList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/usage-aggregates": {
+      "get": {
+        "operationId": "listAdminUsageAggregates",
+        "tags": ["admin-read"],
+        "summary": "List in-memory token usage aggregates by tenant/model/provider.",
+        "responses": {
+          "200": {
+            "description": "Usage aggregate list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageAggregateList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/audit-events": {
+      "get": {
+        "operationId": "listAdminAuditEvents",
+        "tags": ["admin-read"],
+        "summary": "List retained Admin API audit events.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated audit event list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/validate": {
+      "post": {
+        "operationId": "validateAdminConfig",
+        "tags": ["admin-write"],
+        "summary": "Validate a candidate TOML, Caddyfile, or source-file config without committing it.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminConfigValidateRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Validation result. Invalid candidate config returns valid=false rather than a 4xx.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminConfigValidateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/reload": {
+      "post": {
+        "operationId": "reloadAdminConfig",
+        "tags": ["admin-write"],
+        "summary": "Validate and apply a process-local config reload when the candidate can be committed without listener replacement.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminConfigValidateRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Reload result. Rejected candidates return committed=false rather than a 4xx.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminConfigReloadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "getMetrics",
+        "tags": ["admin-read"],
+        "summary": "Return Prometheus text metrics.",
+        "responses": {
+          "200": {
+            "description": "Prometheus text exposition.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Bearer token matching a configured FerroGate API key. Read endpoints require admin.read and write endpoints require admin.write when API keys are configured."
+      }
+    },
+    "parameters": {
+      "ApiKeyId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "PolicyName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Offset": {
+        "name": "offset",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "description": "Clamped by storage.admin_list_max_limit."
+      }
+    },
+    "requestBodies": {
+      "AdminApiKeyMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminApiKeyMutation"
+            },
+            "examples": {
+              "envBackedKey": {
+                "summary": "Environment-backed API key.",
+                "value": {
+                  "id": "key_dev",
+                  "name": "Development key",
+                  "key_env": "FERROGATE_DEV_API_KEY",
+                  "scopes": ["models.read", "chat.completions", "admin.read"],
+                  "allowed_models": ["fast-chat"]
+                }
+              }
+            }
+          }
+        }
+      },
+      "AdminPolicyMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminPolicyMutation"
+            },
+            "examples": {
+              "denyProvider": {
+                "summary": "Deny access to a provider for selected API keys.",
+                "value": {
+                  "name": "deny-expensive-provider",
+                  "effect": "deny",
+                  "api_key_ids": ["key_dev"],
+                  "providers": ["premium"],
+                  "code": "provider_denied",
+                  "message": "provider is not allowed for this key"
+                }
+              }
+            }
+          }
+        }
+      },
+      "AdminConfigValidateRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminConfigValidateRequest"
+            },
+            "examples": {
+              "sourceFile": {
+                "summary": "Reload from the process source file.",
+                "value": {
+                  "source": "file"
+                }
+              },
+              "caddyfile": {
+                "summary": "Validate an inline Caddyfile.",
+                "value": {
+                  "filename": "candidate.Caddyfile",
+                  "config_caddyfile": ":8080 {\n  admin localhost:2019\n}\n"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "AdminApiKeyMutationOk": {
+        "description": "API key mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminApiKeyMutationResponse"
+            }
+          }
+        }
+      },
+      "AdminPolicyMutationOk": {
+        "description": "Policy mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminPolicyMutationResponse"
+            }
+          }
+        }
+      },
+      "DeleteApiKeyOk": {
+        "description": "API key delete response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteApiKeyResponse"
+            }
+          }
+        }
+      },
+      "DeletePolicyOk": {
+        "description": "Policy delete response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeletePolicyResponse"
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "Invalid request payload or candidate config.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid bearer token when API keys are configured.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Bearer token lacks the required scope or is disallowed by tenant/provider/model constraints.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Requested API key or policy was not found.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Runtime rejected the candidate process-local reload.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "Request body exceeded the endpoint limit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status", "service", "version", "runtime"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok"
+          },
+          "service": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string",
+            "const": "pingora"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminStatus": {
+        "type": "object",
+        "required": [
+          "service",
+          "version",
+          "runtime",
+          "snapshot",
+          "providers",
+          "enabled_providers",
+          "models",
+          "enabled_models",
+          "api_keys",
+          "upstreams",
+          "enabled_upstreams",
+          "routes",
+          "enabled_routes",
+          "auth_required"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string",
+            "const": "pingora"
+          },
+          "snapshot": {
+            "type": "string"
+          },
+          "providers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled_providers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "models": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled_models": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "api_keys": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "upstreams": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled_upstreams": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "routes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled_routes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "auth_required": {
+            "type": "boolean"
+          },
+          "acme": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminAcmeStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAcmeStatus": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "domains",
+          "cert_path",
+          "key_path",
+          "renewal_window_secs",
+          "renewal_due",
+          "last_renewal_status",
+          "reload_required",
+          "reload_mode"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cert_path": {
+            "type": "string"
+          },
+          "key_path": {
+            "type": "string"
+          },
+          "certificate_expires_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "renewal_window_secs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "renewal_due": {
+            "type": "boolean"
+          },
+          "last_renewal_status": {
+            "type": "string"
+          },
+          "last_renewal_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "last_renewal_error": {
+            "type": ["string", "null"]
+          },
+          "next_check_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "reload_required": {
+            "type": "boolean"
+          },
+          "reload_mode": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminProvider": {
+        "type": "object",
+        "required": ["name", "kind", "base_url", "has_api_key", "enabled"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "has_api_key": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProviderHealthCheck": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "base_url",
+          "enabled",
+          "status",
+          "reachable",
+          "circuit_open",
+          "consecutive_failures"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "reachable": {
+            "type": "boolean"
+          },
+          "circuit_open": {
+            "type": "boolean"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "checked_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "error": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Model": {
+        "type": "object",
+        "required": ["name", "provider", "provider_model", "fallbacks", "enabled"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "provider_model": {
+            "type": "string"
+          },
+          "routing_strategy": {
+            "type": "string",
+            "default": "priority"
+          },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelFallback"
+            }
+          },
+          "visible_organization_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "visible_project_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_window": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "input_price_per_1m": {
+            "type": ["number", "null"]
+          },
+          "output_price_per_1m": {
+            "type": ["number", "null"]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelFallback": {
+        "type": "object",
+        "required": ["provider", "provider_model", "enabled"],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "provider_model": {
+            "type": "string"
+          },
+          "input_price_per_1m": {
+            "type": ["number", "null"]
+          },
+          "output_price_per_1m": {
+            "type": ["number", "null"]
+          },
+          "priority": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "weight": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminApiKey": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "key_source",
+          "scopes",
+          "allowed_models",
+          "denied_models",
+          "allowed_providers",
+          "denied_providers",
+          "log_bodies"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key_source": {
+            "type": "string",
+            "enum": ["env", "hash", "inline", "none"],
+            "description": "Redacted source classification; secret values are never returned."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "allowed_models": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "denied_models": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "allowed_providers": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "denied_providers": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "organization_id": {
+            "type": ["string", "null"]
+          },
+          "team_id": {
+            "type": ["string", "null"]
+          },
+          "project_id": {
+            "type": ["string", "null"]
+          },
+          "user_id": {
+            "type": ["string", "null"]
+          },
+          "monthly_token_budget": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "request_limit_per_minute": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "expires_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "log_bodies": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminApiKeyMutation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "key_env": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "writeOnly": true,
+            "description": "Plain secret for local development only. Prefer key_env or key_hash."
+          },
+          "key_hash": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "scopes": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "allowed_models": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "denied_models": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "allowed_providers": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "denied_providers": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "organization_id": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "monthly_token_budget": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "request_limit_per_minute": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expires_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "log_bodies": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminApiKeyMutationResponse": {
+        "type": "object",
+        "required": ["object", "key"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "api_key"
+          },
+          "key": {
+            "$ref": "#/components/schemas/AdminApiKey"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PolicyRule": {
+        "type": "object",
+        "required": [
+          "name",
+          "effect",
+          "organization_ids",
+          "project_ids",
+          "api_key_ids",
+          "models",
+          "providers",
+          "code",
+          "message",
+          "enabled"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "effect": {
+            "type": "string",
+            "enum": ["allow", "deny"]
+          },
+          "organization_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "project_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "api_key_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "models": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "providers": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPolicyMutation": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "effect": {
+            "type": "string",
+            "enum": ["allow", "deny"],
+            "default": "deny"
+          },
+          "organization_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "project_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "api_key_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "models": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "providers": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "code": {
+            "type": "string",
+            "default": "policy_denied"
+          },
+          "message": {
+            "type": "string",
+            "default": "request denied by policy"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPolicyMutationResponse": {
+        "type": "object",
+        "required": ["object", "policy"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "policy"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PolicyRule"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteApiKeyResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "api_key"
+              }
+            }
+          }
+        ]
+      },
+      "DeletePolicyResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "policy"
+              }
+            }
+          }
+        ]
+      },
+      "DeleteResponse": {
+        "type": "object",
+        "required": ["object", "id", "deleted"],
+        "properties": {
+          "object": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminTenantRef": {
+        "type": "object",
+        "required": ["api_key_id"],
+        "properties": {
+          "organization_id": {
+            "type": ["string", "null"]
+          },
+          "team_id": {
+            "type": ["string", "null"]
+          },
+          "project_id": {
+            "type": ["string", "null"]
+          },
+          "user_id": {
+            "type": ["string", "null"]
+          },
+          "api_key_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminConfigValidateRequest": {
+        "type": "object",
+        "properties": {
+          "config_toml": {
+            "type": "string"
+          },
+          "config_caddyfile": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Used when parsing config_caddyfile."
+          },
+          "source": {
+            "type": "string",
+            "enum": ["file"],
+            "description": "Use source=file to read the config file that started the current process."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminConfigValidateResponse": {
+        "type": "object",
+        "required": ["valid", "listener_reload_required"],
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "snapshot": {
+            "type": ["string", "null"]
+          },
+          "reload_mode": {
+            "type": ["string", "null"]
+          },
+          "listener_reload_required": {
+            "type": "boolean"
+          },
+          "reload_reason": {
+            "type": ["string", "null"]
+          },
+          "error": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminConfigReloadResponse": {
+        "type": "object",
+        "required": ["valid", "committed", "mode"],
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "committed": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "active_snapshot": {
+            "type": ["string", "null"]
+          },
+          "candidate_snapshot": {
+            "type": ["string", "null"]
+          },
+          "error": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RequestLog": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": ["string", "null"]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "route": {
+            "type": ["string", "null"]
+          },
+          "provider": {
+            "type": ["string", "null"]
+          },
+          "logical_model": {
+            "type": ["string", "null"]
+          },
+          "provider_model": {
+            "type": ["string", "null"]
+          },
+          "status_code": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "error_code": {
+            "type": ["string", "null"]
+          },
+          "prompt_recorded": {
+            "type": "boolean"
+          },
+          "response_recorded": {
+            "type": "boolean"
+          },
+          "prompt_body": {
+            "type": ["string", "null"]
+          },
+          "response_body": {
+            "type": ["string", "null"]
+          },
+          "started_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "completed_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "BillingEvent": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "logical_model",
+          "provider",
+          "provider_model",
+          "usage",
+          "usage_source",
+          "status_code"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": ["string", "null"]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "logical_model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "provider_model": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/TokenUsage"
+          },
+          "usage_source": {
+            "type": "string",
+            "enum": ["provider_usage", "gateway_estimate"]
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CostEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status_code": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "occurred_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "StoredUsageAggregate": {
+        "type": "object",
+        "required": ["id", "logical_model", "provider", "usage"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organization_id": {
+            "type": ["string", "null"]
+          },
+          "project_id": {
+            "type": ["string", "null"]
+          },
+          "api_key_id": {
+            "type": ["string", "null"]
+          },
+          "logical_model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/TokenUsage"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StoredAuditEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "request_id",
+          "action",
+          "target",
+          "outcome",
+          "message",
+          "occurred_at_unix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": ["string", "null"]
+          },
+          "actor_api_key_id": {
+            "type": ["string", "null"]
+          },
+          "action": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "occurred_at_unix": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "TenantContext": {
+        "type": "object",
+        "properties": {
+          "organization_id": {
+            "type": ["string", "null"]
+          },
+          "team_id": {
+            "type": ["string", "null"]
+          },
+          "project_id": {
+            "type": ["string", "null"]
+          },
+          "user_id": {
+            "type": ["string", "null"]
+          },
+          "api_key_id": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "TokenUsage": {
+        "type": "object",
+        "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+        "properties": {
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "CostEstimate": {
+        "type": "object",
+        "required": ["input_cost", "output_cost", "total_cost", "currency"],
+        "properties": {
+          "input_cost": {
+            "type": "number"
+          },
+          "output_cost": {
+            "type": "number"
+          },
+          "total_cost": {
+            "type": "number"
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StringList": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "AdminProviderList": {
+        "$ref": "#/components/schemas/AdminList_AdminProvider"
+      },
+      "ProviderHealthList": {
+        "$ref": "#/components/schemas/AdminList_ProviderHealthCheck"
+      },
+      "AdminModelList": {
+        "$ref": "#/components/schemas/AdminList_Model"
+      },
+      "AdminApiKeyList": {
+        "$ref": "#/components/schemas/AdminList_AdminApiKey"
+      },
+      "AdminTenantRefList": {
+        "$ref": "#/components/schemas/AdminList_AdminTenantRef"
+      },
+      "PolicyRuleList": {
+        "$ref": "#/components/schemas/AdminList_PolicyRule"
+      },
+      "RequestLogList": {
+        "$ref": "#/components/schemas/PaginatedList_RequestLog"
+      },
+      "BillingEventList": {
+        "$ref": "#/components/schemas/PaginatedList_BillingEvent"
+      },
+      "UsageAggregateList": {
+        "$ref": "#/components/schemas/AdminList_StoredUsageAggregate"
+      },
+      "AuditEventList": {
+        "$ref": "#/components/schemas/PaginatedList_StoredAuditEvent"
+      },
+      "AdminList_AdminProvider": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminProvider"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_ProviderHealthCheck": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderHealthCheck"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_Model": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Model"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_AdminApiKey": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminApiKey"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_AdminTenantRef": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminTenantRef"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_PolicyRule": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicyRule"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_StoredUsageAggregate": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredUsageAggregate"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PaginatedList_RequestLog": {
+        "type": "object",
+        "required": ["object", "data", "total", "offset", "limit"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestLog"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PaginatedList_BillingEvent": {
+        "type": "object",
+        "required": ["object", "data", "total", "offset", "limit"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BillingEvent"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PaginatedList_StoredAuditEvent": {
+        "type": "object",
+        "required": ["object", "data", "total", "offset", "limit"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredAuditEvent"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["message", "type", "code", "request_id"],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "const": "ferrogate_error"
+              },
+              "code": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": ["string", "null"]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

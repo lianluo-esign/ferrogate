@@ -45,6 +45,9 @@ jobs:
       - name: Check locked metadata
         run: cargo metadata --locked --format-version=1 >/dev/null
 
+      - name: Validate OpenAPI schemas
+        run: python3 scripts/check-openapi.py
+
       - name: Run workspace tests
         run: cargo test --workspace --all-features
 

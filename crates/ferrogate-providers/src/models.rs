@@ -8,6 +8,8 @@ pub enum RoutingStrategy {
     #[default]
     Priority,
     LowestCost,
+    LowestLatency,
+    Balanced,
 }
 
 #[derive(Debug, Clone, PartialEq)]

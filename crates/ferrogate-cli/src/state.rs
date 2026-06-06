@@ -232,6 +232,7 @@ pub(crate) struct AppState {
     provider_adapters: Arc<ProviderAdapterRegistry>,
     provider_circuit_config: Option<ProviderCircuitConfig>,
     provider_circuits: Arc<HashMap<String, ProviderCircuitBreaker>>,
+    provider_routing_metrics: Arc<Mutex<ProviderRoutingMetrics>>,
     api_key_request_windows: Arc<HashMap<String, ApiKeyRequestWindow>>,
     api_key_token_reservations: Arc<Mutex<HashMap<String, u64>>>,
     billing_events: Arc<InMemoryBillingEventSink>,
@@ -311,6 +312,73 @@ struct GatewayMetricsAccumulator {
     token_totals: TokenMetricTotals,
     cost_totals: BTreeMap<String, f64>,
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
+}
+
+#[derive(Debug, Default)]
+struct ProviderRoutingMetrics {
+    providers: HashMap<String, ProviderRoutingMetric>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProviderRoutingMetric {
+    successful_requests: u64,
+    failed_requests: u64,
+    total_latency_ms: u64,
+}
+
+impl ProviderRoutingMetrics {
+    fn record_request_log(&mut self, log: &StoredRequestLog) {
+        let Some(provider) = &log.provider else {
+            return;
+        };
+        let metric = self.providers.entry(provider.clone()).or_default();
+        if log.status_code >= 400 || log.error_code.is_some() {
+            metric.failed_requests = metric.failed_requests.saturating_add(1);
+        } else {
+            metric.successful_requests = metric.successful_requests.saturating_add(1);
+            if let (Some(started), Some(completed)) = (log.started_at_unix, log.completed_at_unix) {
+                metric.total_latency_ms = metric
+                    .total_latency_ms
+                    .saturating_add(completed.saturating_sub(started).saturating_mul(1_000));
+            }
+        }
+    }
+
+    fn score(&self, provider: &str) -> ProviderRoutingScore {
+        self.providers
+            .get(provider)
+            .map(ProviderRoutingMetric::score)
+            .unwrap_or_default()
+    }
+}
+
+impl ProviderRoutingMetric {
+    fn score(&self) -> ProviderRoutingScore {
+        let total_requests = self
+            .successful_requests
+            .saturating_add(self.failed_requests);
+        let average_latency_ms = if self.successful_requests == 0 {
+            None
+        } else {
+            Some(self.total_latency_ms / self.successful_requests)
+        };
+        ProviderRoutingScore {
+            average_latency_ms,
+            failure_rate: if total_requests == 0 {
+                0.0
+            } else {
+                self.failed_requests as f64 / total_requests as f64
+            },
+            observed_requests: total_requests,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProviderRoutingScore {
+    average_latency_ms: Option<u64>,
+    failure_rate: f64,
+    observed_requests: u64,
 }
 
 #[derive(Debug)]
@@ -614,6 +682,7 @@ impl AppState {
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
             provider_circuit_config,
             provider_circuits: Arc::new(provider_circuits),
+            provider_routing_metrics: Arc::new(Mutex::new(ProviderRoutingMetrics::default())),
             api_key_request_windows: Arc::new(api_key_request_windows),
             api_key_token_reservations: Arc::new(Mutex::new(HashMap::new())),
             billing_events: Arc::new(InMemoryBillingEventSink::with_retention_limit(
@@ -639,6 +708,7 @@ impl AppState {
     fn with_reloaded_config(&self, config: Config) -> Self {
         let mut next = AppState::new(config);
         next.api_key_token_reservations = Arc::clone(&self.api_key_token_reservations);
+        next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
         next.billing_events = Arc::clone(&self.billing_events);
         next.request_logs = Arc::clone(&self.request_logs);
         next.audit_events = Arc::clone(&self.audit_events);
@@ -810,7 +880,65 @@ impl AppState {
                 });
                 routes
             }
+            RoutingStrategy::LowestLatency => {
+                let mut routes = vec![model.primary.clone()];
+                routes.extend(model.fallbacks.iter().cloned());
+                self.sort_routes_by_latency(&mut routes);
+                routes
+            }
+            RoutingStrategy::Balanced => {
+                let mut routes = vec![model.primary.clone()];
+                routes.extend(model.fallbacks.iter().cloned());
+                self.sort_routes_by_balanced_score(&mut routes);
+                routes
+            }
         }
+    }
+
+    fn sort_routes_by_latency(&self, routes: &mut [ModelRoute]) {
+        let metrics = self.provider_routing_metrics.lock().ok();
+        routes.sort_by(|left, right| {
+            let left_score = metrics
+                .as_ref()
+                .map(|metrics| metrics.score(&left.provider))
+                .unwrap_or_default();
+            let right_score = metrics
+                .as_ref()
+                .map(|metrics| metrics.score(&right.provider))
+                .unwrap_or_default();
+            provider_health_rank(self, left, left_score)
+                .cmp(&provider_health_rank(self, right, right_score))
+                .then_with(|| latency_rank(left_score).cmp(&latency_rank(right_score)))
+                .then_with(|| left.priority.cmp(&right.priority))
+                .then_with(|| right.weight.cmp(&left.weight))
+                .then_with(|| left.provider.cmp(&right.provider))
+                .then_with(|| left.provider_model.cmp(&right.provider_model))
+        });
+    }
+
+    fn sort_routes_by_balanced_score(&self, routes: &mut [ModelRoute]) {
+        let metrics = self.provider_routing_metrics.lock().ok();
+        routes.sort_by(|left, right| {
+            let left_score = metrics
+                .as_ref()
+                .map(|metrics| metrics.score(&left.provider))
+                .unwrap_or_default();
+            let right_score = metrics
+                .as_ref()
+                .map(|metrics| metrics.score(&right.provider))
+                .unwrap_or_default();
+            provider_health_rank(self, left, left_score)
+                .cmp(&provider_health_rank(self, right, right_score))
+                .then_with(|| {
+                    balanced_route_score(left, left_score)
+                        .partial_cmp(&balanced_route_score(right, right_score))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| left.priority.cmp(&right.priority))
+                .then_with(|| right.weight.cmp(&left.weight))
+                .then_with(|| left.provider.cmp(&right.provider))
+                .then_with(|| left.provider_model.cmp(&right.provider_model))
+        });
     }
 
     pub(crate) fn can_tenant_use_model(
@@ -1182,6 +1310,9 @@ impl AppState {
 
     pub(crate) fn record_request_log(&self, log: StoredRequestLog) {
         self.record_request_metrics(&log);
+        if let Ok(mut metrics) = self.provider_routing_metrics.lock() {
+            metrics.record_request_log(&log);
+        }
         if let Ok(mut logs) = self.request_logs.lock() {
             logs.append(log);
         }
@@ -1711,6 +1842,31 @@ fn route_estimated_cost(route: &ModelRoute, usage: Option<&BillingTokenUsage>) -
     }
 }
 
+fn provider_health_rank(state: &AppState, route: &ModelRoute, score: ProviderRoutingScore) -> u8 {
+    if !state.provider_circuit_allows(&route.provider) {
+        return 2;
+    }
+    if score.observed_requests >= 3 && score.failure_rate >= 0.5 {
+        return 1;
+    }
+    0
+}
+
+fn latency_rank(score: ProviderRoutingScore) -> u64 {
+    score.average_latency_ms.unwrap_or(u64::MAX)
+}
+
+fn balanced_route_score(route: &ModelRoute, score: ProviderRoutingScore) -> f64 {
+    let cost = route
+        .input_price_per_1m
+        .zip(route.output_price_per_1m)
+        .map(|(input, output)| input + output)
+        .unwrap_or(1_000.0);
+    let latency = score.average_latency_ms.unwrap_or(1_000) as f64 / 1_000.0;
+    let failure_penalty = score.failure_rate * 10.0;
+    cost + latency + failure_penalty
+}
+
 fn route_estimated_unit_cost(route: &ModelRoute) -> f64 {
     match (route.input_price_per_1m, route.output_price_per_1m) {
         (Some(input), Some(output)) => input + output,
@@ -2138,6 +2294,74 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(providers, ["backup-b", "backup-a", "primary"]);
+    }
+
+    #[test]
+    fn orders_lowest_latency_routes_by_observed_provider_latency() {
+        let state = AppState::new(routing_strategy_test_config(
+            RoutingStrategy::LowestLatency,
+            Some(5.0),
+            Some(5.0),
+        ));
+        record_provider_latency(&state, "primary", 200, 0, 1);
+        record_provider_latency(&state, "backup-a", 200, 0, 3);
+        record_provider_latency(&state, "backup-b", 200, 0, 2);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+
+        let providers = state
+            .candidate_model_routes(&resolved, None)
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+
+        assert_eq!(providers, ["primary", "backup-b", "backup-a"]);
+    }
+
+    #[test]
+    fn latency_routing_avoids_unhealthy_observed_provider() {
+        let state = AppState::new(routing_strategy_test_config(
+            RoutingStrategy::LowestLatency,
+            Some(5.0),
+            Some(5.0),
+        ));
+        record_provider_latency(&state, "primary", 500, 0, 1);
+        record_provider_latency(&state, "primary", 500, 0, 1);
+        record_provider_latency(&state, "primary", 200, 0, 1);
+        record_provider_latency(&state, "backup-a", 200, 0, 5);
+        record_provider_latency(&state, "backup-b", 200, 0, 10);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+
+        let providers = state
+            .candidate_model_routes(&resolved, None)
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+
+        assert_eq!(providers, ["backup-a", "backup-b", "primary"]);
+    }
+
+    #[test]
+    fn balanced_routing_combines_cost_latency_and_failures() {
+        let state = AppState::new(routing_strategy_test_config(
+            RoutingStrategy::Balanced,
+            Some(5.0),
+            Some(5.0),
+        ));
+        record_provider_latency(&state, "primary", 200, 0, 1);
+        record_provider_latency(&state, "backup-a", 200, 0, 4);
+        record_provider_latency(&state, "backup-b", 500, 0, 1);
+        record_provider_latency(&state, "backup-b", 500, 0, 1);
+        record_provider_latency(&state, "backup-b", 200, 0, 1);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+        let usage = BillingTokenUsage::new(1_000, 1_000, 2_000);
+
+        let providers = state
+            .candidate_model_routes(&resolved, Some(&usage))
+            .into_iter()
+            .map(|route| route.provider)
+            .collect::<Vec<_>>();
+
+        assert_eq!(providers, ["backup-a", "primary", "backup-b"]);
     }
 
     #[test]
@@ -2623,5 +2847,93 @@ mod tests {
         assert_eq!(aggregates[0].usage.prompt_tokens, 10);
         assert_eq!(aggregates[0].usage.completion_tokens, 16);
         assert_eq!(aggregates[0].usage.total_tokens, 26);
+    }
+
+    fn routing_strategy_test_config(
+        routing_strategy: RoutingStrategy,
+        primary_input_price: Option<f64>,
+        primary_output_price: Option<f64>,
+    ) -> Config {
+        let config = Config {
+            providers: vec![
+                provider_config("primary", "http://127.0.0.1:10001/v1"),
+                provider_config("backup-a", "http://127.0.0.1:10002/v1"),
+                provider_config("backup-b", "http://127.0.0.1:10003/v1"),
+            ],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "primary".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy,
+                fallbacks: vec![
+                    crate::config::ModelFallback {
+                        provider: "backup-a".into(),
+                        provider_model: "gpt-4.1-mini".into(),
+                        input_price_per_1m: Some(2.0),
+                        output_price_per_1m: Some(2.0),
+                        priority: Some(10),
+                        weight: Some(1),
+                        enabled: true,
+                    },
+                    crate::config::ModelFallback {
+                        provider: "backup-b".into(),
+                        provider_model: "gpt-4.1".into(),
+                        input_price_per_1m: Some(1.0),
+                        output_price_per_1m: Some(1.0),
+                        priority: Some(10),
+                        weight: Some(2),
+                        enabled: true,
+                    },
+                ],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: primary_input_price,
+                output_price_per_1m: primary_output_price,
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        config
+    }
+
+    fn provider_config(name: &str, base_url: &str) -> Provider {
+        Provider {
+            name: name.into(),
+            kind: "openai".into(),
+            base_url: base_url.into(),
+            api_key_env: None,
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
+            enabled: true,
+        }
+    }
+
+    fn record_provider_latency(
+        state: &AppState,
+        provider: &str,
+        status_code: u16,
+        started_at_unix: u64,
+        completed_at_unix: u64,
+    ) {
+        state.record_request_log(StoredRequestLog {
+            request_id: format!("fg-{provider}-{status_code}-{completed_at_unix}"),
+            trace_id: None,
+            tenant: ferrogate_core::TenantContext::default(),
+            route: Some("openai.chat.completions".into()),
+            provider: Some(provider.into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            status_code,
+            error_code: (status_code >= 400).then(|| "provider_error".into()),
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: None,
+            response_body: None,
+            started_at_unix: Some(started_at_unix),
+            completed_at_unix: Some(completed_at_unix),
+        });
     }
 }

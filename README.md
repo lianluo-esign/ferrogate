@@ -438,6 +438,9 @@ fingerprint do not change. Listener/TLS changes require graceful upgrade.
 
 ## Admin API
 
+The checked-in OpenAPI 3.1 document for the Admin API lives at
+[`docs/openapi/admin-api.openapi.json`](docs/openapi/admin-api.openapi.json).
+
 Common endpoints:
 
 ```text

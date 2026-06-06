@@ -94,6 +94,21 @@ fn accepts_model_lowest_cost_strategy_with_prices() {
 }
 
 #[test]
+fn accepts_latency_and_balanced_routing_strategies_without_prices() {
+    for routing_strategy in [RoutingStrategy::LowestLatency, RoutingStrategy::Balanced] {
+        let mut model = model();
+        model.routing_strategy = routing_strategy;
+        let config = Config {
+            providers: vec![provider()],
+            models: vec![model],
+            ..Config::default()
+        };
+
+        config.validate().unwrap();
+    }
+}
+
+#[test]
 fn rejects_model_lowest_cost_strategy_without_prices() {
     let mut model = model();
     model.routing_strategy = RoutingStrategy::LowestCost;
