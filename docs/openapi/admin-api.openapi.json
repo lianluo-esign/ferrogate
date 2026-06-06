@@ -1184,7 +1184,8 @@
           "status",
           "reachable",
           "circuit_open",
-          "consecutive_failures"
+          "consecutive_failures",
+          "routing"
         ],
         "properties": {
           "name": {
@@ -1218,6 +1219,60 @@
           },
           "error": {
             "type": ["string", "null"]
+          },
+          "routing": {
+            "$ref": "#/components/schemas/ProviderRoutingHealth"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProviderRoutingHealth": {
+        "type": "object",
+        "required": [
+          "observed_requests",
+          "successful_requests",
+          "failed_requests",
+          "average_latency_ms",
+          "failure_rate",
+          "health_rank",
+          "health_reason"
+        ],
+        "properties": {
+          "observed_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "successful_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "average_latency_ms": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "failure_rate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "health_rank": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lower ranks are preferred by latency-aware and balanced routing."
+          },
+          "health_reason": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "circuit_open",
+              "observed_failure_rate",
+              "no_observations",
+              "healthy_observations"
+            ]
           }
         },
         "additionalProperties": false

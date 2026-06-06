@@ -264,6 +264,14 @@ enabled = false
     assert!(provider_health.contains("\"name\":\"openai\""));
     assert!(provider_health.contains("\"status\":"));
     assert!(provider_health.contains("\"reachable\":"));
+    assert!(provider_health.contains("\"routing\":"));
+    assert!(provider_health.contains("\"observed_requests\":2"));
+    assert!(provider_health.contains("\"successful_requests\":2"));
+    assert!(provider_health.contains("\"failed_requests\":0"));
+    assert!(provider_health.contains("\"average_latency_ms\":"));
+    assert!(provider_health.contains("\"failure_rate\":0.0"));
+    assert!(provider_health.contains("\"health_rank\":0"));
+    assert!(provider_health.contains("\"health_reason\":\"healthy_observations\""));
     assert!(!provider_health.contains("FERROGATE_PROVIDER_SECRET"));
     assert!(!provider_health.contains("provider-secret"));
 

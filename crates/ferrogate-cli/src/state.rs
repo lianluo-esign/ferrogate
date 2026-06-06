@@ -372,6 +372,10 @@ impl ProviderRoutingMetric {
             observed_requests: total_requests,
         }
     }
+
+    fn health(&self, health_rank: u8, health_reason: &'static str) -> ProviderRoutingHealth {
+        ProviderRoutingHealth::from_metric(*self, health_rank, health_reason)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -379,6 +383,36 @@ struct ProviderRoutingScore {
     average_latency_ms: Option<u64>,
     failure_rate: f64,
     observed_requests: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct ProviderRoutingHealth {
+    pub(crate) observed_requests: u64,
+    pub(crate) successful_requests: u64,
+    pub(crate) failed_requests: u64,
+    pub(crate) average_latency_ms: Option<u64>,
+    pub(crate) failure_rate: f64,
+    pub(crate) health_rank: u8,
+    pub(crate) health_reason: &'static str,
+}
+
+impl ProviderRoutingHealth {
+    fn from_metric(
+        metric: ProviderRoutingMetric,
+        health_rank: u8,
+        health_reason: &'static str,
+    ) -> Self {
+        let score = metric.score();
+        Self {
+            observed_requests: score.observed_requests,
+            successful_requests: metric.successful_requests,
+            failed_requests: metric.failed_requests,
+            average_latency_ms: score.average_latency_ms,
+            failure_rate: score.failure_rate,
+            health_rank,
+            health_reason,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -602,6 +636,7 @@ pub(crate) struct ProviderHealthCheck {
     pub(crate) consecutive_failures: u32,
     pub(crate) checked_at_unix: Option<u64>,
     pub(crate) error: Option<String>,
+    pub(crate) routing: ProviderRoutingHealth,
 }
 
 impl AppState {
@@ -1054,6 +1089,7 @@ impl AppState {
     fn provider_health_check(&self, provider: &Provider) -> ProviderHealthCheck {
         let checked_at_unix = now_unix_seconds();
         let circuit = self.provider_circuit_snapshot(&provider.name);
+        let routing = self.provider_routing_health(provider, circuit.open);
         if !provider.enabled {
             return ProviderHealthCheck {
                 name: provider.name.clone(),
@@ -1066,6 +1102,7 @@ impl AppState {
                 consecutive_failures: circuit.consecutive_failures,
                 checked_at_unix,
                 error: None,
+                routing,
             };
         }
 
@@ -1090,7 +1127,29 @@ impl AppState {
             consecutive_failures: circuit.consecutive_failures,
             checked_at_unix,
             error: probe.err(),
+            routing,
         }
+    }
+
+    fn provider_routing_health(
+        &self,
+        provider: &Provider,
+        circuit_open: bool,
+    ) -> ProviderRoutingHealth {
+        let metric = self
+            .provider_routing_metrics
+            .lock()
+            .ok()
+            .and_then(|metrics| metrics.providers.get(&provider.name).copied())
+            .unwrap_or_default();
+        if !provider.enabled {
+            return metric.health(3, "disabled");
+        }
+        let score = metric.score();
+        metric.health(
+            provider_health_rank_from_signals(!circuit_open, score),
+            provider_health_reason(circuit_open, score),
+        )
     }
 
     pub(crate) fn try_consume_api_key_request(&self, api_key_id: &str, limit: u64) -> bool {
@@ -1843,13 +1902,30 @@ fn route_estimated_cost(route: &ModelRoute, usage: Option<&BillingTokenUsage>) -
 }
 
 fn provider_health_rank(state: &AppState, route: &ModelRoute, score: ProviderRoutingScore) -> u8 {
-    if !state.provider_circuit_allows(&route.provider) {
+    provider_health_rank_from_signals(state.provider_circuit_allows(&route.provider), score)
+}
+
+fn provider_health_rank_from_signals(circuit_allows: bool, score: ProviderRoutingScore) -> u8 {
+    if !circuit_allows {
         return 2;
     }
     if score.observed_requests >= 3 && score.failure_rate >= 0.5 {
         return 1;
     }
     0
+}
+
+fn provider_health_reason(circuit_open: bool, score: ProviderRoutingScore) -> &'static str {
+    if circuit_open {
+        return "circuit_open";
+    }
+    if score.observed_requests >= 3 && score.failure_rate >= 0.5 {
+        return "observed_failure_rate";
+    }
+    if score.observed_requests == 0 {
+        return "no_observations";
+    }
+    "healthy_observations"
 }
 
 fn latency_rank(score: ProviderRoutingScore) -> u64 {
@@ -2338,6 +2414,32 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(providers, ["backup-a", "backup-b", "primary"]);
+    }
+
+    #[test]
+    fn provider_health_exposes_routing_observations_and_rank_reason() {
+        let state = AppState::new(routing_strategy_test_config(
+            RoutingStrategy::LowestLatency,
+            Some(5.0),
+            Some(5.0),
+        ));
+        record_provider_latency(&state, "primary", 500, 0, 1);
+        record_provider_latency(&state, "primary", 500, 0, 1);
+        record_provider_latency(&state, "primary", 200, 0, 1);
+
+        let primary = state
+            .provider_health_checks()
+            .into_iter()
+            .find(|check| check.name == "primary")
+            .unwrap();
+
+        assert_eq!(primary.routing.observed_requests, 3);
+        assert_eq!(primary.routing.successful_requests, 1);
+        assert_eq!(primary.routing.failed_requests, 2);
+        assert_eq!(primary.routing.average_latency_ms, Some(1_000));
+        assert!((primary.routing.failure_rate - 0.666).abs() < 0.001);
+        assert_eq!(primary.routing.health_rank, 1);
+        assert_eq!(primary.routing.health_reason, "observed_failure_rate");
     }
 
     #[test]
