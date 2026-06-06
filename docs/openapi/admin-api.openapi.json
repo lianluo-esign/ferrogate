@@ -3,7 +3,7 @@
   "info": {
     "title": "FerroGate Admin API",
     "summary": "Control-plane API for inspecting and mutating process-local FerroGate gateway state.",
-    "version": "2026.5.5",
+    "version": "2026.6.6",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"

@@ -18,7 +18,7 @@ default-members = ["crates/ferrogate-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "2026.5.5"
+version = "2026.6.6"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
