@@ -146,6 +146,8 @@ fn request_log_attributes(log: &StoredRequestLog) -> Vec<OtlpAttribute> {
     ];
 
     push_optional_attribute(&mut attributes, "trace_id", log.trace_id.as_deref());
+    push_optional_attribute(&mut attributes, "cluster_id", log.cluster_id.as_deref());
+    push_optional_attribute(&mut attributes, "node_id", log.node_id.as_deref());
     push_optional_attribute(
         &mut attributes,
         "organization_id",
@@ -410,6 +412,8 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
+            cluster_id: None,
+            node_id: None,
             tenant: TenantContext {
                 organization_id: Some("org".into()),
                 project_id: Some("project".into()),

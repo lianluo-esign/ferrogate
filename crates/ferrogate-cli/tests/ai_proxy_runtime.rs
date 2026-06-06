@@ -253,6 +253,8 @@ enabled = false
     assert!(audit_events.contains("200 OK"));
     assert!(audit_events.contains("\"action\":\"config.validate\""));
     assert!(audit_events.contains("\"actor_api_key_id\":\"admin\""));
+    assert!(audit_events.contains("\"cluster_id\":\"test-cluster\""));
+    assert!(audit_events.contains("\"node_id\":\"test-node-a\""));
     assert!(audit_events.contains("\"outcome\":\"accepted\""));
     assert!(audit_events.contains("\"outcome\":\"rejected\""));
     assert!(!audit_events.contains("client-secret"));
@@ -357,6 +359,8 @@ enabled = false
     assert!(request_logs.contains("200 OK"));
     assert!(request_logs.contains("\"logical_model\":\"fast-chat\""));
     assert!(request_logs.contains("\"logical_model\":\"smart-chat\""));
+    assert!(request_logs.contains("\"cluster_id\":\"test-cluster\""));
+    assert!(request_logs.contains("\"node_id\":\"test-node-a\""));
     assert!(request_logs.contains("\"status_code\":200"));
     assert!(!request_logs.contains("client-secret"));
 
@@ -370,6 +374,8 @@ enabled = false
     assert!(billing_events.contains("200 OK"));
     assert!(billing_events.contains("\"logical_model\":\"fast-chat\""));
     assert!(billing_events.contains("\"provider\":\"openai\""));
+    assert!(billing_events.contains("\"cluster_id\":\"test-cluster\""));
+    assert!(billing_events.contains("\"node_id\":\"test-node-a\""));
     assert!(billing_events.contains("\"total_tokens\":8"));
     assert!(billing_events.contains("\"currency\":\"USD\""));
 

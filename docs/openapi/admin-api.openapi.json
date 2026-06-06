@@ -1818,6 +1818,12 @@
           "trace_id": {
             "type": ["string", "null"]
           },
+          "cluster_id": {
+            "type": ["string", "null"]
+          },
+          "node_id": {
+            "type": ["string", "null"]
+          },
           "tenant": {
             "$ref": "#/components/schemas/TenantContext"
           },
@@ -1880,6 +1886,12 @@
             "type": "string"
           },
           "trace_id": {
+            "type": ["string", "null"]
+          },
+          "cluster_id": {
+            "type": ["string", "null"]
+          },
+          "node_id": {
             "type": ["string", "null"]
           },
           "tenant": {
@@ -1970,6 +1982,12 @@
             "type": "string"
           },
           "trace_id": {
+            "type": ["string", "null"]
+          },
+          "cluster_id": {
+            "type": ["string", "null"]
+          },
+          "node_id": {
             "type": ["string", "null"]
           },
           "actor_api_key_id": {

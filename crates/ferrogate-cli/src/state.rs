@@ -1310,6 +1310,8 @@ impl AppState {
         let event = BillingEvent {
             request_id: draft.request.request_id.clone(),
             trace_id: draft.request.trace_id.clone(),
+            cluster_id: Some(self.cluster_identity.cluster_id.clone()),
+            node_id: Some(self.cluster_identity.node_id.clone()),
             tenant: draft.request.tenant.clone(),
             logical_model: draft.logical_model.into(),
             provider: draft.provider.into(),
@@ -1400,7 +1402,9 @@ impl AppState {
         }
     }
 
-    pub(crate) fn record_request_log(&self, log: StoredRequestLog) {
+    pub(crate) fn record_request_log(&self, mut log: StoredRequestLog) {
+        log.cluster_id = Some(self.cluster_identity.cluster_id.clone());
+        log.node_id = Some(self.cluster_identity.node_id.clone());
         self.record_request_metrics(&log);
         if let Ok(mut metrics) = self.provider_routing_metrics.lock() {
             metrics.record_request_log(&log);
@@ -1429,6 +1433,8 @@ impl AppState {
                 id,
                 request_id: event.request_id,
                 trace_id: event.trace_id,
+                cluster_id: Some(self.cluster_identity.cluster_id.clone()),
+                node_id: Some(self.cluster_identity.node_id.clone()),
                 actor_api_key_id: event.actor_api_key_id,
                 action: event.action,
                 target: event.target,
@@ -2752,6 +2758,8 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            cluster_id: None,
+            node_id: None,
             tenant: ferrogate_core::TenantContext::default(),
             route: Some("openai.chat.completions".into()),
             provider: Some("openai".into()),
@@ -2793,6 +2801,8 @@ mod tests {
             state.record_request_log(StoredRequestLog {
                 request_id: format!("fg-{index}"),
                 trace_id: None,
+                cluster_id: None,
+                node_id: None,
                 tenant: ferrogate_core::TenantContext::default(),
                 route: None,
                 provider: None,
@@ -2941,6 +2951,8 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            cluster_id: None,
+            node_id: None,
             tenant: ferrogate_core::TenantContext::default(),
             route: Some("openai.chat.completions".into()),
             provider: Some("openai".into()),
@@ -3072,6 +3084,8 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: format!("fg-{provider}-{status_code}-{completed_at_unix}"),
             trace_id: None,
+            cluster_id: None,
+            node_id: None,
             tenant: ferrogate_core::TenantContext::default(),
             route: Some("openai.chat.completions".into()),
             provider: Some(provider.into()),

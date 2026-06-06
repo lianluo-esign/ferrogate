@@ -80,6 +80,8 @@ pub enum BillingUsageSource {
 pub struct BillingEvent {
     pub request_id: String,
     pub trace_id: Option<String>,
+    pub cluster_id: Option<String>,
+    pub node_id: Option<String>,
     pub tenant: TenantContext,
     pub logical_model: String,
     pub provider: String,
@@ -231,6 +233,8 @@ mod tests {
         sink.record(BillingEvent {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            cluster_id: None,
+            node_id: None,
             tenant: TenantContext {
                 organization_id: Some("org".into()),
                 team_id: None,
@@ -262,6 +266,8 @@ mod tests {
             sink.record(BillingEvent {
                 request_id: request_id.into(),
                 trace_id: None,
+                cluster_id: None,
+                node_id: None,
                 tenant: TenantContext::default(),
                 logical_model: "fast-chat".into(),
                 provider: "openai".into(),

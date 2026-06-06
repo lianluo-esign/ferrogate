@@ -839,6 +839,8 @@ impl FerroGateway {
                         state.record_request_log(StoredRequestLog {
                             request_id: ctx.request_id.clone(),
                             trace_id: ctx.trace_id.clone(),
+                            cluster_id: None,
+                            node_id: None,
                             tenant: policy_request.tenant.clone(),
                             route: policy_request.route.clone(),
                             provider: Some(provider.name.clone()),
@@ -935,6 +937,8 @@ impl FerroGateway {
         self.state.record_request_log(StoredRequestLog {
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
+            cluster_id: None,
+            node_id: None,
             tenant: log.tenant,
             route: Some(endpoint.route().into()),
             provider: log.provider.map(ToOwned::to_owned),
