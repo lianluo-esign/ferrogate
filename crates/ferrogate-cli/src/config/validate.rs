@@ -332,8 +332,23 @@ impl Config {
         if self.cluster.config_poll_interval_secs == 0 {
             bail!("field cluster.config_poll_interval_secs: must be greater than zero");
         }
-        if self.cluster.state_backend != "local" {
-            bail!("field cluster.state_backend: only local is supported until shared state lands");
+        match self.cluster.state_backend.as_str() {
+            "local" => {}
+            "file" => {
+                if self
+                    .cluster
+                    .file_state_path
+                    .as_deref()
+                    .is_none_or(|path| path.trim().is_empty())
+                {
+                    bail!("field cluster.file_state_path: required when cluster.state_backend is file");
+                }
+            }
+            _ => {
+                bail!(
+                    "field cluster.state_backend: only local and file are supported until database shared state lands"
+                );
+            }
         }
         if self.cluster.counter_backend != "local" {
             bail!(

@@ -25,6 +25,10 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if let Err(error) = self.state.sync_shared_control_plane() {
+            tracing::warn!("failed to sync shared control plane: {error}");
+        }
+
         if path == "/readyz" {
             self.handle_readyz(session, ctx).await?;
             return Ok(true);

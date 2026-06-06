@@ -11,52 +11,33 @@ use std::{
 
 const IMAGE_TAG: &str = "ferrogate:e2e-local";
 const NETWORK_NAME: &str = "ferrogate-e2e-net";
-const GATEWAY_CONTAINER: &str = "ferrogate-e2e-gateway";
 const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
-const HOST_PORT: u16 = 18080;
+const GATEWAY_A_CONTAINER: &str = "ferrogate-e2e-gateway-a";
+const GATEWAY_B_CONTAINER: &str = "ferrogate-e2e-gateway-b";
+const GATEWAY_A_PORT: u16 = 18080;
+const GATEWAY_B_PORT: u16 = 18081;
 
 fn main() -> Result<()> {
     let scenario = env::args().nth(1).unwrap_or_else(|| "cluster-drain".into());
     match scenario.as_str() {
         "cluster-drain" => run_cluster_drain(),
-        _ => bail!("unknown scenario {scenario}; supported: cluster-drain"),
+        "shared-api-key" => run_shared_api_key(),
+        _ => bail!("unknown scenario {scenario}; supported: cluster-drain, shared-api-key"),
     }
 }
 
 fn run_cluster_drain() -> Result<()> {
-    let _cleanup = Cleanup;
-    cleanup();
-    docker(["network", "create", NETWORK_NAME])?;
-    docker(["build", "-t", IMAGE_TAG, "."])?;
+    let _cleanup = setup_environment()?;
     start_provider()?;
     wait_for_provider()?;
 
     let dir = tempfile::tempdir()?;
     let config_path = dir.path().join("ferrogate.toml");
-    std::fs::write(&config_path, gateway_config())?;
-    let config_mount = format!("{}:/etc/ferrogate/ferrogate.toml:ro", config_path.display());
-    let port = format!("127.0.0.1:{HOST_PORT}:8080");
+    std::fs::write(&config_path, gateway_config("e2e-node-a", "local", None))?;
+    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_path, None)?;
 
-    docker([
-        "run",
-        "-d",
-        "--name",
-        GATEWAY_CONTAINER,
-        "--network",
-        NETWORK_NAME,
-        "-p",
-        &port,
-        "-v",
-        &config_mount,
-        "-e",
-        "FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml",
-        "-e",
-        "FERROGATE_PROVIDER_SECRET=provider-secret",
-        IMAGE_TAG,
-    ])?;
-
-    wait_for_http("/healthz", 200)?;
-    expect_json("GET", "/readyz", &[], "", 200, |body| {
+    wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 200, |body| {
         assert_eq!(body["status"], "ready");
         assert_eq!(body["cluster"]["cluster_id"], "e2e-cluster");
         assert_eq!(body["cluster"]["node_id"], "e2e-node-a");
@@ -64,6 +45,7 @@ fn run_cluster_drain() -> Result<()> {
         Ok(())
     })?;
     expect_json(
+        GATEWAY_A_PORT,
         "POST",
         "/v1/chat/completions",
         &[
@@ -78,6 +60,7 @@ fn run_cluster_drain() -> Result<()> {
         },
     )?;
     expect_json(
+        GATEWAY_A_PORT,
         "POST",
         "/admin/v1/drain",
         &[
@@ -92,13 +75,14 @@ fn run_cluster_drain() -> Result<()> {
             Ok(())
         },
     )?;
-    expect_json("GET", "/readyz", &[], "", 503, |body| {
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 503, |body| {
         assert_eq!(body["status"], "not_ready");
         assert_eq!(body["cluster"]["readiness_reason"], "operator_drain");
         assert_eq!(body["cluster"]["draining"], true);
         Ok(())
     })?;
     expect_json(
+        GATEWAY_A_PORT,
         "POST",
         "/v1/chat/completions",
         &[
@@ -113,6 +97,7 @@ fn run_cluster_drain() -> Result<()> {
         },
     )?;
     expect_json(
+        GATEWAY_A_PORT,
         "POST",
         "/admin/v1/drain",
         &[
@@ -127,12 +112,13 @@ fn run_cluster_drain() -> Result<()> {
             Ok(())
         },
     )?;
-    expect_json("GET", "/readyz", &[], "", 200, |body| {
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 200, |body| {
         assert_eq!(body["status"], "ready");
         assert_eq!(body["cluster"]["draining"], false);
         Ok(())
     })?;
     expect_json(
+        GATEWAY_A_PORT,
         "POST",
         "/v1/chat/completions",
         &[
@@ -151,18 +137,169 @@ fn run_cluster_drain() -> Result<()> {
     Ok(())
 }
 
-fn gateway_config() -> &'static str {
-    r#"
+fn run_shared_api_key() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let dir = tempfile::tempdir()?;
+    let state_dir = dir.path().join("state");
+    let state_path = state_dir.join("cluster-state.json");
+    std::fs::create_dir_all(&state_dir)?;
+
+    let config_a = dir.path().join("gateway-a.toml");
+    let config_b = dir.path().join("gateway-b.toml");
+    std::fs::write(
+        &config_a,
+        gateway_config(
+            "e2e-node-a",
+            "file",
+            Some("/var/lib/ferrogate/cluster-state.json"),
+        ),
+    )?;
+    std::fs::write(
+        &config_b,
+        gateway_config(
+            "e2e-node-b",
+            "file",
+            Some("/var/lib/ferrogate/cluster-state.json"),
+        ),
+    )?;
+
+    start_gateway(
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_a,
+        Some(&state_dir),
+    )?;
+    start_gateway(
+        GATEWAY_B_CONTAINER,
+        GATEWAY_B_PORT,
+        &config_b,
+        Some(&state_dir),
+    )?;
+
+    wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
+    wait_for_http(GATEWAY_B_PORT, "/healthz", 200)?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["cluster"]["node_id"], "e2e-node-a");
+        assert_eq!(body["cluster"]["state_backend"], "file");
+        Ok(())
+    })?;
+    expect_json(GATEWAY_B_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["cluster"]["node_id"], "e2e-node-b");
+        assert_eq!(body["cluster"]["state_backend"], "file");
+        Ok(())
+    })?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/admin/v1/api-keys",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"shared-client","name":"Shared client","key":"shared-secret","scopes":["chat.completions"],"allowed_models":["fast-chat"]}"#,
+        201,
+        |body| {
+            assert_eq!(body["key"]["id"], "shared-client");
+            assert_eq!(body["key"]["key_source"], "inline");
+            Ok(())
+        },
+    )?;
+
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/api-keys/shared-client",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["id"], "shared-client");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/admin/v1/policies",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"name":"shared-policy","effect":"deny","api_key_ids":["key_dev"],"models":["fast-chat"],"code":"blocked_by_shared_policy","message":"blocked by shared policy","enabled":true}"#,
+        201,
+        |body| {
+            assert_eq!(body["policy"]["name"], "shared-policy");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/policies/shared-policy",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["policy"]["name"], "shared-policy");
+            assert_eq!(body["policy"]["code"], "blocked_by_shared_policy");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer shared-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    let raw_state = std::fs::read_to_string(&state_path)?;
+    let shared_state: Value = serde_json::from_str(&raw_state)?;
+    assert_eq!(shared_state["version"], 1);
+    assert!(shared_state["api_keys"]
+        .as_array()
+        .is_some_and(|keys| keys.iter().any(|key| key["id"] == "shared-client")));
+
+    println!("shared-api-key scenario passed");
+    Ok(())
+}
+
+fn setup_environment() -> Result<Cleanup> {
+    let cleanup = Cleanup;
+    cleanup_containers();
+    docker(["network", "create", NETWORK_NAME])?;
+    docker(["build", "-t", IMAGE_TAG, "."])?;
+    Ok(cleanup)
+}
+
+fn gateway_config(node_id: &str, state_backend: &str, file_state_path: Option<&str>) -> String {
+    let file_state_path = file_state_path
+        .map(|path| format!("file_state_path = \"{path}\"\n"))
+        .unwrap_or_default();
+    format!(
+        r#"
 listen = "0.0.0.0:8080"
 
 [cluster]
 enabled = true
 cluster_id = "e2e-cluster"
-node_id = "e2e-node-a"
+node_id = "{node_id}"
 node_region = "local"
 node_zone = "local-a"
-state_backend = "local"
-counter_backend = "local"
+state_backend = "{state_backend}"
+{file_state_path}counter_backend = "local"
 heartbeat_interval_secs = 10
 config_poll_interval_secs = 5
 
@@ -191,6 +328,7 @@ name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
 "#
+    )
 }
 
 fn start_provider() -> Result<()> {
@@ -232,6 +370,40 @@ ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
     ])
 }
 
+fn start_gateway(
+    name: &str,
+    host_port: u16,
+    config_path: &std::path::Path,
+    state_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let config_mount = format!("{}:/etc/ferrogate/ferrogate.toml:ro", config_path.display());
+    let port = format!("127.0.0.1:{host_port}:8080");
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--network".to_string(),
+        NETWORK_NAME.to_string(),
+        "-p".to_string(),
+        port,
+        "-v".to_string(),
+        config_mount,
+    ];
+    if let Some(state_dir) = state_dir {
+        args.push("-v".to_string());
+        args.push(format!("{}:/var/lib/ferrogate", state_dir.display()));
+    }
+    args.extend([
+        "-e".to_string(),
+        "FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml".to_string(),
+        "-e".to_string(),
+        "FERROGATE_PROVIDER_SECRET=provider-secret".to_string(),
+        IMAGE_TAG.to_string(),
+    ]);
+    docker_args(args)
+}
+
 fn wait_for_provider() -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(15) {
@@ -256,11 +428,11 @@ fn wait_for_provider() -> Result<()> {
     bail!("provider mock did not start listening on 8081")
 }
 
-fn wait_for_http(path: &str, expected_status: u16) -> Result<()> {
+fn wait_for_http(host_port: u16, path: &str, expected_status: u16) -> Result<()> {
     let started = Instant::now();
     let mut last = String::new();
     while started.elapsed() < Duration::from_secs(30) {
-        match http_request("GET", path, &[], "") {
+        match http_request(host_port, "GET", path, &[], "") {
             Ok(response) if response.status == expected_status => return Ok(()),
             Ok(response) => last = response.raw,
             Err(error) => last = error.to_string(),
@@ -271,6 +443,7 @@ fn wait_for_http(path: &str, expected_status: u16) -> Result<()> {
 }
 
 fn expect_json<F>(
+    host_port: u16,
     method: &str,
     path: &str,
     headers: &[&str],
@@ -281,7 +454,7 @@ fn expect_json<F>(
 where
     F: FnOnce(Value) -> Result<()>,
 {
-    let response = http_request(method, path, headers, body)?;
+    let response = http_request(host_port, method, path, headers, body)?;
     if response.status != expected_status {
         bail!(
             "{method} {path} expected status {expected_status}, got {}; raw: {}",
@@ -304,8 +477,14 @@ struct HttpResponse {
     raw: String,
 }
 
-fn http_request(method: &str, path: &str, headers: &[&str], body: &str) -> Result<HttpResponse> {
-    let mut stream = TcpStream::connect(("127.0.0.1", HOST_PORT))?;
+fn http_request(
+    host_port: u16,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> Result<HttpResponse> {
+    let mut stream = TcpStream::connect(("127.0.0.1", host_port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     write!(
         stream,
@@ -333,6 +512,14 @@ fn http_request(method: &str, path: &str, headers: &[&str], body: &str) -> Resul
 }
 
 fn docker<const N: usize>(args: [&str; N]) -> Result<()> {
+    docker_args(args.map(str::to_string))
+}
+
+fn docker_args<I, S>(args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let status = Command::new("docker")
         .args(args)
         .stdin(Stdio::null())
@@ -344,9 +531,15 @@ fn docker<const N: usize>(args: [&str; N]) -> Result<()> {
     Ok(())
 }
 
-fn cleanup() {
+fn cleanup_containers() {
     let _ = Command::new("docker")
-        .args(["rm", "-f", GATEWAY_CONTAINER, PROVIDER_CONTAINER])
+        .args([
+            "rm",
+            "-f",
+            GATEWAY_A_CONTAINER,
+            GATEWAY_B_CONTAINER,
+            PROVIDER_CONTAINER,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -361,6 +554,6 @@ struct Cleanup;
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        cleanup();
+        cleanup_containers();
     }
 }

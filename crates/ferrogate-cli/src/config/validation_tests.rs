@@ -700,9 +700,30 @@ fn accepts_enabled_local_cluster_identity_config() {
             node_region: Some("us-east-1".into()),
             node_zone: Some("us-east-1a".into()),
             state_backend: "local".into(),
+            file_state_path: None,
             counter_backend: "local".into(),
             heartbeat_interval_secs: 10,
             config_poll_interval_secs: 5,
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn accepts_file_cluster_state_backend_with_path() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            cluster_id: "prod-us".into(),
+            node_id: "gateway-a".into(),
+            state_backend: "file".into(),
+            file_state_path: Some("/var/lib/ferrogate/cluster-state.json".into()),
+            counter_backend: "local".into(),
+            heartbeat_interval_secs: 10,
+            config_poll_interval_secs: 5,
+            ..ClusterConfig::default()
         },
         ..Config::default()
     };
@@ -733,6 +754,18 @@ fn rejects_invalid_enabled_cluster_config() {
     };
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field cluster.state_backend"));
+
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            state_backend: "file".into(),
+            file_state_path: None,
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field cluster.file_state_path"));
 
     let config = Config {
         cluster: ClusterConfig {

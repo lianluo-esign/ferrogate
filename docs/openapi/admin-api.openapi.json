@@ -1257,7 +1257,9 @@
             "type": ["string", "null"]
           },
           "state_backend": {
-            "type": "string"
+            "type": "string",
+            "enum": ["local", "file"],
+            "description": "Cluster control-plane state backend. local is process-local; file uses a shared JSON file for lightweight multi-node API key and policy propagation."
           },
           "counter_backend": {
             "type": "string"

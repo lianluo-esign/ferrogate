@@ -53,6 +53,8 @@ pub(crate) struct ClusterConfig {
     pub(crate) node_zone: Option<String>,
     #[serde(default = "default_cluster_state_backend")]
     pub(crate) state_backend: String,
+    #[serde(default)]
+    pub(crate) file_state_path: Option<String>,
     #[serde(default = "default_cluster_counter_backend")]
     pub(crate) counter_backend: String,
     #[serde(default = "default_cluster_heartbeat_interval_secs")]
@@ -529,6 +531,7 @@ impl Default for ClusterConfig {
             node_region: None,
             node_zone: None,
             state_backend: default_cluster_state_backend(),
+            file_state_path: None,
             counter_backend: default_cluster_counter_backend(),
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             config_poll_interval_secs: default_cluster_config_poll_interval_secs(),

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    env,
+    env, fs,
+    io::ErrorKind,
     net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::{
@@ -38,17 +39,107 @@ use ferrogate_storage::{
     StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
 pub(crate) const RELOAD_MODE_LISTENER_LEVEL_REQUIRED: &str = "listener-level-required";
+
+#[derive(Debug)]
+struct SharedFileControlPlane {
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct SharedFileSnapshot {
+    version: u32,
+    revision: String,
+    api_keys: Vec<ApiKey>,
+    policies: Vec<ConfigPolicyRule>,
+}
+
+impl SharedFileControlPlane {
+    fn from_config(config: &Config) -> anyhow::Result<Option<Self>> {
+        if !config.cluster.enabled || config.cluster.state_backend != "file" {
+            return Ok(None);
+        }
+        let path = config
+            .cluster
+            .file_state_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("cluster.file_state_path is required"))?;
+        Ok(Some(Self {
+            path: PathBuf::from(path),
+        }))
+    }
+
+    fn load(&self) -> anyhow::Result<Option<SharedFileSnapshot>> {
+        let raw = match fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).map_err(|error| {
+                    anyhow::anyhow!("failed to read file cluster state: {error}")
+                });
+            }
+        };
+        let snapshot: SharedFileSnapshot = serde_json::from_str(&raw)
+            .map_err(|error| anyhow::anyhow!("invalid file cluster state JSON: {error}"))?;
+        if snapshot.version != 1 {
+            anyhow::bail!(
+                "unsupported file cluster state version {}; expected 1",
+                snapshot.version
+            );
+        }
+        Ok(Some(snapshot))
+    }
+
+    fn publish_from_config(&self, config: &Config) -> anyhow::Result<String> {
+        let revision = shared_control_plane_revision(&config.api_keys, &config.policies);
+        let snapshot = SharedFileSnapshot {
+            version: 1,
+            revision: revision.clone(),
+            api_keys: config.api_keys.clone(),
+            policies: config.policies.clone(),
+        };
+        let raw = serde_json::to_vec_pretty(&snapshot)?;
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = self.path.with_extension("tmp");
+        fs::write(&tmp, raw)?;
+        fs::rename(&tmp, &self.path)?;
+        Ok(revision)
+    }
+}
+
+fn shared_control_plane_revision(api_keys: &[ApiKey], policies: &[ConfigPolicyRule]) -> String {
+    #[derive(Serialize)]
+    struct RevisionInput<'a> {
+        api_keys: &'a [ApiKey],
+        policies: &'a [ConfigPolicyRule],
+    }
+
+    let bytes = serde_json::to_vec(&RevisionInput { api_keys, policies })
+        .expect("shared control plane serialization should not fail");
+    format!("{:016x}", fnv1a64(&bytes))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SharedAppState {
     inner: Arc<RwLock<AppState>>,
     reload_coordinator: Arc<Mutex<ferrogate_runtime::ReloadCoordinator>>,
     source_path: Option<Arc<PathBuf>>,
+    shared_file_control_plane: Option<Arc<SharedFileControlPlane>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,12 +161,18 @@ pub(crate) struct RuntimeReloadPlan {
 impl SharedAppState {
     pub(crate) fn with_source_path(config: Config, source_path: Option<PathBuf>) -> Self {
         let snapshot = config_snapshot_id(&config);
+        let shared_file_control_plane = SharedFileControlPlane::from_config(&config)
+            .inspect_err(|error| warn!("failed to initialize file cluster state: {error}"))
+            .ok()
+            .flatten()
+            .map(Arc::new);
         Self {
             inner: Arc::new(RwLock::new(AppState::new(config))),
             reload_coordinator: Arc::new(Mutex::new(ferrogate_runtime::ReloadCoordinator::new(
                 snapshot,
             ))),
             source_path: source_path.map(Arc::new),
+            shared_file_control_plane,
         }
     }
 
@@ -160,6 +257,74 @@ impl SharedAppState {
         }
     }
 
+    pub(crate) fn sync_shared_control_plane(&self) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let Some(control_plane) = &self.shared_file_control_plane else {
+            return Ok(None);
+        };
+        let active = self.current();
+        let Some(snapshot) = control_plane.load()? else {
+            let revision = control_plane.publish_from_config(&active.config)?;
+            self.update_cluster_sync_revision(revision);
+            return Ok(None);
+        };
+        if snapshot.revision == active.cluster_sync.active_revision {
+            return Ok(None);
+        }
+        let mut candidate = (*active.config).clone();
+        candidate.api_keys = snapshot.api_keys;
+        candidate.policies = snapshot.policies;
+        candidate.validate()?;
+        Ok(Some(self.reload_process_local_with_revision(
+            candidate,
+            Some(snapshot.revision),
+        )))
+    }
+
+    fn publish_shared_control_plane(&self, config: &Config) -> anyhow::Result<String> {
+        if let Some(control_plane) = &self.shared_file_control_plane {
+            let revision = control_plane.publish_from_config(config)?;
+            self.update_cluster_sync_revision(revision.clone());
+            return Ok(revision);
+        }
+        Ok(config_snapshot_id(config))
+    }
+
+    fn reload_process_local_with_revision(
+        &self,
+        candidate: Config,
+        active_revision: Option<String>,
+    ) -> RuntimeReloadResult {
+        let result = self.reload_process_local(candidate);
+        if result.committed {
+            if let Some(active_revision) = active_revision {
+                self.update_cluster_sync_revision(active_revision);
+            }
+        }
+        result
+    }
+
+    fn update_cluster_sync_revision(&self, active_revision: String) {
+        match self.inner.write() {
+            Ok(mut state) => {
+                state.cluster_sync = Arc::new(ClusterSyncStatus {
+                    active_revision,
+                    last_sync_at_unix: now_unix_seconds(),
+                    last_sync_error: None,
+                    stale: false,
+                });
+            }
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.cluster_sync = Arc::new(ClusterSyncStatus {
+                    active_revision,
+                    last_sync_at_unix: now_unix_seconds(),
+                    last_sync_error: None,
+                    stale: false,
+                });
+            }
+        }
+    }
+
     pub(crate) fn upsert_api_key(&self, key: ApiKey) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
         let mut candidate = (*active.config).clone();
@@ -173,7 +338,11 @@ impl SharedAppState {
             candidate.api_keys.push(key);
         }
         candidate.validate()?;
-        Ok(self.reload_process_local(candidate))
+        let result = self.reload_process_local(candidate);
+        if result.committed {
+            let _ = self.publish_shared_control_plane(&self.current().config)?;
+        }
+        Ok(result)
     }
 
     pub(crate) fn delete_api_key(&self, id: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
@@ -185,7 +354,11 @@ impl SharedAppState {
             return Ok(None);
         }
         candidate.validate()?;
-        Ok(Some(self.reload_process_local(candidate)))
+        let result = self.reload_process_local(candidate);
+        if result.committed {
+            let _ = self.publish_shared_control_plane(&self.current().config)?;
+        }
+        Ok(Some(result))
     }
 
     pub(crate) fn upsert_policy(
@@ -204,7 +377,11 @@ impl SharedAppState {
             candidate.policies.push(policy);
         }
         candidate.validate()?;
-        Ok(self.reload_process_local(candidate))
+        let result = self.reload_process_local(candidate);
+        if result.committed {
+            let _ = self.publish_shared_control_plane(&self.current().config)?;
+        }
+        Ok(result)
     }
 
     pub(crate) fn delete_policy(&self, name: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
@@ -216,7 +393,11 @@ impl SharedAppState {
             return Ok(None);
         }
         candidate.validate()?;
-        Ok(Some(self.reload_process_local(candidate)))
+        let result = self.reload_process_local(candidate);
+        if result.committed {
+            let _ = self.publish_shared_control_plane(&self.current().config)?;
+        }
+        Ok(Some(result))
     }
 
     pub(crate) fn set_drain(&self, drain: bool) -> DrainStatus {

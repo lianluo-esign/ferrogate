@@ -14,6 +14,7 @@ fn config_model_supports_serde_roundtrip() {
             node_region: Some("us-east-1".into()),
             node_zone: Some("us-east-1a".into()),
             state_backend: "local".into(),
+            file_state_path: None,
             counter_backend: "local".into(),
             heartbeat_interval_secs: 11,
             config_poll_interval_secs: 3,

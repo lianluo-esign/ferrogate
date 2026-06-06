@@ -28,6 +28,7 @@ node_id = "gateway-a"
 node_region = "us-east-1"
 node_zone = "us-east-1a"
 state_backend = "local"
+file_state_path = "/var/lib/ferrogate/cluster-state.json"
 counter_backend = "local"
 heartbeat_interval_secs = 15
 config_poll_interval_secs = 7
@@ -106,6 +107,10 @@ log_bodies = true
     assert_eq!(config.cluster.node_region.as_deref(), Some("us-east-1"));
     assert_eq!(config.cluster.node_zone.as_deref(), Some("us-east-1a"));
     assert_eq!(config.cluster.state_backend, "local");
+    assert_eq!(
+        config.cluster.file_state_path.as_deref(),
+        Some("/var/lib/ferrogate/cluster-state.json")
+    );
     assert_eq!(config.cluster.counter_backend, "local");
     assert_eq!(config.cluster.heartbeat_interval_secs, 15);
     assert_eq!(config.cluster.config_poll_interval_secs, 7);
