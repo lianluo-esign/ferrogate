@@ -27,6 +27,7 @@ impl Config {
         self.validate_telemetry()?;
         self.validate_storage()?;
         self.validate_reliability()?;
+        self.validate_cluster()?;
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
         Ok(())
@@ -290,6 +291,55 @@ impl Config {
             bail!("field reliability.graceful_upgrade_sock_retries: must be greater than zero");
         }
 
+        Ok(())
+    }
+
+    fn validate_cluster(&self) -> AnyResult<()> {
+        if !self.cluster.enabled {
+            return Ok(());
+        }
+        if self.cluster.cluster_id.trim().is_empty() {
+            bail!("field cluster.cluster_id: cannot be empty when cluster mode is enabled");
+        }
+        if self.cluster.node_id.trim().is_empty() {
+            bail!("field cluster.node_id: cannot be empty when cluster mode is enabled");
+        }
+        if self
+            .cluster
+            .node_region
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("field cluster.node_region: cannot be empty");
+        }
+        if self
+            .cluster
+            .node_zone
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("field cluster.node_zone: cannot be empty");
+        }
+        if self.cluster.state_backend.trim().is_empty() {
+            bail!("field cluster.state_backend: cannot be empty");
+        }
+        if self.cluster.counter_backend.trim().is_empty() {
+            bail!("field cluster.counter_backend: cannot be empty");
+        }
+        if self.cluster.heartbeat_interval_secs == 0 {
+            bail!("field cluster.heartbeat_interval_secs: must be greater than zero");
+        }
+        if self.cluster.config_poll_interval_secs == 0 {
+            bail!("field cluster.config_poll_interval_secs: must be greater than zero");
+        }
+        if self.cluster.state_backend != "local" {
+            bail!("field cluster.state_backend: only local is supported until shared state lands");
+        }
+        if self.cluster.counter_backend != "local" {
+            bail!(
+                "field cluster.counter_backend: only local is supported until distributed counters land"
+            );
+        }
         Ok(())
     }
 

@@ -141,6 +141,7 @@ impl Config {
             telemetry: TelemetryConfig::default(),
             storage: crate::config::StorageConfig::default(),
             reliability: crate::config::ReliabilityConfig::default(),
+            cluster: crate::config::ClusterConfig::default(),
             upstreams: config
                 .upstreams
                 .into_iter()

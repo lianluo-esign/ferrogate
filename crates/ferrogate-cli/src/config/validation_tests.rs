@@ -690,6 +690,62 @@ fn rejects_invalid_storage_retention_and_admin_list_limits() {
     assert!(error.contains("field storage.admin_list_default_limit"));
 }
 
+#[test]
+fn accepts_enabled_local_cluster_identity_config() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            cluster_id: "prod-us".into(),
+            node_id: "auto".into(),
+            node_region: Some("us-east-1".into()),
+            node_zone: Some("us-east-1a".into()),
+            state_backend: "local".into(),
+            counter_backend: "local".into(),
+            heartbeat_interval_secs: 10,
+            config_poll_interval_secs: 5,
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_invalid_enabled_cluster_config() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            cluster_id: String::new(),
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field cluster.cluster_id"));
+
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            state_backend: "postgres".into(),
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field cluster.state_backend"));
+
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            heartbeat_interval_secs: 0,
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field cluster.heartbeat_interval_secs"));
+}
+
 fn upstream() -> Upstream {
     Upstream {
         name: "backend".into(),

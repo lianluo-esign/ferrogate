@@ -28,6 +28,17 @@ fn openai_models_and_chat_non_streaming_dispatch_work() {
             r#"
 listen = "{gateway_addr}"
 
+[cluster]
+enabled = true
+cluster_id = "test-cluster"
+node_id = "test-node-a"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "local"
+heartbeat_interval_secs = 10
+config_poll_interval_secs = 5
+
 [[providers]]
 name = "openai"
 kind = "openai"
@@ -129,6 +140,14 @@ enabled = false
     assert!(admin_status.contains("200 OK"));
     assert!(admin_status.contains("\"runtime\":\"pingora\""));
     assert!(admin_status.contains("\"auth_required\":true"));
+    assert!(admin_status.contains("\"cluster\":"));
+    assert!(admin_status.contains("\"enabled\":true"));
+    assert!(admin_status.contains("\"cluster_id\":\"test-cluster\""));
+    assert!(admin_status.contains("\"node_id\":\"test-node-a\""));
+    assert!(admin_status.contains("\"node_region\":\"local\""));
+    assert!(admin_status.contains("\"node_zone\":\"local-a\""));
+    assert!(admin_status.contains("\"state_backend\":\"local\""));
+    assert!(admin_status.contains("\"counter_backend\":\"local\""));
     assert!(!admin_status.contains("admin-secret"));
 
     let dashboard = http_request(&gateway_addr, "GET", "/admin/", &[], "");

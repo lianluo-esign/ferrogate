@@ -119,6 +119,7 @@ impl FerroGateway {
                     routes: state.config.routes.len(),
                     enabled_routes: state.config.routes.iter().filter(|r| r.enabled).count(),
                     auth_required: state.auth_required(),
+                    cluster: state.cluster_identity().clone(),
                     acme: state.acme_renewal_status().map(|status| AdminAcmeStatus {
                         enabled: status.enabled,
                         domains: status.domains,

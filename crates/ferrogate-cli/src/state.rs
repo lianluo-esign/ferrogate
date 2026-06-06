@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    env,
     net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::{
@@ -222,6 +223,7 @@ impl SharedAppState {
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
+    cluster_identity: Arc<ClusterIdentity>,
     pub(crate) providers: Arc<HashMap<String, Provider>>,
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
     runtime_routes: Arc<Vec<RuntimeRoute>>,
@@ -246,6 +248,31 @@ pub(crate) struct AppState {
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
     acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ClusterIdentity {
+    pub(crate) enabled: bool,
+    pub(crate) cluster_id: String,
+    pub(crate) node_id: String,
+    pub(crate) node_region: Option<String>,
+    pub(crate) node_zone: Option<String>,
+    pub(crate) state_backend: String,
+    pub(crate) counter_backend: String,
+}
+
+impl ClusterIdentity {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            enabled: config.cluster.enabled,
+            cluster_id: config.cluster.cluster_id.clone(),
+            node_id: resolve_cluster_node_id(&config.cluster.node_id),
+            node_region: config.cluster.node_region.clone(),
+            node_zone: config.cluster.node_zone.clone(),
+            state_backend: config.cluster.state_backend.clone(),
+            counter_backend: config.cluster.counter_backend.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -706,6 +733,7 @@ impl AppState {
         let storage = config.storage.clone();
 
         Self {
+            cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
             config: Arc::new(config),
             providers: Arc::new(providers),
             upstreams: Arc::new(upstreams),
@@ -742,6 +770,7 @@ impl AppState {
 
     fn with_reloaded_config(&self, config: Config) -> Self {
         let mut next = AppState::new(config);
+        next.cluster_identity = Arc::clone(&self.cluster_identity);
         next.api_key_token_reservations = Arc::clone(&self.api_key_token_reservations);
         next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
         next.billing_events = Arc::clone(&self.billing_events);
@@ -774,6 +803,10 @@ impl AppState {
 
     pub(crate) fn auth_required(&self) -> bool {
         !self.config.api_keys.is_empty()
+    }
+
+    pub(crate) fn cluster_identity(&self) -> &ClusterIdentity {
+        &self.cluster_identity
     }
 
     pub(crate) fn acme_renewal_status(&self) -> Option<AcmeRenewalStatus> {
@@ -1950,6 +1983,22 @@ fn route_estimated_unit_cost(route: &ModelRoute) -> f64 {
         (None, Some(output)) => output,
         (None, None) => f64::INFINITY,
     }
+}
+
+fn resolve_cluster_node_id(configured: &str) -> String {
+    let configured = configured.trim();
+    if configured != "auto" {
+        return configured.to_string();
+    }
+    env::var("FERROGATE_NODE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env::var("HOSTNAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| format!("ferrogate-{}", std::process::id()))
 }
 
 fn usage_aggregate_id(

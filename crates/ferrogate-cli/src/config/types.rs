@@ -26,6 +26,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) reliability: ReliabilityConfig,
     #[serde(default)]
+    pub(crate) cluster: ClusterConfig,
+    #[serde(default)]
     pub(crate) upstreams: Vec<Upstream>,
     #[serde(default)]
     pub(crate) routes: Vec<RouteRule>,
@@ -35,6 +37,28 @@ pub(crate) struct Config {
 pub(crate) struct AdminConfig {
     #[serde(default)]
     pub(crate) listen: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ClusterConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_cluster_id")]
+    pub(crate) cluster_id: String,
+    #[serde(default = "default_cluster_node_id")]
+    pub(crate) node_id: String,
+    #[serde(default)]
+    pub(crate) node_region: Option<String>,
+    #[serde(default)]
+    pub(crate) node_zone: Option<String>,
+    #[serde(default = "default_cluster_state_backend")]
+    pub(crate) state_backend: String,
+    #[serde(default = "default_cluster_counter_backend")]
+    pub(crate) counter_backend: String,
+    #[serde(default = "default_cluster_heartbeat_interval_secs")]
+    pub(crate) heartbeat_interval_secs: u64,
+    #[serde(default = "default_cluster_config_poll_interval_secs")]
+    pub(crate) config_poll_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -375,6 +399,30 @@ fn default_true() -> bool {
     true
 }
 
+fn default_cluster_id() -> String {
+    "default".to_string()
+}
+
+fn default_cluster_node_id() -> String {
+    "auto".to_string()
+}
+
+fn default_cluster_state_backend() -> String {
+    "local".to_string()
+}
+
+fn default_cluster_counter_backend() -> String {
+    "local".to_string()
+}
+
+fn default_cluster_heartbeat_interval_secs() -> u64 {
+    10
+}
+
+fn default_cluster_config_poll_interval_secs() -> u64 {
+    5
+}
+
 fn default_acme_directory_url() -> String {
     "https://acme-v02.api.letsencrypt.org/directory".to_string()
 }
@@ -472,6 +520,22 @@ impl Default for StorageConfig {
     }
 }
 
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cluster_id: default_cluster_id(),
+            node_id: default_cluster_node_id(),
+            node_region: None,
+            node_zone: None,
+            state_backend: default_cluster_state_backend(),
+            counter_backend: default_cluster_counter_backend(),
+            heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
+            config_poll_interval_secs: default_cluster_config_poll_interval_secs(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -485,6 +549,7 @@ impl Default for Config {
             telemetry: TelemetryConfig::default(),
             storage: StorageConfig::default(),
             reliability: ReliabilityConfig::default(),
+            cluster: ClusterConfig::default(),
             upstreams: Vec::new(),
             routes: Vec::new(),
         }

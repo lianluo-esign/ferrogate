@@ -21,6 +21,17 @@ fn parses_config_file() {
         r#"
 listen = "0.0.0.0:8080"
 
+[cluster]
+enabled = true
+cluster_id = "prod-us"
+node_id = "gateway-a"
+node_region = "us-east-1"
+node_zone = "us-east-1a"
+state_backend = "local"
+counter_backend = "local"
+heartbeat_interval_secs = 15
+config_poll_interval_secs = 7
+
 [telemetry]
 service_name = "ferrogate-dev"
 otlp_endpoint = "http://127.0.0.1:4318"
@@ -89,6 +100,15 @@ log_bodies = true
 
     let config = Config::load(&path).unwrap();
     assert_eq!(config.listen, "0.0.0.0:8080");
+    assert!(config.cluster.enabled);
+    assert_eq!(config.cluster.cluster_id, "prod-us");
+    assert_eq!(config.cluster.node_id, "gateway-a");
+    assert_eq!(config.cluster.node_region.as_deref(), Some("us-east-1"));
+    assert_eq!(config.cluster.node_zone.as_deref(), Some("us-east-1a"));
+    assert_eq!(config.cluster.state_backend, "local");
+    assert_eq!(config.cluster.counter_backend, "local");
+    assert_eq!(config.cluster.heartbeat_interval_secs, 15);
+    assert_eq!(config.cluster.config_poll_interval_secs, 7);
     assert_eq!(config.telemetry.service_name, "ferrogate-dev");
     assert_eq!(
         config.telemetry.otlp_endpoint.as_deref(),

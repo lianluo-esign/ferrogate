@@ -7,6 +7,17 @@ fn config_model_supports_serde_roundtrip() {
         admin: AdminConfig {
             listen: Some("localhost:2019".into()),
         },
+        cluster: ClusterConfig {
+            enabled: true,
+            cluster_id: "cluster-a".into(),
+            node_id: "node-a".into(),
+            node_region: Some("us-east-1".into()),
+            node_zone: Some("us-east-1a".into()),
+            state_backend: "local".into(),
+            counter_backend: "local".into(),
+            heartbeat_interval_secs: 11,
+            config_poll_interval_secs: 3,
+        },
         upstreams: vec![Upstream {
             name: "backend".into(),
             url: Some("http://127.0.0.1:8081".into()),
@@ -60,6 +71,7 @@ fn config_model_supports_serde_roundtrip() {
 
     assert_eq!(decoded.listen, config.listen);
     assert_eq!(decoded.admin.listen.as_deref(), Some("localhost:2019"));
+    assert_eq!(decoded.cluster, config.cluster);
     assert!(!decoded.tls.is_enabled());
     assert_eq!(
         decoded.telemetry.otlp_endpoint.as_deref(),
