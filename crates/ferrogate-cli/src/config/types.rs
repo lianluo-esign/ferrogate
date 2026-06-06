@@ -59,6 +59,10 @@ pub(crate) struct ClusterConfig {
     pub(crate) file_state_path: Option<String>,
     #[serde(default = "default_cluster_counter_backend")]
     pub(crate) counter_backend: String,
+    #[serde(default)]
+    pub(crate) redis_url: Option<String>,
+    #[serde(default = "default_cluster_counter_timeout_millis")]
+    pub(crate) counter_timeout_millis: u64,
     #[serde(default = "default_cluster_heartbeat_interval_secs")]
     pub(crate) heartbeat_interval_secs: u64,
     #[serde(default = "default_cluster_config_poll_interval_secs")]
@@ -433,6 +437,10 @@ fn default_cluster_counter_backend() -> String {
     "local".to_string()
 }
 
+fn default_cluster_counter_timeout_millis() -> u64 {
+    500
+}
+
 fn default_cluster_heartbeat_interval_secs() -> u64 {
     10
 }
@@ -569,6 +577,8 @@ impl Default for ClusterConfig {
             state_backend: default_cluster_state_backend(),
             file_state_path: None,
             counter_backend: default_cluster_counter_backend(),
+            redis_url: None,
+            counter_timeout_millis: default_cluster_counter_timeout_millis(),
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             config_poll_interval_secs: default_cluster_config_poll_interval_secs(),
         }

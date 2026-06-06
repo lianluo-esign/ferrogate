@@ -357,6 +357,9 @@ impl Config {
         if self.cluster.counter_backend.trim().is_empty() {
             bail!("field cluster.counter_backend: cannot be empty");
         }
+        if self.cluster.counter_timeout_millis == 0 {
+            bail!("field cluster.counter_timeout_millis: must be greater than zero");
+        }
         if self.cluster.heartbeat_interval_secs == 0 {
             bail!("field cluster.heartbeat_interval_secs: must be greater than zero");
         }
@@ -382,9 +385,26 @@ impl Config {
             }
         }
         if self.cluster.counter_backend != "local" {
-            bail!(
-                "field cluster.counter_backend: only local is supported until distributed counters land"
-            );
+            match self.cluster.counter_backend.as_str() {
+                "redis" => {
+                    let redis_url = self
+                        .cluster
+                        .redis_url
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "field cluster.redis_url: required when cluster.counter_backend is redis"
+                            )
+                        })?;
+                    if !redis_url.starts_with("redis://") && !redis_url.starts_with("rediss://") {
+                        bail!("field cluster.redis_url: must start with redis:// or rediss://");
+                    }
+                }
+                _ => {
+                    bail!("field cluster.counter_backend: only local and redis are supported");
+                }
+            }
         }
         Ok(())
     }

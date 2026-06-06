@@ -12,6 +12,7 @@ use std::{
 const IMAGE_TAG: &str = "ferrogate:e2e-local";
 const NETWORK_NAME: &str = "ferrogate-e2e-net";
 const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
+const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
 const GATEWAY_A_CONTAINER: &str = "ferrogate-e2e-gateway-a";
 const GATEWAY_B_CONTAINER: &str = "ferrogate-e2e-gateway-b";
 const GATEWAY_A_PORT: u16 = 18080;
@@ -23,8 +24,9 @@ fn main() -> Result<()> {
         "cluster-drain" => run_cluster_drain(),
         "shared-api-key" => run_shared_api_key(),
         "shared-state-stale" => run_shared_state_stale(),
+        "redis-counters" => run_redis_counters(),
         _ => bail!(
-            "unknown scenario {scenario}; supported: cluster-drain, shared-api-key, shared-state-stale"
+            "unknown scenario {scenario}; supported: cluster-drain, shared-api-key, shared-state-stale, redis-counters"
         ),
     }
 }
@@ -250,6 +252,90 @@ fn run_shared_state_stale() -> Result<()> {
     Ok(())
 }
 
+fn run_redis_counters() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    start_redis()?;
+    wait_for_provider()?;
+    wait_for_redis()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_a = dir.path().join("gateway-a.toml");
+    let config_b = dir.path().join("gateway-b.toml");
+    std::fs::write(&config_a, redis_counter_gateway_config("e2e-node-a"))?;
+    std::fs::write(&config_b, redis_counter_gateway_config("e2e-node-b"))?;
+
+    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_a, None)?;
+    start_gateway(GATEWAY_B_CONTAINER, GATEWAY_B_PORT, &config_b, None)?;
+    wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
+    wait_for_http(GATEWAY_B_PORT, "/readyz", 200)?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-rate-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-rate-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+            Ok(())
+        },
+    )?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-budget-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[],"max_tokens":8}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-budget-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[],"max_tokens":8}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "token_budget_exceeded");
+            Ok(())
+        },
+    )?;
+
+    println!("redis-counters scenario passed");
+    Ok(())
+}
+
 struct SharedFileGateways {
     _dir: tempfile::TempDir,
     state_path: std::path::PathBuf,
@@ -411,6 +497,61 @@ scopes = ["admin.read", "admin.write"]
     )
 }
 
+fn redis_counter_gateway_config(node_id: &str) -> String {
+    format!(
+        r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "{node_id}"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "redis"
+redis_url = "redis://ferrogate-e2e-redis:6379/0"
+counter_timeout_millis = 500
+heartbeat_interval_secs = 10
+config_poll_interval_secs = 5
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "redis_rate"
+name = "Redis rate limit"
+key = "redis-rate-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+request_limit_per_minute = 1
+
+[[api_keys]]
+id = "redis_budget"
+name = "Redis budget"
+key = "redis-budget-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+monthly_token_budget = 8
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+    )
+}
+
 fn start_provider() -> Result<()> {
     let provider_image =
         env::var("FERROGATE_E2E_PROVIDER_IMAGE").unwrap_or_else(|_| "python:3.11-slim".into());
@@ -447,6 +588,25 @@ ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
         "-u",
         "-c",
         command,
+    ])
+}
+
+fn start_redis() -> Result<()> {
+    let redis_image =
+        env::var("FERROGATE_E2E_REDIS_IMAGE").unwrap_or_else(|_| "redis:7-alpine".into());
+    docker([
+        "run",
+        "-d",
+        "--name",
+        REDIS_CONTAINER,
+        "--network",
+        NETWORK_NAME,
+        &redis_image,
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
     ])
 }
 
@@ -506,6 +666,24 @@ fn wait_for_provider() -> Result<()> {
         thread::sleep(Duration::from_millis(250));
     }
     bail!("provider mock did not start listening on 8081")
+}
+
+fn wait_for_redis() -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(15) {
+        if Command::new("docker")
+            .args(["exec", REDIS_CONTAINER, "redis-cli", "PING"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    bail!("redis did not start responding to PING")
 }
 
 fn wait_for_http(host_port: u16, path: &str, expected_status: u16) -> Result<()> {
@@ -619,6 +797,7 @@ fn cleanup_containers() {
             GATEWAY_A_CONTAINER,
             GATEWAY_B_CONTAINER,
             PROVIDER_CONTAINER,
+            REDIS_CONTAINER,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -145,23 +145,43 @@ pub(crate) fn authenticate(
                 });
             }
             if let Some(limit) = configured_key.request_limit_per_minute {
-                if !state.try_consume_api_key_request(&configured_key.id, limit) {
-                    return Err(AuthError {
-                        status: StatusCode::TOO_MANY_REQUESTS,
-                        code: "rate_limit_exceeded",
-                        message: format!(
-                            "API key request rate limit is exhausted for request {request_id}"
-                        ),
-                    });
+                match state.try_consume_api_key_request(&configured_key.id, limit) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(AuthError {
+                            status: StatusCode::TOO_MANY_REQUESTS,
+                            code: "rate_limit_exceeded",
+                            message: format!(
+                                "API key request rate limit is exhausted for request {request_id}"
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        return Err(AuthError {
+                            status: StatusCode::SERVICE_UNAVAILABLE,
+                            code: "governance_counter_unavailable",
+                            message: format!("gateway counter backend is unavailable: {error}"),
+                        });
+                    }
                 }
             }
             if let Some(budget) = configured_key.monthly_token_budget {
-                if state.api_key_tokens_committed_or_reserved(&configured_key.id) >= budget {
-                    return Err(AuthError {
-                        status: StatusCode::TOO_MANY_REQUESTS,
-                        code: "token_budget_exceeded",
-                        message: "API key token budget is exhausted".into(),
-                    });
+                match state.api_key_tokens_committed_or_reserved(&configured_key.id) {
+                    Ok(tokens) if tokens < budget => {}
+                    Ok(_) => {
+                        return Err(AuthError {
+                            status: StatusCode::TOO_MANY_REQUESTS,
+                            code: "token_budget_exceeded",
+                            message: "API key token budget is exhausted".into(),
+                        });
+                    }
+                    Err(error) => {
+                        return Err(AuthError {
+                            status: StatusCode::SERVICE_UNAVAILABLE,
+                            code: "governance_counter_unavailable",
+                            message: format!("gateway counter backend is unavailable: {error}"),
+                        });
+                    }
                 }
             }
             return Ok(auth);

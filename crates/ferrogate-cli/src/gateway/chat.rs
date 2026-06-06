@@ -449,7 +449,7 @@ impl FerroGateway {
                         budget,
                         estimated_usage.total_tokens,
                     ) {
-                        Some(reservation) => {
+                        Ok(Some(reservation)) => {
                             info!(
                                 request_id = %ctx.request_id,
                                 api_key_id = %api_key_id,
@@ -459,7 +459,7 @@ impl FerroGateway {
                             );
                             token_reservation = Some(reservation);
                         }
-                        None => {
+                        Ok(None) => {
                             self.record_ai_error_log(
                                 endpoint,
                                 ctx,
@@ -476,6 +476,28 @@ impl FerroGateway {
                                 StatusCode::TOO_MANY_REQUESTS,
                                 "token_budget_exceeded",
                                 "API key token budget cannot cover the estimated request usage",
+                                &ctx.request_id,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            self.record_ai_error_log(
+                                endpoint,
+                                ctx,
+                                AiErrorLog {
+                                    tenant: policy_request.tenant.clone(),
+                                    logical_model: Some(&request.model),
+                                    provider: Some(&provider.name),
+                                    status: StatusCode::SERVICE_UNAVAILABLE,
+                                    error_code: "governance_counter_unavailable",
+                                },
+                            );
+                            write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "governance_counter_unavailable",
+                                format!("gateway counter backend is unavailable: {error}"),
                                 &ctx.request_id,
                             )
                             .await?;

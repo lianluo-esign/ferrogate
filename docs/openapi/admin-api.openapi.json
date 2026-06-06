@@ -1391,7 +1391,12 @@
             "description": "Cluster control-plane state backend. local is process-local; file uses a shared JSON file for lightweight multi-node API key and policy propagation."
           },
           "counter_backend": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "local",
+              "redis"
+            ],
+            "description": "Cluster counter backend. local is process-local; redis uses shared atomic counters for cluster-safe request limits and token-budget reservation/settlement."
           },
           "active_revision": {
             "type": "string"

@@ -720,6 +720,8 @@ fn accepts_enabled_local_cluster_identity_config() {
             state_backend: "local".into(),
             file_state_path: None,
             counter_backend: "local".into(),
+            redis_url: None,
+            counter_timeout_millis: 500,
             heartbeat_interval_secs: 10,
             config_poll_interval_secs: 5,
         },
@@ -739,6 +741,8 @@ fn accepts_file_cluster_state_backend_with_path() {
             state_backend: "file".into(),
             file_state_path: Some("/var/lib/ferrogate/cluster-state.json".into()),
             counter_backend: "local".into(),
+            redis_url: None,
+            counter_timeout_millis: 500,
             heartbeat_interval_secs: 10,
             config_poll_interval_secs: 5,
             ..ClusterConfig::default()
@@ -747,6 +751,42 @@ fn accepts_file_cluster_state_backend_with_path() {
     };
 
     config.validate().unwrap();
+}
+
+#[test]
+fn accepts_redis_cluster_counter_backend_with_url() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            cluster_id: "prod-us".into(),
+            node_id: "gateway-a".into(),
+            counter_backend: "redis".into(),
+            redis_url: Some("redis://redis:6379/0".into()),
+            counter_timeout_millis: 250,
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_redis_cluster_counter_backend_without_url() {
+    let config = Config {
+        cluster: ClusterConfig {
+            enabled: true,
+            cluster_id: "prod-us".into(),
+            node_id: "gateway-a".into(),
+            counter_backend: "redis".into(),
+            redis_url: None,
+            ..ClusterConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field cluster.redis_url"));
 }
 
 #[test]

@@ -39,6 +39,7 @@ use ferrogate_storage::{
     StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
+use redis::Commands;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -456,8 +457,7 @@ pub(crate) struct AppState {
     provider_circuit_config: Option<ProviderCircuitConfig>,
     provider_circuits: Arc<HashMap<String, ProviderCircuitBreaker>>,
     provider_routing_metrics: Arc<Mutex<ProviderRoutingMetrics>>,
-    api_key_request_windows: Arc<HashMap<String, ApiKeyRequestWindow>>,
-    api_key_token_reservations: Arc<Mutex<HashMap<String, u64>>>,
+    cluster_counters: Arc<ClusterCounterBackend>,
     metering_events: Arc<InMemoryBillingEventSink>,
     metering_exporter: Option<Arc<MeteringExporter>>,
     request_logs: Arc<Mutex<InMemoryAppendRepository<StoredRequestLog>>>,
@@ -1001,18 +1001,13 @@ impl AppState {
         } else {
             HashMap::new()
         };
-        let api_key_request_windows = config
-            .api_keys
-            .iter()
-            .filter(|key| key.request_limit_per_minute.is_some())
-            .map(|key| (key.id.clone(), ApiKeyRequestWindow::default()))
-            .collect();
         let storage = config.storage.clone();
         let active_revision = config_snapshot_id(&config);
         let metering_exporter = MeteringExporter::from_config(&config.metering)
             .ok()
             .flatten()
             .map(Arc::new);
+        let cluster_counters = ClusterCounterBackend::from_config(&config);
 
         Self {
             cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
@@ -1033,8 +1028,7 @@ impl AppState {
             provider_circuit_config,
             provider_circuits: Arc::new(provider_circuits),
             provider_routing_metrics: Arc::new(Mutex::new(ProviderRoutingMetrics::default())),
-            api_key_request_windows: Arc::new(api_key_request_windows),
-            api_key_token_reservations: Arc::new(Mutex::new(HashMap::new())),
+            cluster_counters: Arc::new(cluster_counters),
             metering_events: Arc::new(InMemoryBillingEventSink::with_retention_limit(
                 storage.billing_event_retention_records,
             )),
@@ -1060,7 +1054,10 @@ impl AppState {
     fn with_reloaded_config(&self, config: Config) -> Self {
         let mut next = AppState::new(config);
         next.cluster_identity = Arc::clone(&self.cluster_identity);
-        next.api_key_token_reservations = Arc::clone(&self.api_key_token_reservations);
+        next.cluster_counters = Arc::new(ClusterCounterBackend::from_reloaded_config(
+            &next.config,
+            &self.cluster_counters,
+        ));
         next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
         next.metering_events = Arc::clone(&self.metering_events);
         next.request_logs = Arc::clone(&self.request_logs);
@@ -1500,10 +1497,12 @@ impl AppState {
         )
     }
 
-    pub(crate) fn try_consume_api_key_request(&self, api_key_id: &str, limit: u64) -> bool {
-        self.api_key_request_windows
-            .get(api_key_id)
-            .is_none_or(|window| window.try_consume(limit, now_unix_seconds().unwrap_or_default()))
+    pub(crate) fn try_consume_api_key_request(
+        &self,
+        api_key_id: &str,
+        limit: u64,
+    ) -> anyhow::Result<bool> {
+        self.cluster_counters.try_consume_request(api_key_id, limit)
     }
 
     pub(crate) fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
@@ -1520,14 +1519,12 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub(crate) fn api_key_tokens_committed_or_reserved(&self, api_key_id: &str) -> u64 {
-        self.api_key_total_tokens_used(api_key_id)
-            + self
-                .api_key_token_reservations
-                .lock()
-                .ok()
-                .and_then(|reservations| reservations.get(api_key_id).copied())
-                .unwrap_or_default()
+    pub(crate) fn api_key_tokens_committed_or_reserved(
+        &self,
+        api_key_id: &str,
+    ) -> anyhow::Result<u64> {
+        self.cluster_counters
+            .committed_or_reserved(api_key_id, self.api_key_total_tokens_used(api_key_id))
     }
 
     pub(crate) fn try_reserve_api_key_tokens(
@@ -1535,27 +1532,10 @@ impl AppState {
         api_key_id: &str,
         budget: u64,
         estimated_tokens: u64,
-    ) -> Option<ApiKeyTokenReservation> {
+    ) -> anyhow::Result<Option<ApiKeyTokenReservation>> {
         let committed = self.api_key_total_tokens_used(api_key_id);
-        let Ok(mut reservations) = self.api_key_token_reservations.lock() else {
-            return None;
-        };
-        let reserved = reservations.get(api_key_id).copied().unwrap_or_default();
-        if committed
-            .saturating_add(reserved)
-            .saturating_add(estimated_tokens)
-            > budget
-        {
-            return None;
-        }
-
-        *reservations.entry(api_key_id.to_string()).or_default() += estimated_tokens;
-        Some(ApiKeyTokenReservation {
-            api_key_id: api_key_id.to_string(),
-            tokens: estimated_tokens,
-            reservations: Arc::clone(&self.api_key_token_reservations),
-            released: false,
-        })
+        self.cluster_counters
+            .try_reserve_tokens(api_key_id, committed, budget, estimated_tokens)
     }
 
     pub(crate) fn evaluate_policy(
@@ -1643,6 +1623,19 @@ impl AppState {
             draft.provider,
             &usage,
         );
+        if let Some(api_key_id) = &draft.request.tenant.api_key_id {
+            if let Err(error) = self
+                .cluster_counters
+                .record_used_tokens(api_key_id, usage.total_tokens)
+            {
+                warn!(
+                    api_key_id = %api_key_id,
+                    total_tokens = usage.total_tokens,
+                    error = %error,
+                    "failed to record shared token counter usage"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1889,7 +1882,7 @@ struct BillingTokenUsageDraft<'a> {
 pub(crate) struct ApiKeyTokenReservation {
     api_key_id: String,
     tokens: u64,
-    reservations: Arc<Mutex<HashMap<String, u64>>>,
+    counters: Arc<ClusterCounterBackend>,
     released: bool,
 }
 
@@ -1906,14 +1899,7 @@ impl ApiKeyTokenReservation {
         if self.released {
             return;
         }
-        if let Ok(mut reservations) = self.reservations.lock() {
-            if let Some(reserved) = reservations.get_mut(&self.api_key_id) {
-                *reserved = reserved.saturating_sub(self.tokens);
-                if *reserved == 0 {
-                    reservations.remove(&self.api_key_id);
-                }
-            }
-        }
+        self.counters.release_tokens(&self.api_key_id, self.tokens);
         self.released = true;
     }
 }
@@ -2108,6 +2094,296 @@ impl ApiKeyRequestWindow {
 struct ApiKeyRequestWindowState {
     window_started_at: u64,
     count: u64,
+}
+
+#[derive(Debug)]
+enum ClusterCounterBackend {
+    Local {
+        request_windows: HashMap<String, ApiKeyRequestWindow>,
+        token_reservations: Arc<Mutex<HashMap<String, u64>>>,
+    },
+    Redis(RedisCounterBackend),
+}
+
+#[derive(Debug)]
+struct RedisCounterBackend {
+    cluster_id: String,
+    url: String,
+    timeout: Duration,
+}
+
+impl ClusterCounterBackend {
+    fn from_config(config: &Config) -> Self {
+        if config.cluster.enabled && config.cluster.counter_backend == "redis" {
+            if let Some(url) = &config.cluster.redis_url {
+                return Self::Redis(RedisCounterBackend {
+                    cluster_id: config.cluster.cluster_id.clone(),
+                    url: url.clone(),
+                    timeout: Duration::from_millis(config.cluster.counter_timeout_millis),
+                });
+            }
+        }
+
+        Self::Local {
+            request_windows: config
+                .api_keys
+                .iter()
+                .filter(|key| key.request_limit_per_minute.is_some())
+                .map(|key| (key.id.clone(), ApiKeyRequestWindow::default()))
+                .collect(),
+            token_reservations: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn from_reloaded_config(config: &Config, previous: &Arc<Self>) -> Self {
+        match (Self::from_config(config), previous.as_ref()) {
+            (
+                Self::Local {
+                    request_windows, ..
+                },
+                Self::Local {
+                    token_reservations, ..
+                },
+            ) => Self::Local {
+                request_windows,
+                token_reservations: Arc::clone(token_reservations),
+            },
+            (next, _) => next,
+        }
+    }
+
+    fn try_consume_request(&self, api_key_id: &str, limit: u64) -> anyhow::Result<bool> {
+        match self {
+            Self::Local {
+                request_windows, ..
+            } => Ok(request_windows.get(api_key_id).is_none_or(|window| {
+                window.try_consume(limit, now_unix_seconds().unwrap_or_default())
+            })),
+            Self::Redis(redis) => redis.try_consume_request(api_key_id, limit),
+        }
+    }
+
+    fn reserved_tokens(&self, api_key_id: &str) -> anyhow::Result<u64> {
+        match self {
+            Self::Local {
+                token_reservations, ..
+            } => Ok(token_reservations
+                .lock()
+                .ok()
+                .and_then(|reservations| reservations.get(api_key_id).copied())
+                .unwrap_or_default()),
+            Self::Redis(redis) => redis.reserved_tokens(api_key_id),
+        }
+    }
+
+    fn committed_or_reserved(&self, api_key_id: &str, local_committed: u64) -> anyhow::Result<u64> {
+        match self {
+            Self::Local { .. } => {
+                Ok(local_committed.saturating_add(self.reserved_tokens(api_key_id)?))
+            }
+            Self::Redis(redis) => redis.committed_or_reserved(api_key_id),
+        }
+    }
+
+    fn try_reserve_tokens(
+        self: &Arc<Self>,
+        api_key_id: &str,
+        committed: u64,
+        budget: u64,
+        estimated_tokens: u64,
+    ) -> anyhow::Result<Option<ApiKeyTokenReservation>> {
+        match self.as_ref() {
+            Self::Local {
+                token_reservations, ..
+            } => {
+                let Ok(mut reservations) = token_reservations.lock() else {
+                    return Ok(None);
+                };
+                let reserved = reservations.get(api_key_id).copied().unwrap_or_default();
+                if committed
+                    .saturating_add(reserved)
+                    .saturating_add(estimated_tokens)
+                    > budget
+                {
+                    return Ok(None);
+                }
+
+                *reservations.entry(api_key_id.to_string()).or_default() += estimated_tokens;
+                Ok(Some(ApiKeyTokenReservation {
+                    api_key_id: api_key_id.to_string(),
+                    tokens: estimated_tokens,
+                    counters: Arc::clone(self),
+                    released: false,
+                }))
+            }
+            Self::Redis(redis) => {
+                if redis.try_reserve_tokens(api_key_id, budget, estimated_tokens)? {
+                    Ok(Some(ApiKeyTokenReservation {
+                        api_key_id: api_key_id.to_string(),
+                        tokens: estimated_tokens,
+                        counters: Arc::clone(self),
+                        released: false,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    fn record_used_tokens(&self, api_key_id: &str, tokens: u64) -> anyhow::Result<()> {
+        match self {
+            Self::Local { .. } => Ok(()),
+            Self::Redis(redis) => redis.record_used_tokens(api_key_id, tokens),
+        }
+    }
+
+    fn release_tokens(&self, api_key_id: &str, tokens: u64) {
+        match self {
+            Self::Local {
+                token_reservations, ..
+            } => {
+                if let Ok(mut reservations) = token_reservations.lock() {
+                    if let Some(reserved) = reservations.get_mut(api_key_id) {
+                        *reserved = reserved.saturating_sub(tokens);
+                        if *reserved == 0 {
+                            reservations.remove(api_key_id);
+                        }
+                    }
+                }
+            }
+            Self::Redis(redis) => {
+                let _ = redis.release_tokens(api_key_id, tokens);
+            }
+        }
+    }
+}
+
+impl RedisCounterBackend {
+    fn connection(&self) -> anyhow::Result<redis::Connection> {
+        let client = redis::Client::open(self.url.as_str())?;
+        let connection = client.get_connection_with_timeout(self.timeout)?;
+        connection.set_read_timeout(Some(self.timeout))?;
+        connection.set_write_timeout(Some(self.timeout))?;
+        Ok(connection)
+    }
+
+    fn key(&self, suffix: &str) -> String {
+        format!("ferrogate:{}:{suffix}", self.cluster_id)
+    }
+
+    fn api_key_prefix(&self, api_key_id: &str) -> String {
+        let sanitized = sanitize_redis_key_part(api_key_id);
+        self.key(&format!("api-key:{sanitized}"))
+    }
+
+    fn try_consume_request(&self, api_key_id: &str, limit: u64) -> anyhow::Result<bool> {
+        let now = now_unix_seconds().unwrap_or_default();
+        let window = now / 60;
+        let key = format!("{}:rate:{window}", self.api_key_prefix(api_key_id));
+        let mut connection = self.connection()?;
+        let count: u64 = redis::cmd("INCR").arg(&key).query(&mut connection)?;
+        if count == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&key)
+                .arg(120)
+                .query(&mut connection)?;
+        }
+        Ok(count <= limit)
+    }
+
+    fn reserved_tokens(&self, api_key_id: &str) -> anyhow::Result<u64> {
+        let key = format!("{}:tokens:reserved", self.api_key_prefix(api_key_id));
+        let mut connection = self.connection()?;
+        Ok(connection.get(key).unwrap_or_default())
+    }
+
+    fn committed_or_reserved(&self, api_key_id: &str) -> anyhow::Result<u64> {
+        let prefix = self.api_key_prefix(api_key_id);
+        let used_key = format!("{prefix}:tokens:used");
+        let reserved_key = format!("{prefix}:tokens:reserved");
+        let mut connection = self.connection()?;
+        let used: u64 = connection.get(used_key).unwrap_or_default();
+        let reserved: u64 = connection.get(reserved_key).unwrap_or_default();
+        Ok(used.saturating_add(reserved))
+    }
+
+    fn try_reserve_tokens(
+        &self,
+        api_key_id: &str,
+        budget: u64,
+        estimated_tokens: u64,
+    ) -> anyhow::Result<bool> {
+        let prefix = self.api_key_prefix(api_key_id);
+        let used_key = format!("{prefix}:tokens:used");
+        let reserved_key = format!("{prefix}:tokens:reserved");
+        let script = redis::Script::new(
+            r#"
+local used = tonumber(redis.call('GET', KEYS[1]) or '0')
+local reserved = tonumber(redis.call('GET', KEYS[2]) or '0')
+local budget = tonumber(ARGV[1])
+local estimate = tonumber(ARGV[2])
+if used + reserved + estimate > budget then
+  return 0
+end
+redis.call('INCRBY', KEYS[2], estimate)
+return 1
+"#,
+        );
+        let mut connection = self.connection()?;
+        let reserved: u8 = script
+            .key(used_key)
+            .key(reserved_key)
+            .arg(budget)
+            .arg(estimated_tokens)
+            .invoke(&mut connection)?;
+        Ok(reserved == 1)
+    }
+
+    fn record_used_tokens(&self, api_key_id: &str, tokens: u64) -> anyhow::Result<()> {
+        if tokens == 0 {
+            return Ok(());
+        }
+        let key = format!("{}:tokens:used", self.api_key_prefix(api_key_id));
+        let mut connection = self.connection()?;
+        let _: u64 = redis::cmd("INCRBY")
+            .arg(key)
+            .arg(tokens)
+            .query(&mut connection)?;
+        Ok(())
+    }
+
+    fn release_tokens(&self, api_key_id: &str, tokens: u64) -> anyhow::Result<()> {
+        let key = format!("{}:tokens:reserved", self.api_key_prefix(api_key_id));
+        let script = redis::Script::new(
+            r#"
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local next = current - tonumber(ARGV[1])
+if next <= 0 then
+  redis.call('DEL', KEYS[1])
+else
+  redis.call('SET', KEYS[1], next)
+end
+return 1
+"#,
+        );
+        let mut connection = self.connection()?;
+        let _: u8 = script.key(key).arg(tokens).invoke(&mut connection)?;
+        Ok(())
+    }
+}
+
+fn sanitize_redis_key_part(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn provider_circuit_config(config: &Config) -> Option<ProviderCircuitConfig> {
@@ -2907,8 +3183,8 @@ mod tests {
             ..Config::default()
         });
 
-        assert!(state.try_consume_api_key_request("key_dev", 1));
-        assert!(!state.try_consume_api_key_request("key_dev", 1));
+        assert!(state.try_consume_api_key_request("key_dev", 1).unwrap());
+        assert!(!state.try_consume_api_key_request("key_dev", 1).unwrap());
     }
 
     #[test]
@@ -2917,15 +3193,32 @@ mod tests {
 
         let reservation = state
             .try_reserve_api_key_tokens("key_dev", 10, 7)
+            .unwrap()
             .expect("first reservation should fit");
 
-        assert_eq!(state.api_key_tokens_committed_or_reserved("key_dev"), 7);
-        assert!(state.try_reserve_api_key_tokens("key_dev", 10, 4).is_none());
+        assert_eq!(
+            state
+                .api_key_tokens_committed_or_reserved("key_dev")
+                .unwrap(),
+            7
+        );
+        assert!(state
+            .try_reserve_api_key_tokens("key_dev", 10, 4)
+            .unwrap()
+            .is_none());
 
         drop(reservation);
 
-        assert_eq!(state.api_key_tokens_committed_or_reserved("key_dev"), 0);
-        assert!(state.try_reserve_api_key_tokens("key_dev", 10, 4).is_some());
+        assert_eq!(
+            state
+                .api_key_tokens_committed_or_reserved("key_dev")
+                .unwrap(),
+            0
+        );
+        assert!(state
+            .try_reserve_api_key_tokens("key_dev", 10, 4)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

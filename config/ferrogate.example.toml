@@ -141,3 +141,12 @@ team_id = "team_platform"
 project_id = "project_ferrogate"
 monthly_token_budget = 1000000
 request_limit_per_minute = 60
+
+# Optional cluster-safe counters for multi-node deployments.
+# Keep the default local counter backend for single-node development.
+# [cluster]
+# enabled = true
+# cluster_id = "prod-us"
+# counter_backend = "redis"
+# redis_url = "redis://redis:6379/0"
+# counter_timeout_millis = 500

@@ -257,6 +257,12 @@ development keys.
 ferrogate hash-key --secret 'your-client-secret'
 ```
 
+For multi-node cluster mode, set `cluster.counter_backend = "redis"` with
+`cluster.redis_url` to enforce API-key request limits and token-budget
+reservation/settlement across gateway replicas. Redis counters are fail-closed:
+if the counter backend is unavailable, guarded AI requests return a governance
+backend error instead of falling back to per-process counters.
+
 ### OpenRouter Provider
 
 OpenRouter is available as a first-class provider kind while using the same
