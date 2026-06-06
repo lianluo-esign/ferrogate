@@ -1282,7 +1282,13 @@
           },
           "readiness_reason": {
             "type": "string",
-            "enum": ["state_loaded", "sync_error", "revision_missing", "operator_drain"]
+            "enum": [
+              "state_loaded",
+              "stale_state",
+              "sync_error",
+              "revision_missing",
+              "operator_drain"
+            ]
           },
           "draining": {
             "type": "boolean"

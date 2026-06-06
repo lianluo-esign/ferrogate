@@ -262,12 +262,21 @@ impl SharedAppState {
             return Ok(None);
         };
         let active = self.current();
-        let Some(snapshot) = control_plane.load()? else {
+        let snapshot = match control_plane.load() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let message = error.to_string();
+                self.mark_cluster_sync_error(message);
+                return Err(error);
+            }
+        };
+        let Some(snapshot) = snapshot else {
             let revision = control_plane.publish_from_config(&active.config)?;
             self.update_cluster_sync_revision(revision);
             return Ok(None);
         };
         if snapshot.revision == active.cluster_sync.active_revision {
+            self.update_cluster_sync_revision(snapshot.revision);
             return Ok(None);
         }
         let mut candidate = (*active.config).clone();
@@ -320,6 +329,31 @@ impl SharedAppState {
                     last_sync_at_unix: now_unix_seconds(),
                     last_sync_error: None,
                     stale: false,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn mark_cluster_sync_error(&self, error: impl Into<String>) {
+        let error = error.into();
+        match self.inner.write() {
+            Ok(mut state) => {
+                let current = state.cluster_sync.as_ref();
+                state.cluster_sync = Arc::new(ClusterSyncStatus {
+                    active_revision: current.active_revision.clone(),
+                    last_sync_at_unix: current.last_sync_at_unix,
+                    last_sync_error: Some(error.clone()),
+                    stale: true,
+                });
+            }
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                let current = state.cluster_sync.as_ref();
+                state.cluster_sync = Arc::new(ClusterSyncStatus {
+                    active_revision: current.active_revision.clone(),
+                    last_sync_at_unix: current.last_sync_at_unix,
+                    last_sync_error: Some(error),
+                    stale: true,
                 });
             }
         }
@@ -500,10 +534,13 @@ impl ClusterIdentity {
 
 impl ClusterStatus {
     fn new(identity: &ClusterIdentity, sync: &ClusterSyncStatus, drain: &DrainStatus) -> Self {
-        let state_ready = !sync.active_revision.trim().is_empty() && sync.last_sync_error.is_none();
+        let has_revision = !sync.active_revision.trim().is_empty();
+        let state_ready = has_revision;
         let ready = state_ready && drain.accepting_new_requests;
         let readiness_reason = if drain.draining {
             "operator_drain"
+        } else if sync.stale && has_revision {
+            "stale_state"
         } else if state_ready {
             "state_loaded"
         } else if sync.last_sync_error.is_some() {

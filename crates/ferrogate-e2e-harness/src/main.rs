@@ -22,7 +22,10 @@ fn main() -> Result<()> {
     match scenario.as_str() {
         "cluster-drain" => run_cluster_drain(),
         "shared-api-key" => run_shared_api_key(),
-        _ => bail!("unknown scenario {scenario}; supported: cluster-drain, shared-api-key"),
+        "shared-state-stale" => run_shared_state_stale(),
+        _ => bail!(
+            "unknown scenario {scenario}; supported: cluster-drain, shared-api-key, shared-state-stale"
+        ),
     }
 }
 
@@ -142,6 +145,117 @@ fn run_shared_api_key() -> Result<()> {
     start_provider()?;
     wait_for_provider()?;
 
+    let shared = start_shared_file_gateways()?;
+    publish_shared_client_and_policy()?;
+
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/api-keys/shared-client",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["id"], "shared-client");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/policies/shared-policy",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["policy"]["name"], "shared-policy");
+            assert_eq!(body["policy"]["code"], "blocked_by_shared_policy");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer shared-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    let raw_state = std::fs::read_to_string(&shared.state_path)?;
+    let shared_state: Value = serde_json::from_str(&raw_state)?;
+    assert_eq!(shared_state["version"], 1);
+    assert!(shared_state["api_keys"]
+        .as_array()
+        .is_some_and(|keys| keys.iter().any(|key| key["id"] == "shared-client")));
+
+    println!("shared-api-key scenario passed");
+    Ok(())
+}
+
+fn run_shared_state_stale() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let _shared = start_shared_file_gateways()?;
+    publish_shared_client_and_policy()?;
+
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/api-keys/shared-client",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["id"], "shared-client");
+            Ok(())
+        },
+    )?;
+    corrupt_shared_state_file()?;
+    expect_json(GATEWAY_B_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["cluster"]["stale"], true);
+        assert_eq!(body["cluster"]["readiness_reason"], "stale_state");
+        assert!(body["cluster"]["last_sync_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid file cluster state JSON")));
+        Ok(())
+    })?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer shared-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    println!("shared-state-stale scenario passed");
+    Ok(())
+}
+
+struct SharedFileGateways {
+    _dir: tempfile::TempDir,
+    state_path: std::path::PathBuf,
+}
+
+fn start_shared_file_gateways() -> Result<SharedFileGateways> {
     let dir = tempfile::tempdir()?;
     let state_dir = dir.path().join("state");
     let state_path = state_dir.join("cluster-state.json");
@@ -192,6 +306,13 @@ fn run_shared_api_key() -> Result<()> {
         Ok(())
     })?;
 
+    Ok(SharedFileGateways {
+        _dir: dir,
+        state_path,
+    })
+}
+
+fn publish_shared_client_and_policy() -> Result<()> {
     expect_json(
         GATEWAY_A_PORT,
         "POST",
@@ -205,19 +326,6 @@ fn run_shared_api_key() -> Result<()> {
         |body| {
             assert_eq!(body["key"]["id"], "shared-client");
             assert_eq!(body["key"]["key_source"], "inline");
-            Ok(())
-        },
-    )?;
-
-    expect_json(
-        GATEWAY_B_PORT,
-        "GET",
-        "/admin/v1/api-keys/shared-client",
-        &["Authorization: Bearer admin-secret"],
-        "",
-        200,
-        |body| {
-            assert_eq!(body["key"]["id"], "shared-client");
             Ok(())
         },
     )?;
@@ -235,45 +343,17 @@ fn run_shared_api_key() -> Result<()> {
             assert_eq!(body["policy"]["name"], "shared-policy");
             Ok(())
         },
-    )?;
-    expect_json(
-        GATEWAY_B_PORT,
-        "GET",
-        "/admin/v1/policies/shared-policy",
-        &["Authorization: Bearer admin-secret"],
-        "",
-        200,
-        |body| {
-            assert_eq!(body["policy"]["name"], "shared-policy");
-            assert_eq!(body["policy"]["code"], "blocked_by_shared_policy");
-            Ok(())
-        },
-    )?;
-    expect_json(
-        GATEWAY_B_PORT,
-        "POST",
-        "/v1/chat/completions",
-        &[
-            "Authorization: Bearer shared-secret",
-            "Content-Type: application/json",
-        ],
-        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
-        200,
-        |body| {
-            assert_eq!(body["object"], "chat.completion");
-            Ok(())
-        },
-    )?;
+    )
+}
 
-    let raw_state = std::fs::read_to_string(&state_path)?;
-    let shared_state: Value = serde_json::from_str(&raw_state)?;
-    assert_eq!(shared_state["version"], 1);
-    assert!(shared_state["api_keys"]
-        .as_array()
-        .is_some_and(|keys| keys.iter().any(|key| key["id"] == "shared-client")));
-
-    println!("shared-api-key scenario passed");
-    Ok(())
+fn corrupt_shared_state_file() -> Result<()> {
+    docker([
+        "exec",
+        GATEWAY_A_CONTAINER,
+        "sh",
+        "-c",
+        "printf '{not valid json' > /var/lib/ferrogate/cluster-state.json",
+    ])
 }
 
 fn setup_environment() -> Result<Cleanup> {
