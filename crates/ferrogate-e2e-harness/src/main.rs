@@ -24,9 +24,10 @@ fn main() -> Result<()> {
         "cluster-drain" => run_cluster_drain(),
         "shared-api-key" => run_shared_api_key(),
         "shared-state-stale" => run_shared_state_stale(),
+        "shared-state-startup-unavailable" => run_shared_state_startup_unavailable(),
         "redis-counters" => run_redis_counters(),
         _ => bail!(
-            "unknown scenario {scenario}; supported: cluster-drain, shared-api-key, shared-state-stale, redis-counters"
+            "unknown scenario {scenario}; supported: cluster-drain, shared-api-key, shared-state-stale, shared-state-startup-unavailable, redis-counters"
         ),
     }
 }
@@ -249,6 +250,40 @@ fn run_shared_state_stale() -> Result<()> {
     )?;
 
     println!("shared-state-stale scenario passed");
+    Ok(())
+}
+
+fn run_shared_state_startup_unavailable() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("gateway-a.toml");
+    std::fs::write(
+        &config_path,
+        gateway_config(
+            "e2e-node-a",
+            "file",
+            Some("/proc/ferrogate/cluster-state.json"),
+        ),
+    )?;
+    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_path, None)?;
+    wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 503, |body| {
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["cluster"]["node_id"], "e2e-node-a");
+        assert_eq!(body["cluster"]["state_backend"], "file");
+        assert_eq!(body["cluster"]["active_revision"], "");
+        assert_eq!(body["cluster"]["stale"], false);
+        assert_eq!(body["cluster"]["readiness_reason"], "sync_error");
+        assert!(body["cluster"]["last_sync_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("failed to publish file cluster state")));
+        Ok(())
+    })?;
+
+    println!("shared-state-startup-unavailable scenario passed");
     Ok(())
 }
 

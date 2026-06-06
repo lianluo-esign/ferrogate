@@ -105,11 +105,15 @@ impl SharedFileControlPlane {
         };
         let raw = serde_json::to_vec_pretty(&snapshot)?;
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|error| {
+                anyhow::anyhow!("failed to publish file cluster state: {error}")
+            })?;
         }
         let tmp = self.path.with_extension("tmp");
-        fs::write(&tmp, raw)?;
-        fs::rename(&tmp, &self.path)?;
+        fs::write(&tmp, raw)
+            .map_err(|error| anyhow::anyhow!("failed to publish file cluster state: {error}"))?;
+        fs::rename(&tmp, &self.path)
+            .map_err(|error| anyhow::anyhow!("failed to publish file cluster state: {error}"))?;
         Ok(revision)
     }
 }
@@ -272,7 +276,14 @@ impl SharedAppState {
             }
         };
         let Some(snapshot) = snapshot else {
-            let revision = control_plane.publish_from_config(&active.config)?;
+            let revision = match control_plane.publish_from_config(&active.config) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    let message = error.to_string();
+                    self.mark_cluster_sync_error(message);
+                    return Err(error);
+                }
+            };
             self.update_cluster_sync_revision(revision);
             return Ok(None);
         };
@@ -283,7 +294,11 @@ impl SharedAppState {
         let mut candidate = (*active.config).clone();
         candidate.api_keys = snapshot.api_keys;
         candidate.policies = snapshot.policies;
-        candidate.validate()?;
+        if let Err(error) = candidate.validate() {
+            let message = error.to_string();
+            self.mark_cluster_sync_error(message);
+            return Err(error);
+        }
         Ok(Some(self.reload_process_local_with_revision(
             candidate,
             Some(snapshot.revision),
@@ -340,21 +355,23 @@ impl SharedAppState {
         match self.inner.write() {
             Ok(mut state) => {
                 let current = state.cluster_sync.as_ref();
+                let has_revision = !current.active_revision.trim().is_empty();
                 state.cluster_sync = Arc::new(ClusterSyncStatus {
                     active_revision: current.active_revision.clone(),
                     last_sync_at_unix: current.last_sync_at_unix,
                     last_sync_error: Some(error.clone()),
-                    stale: true,
+                    stale: has_revision,
                 });
             }
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();
                 let current = state.cluster_sync.as_ref();
+                let has_revision = !current.active_revision.trim().is_empty();
                 state.cluster_sync = Arc::new(ClusterSyncStatus {
                     active_revision: current.active_revision.clone(),
                     last_sync_at_unix: current.last_sync_at_unix,
                     last_sync_error: Some(error),
-                    stale: true,
+                    stale: has_revision,
                 });
             }
         }
@@ -565,6 +582,25 @@ impl ClusterStatus {
             draining: drain.draining,
             accepting_new_requests: drain.accepting_new_requests,
         }
+    }
+}
+
+fn initial_cluster_sync_status(config: &Config) -> ClusterSyncStatus {
+    let uses_required_shared_state =
+        config.cluster.enabled && config.cluster.state_backend == "file";
+    ClusterSyncStatus {
+        active_revision: if uses_required_shared_state {
+            String::new()
+        } else {
+            config_snapshot_id(config)
+        },
+        last_sync_at_unix: if uses_required_shared_state {
+            None
+        } else {
+            now_unix_seconds()
+        },
+        last_sync_error: None,
+        stale: false,
     }
 }
 
@@ -1002,7 +1038,7 @@ impl AppState {
             HashMap::new()
         };
         let storage = config.storage.clone();
-        let active_revision = config_snapshot_id(&config);
+        let cluster_sync = initial_cluster_sync_status(&config);
         let metering_exporter = MeteringExporter::from_config(&config.metering)
             .ok()
             .flatten()
@@ -1011,12 +1047,7 @@ impl AppState {
 
         Self {
             cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
-            cluster_sync: Arc::new(ClusterSyncStatus {
-                active_revision,
-                last_sync_at_unix: now_unix_seconds(),
-                last_sync_error: None,
-                stale: false,
-            }),
+            cluster_sync: Arc::new(cluster_sync),
             config: Arc::new(config),
             providers: Arc::new(providers),
             upstreams: Arc::new(upstreams),
