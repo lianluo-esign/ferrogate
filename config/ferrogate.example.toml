@@ -65,6 +65,22 @@ graceful_upgrade_pid_file = "/tmp/ferrogate.pid"
 graceful_upgrade_sock = "/tmp/ferrogate_upgrade.sock"
 graceful_upgrade_sock_retries = 5
 
+[[extensions]]
+id = "tool.echo"
+kind = "tool_provider"
+source = "builtin"
+enabled = false
+order = 10
+
+[extensions.permissions]
+tools = ["tool.echo"]
+network = []
+filesystem = false
+shell = false
+
+[extensions.config]
+timeout_ms = 30000
+
 [[upstreams]]
 name = "example-api"
 url = "https://httpbin.org"

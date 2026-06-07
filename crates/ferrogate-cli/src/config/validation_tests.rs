@@ -123,6 +123,92 @@ fn rejects_model_lowest_cost_strategy_without_prices() {
 }
 
 #[test]
+fn accepts_builtin_extension_config_with_explicit_permissions() {
+    let config = Config {
+        extensions: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_duplicate_extension_ids() {
+    let config = Config {
+        extensions: vec![
+            extension("tool.echo", ExtensionKind::ToolProvider, 10),
+            extension("tool.echo", ExtensionKind::EventSink, 20),
+        ],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("duplicate extension id tool.echo"));
+}
+
+#[test]
+fn rejects_extension_sources_that_can_execute_out_of_tree_code() {
+    let mut extension = extension("mcp-tools", ExtensionKind::ToolProvider, 10);
+    extension.source = "wasm".into();
+    let config = Config {
+        extensions: vec![extension],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("only builtin extensions are supported"));
+}
+
+#[test]
+fn rejects_duplicate_enabled_extension_order_for_same_kind() {
+    let config = Config {
+        extensions: vec![
+            extension("tool.echo", ExtensionKind::ToolProvider, 10),
+            extension("tool.health_check", ExtensionKind::ToolProvider, 10),
+        ],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("duplicate enabled extension order 10"));
+
+    let mut disabled = extension("tool.health_check", ExtensionKind::ToolProvider, 10);
+    disabled.enabled = false;
+    let config = Config {
+        extensions: vec![
+            extension("tool.echo", ExtensionKind::ToolProvider, 10),
+            disabled,
+        ],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_invalid_extension_permission_values() {
+    let mut extension_config = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    extension_config.permissions.tools = vec!["tool.echo".into(), "tool.echo".into()];
+    let config = Config {
+        extensions: vec![extension_config],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("duplicate permission value tool.echo"));
+
+    let mut extension_config = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    extension_config.permissions.network = vec!["".into()];
+    let config = Config {
+        extensions: vec![extension_config],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("permissions.network[0]: cannot be empty"));
+}
+
+#[test]
 fn validates_optional_metering_export_boundary() {
     let config = Config::default();
     assert_eq!(
@@ -911,5 +997,22 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         request_limit_per_minute: None,
         expires_at_unix: None,
         log_bodies: None,
+    }
+}
+
+fn extension(id: &str, kind: ExtensionKind, order: u32) -> ExtensionConfig {
+    ExtensionConfig {
+        id: id.into(),
+        kind,
+        enabled: true,
+        source: "builtin".into(),
+        order,
+        permissions: ExtensionPermissions {
+            tools: vec![id.into()],
+            network: vec![],
+            filesystem: false,
+            shell: false,
+        },
+        config: std::collections::BTreeMap::new(),
     }
 }

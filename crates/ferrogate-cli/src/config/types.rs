@@ -20,6 +20,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) policies: Vec<PolicyRule>,
     #[serde(default)]
+    pub(crate) extensions: Vec<ExtensionConfig>,
+    #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
     pub(crate) metering: MeteringConfig,
@@ -282,6 +284,42 @@ pub(crate) struct PolicyRule {
     pub(crate) enabled: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExtensionKind {
+    RequestHook,
+    ToolProvider,
+    EventSink,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ExtensionConfig {
+    pub(crate) id: String,
+    pub(crate) kind: ExtensionKind,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_extension_source")]
+    pub(crate) source: String,
+    #[serde(default = "default_extension_order")]
+    pub(crate) order: u32,
+    #[serde(default)]
+    pub(crate) permissions: ExtensionPermissions,
+    #[serde(default)]
+    pub(crate) config: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ExtensionPermissions {
+    #[serde(default)]
+    pub(crate) tools: Vec<String>,
+    #[serde(default)]
+    pub(crate) network: Vec<String>,
+    #[serde(default)]
+    pub(crate) filesystem: bool,
+    #[serde(default)]
+    pub(crate) shell: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct TelemetryConfig {
     #[serde(default = "default_service_name")]
@@ -493,6 +531,14 @@ fn default_policy_message() -> String {
     "request denied by policy".to_string()
 }
 
+fn default_extension_source() -> String {
+    "builtin".to_string()
+}
+
+fn default_extension_order() -> u32 {
+    100
+}
+
 fn default_access_log_sample_rate() -> u64 {
     100
 }
@@ -595,6 +641,7 @@ impl Default for Config {
             models: Vec::new(),
             api_keys: Vec::new(),
             policies: Vec::new(),
+            extensions: Vec::new(),
             telemetry: TelemetryConfig::default(),
             metering: MeteringConfig::default(),
             storage: StorageConfig::default(),

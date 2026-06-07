@@ -138,6 +138,7 @@ impl Config {
                 })
                 .collect(),
             policies: Vec::new(),
+            extensions: Vec::new(),
             telemetry: TelemetryConfig::default(),
             metering: crate::config::MeteringConfig::default(),
             storage: crate::config::StorageConfig::default(),

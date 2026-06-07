@@ -23,6 +23,7 @@ impl Config {
         let model_names = self.validate_models(&provider_names)?;
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
+        self.validate_extensions()?;
         self.validate_tls()?;
         self.validate_telemetry()?;
         self.validate_metering()?;
@@ -635,6 +636,53 @@ impl Config {
         Ok(())
     }
 
+    fn validate_extensions(&self) -> AnyResult<()> {
+        let mut ids = HashSet::new();
+        let mut enabled_orders = HashSet::new();
+
+        for (index, extension) in self.extensions.iter().enumerate() {
+            if extension.id.trim().is_empty() {
+                bail!("field extensions[{index}].id: cannot be empty");
+            }
+            if !ids.insert(extension.id.as_str()) {
+                bail!(
+                    "field extensions[{index}].id: duplicate extension id {}",
+                    extension.id
+                );
+            }
+            if extension.source.trim().is_empty() {
+                bail!("field extensions[{index}].source: cannot be empty");
+            }
+            if extension.source != "builtin" {
+                bail!(
+                    "field extensions[{index}].source: only builtin extensions are supported in this phase"
+                );
+            }
+            if extension.enabled
+                && !enabled_orders.insert((extension.kind.clone(), extension.order))
+            {
+                bail!(
+                    "field extensions[{index}].order: duplicate enabled extension order {} for kind {:?}",
+                    extension.order,
+                    extension.kind
+                );
+            }
+
+            validate_extension_permission_names(
+                index,
+                "permissions.tools",
+                &extension.permissions.tools,
+            )?;
+            validate_extension_permission_names(
+                index,
+                "permissions.network",
+                &extension.permissions.network,
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn validate_upstreams(&self) -> AnyResult<HashSet<&str>> {
         let mut names = HashSet::new();
         for (index, upstream) in self.upstreams.iter().enumerate() {
@@ -737,6 +785,26 @@ where
         HeaderValue::from_str(header.value()).with_context(|| {
             format!("field routes[{route_index}].{field}[{index}].value: invalid header value")
         })?;
+    }
+    Ok(())
+}
+
+fn validate_extension_permission_names(
+    extension_index: usize,
+    field: &str,
+    names: &[String],
+) -> AnyResult<()> {
+    let mut seen = HashSet::new();
+    for (index, name) in names.iter().enumerate() {
+        if name.trim().is_empty() {
+            bail!("field extensions[{extension_index}].{field}[{index}]: cannot be empty");
+        }
+        if !seen.insert(name.as_str()) {
+            bail!(
+                "field extensions[{extension_index}].{field}[{index}]: duplicate permission value {}",
+                name
+            );
+        }
     }
     Ok(())
 }
