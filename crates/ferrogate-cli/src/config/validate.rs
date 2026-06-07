@@ -678,6 +678,7 @@ impl Config {
                 "permissions.network",
                 &extension.permissions.network,
             )?;
+            validate_builtin_extension_shape(index, extension)?;
         }
 
         Ok(())
@@ -804,6 +805,81 @@ fn validate_extension_permission_names(
                 "field extensions[{extension_index}].{field}[{index}]: duplicate permission value {}",
                 name
             );
+        }
+    }
+    Ok(())
+}
+
+fn validate_builtin_extension_shape(
+    extension_index: usize,
+    extension: &super::ExtensionConfig,
+) -> AnyResult<()> {
+    match extension.id.as_str() {
+        "tool.echo" | "tool.health_check" => {
+            if !matches!(extension.kind, super::ExtensionKind::ToolProvider) {
+                bail!(
+                    "field extensions[{extension_index}].kind: {} must be tool_provider",
+                    extension.id
+                );
+            }
+        }
+        "mcp.http" => {
+            if !matches!(extension.kind, super::ExtensionKind::ToolProvider) {
+                bail!("field extensions[{extension_index}].kind: mcp.http must be tool_provider");
+            }
+            let endpoint = extension
+                .config
+                .get("endpoint")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "field extensions[{extension_index}].config.endpoint: required for mcp.http"
+                    )
+                })?;
+            let uri: http::Uri = endpoint.parse().with_context(|| {
+                format!("field extensions[{extension_index}].config.endpoint: invalid URI")
+            })?;
+            if uri.scheme_str() != Some("http") {
+                bail!("field extensions[{extension_index}].config.endpoint: mcp.http supports http endpoints only in this phase");
+            }
+            let host = uri
+                .authority()
+                .map(|authority| authority.host())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "field extensions[{extension_index}].config.endpoint: must include host"
+                    )
+                })?;
+            if !extension
+                .permissions
+                .network
+                .iter()
+                .any(|allowed| allowed == "*" || allowed == host)
+            {
+                bail!(
+                    "field extensions[{extension_index}].permissions.network: must allow MCP host {host}"
+                );
+            }
+        }
+        "hook.noop" => {
+            if !matches!(extension.kind, super::ExtensionKind::RequestHook) {
+                bail!("field extensions[{extension_index}].kind: hook.noop must be request_hook");
+            }
+        }
+        "event.audit_log" => {
+            if !matches!(extension.kind, super::ExtensionKind::EventSink) {
+                bail!(
+                    "field extensions[{extension_index}].kind: event.audit_log must be event_sink"
+                );
+            }
+        }
+        _ => {
+            if extension.enabled {
+                bail!(
+                    "field extensions[{extension_index}].id: unsupported builtin extension {}",
+                    extension.id
+                );
+            }
         }
     }
     Ok(())

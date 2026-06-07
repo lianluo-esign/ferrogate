@@ -20,6 +20,18 @@ impl FerroGateway {
         let req = session.req_header();
         let path = req.uri.path().to_string();
 
+        if let Err(error) = state.run_pre_request_hooks(&ctx.request_id, &path) {
+            write_json_error(
+                session,
+                error.status(),
+                error.code(),
+                error.message(),
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(true);
+        }
+
         if path == "/healthz" {
             self.handle_healthz(session, ctx).await?;
             return Ok(true);
@@ -42,6 +54,22 @@ impl FerroGateway {
         if path == "/v1/models" {
             let headers = req.headers.clone();
             self.handle_models(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/v1/tools" {
+            let headers = req.headers.clone();
+            let query = req.uri.query().map(str::to_string);
+            self.handle_tools(session, ctx, &headers, query.as_deref())
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/v1/tools/execute" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_tool_execute(session, ctx, headers, &method)
+                .await?;
             return Ok(true);
         }
 
@@ -113,6 +141,18 @@ impl FerroGateway {
             let headers = req.headers.clone();
             self.handle_admin_provider_health(session, ctx, &headers)
                 .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/extensions" {
+            let headers = req.headers.clone();
+            self.handle_admin_extensions(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/tools" {
+            let headers = req.headers.clone();
+            self.handle_admin_tools(session, ctx, &headers).await?;
             return Ok(true);
         }
 

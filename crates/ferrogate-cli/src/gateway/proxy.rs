@@ -97,6 +97,9 @@ impl ProxyHttp for FerroGateway {
                 upstream_response.insert_header(header.name.clone(), header.value.clone())?;
             }
         }
+        self.state
+            .current()
+            .run_post_response_hooks(&ctx.request_id, upstream_response.status.as_u16());
         Ok(())
     }
 

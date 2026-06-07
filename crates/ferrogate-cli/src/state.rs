@@ -16,6 +16,10 @@ use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config, HeaderMutation,
     Model, PolicyRule as ConfigPolicyRule, Provider, RouteRule, StorageConfig, Upstream,
 };
+use crate::extensions::{
+    ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
+    ToolExecutionResponse,
+};
 use crate::metering::MeteringExporter;
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
@@ -468,6 +472,7 @@ pub(crate) struct AppState {
     pub(crate) upstreams: Arc<HashMap<String, Upstream>>,
     runtime_routes: Arc<Vec<RuntimeRoute>>,
     runtime_upstreams: Arc<HashMap<String, RuntimeUpstream>>,
+    extension_registry: Arc<ExtensionRegistry>,
     model_visibility: Arc<HashMap<String, ModelVisibility>>,
     model_registry: Arc<ModelRegistry>,
     provider_adapters: Arc<ProviderAdapterRegistry>,
@@ -1023,6 +1028,7 @@ impl AppState {
             .iter()
             .map(|upstream| (upstream.name.clone(), AtomicU64::new(0)))
             .collect();
+        let extension_registry = ExtensionRegistry::from_config(&config.extensions);
         let model_registry = ModelRegistry::new(config.models.iter().map(model_registry_entry))
             .expect("config validation must reject invalid model registry entries");
 
@@ -1053,6 +1059,7 @@ impl AppState {
             upstreams: Arc::new(upstreams),
             runtime_routes: Arc::new(runtime_routes),
             runtime_upstreams: Arc::new(runtime_upstreams),
+            extension_registry: Arc::new(extension_registry),
             model_visibility: Arc::new(model_visibility),
             model_registry: Arc::new(model_registry),
             provider_adapters: Arc::new(ProviderAdapterRegistry::default()),
@@ -1080,6 +1087,47 @@ impl AppState {
             drain: Arc::new(AtomicBool::new(false)),
             acme_renewal: None,
         }
+    }
+
+    pub(crate) fn extension_statuses(&self) -> Vec<ExtensionStatus> {
+        self.extension_registry.statuses()
+    }
+
+    pub(crate) fn tools_for(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        api_key_id: Option<&str>,
+        route: Option<&str>,
+    ) -> Vec<RegisteredTool> {
+        self.extension_registry.tools_for(tenant, api_key_id, route)
+    }
+
+    pub(crate) fn all_tools(&self) -> Vec<RegisteredTool> {
+        self.extension_registry.all_tools()
+    }
+
+    pub(crate) async fn execute_tool(
+        &self,
+        request: ToolExecutionRequest,
+        request_id: String,
+        tenant: ferrogate_core::TenantContext,
+        api_key_id: Option<&str>,
+    ) -> Result<ToolExecutionResponse, ToolExecutionError> {
+        self.extension_registry
+            .execute_tool(request, request_id, tenant, api_key_id)
+            .await
+    }
+
+    pub(crate) fn run_pre_request_hooks(
+        &self,
+        request_id: &str,
+        path: &str,
+    ) -> Result<(), ToolExecutionError> {
+        self.extension_registry.pre_request(request_id, path)
+    }
+
+    pub(crate) fn run_post_response_hooks(&self, request_id: &str, status: u16) {
+        self.extension_registry.post_response(request_id, status);
     }
 
     fn with_reloaded_config(&self, config: Config) -> Self {

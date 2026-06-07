@@ -212,6 +212,60 @@
         }
       }
     },
+    "/admin/v1/extensions": {
+      "get": {
+        "operationId": "listAdminExtensions",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List configured gateway extensions without exposing extension config.",
+        "responses": {
+          "200": {
+            "description": "Extension list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminExtensionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/tools": {
+      "get": {
+        "operationId": "listAdminTools",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List registered extension tools without exposing provider secrets or extension config.",
+        "responses": {
+          "200": {
+            "description": "Tool list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminToolList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/models": {
       "get": {
         "operationId": "listAdminModels",
@@ -1269,6 +1323,9 @@
           "enabled_upstreams",
           "routes",
           "enabled_routes",
+          "extensions",
+          "active_extensions",
+          "tools",
           "auth_required",
           "cluster"
         ],
@@ -1319,6 +1376,18 @@
             "minimum": 0
           },
           "enabled_routes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "extensions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "active_extensions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tools": {
             "type": "integer",
             "minimum": 0
           },
@@ -1612,6 +1681,94 @@
               }
             ],
             "description": "Cluster-wide provider observations when a shared aggregation backend is configured. Null means this node only has local observations."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminExtension": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "source",
+          "enabled",
+          "active",
+          "health",
+          "order",
+          "last_error"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "request_hook",
+              "tool_provider",
+              "event_sink"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "health": {
+            "type": "string"
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminTool": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "input_schema",
+          "extension_id",
+          "tenant_allowlist",
+          "api_key_allowlist",
+          "route_allowlist"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_schema": {
+            "type": "object"
+          },
+          "extension_id": {
+            "type": "string"
+          },
+          "tenant_allowlist": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "api_key_allowlist": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "route_allowlist": {
+            "$ref": "#/components/schemas/StringList"
           }
         },
         "additionalProperties": false
@@ -2594,6 +2751,12 @@
       "ProviderHealthList": {
         "$ref": "#/components/schemas/AdminList_ProviderHealthCheck"
       },
+      "AdminExtensionList": {
+        "$ref": "#/components/schemas/AdminList_AdminExtension"
+      },
+      "AdminToolList": {
+        "$ref": "#/components/schemas/AdminList_AdminTool"
+      },
       "AdminModelList": {
         "$ref": "#/components/schemas/AdminList_Model"
       },
@@ -2650,6 +2813,46 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ProviderHealthCheck"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_AdminExtension": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminExtension"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_AdminTool": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminTool"
             }
           }
         },

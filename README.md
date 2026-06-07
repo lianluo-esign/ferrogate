@@ -460,11 +460,15 @@ Common endpoints:
 
 ```text
 GET  /v1/models
+GET  /v1/tools
+POST /v1/tools/execute
 POST /v1/chat/completions
 POST /v1/responses
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
+GET  /admin/v1/extensions
+GET  /admin/v1/tools
 GET  /admin/v1/models
 GET  /admin/v1/api-keys
 GET  /admin/v1/tenants
@@ -480,7 +484,8 @@ GET  /metrics
 GET  /admin
 ```
 
-Read endpoints require `admin.read` when API keys are configured. Chat
+Read endpoints require `admin.read` when API keys are configured. Tool listing
+requires `tools.read`, explicit tool execution requires `tools.execute`, chat
 completions require `chat.completions`, Responses API requests require
 `responses.create`, and config validation and reload require `admin.write`.
 

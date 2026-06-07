@@ -7,6 +7,7 @@ use pingora::{proxy::Session, Result as PingoraResult};
 use crate::{
     auth::authenticate,
     config::{config_snapshot_id, ApiKey, Config, PolicyRule},
+    extensions::ToolExecutionRequest,
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse,
@@ -142,6 +143,13 @@ impl FerroGateway {
                     enabled_upstreams: state.config.upstreams.iter().filter(|u| u.enabled).count(),
                     routes: state.config.routes.len(),
                     enabled_routes: state.config.routes.iter().filter(|r| r.enabled).count(),
+                    extensions: state.config.extensions.len(),
+                    active_extensions: state
+                        .extension_statuses()
+                        .iter()
+                        .filter(|extension| extension.active)
+                        .count(),
+                    tools: state.all_tools().len(),
                     auth_required: state.auth_required(),
                     cluster: state.cluster_status(),
                     acme: state.acme_renewal_status().map(|status| AdminAcmeStatus {
@@ -168,6 +176,143 @@ impl FerroGateway {
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_tools(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "tools.read", &ctx.request_id) {
+            Ok(auth) => {
+                let route = query
+                    .and_then(|query| parse_query_param(query, "route"))
+                    .map(str::to_string);
+                let body = AdminList::new(state.tools_for(
+                    &auth.tenant_context(),
+                    auth.api_key_id.as_deref(),
+                    route.as_deref(),
+                ));
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_tool_execute(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+    ) -> PingoraResult<()> {
+        if *method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "tool execution requires POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let state = self.state.current();
+        let auth = match authenticate(&state, &headers, "tools.execute", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let request: ToolExecutionRequest = match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_json",
+                    format!("invalid tool execution JSON: {error}"),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match state
+            .execute_tool(
+                request.clone(),
+                ctx.request_id.clone(),
+                auth.tenant_context(),
+                auth.api_key_id.as_deref(),
+            )
+            .await
+        {
+            Ok(response) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "tool.execute",
+                    response.name.clone(),
+                    "success",
+                    format!("tool executed in {}ms", response.latency_ms),
+                ));
+                write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+            }
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "tool.execute",
+                    request.name,
+                    "error",
+                    format!("{}: {}", error.code(), error.message()),
+                ));
+                write_json_error(
+                    session,
+                    error.status(),
+                    error.code(),
+                    error.message(),
                     &ctx.request_id,
                 )
                 .await
@@ -698,6 +843,56 @@ impl FerroGateway {
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
                 let body = AdminList::new(state.provider_health_checks());
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_extensions(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList::new(state.extension_statuses());
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_tools(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList::new(state.all_tools());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -1698,6 +1893,13 @@ fn admin_audit_event_draft(
     message: impl Into<String>,
 ) -> AdminAuditEventDraft {
     admin_audit_event_draft_for_action(ctx, auth, "config.validate", outcome, message)
+}
+
+fn parse_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .find_map(|(name, value)| (name == key).then_some(value))
 }
 
 fn admin_audit_event_draft_for_action(

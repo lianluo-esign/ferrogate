@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod config;
 mod dashboard;
+mod extensions;
 mod gateway;
 mod lifecycle;
 mod metering;

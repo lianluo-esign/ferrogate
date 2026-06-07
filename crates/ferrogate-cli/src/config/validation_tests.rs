@@ -209,6 +209,53 @@ fn rejects_invalid_extension_permission_values() {
 }
 
 #[test]
+fn validates_builtin_extension_kind_and_mcp_network_boundary() {
+    let mut wrong_kind = extension("tool.echo", ExtensionKind::EventSink, 10);
+    wrong_kind.permissions.tools = vec!["tool.echo".into()];
+    let config = Config {
+        extensions: vec![wrong_kind],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("must be tool_provider"));
+
+    let mut mcp = extension("mcp.http", ExtensionKind::ToolProvider, 10);
+    mcp.permissions.tools = vec!["github.search".into()];
+    let config = Config {
+        extensions: vec![mcp],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("config.endpoint"));
+
+    let mut mcp = extension("mcp.http", ExtensionKind::ToolProvider, 10);
+    mcp.permissions.tools = vec!["github.search".into()];
+    mcp.config.insert(
+        "endpoint".into(),
+        toml::Value::String("http://127.0.0.1:9000/mcp".into()),
+    );
+    let config = Config {
+        extensions: vec![mcp],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("permissions.network"));
+
+    let mut mcp = extension("mcp.http", ExtensionKind::ToolProvider, 10);
+    mcp.permissions.tools = vec!["github.search".into()];
+    mcp.permissions.network = vec!["127.0.0.1".into()];
+    mcp.config.insert(
+        "endpoint".into(),
+        toml::Value::String("http://127.0.0.1:9000/mcp".into()),
+    );
+    let config = Config {
+        extensions: vec![mcp],
+        ..Config::default()
+    };
+    config.validate().unwrap();
+}
+
+#[test]
 fn validates_optional_metering_export_boundary() {
     let config = Config::default();
     assert_eq!(
