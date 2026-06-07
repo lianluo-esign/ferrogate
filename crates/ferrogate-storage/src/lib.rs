@@ -84,6 +84,8 @@ pub struct StoredRequestLog {
     pub response_recorded: bool,
     pub prompt_body: Option<String>,
     pub response_body: Option<String>,
+    #[serde(default)]
+    pub cache_status: Option<String>,
     pub started_at_unix: Option<u64>,
     pub completed_at_unix: Option<u64>,
 }
@@ -307,6 +309,7 @@ mod tests {
             response_recorded: false,
             prompt_body: None,
             response_body: None,
+            cache_status: None,
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
         });
@@ -326,6 +329,7 @@ mod tests {
             response_recorded: false,
             prompt_body: None,
             response_body: None,
+            cache_status: None,
             started_at_unix: Some(3),
             completed_at_unix: Some(4),
         });
@@ -356,6 +360,7 @@ mod tests {
                 response_recorded: false,
                 prompt_body: None,
                 response_body: None,
+                cache_status: None,
                 started_at_unix: None,
                 completed_at_unix: None,
             });

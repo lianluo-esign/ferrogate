@@ -430,6 +430,7 @@ mod tests {
             response_recorded: true,
             prompt_body: Some("client-secret prompt".into()),
             response_body: Some("provider-secret response".into()),
+            cache_status: None,
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
         });

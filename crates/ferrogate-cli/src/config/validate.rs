@@ -27,6 +27,7 @@ impl Config {
         self.validate_tls()?;
         self.validate_telemetry()?;
         self.validate_metering()?;
+        self.validate_cache()?;
         self.validate_storage()?;
         self.validate_reliability()?;
         self.validate_cluster()?;
@@ -245,6 +246,16 @@ impl Config {
             bail!(
                 "field metering.export_token_env: required when metering export is enabled unless metering.export_token is set"
             );
+        }
+        Ok(())
+    }
+
+    fn validate_cache(&self) -> AnyResult<()> {
+        if self.cache.ttl_secs == 0 {
+            bail!("field cache.ttl_secs: must be greater than zero");
+        }
+        if self.cache.max_records == 0 {
+            bail!("field cache.max_records: must be greater than zero");
         }
         Ok(())
     }

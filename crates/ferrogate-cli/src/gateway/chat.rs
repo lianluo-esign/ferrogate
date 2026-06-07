@@ -440,6 +440,63 @@ impl FerroGateway {
                 return Ok(());
             }
 
+            let cache_key = if request.stream {
+                None
+            } else {
+                state
+                    .ai_cache_enabled(auth.api_key_id.as_deref(), &request.model, &provider.name)
+                    .then(|| {
+                        state.ai_response_cache_key(
+                            endpoint.route(),
+                            &policy_request.tenant,
+                            &request.model,
+                            &provider.name,
+                            &model_route.provider_model,
+                            &body_json,
+                        )
+                    })
+            };
+            if let Some(cache_key) = cache_key.as_ref() {
+                if let Some(cached) = state.lookup_ai_response_cache(cache_key) {
+                    state.record_ai_cache_hit();
+                    let record_bodies = auth.can_record_bodies(state.config.telemetry.log_bodies);
+                    state.record_request_log(StoredRequestLog {
+                        request_id: ctx.request_id.clone(),
+                        trace_id: ctx.trace_id.clone(),
+                        cluster_id: None,
+                        node_id: None,
+                        tenant: policy_request.tenant.clone(),
+                        route: policy_request.route.clone(),
+                        provider: Some(provider.name.clone()),
+                        logical_model: Some(request.model.clone()),
+                        provider_model: Some(model_route.provider_model.clone()),
+                        status_code: cached.status_code,
+                        error_code: None,
+                        prompt_recorded: record_bodies,
+                        response_recorded: record_bodies,
+                        prompt_body: record_bodies.then(|| body_json.to_string()),
+                        response_body: record_bodies.then(|| {
+                            String::from_utf8_lossy(&cached.body)
+                                .chars()
+                                .take(16 * 1024)
+                                .collect()
+                        }),
+                        cache_status: Some("hit".into()),
+                        started_at_unix: None,
+                        completed_at_unix: None,
+                    });
+                    return write_raw_response(
+                        session,
+                        StatusCode::from_u16(cached.status_code).unwrap_or(StatusCode::OK),
+                        &cached.content_type,
+                        cached.body.into(),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                state.record_ai_cache_miss();
+            }
+
             if token_reservation.is_none() {
                 if let (Some(api_key_id), Some(budget)) =
                     (auth.api_key_id.as_deref(), auth.monthly_token_budget)
@@ -902,9 +959,20 @@ impl FerroGateway {
                                     .take(16 * 1024)
                                     .collect()
                             }),
+                            cache_status: cache_key.as_ref().map(|_| "miss".to_string()),
                             started_at_unix: None,
                             completed_at_unix: None,
                         });
+                        if let Some(cache_key) = cache_key {
+                            state.store_ai_response_cache(
+                                cache_key,
+                                crate::state::AiCachedResponse {
+                                    status_code: response.status.as_u16(),
+                                    content_type: response.content_type.clone(),
+                                    body: response.body.clone(),
+                                },
+                            );
+                        }
 
                         return write_raw_response(
                             session,
@@ -995,6 +1063,7 @@ impl FerroGateway {
             response_recorded: false,
             prompt_body: None,
             response_body: None,
+            cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
         });

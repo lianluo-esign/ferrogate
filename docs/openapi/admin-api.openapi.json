@@ -2083,6 +2083,13 @@
           },
           "log_bodies": {
             "type": "boolean"
+          },
+          "cache_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Optional per-key override for exact-match AI response caching. Null inherits the global/model cache policy."
           }
         },
         "additionalProperties": false
@@ -2153,6 +2160,10 @@
           },
           "log_bodies": {
             "type": "boolean"
+          },
+          "cache_enabled": {
+            "type": "boolean",
+            "description": "Optional per-key override for exact-match AI response caching."
           }
         },
         "additionalProperties": false

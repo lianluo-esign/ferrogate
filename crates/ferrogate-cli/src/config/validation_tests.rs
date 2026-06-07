@@ -17,6 +17,7 @@ fn rejects_model_with_unknown_provider() {
             input_price_per_1m: None,
             output_price_per_1m: None,
             enabled: true,
+            cache_enabled: None,
         }],
         ..Config::default()
     };
@@ -855,6 +856,31 @@ fn rejects_invalid_storage_retention_and_admin_list_limits() {
 }
 
 #[test]
+fn rejects_invalid_ai_cache_limits() {
+    let config = Config {
+        cache: CacheConfig {
+            enabled: true,
+            ttl_secs: 0,
+            ..CacheConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field cache.ttl_secs"));
+
+    let config = Config {
+        cache: CacheConfig {
+            enabled: true,
+            max_records: 0,
+            ..CacheConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field cache.max_records"));
+}
+
+#[test]
 fn accepts_enabled_local_cluster_identity_config() {
     let config = Config {
         cluster: ClusterConfig {
@@ -1018,6 +1044,7 @@ fn model() -> Model {
         input_price_per_1m: None,
         output_price_per_1m: None,
         enabled: true,
+        cache_enabled: None,
     }
 }
 
@@ -1057,6 +1084,7 @@ fn api_key(id: &str, name: &str) -> ApiKey {
         request_limit_per_minute: None,
         expires_at_unix: None,
         log_bodies: None,
+        cache_enabled: None,
     }
 }
 

@@ -524,6 +524,323 @@ enabled = false
 }
 
 #[test]
+fn exact_match_cache_serves_repeated_non_streaming_chat_without_provider_call() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_cached","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"cached ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[cache]
+enabled = true
+ttl_secs = 60
+max_records = 16
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+cache_enabled = true
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+cache_enabled = true
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let body = r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello cache"}],"temperature":0}"#;
+    let first = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        body,
+    );
+    assert!(first.contains("200 OK"), "{first}");
+    assert!(first.contains("cached ok"));
+
+    let second = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        body,
+    );
+    assert!(second.contains("200 OK"), "{second}");
+    assert!(second.contains("cached ok"));
+    assert!(!second.contains("provider-secret"));
+    assert!(!second.contains("client-secret"));
+
+    let logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(logs.contains("200 OK"), "{logs}");
+    assert!(logs.contains("\"cache_status\":\"miss\""), "{logs}");
+    assert!(logs.contains("\"cache_status\":\"hit\""), "{logs}");
+    assert!(!logs.contains("provider-secret"));
+    assert!(!logs.contains("client-secret"));
+
+    let metrics = http_request(
+        &gateway_addr,
+        "GET",
+        "/metrics",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(metrics.contains("200 OK"), "{metrics}");
+    assert!(
+        metrics.contains("ferrogate_ai_cache_requests_total{status=\"miss\"} 1"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("ferrogate_ai_cache_requests_total{status=\"hit\"} 1"),
+        "{metrics}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
+    assert!(provider_requests[0].contains("POST /v1/chat/completions HTTP/1.1"));
+    assert!(provider_requests[0].contains("authorization: Bearer provider-secret"));
+    assert!(provider_requests[0].contains(r#""model":"gpt-4o-mini""#));
+    assert!(!provider_requests[0].contains("fast-chat"));
+    assert!(!provider_requests[0].contains("client-secret"));
+}
+
+#[test]
+fn exact_match_cache_hit_does_not_require_token_budget_headroom() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_cached_budget","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"cached budget ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[cache]
+enabled = true
+ttl_secs = 60
+max_records = 16
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+cache_enabled = true
+
+[[api_keys]]
+id = "key_budget"
+name = "Budget key"
+key = "budget-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+monthly_token_budget = 8
+cache_enabled = true
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let body = r#"{"model":"fast-chat","messages":[],"max_tokens":8}"#;
+    let first = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer budget-secret",
+            "Content-Type: application/json",
+        ],
+        body,
+    );
+    assert!(first.contains("200 OK"), "{first}");
+    assert!(first.contains("cached budget ok"), "{first}");
+
+    let second = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer budget-secret",
+            "Content-Type: application/json",
+        ],
+        body,
+    );
+    assert!(second.contains("200 OK"), "{second}");
+    assert!(second.contains("cached budget ok"), "{second}");
+    assert!(!second.contains("token_budget_exceeded"), "{second}");
+
+    let logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer budget-secret"],
+        "",
+    );
+    assert!(logs.contains("200 OK"), "{logs}");
+    assert!(logs.contains("\"cache_status\":\"miss\""), "{logs}");
+    assert!(logs.contains("\"cache_status\":\"hit\""), "{logs}");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
+}
+
+#[test]
+fn api_key_cache_disable_keeps_repeated_requests_on_provider_path() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        2,
+        r#"{"id":"chatcmpl_uncached","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"uncached ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[cache]
+enabled = true
+ttl_secs = 60
+max_records = 16
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+cache_enabled = true
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+cache_enabled = false
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let body = r#"{"model":"fast-chat","messages":[{"role":"user","content":"tenant no cache"}]}"#;
+    for _ in 0..2 {
+        let response = http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/chat/completions",
+            &[
+                "Authorization: Bearer client-secret",
+                "Content-Type: application/json",
+            ],
+            body,
+        );
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(response.contains("uncached ok"), "{response}");
+    }
+
+    let logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(logs.contains("200 OK"), "{logs}");
+    assert!(!logs.contains("\"cache_status\":\"hit\""), "{logs}");
+    assert!(!logs.contains("\"cache_status\":\"miss\""), "{logs}");
+
+    let metrics = http_request(
+        &gateway_addr,
+        "GET",
+        "/metrics",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(metrics.contains("200 OK"), "{metrics}");
+    assert!(
+        metrics.contains("ferrogate_ai_cache_requests_total{status=\"miss\"} 0"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("ferrogate_ai_cache_requests_total{status=\"hit\"} 0"),
+        "{metrics}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
+}
+
+#[test]
 fn token_metering_export_posts_normalized_usage_without_gateway_cost() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(

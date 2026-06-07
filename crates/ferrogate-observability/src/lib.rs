@@ -337,6 +337,8 @@ pub struct GatewayMetricsSnapshot {
     pub request_log_total: u64,
     pub request_error_total: u64,
     pub request_status_totals: Vec<RequestStatusMetric>,
+    pub cache_hits_total: u64,
+    pub cache_misses_total: u64,
     pub billing_event_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
@@ -419,6 +421,21 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_billing_events_total {}\n",
         snapshot.billing_event_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_ai_cache_requests_total",
+        "AI response cache lookups grouped by cache status.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_ai_cache_requests_total{{status=\"hit\"}} {}\n",
+        snapshot.cache_hits_total
+    ));
+    output.push_str(&format!(
+        "ferrogate_ai_cache_requests_total{{status=\"miss\"}} {}\n",
+        snapshot.cache_misses_total
     ));
 
     push_help(
@@ -629,6 +646,18 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "Total token metering events recorded by FerroGate.",
             snapshot.billing_event_total as f64,
             vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.ai_cache.requests",
+            "AI response cache hits.",
+            snapshot.cache_hits_total as f64,
+            vec![OtlpAttribute::new("status", "hit")],
+        ),
+        sum_metric_json(
+            "ferrogate.ai_cache.requests",
+            "AI response cache misses.",
+            snapshot.cache_misses_total as f64,
+            vec![OtlpAttribute::new("status", "miss")],
         ),
         sum_metric_json(
             "ferrogate.tokens",
@@ -994,6 +1023,8 @@ mod tests {
                     count: 1,
                 },
             ],
+            cache_hits_total: 1,
+            cache_misses_total: 1,
             billing_event_total: 1,
             token_totals: TokenMetricTotals {
                 prompt_tokens: 3,
@@ -1012,6 +1043,8 @@ mod tests {
 
         assert!(text.contains("# TYPE ferrogate_request_logs_total counter"));
         assert!(text.contains("ferrogate_request_errors_total 1"));
+        assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"hit\"} 1"));
+        assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"miss\"} 1"));
         assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));
         assert!(text.contains(
             "ferrogate_model_provider_requests_total{logical_model=\"fast-chat\",provider=\"openai\"} 1"

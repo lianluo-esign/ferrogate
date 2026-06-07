@@ -124,6 +124,7 @@ pub(crate) struct AdminApiKey {
     pub(crate) request_limit_per_minute: Option<u64>,
     pub(crate) expires_at_unix: Option<u64>,
     pub(crate) log_bodies: bool,
+    pub(crate) cache_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +165,8 @@ pub(crate) struct AdminApiKeyMutation {
     pub(crate) expires_at_unix: Option<u64>,
     #[serde(default)]
     pub(crate) log_bodies: Option<bool>,
+    #[serde(default)]
+    pub(crate) cache_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

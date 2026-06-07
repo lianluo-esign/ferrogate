@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     env, fs,
     io::ErrorKind,
     net::{TcpStream, ToSocketAddrs},
@@ -43,6 +43,7 @@ use ferrogate_storage::{
     StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
+#[cfg(test)]
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -486,6 +487,7 @@ pub(crate) struct AppState {
     audit_events: Arc<Mutex<InMemoryAppendRepository<StoredAuditEvent>>>,
     usage_aggregates: Arc<Mutex<InMemoryRepository<StoredUsageAggregate>>>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
+    response_cache: Arc<Mutex<AiResponseCache>>,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
@@ -669,9 +671,35 @@ struct GatewayMetricsAccumulator {
     request_log_total: u64,
     request_error_total: u64,
     request_status_totals: BTreeMap<u16, u64>,
+    cache_hits_total: u64,
+    cache_misses_total: u64,
     billing_event_total: u64,
     token_totals: TokenMetricTotals,
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AiResponseCacheKey {
+    value: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AiCachedResponse {
+    pub(crate) status_code: u16,
+    pub(crate) content_type: String,
+    pub(crate) body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct AiResponseCacheEntry {
+    response: AiCachedResponse,
+    expires_at_unix: u64,
+}
+
+#[derive(Debug, Default)]
+struct AiResponseCache {
+    entries: HashMap<String, AiResponseCacheEntry>,
+    order: VecDeque<String>,
 }
 
 #[derive(Debug, Default)]
@@ -866,6 +894,14 @@ impl GatewayMetricsAccumulator {
         total.total_tokens += event.usage.total_tokens;
     }
 
+    fn record_cache_hit(&mut self) {
+        self.cache_hits_total = self.cache_hits_total.saturating_add(1);
+    }
+
+    fn record_cache_miss(&mut self) {
+        self.cache_misses_total = self.cache_misses_total.saturating_add(1);
+    }
+
     fn snapshot(&self, service_name: String) -> GatewayMetricsSnapshot {
         GatewayMetricsSnapshot {
             service_name,
@@ -879,9 +915,61 @@ impl GatewayMetricsAccumulator {
                     count: *count,
                 })
                 .collect(),
+            cache_hits_total: self.cache_hits_total,
+            cache_misses_total: self.cache_misses_total,
             billing_event_total: self.billing_event_total,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
+        }
+    }
+}
+
+impl AiResponseCacheKey {
+    fn new(value: String) -> Self {
+        Self { value }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.value
+    }
+}
+
+impl AiResponseCache {
+    fn get(&mut self, key: &AiResponseCacheKey, now_unix: u64) -> Option<AiCachedResponse> {
+        let entry = self.entries.get(key.as_str())?;
+        if entry.expires_at_unix <= now_unix {
+            self.entries.remove(key.as_str());
+            self.order.retain(|existing| existing != key.as_str());
+            return None;
+        }
+        Some(entry.response.clone())
+    }
+
+    fn insert(
+        &mut self,
+        key: AiResponseCacheKey,
+        response: AiCachedResponse,
+        ttl_secs: u64,
+        max_records: usize,
+        now_unix: u64,
+    ) {
+        let key = key.value;
+        if self.entries.contains_key(&key) {
+            self.order.retain(|existing| existing != &key);
+        }
+        self.entries.insert(
+            key.clone(),
+            AiResponseCacheEntry {
+                response,
+                expires_at_unix: now_unix.saturating_add(ttl_secs),
+            },
+        );
+        self.order.push_back(key);
+        while self.entries.len() > max_records {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
         }
     }
 }
@@ -1079,6 +1167,7 @@ impl AppState {
             ))),
             usage_aggregates: Arc::new(Mutex::new(InMemoryRepository::new())),
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
+            response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
@@ -1143,6 +1232,7 @@ impl AppState {
         next.audit_events = Arc::clone(&self.audit_events);
         next.usage_aggregates = Arc::clone(&self.usage_aggregates);
         next.metrics = Arc::clone(&self.metrics);
+        next.response_cache = Arc::clone(&self.response_cache);
         next.request_ids = Arc::clone(&self.request_ids);
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
@@ -1291,6 +1381,122 @@ impl AppState {
                 body,
             },
         )
+    }
+
+    pub(crate) fn ai_cache_enabled(
+        &self,
+        api_key_id: Option<&str>,
+        logical_model: &str,
+        provider_name: &str,
+    ) -> bool {
+        if !self.config.cache.enabled {
+            return false;
+        }
+        let _ = provider_name;
+        if self
+            .config
+            .models
+            .iter()
+            .find(|model| model.name == logical_model)
+            .and_then(|model| model.cache_enabled)
+            == Some(false)
+        {
+            return false;
+        }
+        if let Some(api_key_id) = api_key_id {
+            if self
+                .config
+                .api_keys
+                .iter()
+                .find(|key| key.id == api_key_id)
+                .and_then(|key| key.cache_enabled)
+                == Some(false)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn ai_response_cache_key(
+        &self,
+        route: &str,
+        tenant: &ferrogate_core::TenantContext,
+        logical_model: &str,
+        provider: &str,
+        provider_model: &str,
+        body: &serde_json::Value,
+    ) -> AiResponseCacheKey {
+        #[derive(Serialize)]
+        struct CacheKeyInput<'a> {
+            route: &'a str,
+            organization_id: &'a Option<String>,
+            team_id: &'a Option<String>,
+            project_id: &'a Option<String>,
+            user_id: &'a Option<String>,
+            api_key_id: &'a Option<String>,
+            logical_model: &'a str,
+            provider: &'a str,
+            provider_model: &'a str,
+            stream: bool,
+            request_body: &'a serde_json::Value,
+        }
+
+        let bytes = serde_json::to_vec(&CacheKeyInput {
+            route,
+            organization_id: &tenant.organization_id,
+            team_id: &tenant.team_id,
+            project_id: &tenant.project_id,
+            user_id: &tenant.user_id,
+            api_key_id: &tenant.api_key_id,
+            logical_model,
+            provider,
+            provider_model,
+            stream: false,
+            request_body: body,
+        })
+        .expect("AI cache key serialization should not fail");
+        AiResponseCacheKey::new(format!("ai-cache:{:016x}", fnv1a64(&bytes)))
+    }
+
+    pub(crate) fn lookup_ai_response_cache(
+        &self,
+        key: &AiResponseCacheKey,
+    ) -> Option<AiCachedResponse> {
+        let now = now_unix_seconds().unwrap_or_default();
+        self.response_cache
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get(key, now))
+    }
+
+    pub(crate) fn store_ai_response_cache(
+        &self,
+        key: AiResponseCacheKey,
+        response: AiCachedResponse,
+    ) {
+        let now = now_unix_seconds().unwrap_or_default();
+        if let Ok(mut cache) = self.response_cache.lock() {
+            cache.insert(
+                key,
+                response,
+                self.config.cache.ttl_secs,
+                self.config.cache.max_records,
+                now,
+            );
+        }
+    }
+
+    pub(crate) fn record_ai_cache_hit(&self) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_cache_hit();
+        }
+    }
+
+    pub(crate) fn record_ai_cache_miss(&self) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_cache_miss();
+        }
     }
 
     pub(crate) fn resolve_model(
@@ -1598,6 +1804,7 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub(crate) fn api_key_tokens_committed_or_reserved(
         &self,
         api_key_id: &str,
@@ -1823,6 +2030,8 @@ impl AppState {
                 request_log_total: 0,
                 request_error_total: 0,
                 request_status_totals: Vec::new(),
+                cache_hits_total: 0,
+                cache_misses_total: 0,
                 billing_event_total: 0,
                 token_totals: TokenMetricTotals::default(),
                 model_provider_totals: Vec::new(),
@@ -2256,6 +2465,7 @@ impl ClusterCounterBackend {
         }
     }
 
+    #[cfg(test)]
     fn reserved_tokens(&self, api_key_id: &str) -> anyhow::Result<u64> {
         match self {
             Self::Local {
@@ -2269,6 +2479,7 @@ impl ClusterCounterBackend {
         }
     }
 
+    #[cfg(test)]
     fn committed_or_reserved(&self, api_key_id: &str, local_committed: u64) -> anyhow::Result<u64> {
         match self {
             Self::Local { .. } => {
@@ -2385,12 +2596,14 @@ impl RedisCounterBackend {
         Ok(count <= limit)
     }
 
+    #[cfg(test)]
     fn reserved_tokens(&self, api_key_id: &str) -> anyhow::Result<u64> {
         let key = format!("{}:tokens:reserved", self.api_key_prefix(api_key_id));
         let mut connection = self.connection()?;
         Ok(connection.get(key).unwrap_or_default())
     }
 
+    #[cfg(test)]
     fn committed_or_reserved(&self, api_key_id: &str) -> anyhow::Result<u64> {
         let prefix = self.api_key_prefix(api_key_id);
         let used_key = format!("{prefix}:tokens:used");
@@ -2973,6 +3186,7 @@ mod tests {
                 input_price_per_1m: None,
                 output_price_per_1m: None,
                 enabled: true,
+                cache_enabled: None,
             }],
             ..Config::default()
         };
@@ -3065,6 +3279,7 @@ mod tests {
                 input_price_per_1m: Some(5.0),
                 output_price_per_1m: Some(5.0),
                 enabled: true,
+                cache_enabled: None,
             }],
             ..Config::default()
         };
@@ -3272,6 +3487,7 @@ mod tests {
                 request_limit_per_minute: Some(1),
                 expires_at_unix: None,
                 log_bodies: None,
+                cache_enabled: None,
             }],
             ..Config::default()
         });
@@ -3339,6 +3555,7 @@ mod tests {
                 input_price_per_1m: Some(1.0),
                 output_price_per_1m: Some(2.0),
                 enabled: true,
+                cache_enabled: None,
             }],
             ..Config::default()
         };
@@ -3442,6 +3659,7 @@ mod tests {
             response_recorded: false,
             prompt_body: None,
             response_body: None,
+            cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
         });
@@ -3485,6 +3703,7 @@ mod tests {
                 response_recorded: false,
                 prompt_body: None,
                 response_body: None,
+                cache_status: None,
                 started_at_unix: None,
                 completed_at_unix: None,
             });
@@ -3607,6 +3826,7 @@ mod tests {
                 input_price_per_1m: Some(1.0),
                 output_price_per_1m: Some(2.0),
                 enabled: true,
+                cache_enabled: None,
             }],
             ..Config::default()
         };
@@ -3635,6 +3855,7 @@ mod tests {
             response_recorded: false,
             prompt_body: None,
             response_body: None,
+            cache_status: None,
             started_at_unix: None,
             completed_at_unix: None,
         });
@@ -3672,6 +3893,8 @@ mod tests {
         assert_eq!(snapshot.service_name, "ferrogate-test");
         assert_eq!(snapshot.request_log_total, 1);
         assert_eq!(snapshot.request_status_totals[0].status_code, 200);
+        assert_eq!(snapshot.cache_hits_total, 0);
+        assert_eq!(snapshot.cache_misses_total, 0);
         assert_eq!(snapshot.billing_event_total, 2);
         assert_eq!(snapshot.token_totals.total_tokens, 26);
         assert_eq!(snapshot.model_provider_totals[0].logical_model, "fast-chat");
@@ -3726,6 +3949,7 @@ mod tests {
                 input_price_per_1m: primary_input_price,
                 output_price_per_1m: primary_output_price,
                 enabled: true,
+                cache_enabled: None,
             }],
             ..Config::default()
         };
@@ -3768,6 +3992,7 @@ mod tests {
             response_recorded: false,
             prompt_body: None,
             response_body: None,
+            cache_status: None,
             started_at_unix: Some(started_at_unix),
             completed_at_unix: Some(completed_at_unix),
         });

@@ -1832,6 +1832,7 @@ fn admin_api_key(key: &crate::config::ApiKey) -> AdminApiKey {
         request_limit_per_minute: key.request_limit_per_minute,
         expires_at_unix: key.expires_at_unix,
         log_bodies: key.log_bodies.unwrap_or(false),
+        cache_enabled: key.cache_enabled,
     }
 }
 
@@ -1876,6 +1877,7 @@ fn api_key_from_mutation(
         request_limit_per_minute: payload.request_limit_per_minute,
         expires_at_unix: payload.expires_at_unix,
         log_bodies: payload.log_bodies,
+        cache_enabled: payload.cache_enabled,
     })
 }
 

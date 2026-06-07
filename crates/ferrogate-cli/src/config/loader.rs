@@ -110,6 +110,7 @@ impl Config {
                         .as_deref()
                         .and_then(|value| value.parse().ok()),
                     enabled: true,
+                    cache_enabled: None,
                 })
                 .collect(),
             api_keys: config
@@ -135,12 +136,14 @@ impl Config {
                     request_limit_per_minute: key.request_limit_per_minute,
                     expires_at_unix: None,
                     log_bodies: None,
+                    cache_enabled: None,
                 })
                 .collect(),
             policies: Vec::new(),
             extensions: Vec::new(),
             telemetry: TelemetryConfig::default(),
             metering: crate::config::MeteringConfig::default(),
+            cache: crate::config::CacheConfig::default(),
             storage: crate::config::StorageConfig::default(),
             reliability: crate::config::ReliabilityConfig::default(),
             cluster: crate::config::ClusterConfig::default(),

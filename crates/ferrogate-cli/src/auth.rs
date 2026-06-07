@@ -165,25 +165,6 @@ pub(crate) fn authenticate(
                     }
                 }
             }
-            if let Some(budget) = configured_key.monthly_token_budget {
-                match state.api_key_tokens_committed_or_reserved(&configured_key.id) {
-                    Ok(tokens) if tokens < budget => {}
-                    Ok(_) => {
-                        return Err(AuthError {
-                            status: StatusCode::TOO_MANY_REQUESTS,
-                            code: "token_budget_exceeded",
-                            message: "API key token budget is exhausted".into(),
-                        });
-                    }
-                    Err(error) => {
-                        return Err(AuthError {
-                            status: StatusCode::SERVICE_UNAVAILABLE,
-                            code: "governance_counter_unavailable",
-                            message: format!("gateway counter backend is unavailable: {error}"),
-                        });
-                    }
-                }
-            }
             return Ok(auth);
         }
     }
@@ -384,6 +365,7 @@ mod tests {
             request_limit_per_minute: None,
             expires_at_unix: None,
             log_bodies: None,
+            cache_enabled: None,
         };
 
         assert!(hash.starts_with("blake2b:"));

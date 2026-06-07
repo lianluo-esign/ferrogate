@@ -26,6 +26,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) metering: MeteringConfig,
     #[serde(default)]
+    pub(crate) cache: CacheConfig,
+    #[serde(default)]
     pub(crate) storage: StorageConfig,
     #[serde(default)]
     pub(crate) reliability: ReliabilityConfig,
@@ -199,6 +201,8 @@ pub(crate) struct Model {
     pub(crate) output_price_per_1m: Option<f64>,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) cache_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -259,6 +263,8 @@ pub(crate) struct ApiKey {
     pub(crate) expires_at_unix: Option<u64>,
     #[serde(default)]
     pub(crate) log_bodies: Option<bool>,
+    #[serde(default)]
+    pub(crate) cache_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -348,6 +354,16 @@ pub(crate) struct MeteringConfig {
     pub(crate) export_token: Option<String>,
     #[serde(default = "default_metering_export_timeout_secs")]
     pub(crate) export_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct CacheConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_cache_ttl_secs")]
+    pub(crate) ttl_secs: u64,
+    #[serde(default = "default_cache_max_records")]
+    pub(crate) max_records: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -555,6 +571,14 @@ fn default_metering_export_timeout_secs() -> u64 {
     3
 }
 
+fn default_cache_ttl_secs() -> u64 {
+    300
+}
+
+fn default_cache_max_records() -> usize {
+    1_000
+}
+
 fn default_request_log_retention_records() -> usize {
     10_000
 }
@@ -596,6 +620,16 @@ impl Default for MeteringConfig {
             export_token_env: None,
             export_token: None,
             export_timeout_secs: default_metering_export_timeout_secs(),
+        }
+    }
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ttl_secs: default_cache_ttl_secs(),
+            max_records: default_cache_max_records(),
         }
     }
 }
@@ -644,6 +678,7 @@ impl Default for Config {
             extensions: Vec::new(),
             telemetry: TelemetryConfig::default(),
             metering: MeteringConfig::default(),
+            cache: CacheConfig::default(),
             storage: StorageConfig::default(),
             reliability: ReliabilityConfig::default(),
             cluster: ClusterConfig::default(),
