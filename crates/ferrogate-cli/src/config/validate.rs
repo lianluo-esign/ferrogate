@@ -861,11 +861,6 @@ fn validate_builtin_extension_shape(
                 );
             }
         }
-        "hook.noop" => {
-            if !matches!(extension.kind, super::ExtensionKind::RequestHook) {
-                bail!("field extensions[{extension_index}].kind: hook.noop must be request_hook");
-            }
-        }
         "event.audit_log" => {
             if !matches!(extension.kind, super::ExtensionKind::EventSink) {
                 bail!(
@@ -874,6 +869,15 @@ fn validate_builtin_extension_shape(
             }
         }
         _ => {
+            if extension.id == "hook.noop" || extension.id.starts_with("hook.noop.") {
+                if !matches!(extension.kind, super::ExtensionKind::RequestHook) {
+                    bail!(
+                        "field extensions[{extension_index}].kind: {} must be request_hook",
+                        extension.id
+                    );
+                }
+                return Ok(());
+            }
             if extension.enabled {
                 bail!(
                     "field extensions[{extension_index}].id: unsupported builtin extension {}",

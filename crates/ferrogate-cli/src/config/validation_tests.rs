@@ -133,6 +133,19 @@ fn accepts_builtin_extension_config_with_explicit_permissions() {
 }
 
 #[test]
+fn accepts_multiple_builtin_noop_hooks_for_ordered_pipelines() {
+    let config = Config {
+        extensions: vec![
+            extension("hook.noop.first", ExtensionKind::RequestHook, 10),
+            extension("hook.noop.second", ExtensionKind::RequestHook, 20),
+        ],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
 fn rejects_duplicate_extension_ids() {
     let config = Config {
         extensions: vec![

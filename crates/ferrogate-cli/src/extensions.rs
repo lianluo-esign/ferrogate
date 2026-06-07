@@ -414,12 +414,15 @@ fn build_builtin_extension(extension: &ExtensionConfig) -> AnyResult<BuiltinExte
         ExtensionKind::ToolProvider => {
             build_tool_provider(extension).map(BuiltinExtension::ToolProvider)
         }
-        ExtensionKind::RequestHook => match extension.id.as_str() {
-            "hook.noop" => Ok(BuiltinExtension::RequestHook(RequestHook::Noop(
-                HookConfig::from_extension(extension),
-            ))),
-            _ => bail!("unsupported builtin request hook {}", extension.id),
-        },
+        ExtensionKind::RequestHook => {
+            if extension.id == "hook.noop" || extension.id.starts_with("hook.noop.") {
+                Ok(BuiltinExtension::RequestHook(RequestHook::Noop(
+                    HookConfig::from_extension(extension),
+                )))
+            } else {
+                bail!("unsupported builtin request hook {}", extension.id)
+            }
+        }
         ExtensionKind::EventSink => match extension.id.as_str() {
             "event.audit_log" => Ok(BuiltinExtension::EventSink(EventSink::AuditLog(
                 AuditLogSink {
@@ -1082,6 +1085,88 @@ mod tests {
                 && status.health == "degraded"
                 && status.last_error.as_deref() == Some("hook.noop denied pre_tool_call")
         }));
+    }
+
+    #[tokio::test]
+    async fn tool_hooks_run_pre_in_order_and_post_in_reverse_order() {
+        let mut first_pre = extension("hook.noop.first", ExtensionKind::RequestHook);
+        first_pre.order = 10;
+        first_pre
+            .config
+            .insert("blocking".into(), toml::Value::Boolean(true));
+        first_pre
+            .config
+            .insert("fail_pre_tool_call".into(), toml::Value::Boolean(true));
+        let mut second_pre = extension("hook.noop.second", ExtensionKind::RequestHook);
+        second_pre.order = 20;
+        second_pre
+            .config
+            .insert("blocking".into(), toml::Value::Boolean(true));
+        second_pre
+            .config
+            .insert("fail_pre_tool_call".into(), toml::Value::Boolean(true));
+        let pre_registry = ExtensionRegistry::from_config(&[
+            extension("tool.echo", ExtensionKind::ToolProvider),
+            second_pre,
+            first_pre,
+        ]);
+
+        let pre_error = pre_registry
+            .execute_tool(
+                ToolExecutionRequest {
+                    name: "tool.echo".into(),
+                    arguments: json!({}),
+                    route: None,
+                    session_id: None,
+                },
+                "req-1".into(),
+                TenantContext::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(pre_error.message(), "hook.noop.first denied pre_tool_call");
+
+        let mut first_post = extension("hook.noop.first", ExtensionKind::RequestHook);
+        first_post.order = 10;
+        first_post
+            .config
+            .insert("blocking".into(), toml::Value::Boolean(true));
+        first_post
+            .config
+            .insert("fail_post_tool_call".into(), toml::Value::Boolean(true));
+        let mut second_post = extension("hook.noop.second", ExtensionKind::RequestHook);
+        second_post.order = 20;
+        second_post
+            .config
+            .insert("blocking".into(), toml::Value::Boolean(true));
+        second_post
+            .config
+            .insert("fail_post_tool_call".into(), toml::Value::Boolean(true));
+        let post_registry = ExtensionRegistry::from_config(&[
+            extension("tool.echo", ExtensionKind::ToolProvider),
+            first_post,
+            second_post,
+        ]);
+
+        let post_error = post_registry
+            .execute_tool(
+                ToolExecutionRequest {
+                    name: "tool.echo".into(),
+                    arguments: json!({}),
+                    route: None,
+                    session_id: None,
+                },
+                "req-2".into(),
+                TenantContext::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            post_error.message(),
+            "hook.noop.second failed post_tool_call"
+        );
     }
 
     #[tokio::test]

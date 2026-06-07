@@ -145,6 +145,24 @@ fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
     assert_eq!(tools["data"][0]["name"], "github.search");
     assert!(tools["data"][0].get("config").is_none());
 
+    let extensions = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/extensions",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let mcp = extensions["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|extension| extension["id"] == "mcp.http")
+        .unwrap();
+    assert_eq!(mcp["active"], true);
+    assert_eq!(mcp["health"], "ok");
+    assert!(mcp.get("config").is_none());
+    assert!(!extensions.to_string().contains("/mcp"));
+
     let executed = response_json(http_request(
         &gateway_addr,
         "POST",
