@@ -181,6 +181,15 @@ impl ExtensionRegistry {
         self.tools.as_ref().clone()
     }
 
+    #[cfg(test)]
+    fn captured_events(&self, sink_id: &str) -> Vec<GatewayEvent> {
+        self.event_sinks
+            .iter()
+            .find(|sink| sink.id() == sink_id)
+            .map(EventSink::events)
+            .unwrap_or_default()
+    }
+
     pub(crate) async fn execute_tool(
         &self,
         request: ToolExecutionRequest,
@@ -189,22 +198,52 @@ impl ExtensionRegistry {
         api_key_id: Option<&str>,
     ) -> Result<ToolExecutionResponse, ToolExecutionError> {
         let Some(tool) = self.tools.iter().find(|tool| tool.name == request.name) else {
-            return Err(ToolExecutionError::NotFound(format!(
-                "tool {} is not registered",
-                request.name
-            )));
+            let error =
+                ToolExecutionError::NotFound(format!("tool {} is not registered", request.name));
+            let _ = self.emit_tool_event(ToolEventDraft {
+                request_id: request_id.clone(),
+                tenant: tenant.clone(),
+                extension_id: "tool_registry".into(),
+                tool_name: Some(request.name.clone()),
+                status: "error".into(),
+                latency_ms: 0,
+                error_code: Some(error.code().into()),
+                session_id: request.session_id.clone(),
+            });
+            return Err(error);
         };
         if !tool_visible(tool, &tenant, api_key_id, request.route.as_deref()) {
-            return Err(ToolExecutionError::Denied(format!(
+            let error = ToolExecutionError::Denied(format!(
                 "tool {} is not allowlisted for this tenant, API key, or route",
                 request.name
-            )));
+            ));
+            let _ = self.emit_tool_event(ToolEventDraft {
+                request_id: request_id.clone(),
+                tenant: tenant.clone(),
+                extension_id: tool.extension_id.clone(),
+                tool_name: Some(request.name.clone()),
+                status: "error".into(),
+                latency_ms: 0,
+                error_code: Some(error.code().into()),
+                session_id: request.session_id.clone(),
+            });
+            return Err(error);
         }
 
         for hook in self.hooks.iter() {
             if let Err(error) = hook.pre_tool_call(&request) {
                 self.record_extension_error(hook.id(), error.message());
                 if hook.blocking() {
+                    let _ = self.emit_tool_event(ToolEventDraft {
+                        request_id: request_id.clone(),
+                        tenant: tenant.clone(),
+                        extension_id: hook.id().into(),
+                        tool_name: Some(request.name.clone()),
+                        status: "error".into(),
+                        latency_ms: 0,
+                        error_code: Some(error.code().into()),
+                        session_id: request.session_id.clone(),
+                    });
                     return Err(error);
                 }
             }
@@ -219,6 +258,17 @@ impl ExtensionRegistry {
             Ok(content) => content,
             Err(error) => {
                 self.record_extension_error(&tool.extension_id, error.message());
+                let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                let _ = self.emit_tool_event(ToolEventDraft {
+                    request_id: request_id.clone(),
+                    tenant: tenant.clone(),
+                    extension_id: tool.extension_id.clone(),
+                    tool_name: Some(request.name.clone()),
+                    status: "error".into(),
+                    latency_ms,
+                    error_code: Some(error.code().into()),
+                    session_id: request.session_id.clone(),
+                });
                 return Err(error);
             }
         };
@@ -228,6 +278,16 @@ impl ExtensionRegistry {
             if let Err(error) = hook.post_tool_call(&request) {
                 self.record_extension_error(hook.id(), error.message());
                 if hook.blocking() {
+                    let _ = self.emit_tool_event(ToolEventDraft {
+                        request_id: request_id.clone(),
+                        tenant: tenant.clone(),
+                        extension_id: hook.id().into(),
+                        tool_name: Some(request.name.clone()),
+                        status: "error".into(),
+                        latency_ms,
+                        error_code: Some(error.code().into()),
+                        session_id: request.session_id.clone(),
+                    });
                     return Err(error);
                 }
             }
@@ -242,7 +302,7 @@ impl ExtensionRegistry {
             session_id: request.session_id.clone(),
             latency_ms,
         };
-        self.emit(GatewayEvent {
+        self.emit_tool_event(ToolEventDraft {
             request_id,
             tenant,
             extension_id: tool.extension_id.clone(),
@@ -299,6 +359,30 @@ impl ExtensionRegistry {
             }
         }
     }
+
+    fn emit_tool_event(&self, draft: ToolEventDraft) -> Result<(), ToolExecutionError> {
+        self.emit(GatewayEvent {
+            request_id: draft.request_id,
+            tenant: draft.tenant,
+            extension_id: draft.extension_id,
+            tool_name: draft.tool_name,
+            status: draft.status,
+            latency_ms: draft.latency_ms,
+            error_code: draft.error_code,
+            session_id: draft.session_id,
+        })
+    }
+}
+
+struct ToolEventDraft {
+    request_id: String,
+    tenant: TenantContext,
+    extension_id: String,
+    tool_name: Option<String>,
+    status: String,
+    latency_ms: u64,
+    error_code: Option<String>,
+    session_id: Option<String>,
 }
 
 fn status(
@@ -631,6 +715,17 @@ impl EventSink {
                 }
                 Ok(())
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn events(&self) -> Vec<GatewayEvent> {
+        match self {
+            Self::AuditLog(sink) => sink
+                .events
+                .lock()
+                .map(|events| events.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -987,5 +1082,38 @@ mod tests {
                 && status.health == "degraded"
                 && status.last_error.as_deref() == Some("hook.noop denied pre_tool_call")
         }));
+    }
+
+    #[tokio::test]
+    async fn tool_execution_failures_emit_audit_events() {
+        let registry = ExtensionRegistry::from_config(&[
+            extension("tool.echo", ExtensionKind::ToolProvider),
+            extension("event.audit_log", ExtensionKind::EventSink),
+        ]);
+
+        let error = registry
+            .execute_tool(
+                ToolExecutionRequest {
+                    name: "tool.missing".into(),
+                    arguments: json!({}),
+                    route: None,
+                    session_id: Some("session-1".into()),
+                },
+                "req-1".into(),
+                TenantContext::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "tool_not_found");
+        let events = registry.captured_events("event.audit_log");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].request_id, "req-1");
+        assert_eq!(events[0].extension_id, "tool_registry");
+        assert_eq!(events[0].tool_name.as_deref(), Some("tool.missing"));
+        assert_eq!(events[0].status, "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("tool_not_found"));
+        assert_eq!(events[0].session_id.as_deref(), Some("session-1"));
     }
 }
