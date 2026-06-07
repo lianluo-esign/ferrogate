@@ -483,18 +483,18 @@ GET  /admin
 
 ## Docker
 
-稳定版本使用日期版本号，例如 `v2026.06.06`。
+稳定版本使用日期版本号，例如 `v2026.06.07`。
 
 拉取 GitHub Packages 发布镜像，并挂载配置运行：
 
 ```bash
-docker pull ghcr.io/lianluo-esign/ferrogate:v2026.06.06
+docker pull ghcr.io/lianluo-esign/ferrogate:v2026.06.07
 
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/config/ferrogate.example.toml:/etc/ferrogate/ferrogate.toml:ro" \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ghcr.io/lianluo-esign/ferrogate:v2026.06.06
+  ghcr.io/lianluo-esign/ferrogate:v2026.06.07
 ```
 
 开发 Docker 改动时，可以构建本地镜像：
@@ -514,7 +514,7 @@ docker run --rm \
   -v /etc/ferrogate/ferrogate.toml:/etc/ferrogate/ferrogate.toml:ro \
   -v /var/lib/ferrogate/acme:/var/lib/ferrogate/acme \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ghcr.io/lianluo-esign/ferrogate:v2026.06.06
+  ghcr.io/lianluo-esign/ferrogate:v2026.06.07
 ```
 
 ## 质量与安全

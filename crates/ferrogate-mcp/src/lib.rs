@@ -34,9 +34,10 @@ pub enum McpTransport {
     Stdio,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpAuthType {
+    #[default]
     None,
     Headers,
     Oauth,
@@ -95,12 +96,6 @@ pub struct McpTlsConfig {
     pub insecure_skip_verify: bool,
     #[serde(default)]
     pub ca_cert_path: Option<String>,
-}
-
-impl Default for McpAuthType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 fn default_timeout_ms() -> u64 {

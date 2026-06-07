@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Date-based container version tag, for example v2026.06.06"
+        description: "Date-based container version tag, for example v2026.06.07"
         required: true
-        default: "v2026.06.06"
+        default: "v2026.06.07"
   push:
     tags:
       - "v*"
