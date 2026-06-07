@@ -172,6 +172,46 @@ fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
         .any(|request| request.contains("\"tools/call\"")));
 }
 
+#[test]
+fn agentic_lite_non_blocking_hook_failures_are_admin_visible() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, non_blocking_hook_failure_config(&gateway_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let tools = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/tools",
+        &["Authorization: Bearer tool-secret"],
+        "",
+    ));
+    assert_eq!(tools["data"][0]["name"], "tool.echo");
+
+    let extensions = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/extensions",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let hook = extensions["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|extension| extension["id"] == "hook.noop")
+        .unwrap();
+    assert_eq!(hook["active"], true);
+    assert_eq!(hook["health"], "degraded");
+    assert!(hook["last_error"].as_str().unwrap().contains("pre_request"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
 fn builtin_tools_config(gateway_addr: &str) -> String {
     format!(
         r#"
@@ -230,6 +270,46 @@ order = 40
 
 [extensions.permissions]
 tools = ["tool.health_check"]
+"#
+    )
+}
+
+fn non_blocking_hook_failure_config(gateway_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
+id = "tool-client"
+name = "Tool client"
+key = "tool-secret"
+scopes = ["tools.read"]
+
+[[extensions]]
+id = "tool.echo"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+
+[extensions.permissions]
+tools = ["tool.echo"]
+
+[[extensions]]
+id = "hook.noop"
+kind = "request_hook"
+source = "builtin"
+enabled = true
+order = 20
+
+[extensions.config]
+fail_pre_request = true
 "#
     )
 }

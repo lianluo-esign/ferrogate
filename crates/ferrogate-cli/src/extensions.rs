@@ -104,7 +104,7 @@ pub(crate) struct GatewayEvent {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExtensionRegistry {
-    statuses: Arc<Vec<ExtensionStatus>>,
+    statuses: Arc<Mutex<Vec<ExtensionStatus>>>,
     tools: Arc<Vec<RegisteredTool>>,
     tool_providers: Arc<HashMap<String, ToolProvider>>,
     hooks: Arc<Vec<RequestHook>>,
@@ -149,7 +149,7 @@ impl ExtensionRegistry {
         }
 
         Self {
-            statuses: Arc::new(statuses),
+            statuses: Arc::new(Mutex::new(statuses)),
             tools: Arc::new(tools),
             tool_providers: Arc::new(tool_providers),
             hooks: Arc::new(hooks),
@@ -158,7 +158,10 @@ impl ExtensionRegistry {
     }
 
     pub(crate) fn statuses(&self) -> Vec<ExtensionStatus> {
-        self.statuses.as_ref().clone()
+        self.statuses
+            .lock()
+            .map(|statuses| statuses.clone())
+            .unwrap_or_default()
     }
 
     pub(crate) fn tools_for(
@@ -199,7 +202,12 @@ impl ExtensionRegistry {
         }
 
         for hook in self.hooks.iter() {
-            hook.pre_tool_call(&request)?;
+            if let Err(error) = hook.pre_tool_call(&request) {
+                self.record_extension_error(hook.id(), error.message());
+                if hook.blocking() {
+                    return Err(error);
+                }
+            }
         }
 
         let started = Instant::now();
@@ -207,11 +215,22 @@ impl ExtensionRegistry {
             .tool_providers
             .get(&tool.extension_id)
             .ok_or_else(|| ToolExecutionError::Failed("tool provider is not active".into()))?;
-        let content = provider.execute(&request).await?;
+        let content = match provider.execute(&request).await {
+            Ok(content) => content,
+            Err(error) => {
+                self.record_extension_error(&tool.extension_id, error.message());
+                return Err(error);
+            }
+        };
         let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         for hook in self.hooks.iter().rev() {
-            hook.post_tool_call(&request);
+            if let Err(error) = hook.post_tool_call(&request) {
+                self.record_extension_error(hook.id(), error.message());
+                if hook.blocking() {
+                    return Err(error);
+                }
+            }
         }
 
         let response = ToolExecutionResponse {
@@ -232,7 +251,7 @@ impl ExtensionRegistry {
             latency_ms,
             error_code: None,
             session_id: response.session_id.clone(),
-        });
+        })?;
         Ok(response)
     }
 
@@ -242,20 +261,42 @@ impl ExtensionRegistry {
         path: &str,
     ) -> Result<(), ToolExecutionError> {
         for hook in self.hooks.iter() {
-            hook.pre_request(request_id, path)?;
+            if let Err(error) = hook.pre_request(request_id, path) {
+                self.record_extension_error(hook.id(), error.message());
+                if hook.blocking() {
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
 
     pub(crate) fn post_response(&self, request_id: &str, status: u16) {
         for hook in self.hooks.iter().rev() {
-            hook.post_response(request_id, status);
+            if let Err(error) = hook.post_response(request_id, status) {
+                self.record_extension_error(hook.id(), error.message());
+            }
         }
     }
 
-    pub(crate) fn emit(&self, event: GatewayEvent) {
+    pub(crate) fn emit(&self, event: GatewayEvent) -> Result<(), ToolExecutionError> {
         for sink in self.event_sinks.iter() {
-            sink.emit(event.clone());
+            if let Err(error) = sink.emit(event.clone()) {
+                self.record_extension_error(sink.id(), error.message());
+                if sink.blocking() {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_extension_error(&self, extension_id: &str, message: &str) {
+        if let Ok(mut statuses) = self.statuses.lock() {
+            if let Some(status) = statuses.iter_mut().find(|status| status.id == extension_id) {
+                status.health = "degraded";
+                status.last_error = Some(message.to_string());
+            }
         }
     }
 }
@@ -290,13 +331,20 @@ fn build_builtin_extension(extension: &ExtensionConfig) -> AnyResult<BuiltinExte
             build_tool_provider(extension).map(BuiltinExtension::ToolProvider)
         }
         ExtensionKind::RequestHook => match extension.id.as_str() {
-            "hook.noop" => Ok(BuiltinExtension::RequestHook(RequestHook::Noop)),
+            "hook.noop" => Ok(BuiltinExtension::RequestHook(RequestHook::Noop(
+                HookConfig::from_extension(extension),
+            ))),
             _ => bail!("unsupported builtin request hook {}", extension.id),
         },
         ExtensionKind::EventSink => match extension.id.as_str() {
-            "event.audit_log" => Ok(BuiltinExtension::EventSink(EventSink::AuditLog(Arc::new(
-                Mutex::new(Vec::new()),
-            )))),
+            "event.audit_log" => Ok(BuiltinExtension::EventSink(EventSink::AuditLog(
+                AuditLogSink {
+                    id: extension.id.clone(),
+                    blocking: bool_value(&extension.config, "blocking"),
+                    fail_emit: bool_value(&extension.config, "fail_emit"),
+                    events: Arc::new(Mutex::new(Vec::new())),
+                },
+            ))),
             _ => bail!("unsupported builtin event sink {}", extension.id),
         },
     }
@@ -437,13 +485,31 @@ impl McpHttpToolProvider {
 
 #[derive(Debug, Clone)]
 enum RequestHook {
-    Noop,
+    Noop(HookConfig),
 }
 
 impl RequestHook {
+    fn id(&self) -> &str {
+        match self {
+            Self::Noop(config) => &config.id,
+        }
+    }
+
+    fn blocking(&self) -> bool {
+        match self {
+            Self::Noop(config) => config.blocking,
+        }
+    }
+
     fn pre_request(&self, request_id: &str, path: &str) -> Result<(), ToolExecutionError> {
         match self {
-            Self::Noop => {
+            Self::Noop(config) => {
+                if config.fail_pre_request {
+                    return Err(ToolExecutionError::Denied(format!(
+                        "{} denied pre_request",
+                        config.id
+                    )));
+                }
                 if request_id.trim().is_empty() {
                     return Err(ToolExecutionError::Denied(
                         "request id cannot be empty".into(),
@@ -459,11 +525,29 @@ impl RequestHook {
         }
     }
 
-    fn post_response(&self, _request_id: &str, _status: u16) {}
+    fn post_response(&self, _request_id: &str, _status: u16) -> Result<(), ToolExecutionError> {
+        match self {
+            Self::Noop(config) => {
+                if config.fail_post_response {
+                    return Err(ToolExecutionError::Denied(format!(
+                        "{} failed post_response",
+                        config.id
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
 
     fn pre_tool_call(&self, request: &ToolExecutionRequest) -> Result<(), ToolExecutionError> {
         match self {
-            Self::Noop => {
+            Self::Noop(config) => {
+                if config.fail_pre_tool_call {
+                    return Err(ToolExecutionError::Denied(format!(
+                        "{} denied pre_tool_call",
+                        config.id
+                    )));
+                }
                 if request.name.trim().is_empty() {
                     return Err(ToolExecutionError::Denied(
                         "tool name cannot be empty".into(),
@@ -474,27 +558,89 @@ impl RequestHook {
         }
     }
 
-    fn post_tool_call(&self, _request: &ToolExecutionRequest) {}
+    fn post_tool_call(&self, _request: &ToolExecutionRequest) -> Result<(), ToolExecutionError> {
+        match self {
+            Self::Noop(config) => {
+                if config.fail_post_tool_call {
+                    return Err(ToolExecutionError::Denied(format!(
+                        "{} failed post_tool_call",
+                        config.id
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HookConfig {
+    id: String,
+    blocking: bool,
+    fail_pre_request: bool,
+    fail_post_response: bool,
+    fail_pre_tool_call: bool,
+    fail_post_tool_call: bool,
+}
+
+impl HookConfig {
+    fn from_extension(extension: &ExtensionConfig) -> Self {
+        Self {
+            id: extension.id.clone(),
+            blocking: bool_value(&extension.config, "blocking"),
+            fail_pre_request: bool_value(&extension.config, "fail_pre_request"),
+            fail_post_response: bool_value(&extension.config, "fail_post_response"),
+            fail_pre_tool_call: bool_value(&extension.config, "fail_pre_tool_call"),
+            fail_post_tool_call: bool_value(&extension.config, "fail_post_tool_call"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 enum EventSink {
-    AuditLog(Arc<Mutex<Vec<GatewayEvent>>>),
+    AuditLog(AuditLogSink),
 }
 
 impl EventSink {
-    fn emit(&self, event: GatewayEvent) {
+    fn id(&self) -> &str {
         match self {
-            Self::AuditLog(events) => {
-                if let Ok(mut events) = events.lock() {
+            Self::AuditLog(sink) => &sink.id,
+        }
+    }
+
+    fn blocking(&self) -> bool {
+        match self {
+            Self::AuditLog(sink) => sink.blocking,
+        }
+    }
+
+    fn emit(&self, event: GatewayEvent) -> Result<(), ToolExecutionError> {
+        match self {
+            Self::AuditLog(sink) => {
+                if sink.fail_emit {
+                    return Err(ToolExecutionError::Failed(format!(
+                        "{} failed to emit event",
+                        sink.id
+                    )));
+                }
+                if let Ok(mut events) = sink.events.lock() {
                     events.push(event);
                     if events.len() > 1_000 {
                         events.remove(0);
                     }
                 }
+                Ok(())
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct AuditLogSink {
+    id: String,
+    blocking: bool,
+    fail_emit: bool,
+    events: Arc<Mutex<Vec<GatewayEvent>>>,
 }
 
 fn tool_visible(
@@ -539,6 +685,13 @@ fn integer_value(config: &BTreeMap<String, toml::Value>, key: &str) -> Option<u6
         .get(key)
         .and_then(toml::Value::as_integer)
         .and_then(|value| u64::try_from(value).ok())
+}
+
+fn bool_value(config: &BTreeMap<String, toml::Value>, key: &str) -> bool {
+    config
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn string_list(config: &BTreeMap<String, toml::Value>, key: &str) -> Vec<String> {
@@ -750,5 +903,89 @@ mod tests {
 
         assert_eq!(response.name, "tool.echo");
         assert_eq!(response.content, json!({"echo": {"message": "hello"}}));
+    }
+
+    #[tokio::test]
+    async fn non_blocking_extension_failures_are_isolated_and_visible() {
+        let mut hook = extension("hook.noop", ExtensionKind::RequestHook);
+        hook.config
+            .insert("fail_pre_tool_call".into(), toml::Value::Boolean(true));
+        let mut sink = extension("event.audit_log", ExtensionKind::EventSink);
+        sink.config
+            .insert("fail_emit".into(), toml::Value::Boolean(true));
+        let registry = ExtensionRegistry::from_config(&[
+            extension("tool.echo", ExtensionKind::ToolProvider),
+            hook,
+            sink,
+        ]);
+
+        let response = registry
+            .execute_tool(
+                ToolExecutionRequest {
+                    name: "tool.echo".into(),
+                    arguments: json!({"message": "hello"}),
+                    route: None,
+                    session_id: None,
+                },
+                "req-1".into(),
+                TenantContext::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.name, "tool.echo");
+        let statuses = registry.statuses();
+        assert!(statuses.iter().any(|status| {
+            status.id == "hook.noop"
+                && status.health == "degraded"
+                && status
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("pre_tool_call"))
+        }));
+        assert!(statuses.iter().any(|status| {
+            status.id == "event.audit_log"
+                && status.health == "degraded"
+                && status
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("emit event"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn blocking_extension_failures_stop_tool_execution() {
+        let mut hook = extension("hook.noop", ExtensionKind::RequestHook);
+        hook.config
+            .insert("blocking".into(), toml::Value::Boolean(true));
+        hook.config
+            .insert("fail_pre_tool_call".into(), toml::Value::Boolean(true));
+        let registry = ExtensionRegistry::from_config(&[
+            extension("tool.echo", ExtensionKind::ToolProvider),
+            hook,
+        ]);
+
+        let error = registry
+            .execute_tool(
+                ToolExecutionRequest {
+                    name: "tool.echo".into(),
+                    arguments: json!({"message": "hello"}),
+                    route: None,
+                    session_id: None,
+                },
+                "req-1".into(),
+                TenantContext::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "tool_denied");
+        assert!(registry.statuses().iter().any(|status| {
+            status.id == "hook.noop"
+                && status.health == "degraded"
+                && status.last_error.as_deref() == Some("hook.noop denied pre_tool_call")
+        }));
     }
 }
