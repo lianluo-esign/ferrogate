@@ -4,8 +4,9 @@
 
 FerroGate is an open-source Rust API gateway and AI gateway built on
 Cloudflare Pingora. It gives teams a self-hostable control point for LLM
-traffic: routing, virtual API keys, provider adapters, policy checks, token
-usage accounting, observability, admin APIs, and automatic HTTPS.
+traffic: routing, virtual API keys, provider adapters, exact-match response
+cache, MCP tool execution, policy checks, token usage accounting,
+observability, admin APIs, cluster operations, and automatic HTTPS.
 
 The project is developed as the open-source gateway foundation behind
 [Token4AI Cloud](https://token4ai.cloud).
@@ -18,11 +19,23 @@ The project is developed as the open-source gateway foundation behind
 - **OpenAI-compatible AI API** with `GET /v1/models`,
   `POST /v1/chat/completions`, and `POST /v1/responses`, including
   non-streaming and streaming SSE forwarding.
-- **Provider adapters** for OpenAI-compatible APIs, OpenAI, Anthropic, Gemini,
-  Grok/xAI, and Azure OpenAI.
+- **Provider adapters** for OpenAI-compatible APIs, OpenAI, Azure OpenAI,
+  OpenRouter, Anthropic, Gemini, and Grok/xAI.
 - **Model registry and fallback routing** with logical model names, provider
-  model mapping, priority fallback, weighted fallback, tenant visibility, and
-  provider allow/deny controls.
+  model mapping, priority fallback, weighted fallback, lowest-cost,
+  lowest-latency, balanced routing, tenant visibility, and provider allow/deny
+  controls.
+- **Exact-match AI response cache** for non-streaming requests with global,
+  model, and API-key enablement controls. Cache keys include tenant context,
+  route, logical model, provider route/model, and normalized request body.
+- **MCP gateway support** through `ferrogate-mcp`, with streamable HTTP, SSE,
+  and stdio server sessions, startup `initialize` plus `tools/list`, namespaced
+  `serverName-toolName` tools, deny-by-default execution allowlists, policy
+  targets, admin visibility, health checks, reconnects, and
+  `POST /v1/mcp/tool/execute`.
+- **Agentic Lite extension surface** with built-in request hooks, tool
+  providers, event sinks, `GET /v1/tools`, `POST /v1/tools/execute`, admin tool
+  session views, and audit events.
 - **Caddy-style config file compatibility** through `Ferrogate/Caddyfile`
   parsing for familiar reverse-proxy routes, matchers, TLS, logging, and
   gateway settings, alongside structured TOML configuration.
@@ -32,43 +45,60 @@ The project is developed as the open-source gateway foundation behind
 - **Token usage metering events** using provider-reported usage when
   available, gateway estimates when needed, and a request reservation /
   settlement flow inspired by production AI gateways.
-- **Observability** with structured request logs, token metering events, configurable
-  in-memory retention, usage aggregates, Prometheus metrics, request/trace ID
-  propagation, and OTLP/HTTP metrics/logs/traces export.
+- **Observability** with structured request logs, token metering events,
+  configurable in-memory retention, usage aggregates, provider health, cache
+  metrics, MCP tool metrics, Prometheus metrics, request/trace ID propagation,
+  and OTLP/HTTP metrics/logs/traces export.
 - **Admin API and dashboard** for gateway status, providers, models, API keys,
   tenants, policies, request logs, metering events, usage aggregates, audit
-  events, provider health, config validation, and process-local reload.
-- **Automatic HTTPS** with manual TLS, ACME HTTP-01, and ACME DNS-01 through a
-  built-in Cloudflare provider. ACME provider credentials are read from the
-  configuration file, not environment variables or Python scripts.
+  events, provider health, extensions, tools, MCP servers, config validation,
+  process-local reload, and node drain/readiness.
+- **Cluster operations** for multi-node deployments with node identity, shared
+  file control-plane state, Redis-backed request and token counters, status,
+  readiness, and drain semantics.
+- **Automatic HTTPS** with manual TLS, ACME HTTP-01, ACME DNS-01 through a
+  built-in Cloudflare provider, renewal scheduling, and graceful-upgrade
+  handoff when listener-level TLS reload is required. ACME provider credentials
+  are read from the configuration file, not environment variables or Python
+  scripts.
 - **Supply-chain and security gates** with formatting, clippy, locked metadata,
   high-confidence secret scanning, cargo-deny, cargo-audit, and GitHub Actions.
 
 ## Current Status
 
-The planned MVP and production-readiness implementation slice is complete for
-the open-source gateway codebase.
+The open-source gateway implementation now covers the core API gateway, AI
+gateway, governance, tool execution, observability, TLS, and cluster operations
+needed for a self-hosted first production slice.
 
 Validated end-to-end:
 
 - HTTP reverse proxy runtime on Pingora.
-- OpenAI-compatible AI gateway paths.
-- Provider adapters and fallback routing.
+- OpenAI-compatible Chat Completions and Responses API paths.
+- Provider adapters and priority, weighted, cost, latency, and balanced routing.
 - Virtual API key auth, policy checks, rate limits, and token budget handling.
-- Request logs, token metering events, usage aggregates, metrics, and OTLP planning.
-- Admin API, API key and policy CRUD, static dashboard, config validation, and
-  process-local reload.
-- Manual TLS, ACME HTTP-01, and ACME DNS-01.
+- Exact-match response cache for non-streaming AI requests.
+- Agentic Lite tools and MCP gateway execution through auth, policy, billing,
+  audit, and metrics.
+- Request logs, token metering events, usage aggregates, provider health, cache
+  metrics, MCP tool metrics, Prometheus, and OTLP export.
+- Admin API, API key and policy CRUD, static dashboard, config validation,
+  process-local reload, status, readiness, and drain.
+- Manual TLS, ACME HTTP-01, ACME DNS-01, renewal scheduling, and listener-level
+  graceful upgrade handoff.
+- Cluster identity, shared file state, Redis counters, readiness, and drain
+  runbooks.
 - Real Let's Encrypt staging and production issuance for both HTTP-01 and
   Cloudflare DNS-01 during live validation.
 
 Still intentionally scoped as next-stage production work:
 
-- Persistent storage implementations for API keys, tenants, policy, billing,
-  request logs, and audit logs. Current runtime state is primarily config and
+- Durable database-backed storage implementations for API keys, tenants, policy,
+  billing, request logs, audit logs, and multi-node control-plane state. Current
+  runtime state is primarily config, shared file state, Redis counters, and
   in-memory repository driven.
-- Full Admin API CRUD control plane beyond the current API key and policy
-  resources.
+- Full Admin API write control plane beyond the current API key, policy,
+  config-validation, reload, and drain resources.
+- Semantic/vector cache matching. The implemented cache is exact-match only.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the
   generic external hook boundary.
 
@@ -85,6 +115,7 @@ crates/
   ferrogate-billing         Token usage metering models and local event retention
   ferrogate-observability   Metrics, spans, exporter contracts
   ferrogate-runtime         Reload and runtime lifecycle state machine
+  ferrogate-mcp             MCP host/client manager and tool execution bridge
 config/                     Example TOML configuration
 Ferrogate/Caddyfile          Default Caddyfile-style development config
 scripts/security-check.sh    Local security and supply-chain gate
@@ -357,7 +388,8 @@ ai_gateway {
 
 ## Automatic HTTPS
 
-FerroGate supports manual TLS certificates and startup-time ACME issuance.
+FerroGate supports manual TLS certificates, startup-time ACME issuance, and
+background ACME renewal scheduling.
 
 ### Manual TLS
 
@@ -519,8 +551,16 @@ GET  /admin/v1/mcp-servers
 GET  /admin/v1/tool-sessions/{session_id}
 GET  /admin/v1/models
 GET  /admin/v1/api-keys
+GET  /admin/v1/api-keys/{id}
+POST /admin/v1/api-keys
+PUT  /admin/v1/api-keys/{id}
+DELETE /admin/v1/api-keys/{id}
 GET  /admin/v1/tenants
 GET  /admin/v1/policies
+GET  /admin/v1/policies/{name}
+POST /admin/v1/policies
+PUT  /admin/v1/policies/{name}
+DELETE /admin/v1/policies/{name}
 GET  /admin/v1/request-logs
 GET  /admin/v1/metering-events
 GET  /admin/v1/billing-events  # compatibility alias
@@ -528,6 +568,9 @@ GET  /admin/v1/usage-aggregates
 GET  /admin/v1/audit-events
 POST /admin/v1/config/validate
 POST /admin/v1/config/reload
+GET  /admin/v1/drain
+POST /admin/v1/drain
+DELETE /admin/v1/drain
 GET  /metrics
 GET  /admin
 ```
@@ -613,6 +656,9 @@ are monitored separately from direct FerroGate code.
 ## Documentation
 
 - Project roadmap: [`docs/roadmap.md`](docs/roadmap.md)
+- Cluster deployment guide: [`docs/cluster-deployment.md`](docs/cluster-deployment.md)
+- Admin API OpenAPI:
+  [`docs/openapi/admin-api.openapi.json`](docs/openapi/admin-api.openapi.json)
 - Performance testing guide:
   [`docs/performance-testing.md`](docs/performance-testing.md)
 - Example TOML configuration:
