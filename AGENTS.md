@@ -120,6 +120,22 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+Before pushing changes that will trigger GitHub `rust-ci`, reproduce that CI
+gate locally with the pinned workflow toolchain first. Use Rust `1.88.0` unless
+`.github/workflows/ci.yml` changes, and run:
+
+```bash
+cargo +1.88.0 fmt --all -- --check
+cargo +1.88.0 clippy --workspace --all-targets --all-features -- -D warnings
+cargo +1.88.0 metadata --locked --format-version=1 >/dev/null
+python3 scripts/check-openapi.py
+cargo +1.88.0 test --workspace --all-features
+cargo +1.88.0 test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- --nocapture
+```
+
+Do not push to run GitHub CI as the first build signal when these commands can
+be run locally.
+
 For config parser, provider, policy, billing, storage, or streaming changes,
 add or update focused regression tests. For security-sensitive changes, also
 run the local security gate when practical:

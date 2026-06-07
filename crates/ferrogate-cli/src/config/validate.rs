@@ -802,8 +802,7 @@ fn validate_extension_permission_names(
         }
         if !seen.insert(name.as_str()) {
             bail!(
-                "field extensions[{extension_index}].{field}[{index}]: duplicate permission value {}",
-                name
+                "field extensions[{extension_index}].{field}[{index}]: duplicate permission value {name}"
             );
         }
     }
