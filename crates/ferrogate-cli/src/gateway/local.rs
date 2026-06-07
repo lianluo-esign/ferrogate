@@ -278,6 +278,11 @@ impl FerroGateway {
                 .await;
             }
         };
+        let audit_target = request
+            .session_id
+            .as_ref()
+            .map(|session_id| tool_session_audit_target(session_id))
+            .unwrap_or_else(|| request.name.clone());
 
         match state
             .execute_tool(
@@ -293,9 +298,12 @@ impl FerroGateway {
                     ctx,
                     &auth,
                     "tool.execute",
-                    response.name.clone(),
+                    audit_target,
                     "success",
-                    format!("tool executed in {}ms", response.latency_ms),
+                    format!(
+                        "tool {} executed in {}ms",
+                        response.name, response.latency_ms
+                    ),
                 ));
                 write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
             }
@@ -304,15 +312,69 @@ impl FerroGateway {
                     ctx,
                     &auth,
                     "tool.execute",
-                    request.name,
+                    audit_target,
                     "error",
-                    format!("{}: {}", error.code(), error.message()),
+                    format!(
+                        "tool {} failed: {}: {}",
+                        request.name,
+                        error.code(),
+                        error.message()
+                    ),
                 ));
                 write_json_error(
                     session,
                     error.status(),
                     error.code(),
                     error.message(),
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_tool_session(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path: &str,
+    ) -> PingoraResult<()> {
+        let Some(session_id) = path.strip_prefix("/admin/v1/tool-sessions/") else {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "tool session endpoint not found",
+                &ctx.request_id,
+            )
+            .await;
+        };
+        if session_id.is_empty() {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_tool_session",
+                "tool session id is required",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let events = state.tool_session_events(session_id);
+                let total = events.len();
+                let body = AdminList::paginated(events, total, 0, total);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
                     &ctx.request_id,
                 )
                 .await
@@ -1900,6 +1962,10 @@ fn parse_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
         .split('&')
         .filter_map(|part| part.split_once('='))
         .find_map(|(name, value)| (name == key).then_some(value))
+}
+
+fn tool_session_audit_target(session_id: &str) -> String {
+    format!("tool_session:{session_id}")
 }
 
 fn admin_audit_event_draft_for_action(

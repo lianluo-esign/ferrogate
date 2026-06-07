@@ -469,6 +469,7 @@ GET  /admin/v1/providers
 GET  /admin/v1/provider-health
 GET  /admin/v1/extensions
 GET  /admin/v1/tools
+GET  /admin/v1/tool-sessions/{session_id}
 GET  /admin/v1/models
 GET  /admin/v1/api-keys
 GET  /admin/v1/tenants

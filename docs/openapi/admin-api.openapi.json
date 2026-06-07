@@ -266,6 +266,45 @@
         }
       }
     },
+    "/admin/v1/tool-sessions/{session_id}": {
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Caller-supplied tool session identifier."
+        }
+      ],
+      "get": {
+        "operationId": "listAdminToolSessionEvents",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List tool execution audit events grouped by caller-supplied tool session.",
+        "responses": {
+          "200": {
+            "description": "Tool session audit timeline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/models": {
       "get": {
         "operationId": "listAdminModels",

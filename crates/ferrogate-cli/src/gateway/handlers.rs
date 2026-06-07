@@ -156,6 +156,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path.starts_with("/admin/v1/tool-sessions/") {
+            let headers = req.headers.clone();
+            self.handle_admin_tool_session(session, ctx, &headers, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/models" {
             let headers = req.headers.clone();
             self.handle_admin_models(session, ctx, &headers).await?;

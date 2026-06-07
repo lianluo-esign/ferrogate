@@ -93,14 +93,32 @@ fn agentic_lite_builtin_tools_are_visible_and_explicitly_executable() {
     let events = audit_events["data"].as_array().unwrap();
     assert!(events.iter().any(|event| {
         event["action"] == "tool.execute"
-            && event["target"] == "tool.echo"
+            && event["target"] == "tool_session:session-1"
             && event["outcome"] == "success"
+            && event["message"].as_str().unwrap().contains("tool.echo")
     }));
     assert!(events.iter().any(|event| {
         event["action"] == "tool.execute"
             && event["target"] == "tool.health_check"
             && event["outcome"] == "error"
     }));
+
+    let session_events = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tool-sessions/session-1",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let session_events = session_events["data"].as_array().unwrap();
+    assert_eq!(session_events.len(), 1);
+    assert_eq!(session_events[0]["action"], "tool.execute");
+    assert_eq!(session_events[0]["target"], "tool_session:session-1");
+    assert_eq!(session_events[0]["outcome"], "success");
+    assert!(session_events[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("tool.echo"));
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();

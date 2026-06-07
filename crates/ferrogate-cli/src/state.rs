@@ -1889,6 +1889,20 @@ impl AppState {
             })
     }
 
+    pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
+        let target = format!("tool_session:{session_id}");
+        self.audit_events
+            .lock()
+            .map(|events| {
+                events
+                    .list()
+                    .into_iter()
+                    .filter(|event| event.action == "tool.execute" && event.target == target)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn admin_pagination(&self, query: Option<&str>) -> AdminPagination {
         AdminPagination::from_query(
             query,
