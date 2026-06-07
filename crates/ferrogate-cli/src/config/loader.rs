@@ -141,6 +141,7 @@ impl Config {
                 .collect(),
             policies: Vec::new(),
             extensions: Vec::new(),
+            mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),
             metering: crate::config::MeteringConfig::default(),
             cache: crate::config::CacheConfig::default(),

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub(crate) use ferrogate_mcp::{
+    McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
+};
 use ferrogate_providers::RoutingStrategy;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -21,6 +24,8 @@ pub(crate) struct Config {
     pub(crate) policies: Vec<PolicyRule>,
     #[serde(default)]
     pub(crate) extensions: Vec<ExtensionConfig>,
+    #[serde(default)]
+    pub(crate) mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
@@ -360,10 +365,19 @@ pub(crate) struct MeteringConfig {
 pub(crate) struct CacheConfig {
     #[serde(default)]
     pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) mode: CacheMode,
     #[serde(default = "default_cache_ttl_secs")]
     pub(crate) ttl_secs: u64,
     #[serde(default = "default_cache_max_records")]
     pub(crate) max_records: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CacheMode {
+    #[default]
+    ExactMatch,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -628,6 +642,7 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: CacheMode::ExactMatch,
             ttl_secs: default_cache_ttl_secs(),
             max_records: default_cache_max_records(),
         }
@@ -676,6 +691,7 @@ impl Default for Config {
             api_keys: Vec::new(),
             policies: Vec::new(),
             extensions: Vec::new(),
+            mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),
             metering: MeteringConfig::default(),
             cache: CacheConfig::default(),

@@ -22,7 +22,7 @@ fn rejects_model_with_unknown_provider() {
         ..Config::default()
     };
 
-    let error = config.validate().unwrap_err().to_string();
+    let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("unknown provider"));
 }
 
@@ -44,7 +44,7 @@ fn rejects_model_with_unknown_fallback_provider() {
         ..Config::default()
     };
 
-    let error = config.validate().unwrap_err().to_string();
+    let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("fallback provider missing"));
 }
 
@@ -66,7 +66,7 @@ fn rejects_model_fallback_with_zero_weight() {
         ..Config::default()
     };
 
-    let error = config.validate().unwrap_err().to_string();
+    let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("fallbacks[0].weight"));
 }
 
@@ -1009,6 +1009,64 @@ fn rejects_invalid_enabled_cluster_config() {
     assert!(error.contains("field cluster.heartbeat_interval_secs"));
 }
 
+#[test]
+fn validates_mcp_server_config_shape() {
+    let mut missing_allowlist = mcp_server();
+    missing_allowlist.tools_to_execute = vec![];
+    let config = Config {
+        mcp_servers: vec![missing_allowlist],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("tools_to_execute"), "{error}");
+
+    let mut duplicate = mcp_server();
+    duplicate.url = Some("http://127.0.0.1:9001/mcp".into());
+    let config = Config {
+        mcp_servers: vec![mcp_server(), duplicate],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("duplicate MCP server name"), "{error}");
+
+    let mut stdio = mcp_server();
+    stdio.name = "local".into();
+    stdio.transport = McpTransport::Stdio;
+    stdio.url = None;
+    stdio.command = None;
+    let config = Config {
+        mcp_servers: vec![stdio],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("requires command"), "{error}");
+}
+
+#[test]
+fn accepts_mcp_policy_targets() {
+    let mut key = api_key("blocked", "Blocked");
+    key.scopes = vec!["tools.execute".into()];
+    let config = Config {
+        api_keys: vec![key],
+        mcp_servers: vec![mcp_server()],
+        policies: vec![PolicyRule {
+            name: "deny github search".into(),
+            effect: "deny".into(),
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["blocked".into()],
+            models: vec!["mcp_tool:github-search".into()],
+            providers: vec!["mcp:github".into()],
+            code: "mcp_denied".into(),
+            message: "blocked".into(),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
 fn upstream() -> Upstream {
     Upstream {
         name: "backend".into(),
@@ -1102,5 +1160,27 @@ fn extension(id: &str, kind: ExtensionKind, order: u32) -> ExtensionConfig {
             shell: false,
         },
         config: std::collections::BTreeMap::new(),
+    }
+}
+
+fn mcp_server() -> McpServerConfig {
+    McpServerConfig {
+        name: "github".into(),
+        transport: McpTransport::StreamableHttp,
+        url: Some("http://127.0.0.1:9000/mcp".into()),
+        command: None,
+        args: vec![],
+        auth_type: McpAuthType::None,
+        headers: vec![],
+        tools_to_execute: vec!["search".into()],
+        tools_to_auto_execute: vec![],
+        tool_include: vec![],
+        tool_regex: vec![],
+        tls: McpTlsConfig::default(),
+        timeout_ms: 1_000,
+        health_ping_interval_secs: 10,
+        max_reconnect_attempts: 5,
+        min_reconnect_backoff_secs: 1,
+        max_reconnect_backoff_secs: 30,
     }
 }

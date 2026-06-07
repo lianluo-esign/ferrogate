@@ -19,8 +19,10 @@ impl Config {
             })?;
         }
 
-        let provider_names = self.validate_providers()?;
-        let model_names = self.validate_models(&provider_names)?;
+        let mut provider_names = self.validate_providers()?;
+        let mut model_names = self.validate_models(&provider_names)?;
+        self.validate_mcp_servers()?;
+        self.add_mcp_policy_targets(&mut model_names, &mut provider_names);
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_extensions()?;
@@ -421,13 +423,13 @@ impl Config {
         Ok(())
     }
 
-    fn validate_providers(&self) -> AnyResult<HashSet<&str>> {
+    fn validate_providers(&self) -> AnyResult<HashSet<String>> {
         let mut names = HashSet::new();
         for (index, provider) in self.providers.iter().enumerate() {
             if provider.name.trim().is_empty() {
                 bail!("field providers[{index}].name: cannot be empty");
             }
-            if !names.insert(provider.name.as_str()) {
+            if !names.insert(provider.name.clone()) {
                 bail!(
                     "field providers[{index}].name: duplicate provider name {}",
                     provider.name
@@ -457,16 +459,13 @@ impl Config {
         Ok(names)
     }
 
-    fn validate_models<'a>(
-        &'a self,
-        provider_names: &HashSet<&str>,
-    ) -> AnyResult<HashSet<&'a str>> {
+    fn validate_models(&self, provider_names: &HashSet<String>) -> AnyResult<HashSet<String>> {
         let mut names = HashSet::new();
         for (index, model) in self.models.iter().enumerate() {
             if model.name.trim().is_empty() {
                 bail!("field models[{index}].name: cannot be empty");
             }
-            if !names.insert(model.name.as_str()) {
+            if !names.insert(model.name.clone()) {
                 bail!(
                     "field models[{index}].name: duplicate model name {}",
                     model.name
@@ -523,17 +522,17 @@ impl Config {
         Ok(names)
     }
 
-    fn validate_api_keys<'a>(
-        &'a self,
-        model_names: &HashSet<&str>,
-        provider_names: &HashSet<&str>,
-    ) -> AnyResult<HashSet<&'a str>> {
+    fn validate_api_keys(
+        &self,
+        model_names: &HashSet<String>,
+        provider_names: &HashSet<String>,
+    ) -> AnyResult<HashSet<String>> {
         let mut ids = HashSet::new();
         for (index, key) in self.api_keys.iter().enumerate() {
             if key.id.trim().is_empty() {
                 bail!("field api_keys[{index}].id: cannot be empty");
             }
-            if !ids.insert(key.id.as_str()) {
+            if !ids.insert(key.id.clone()) {
                 bail!(
                     "field api_keys[{index}].id: duplicate api key id {}",
                     key.id
@@ -598,9 +597,9 @@ impl Config {
 
     fn validate_policies(
         &self,
-        api_key_ids: &HashSet<&str>,
-        model_names: &HashSet<&str>,
-        provider_names: &HashSet<&str>,
+        api_key_ids: &HashSet<String>,
+        model_names: &HashSet<String>,
+        provider_names: &HashSet<String>,
     ) -> AnyResult<()> {
         let mut names = HashSet::new();
         for (index, policy) in self.policies.iter().enumerate() {
@@ -693,6 +692,36 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    fn validate_mcp_servers(&self) -> AnyResult<()> {
+        let mut names = HashSet::new();
+        for (index, server) in self.mcp_servers.iter().enumerate() {
+            if !names.insert(server.name.as_str()) {
+                bail!(
+                    "field mcp_servers[{index}].name: duplicate MCP server name {}",
+                    server.name
+                );
+            }
+            ferrogate_mcp::validate_mcp_server_config(server)
+                .map_err(|error| anyhow::anyhow!("field mcp_servers[{index}]: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn add_mcp_policy_targets(
+        &self,
+        model_names: &mut HashSet<String>,
+        provider_names: &mut HashSet<String>,
+    ) {
+        for server in &self.mcp_servers {
+            for tool in &server.tools_to_execute {
+                if tool != "*" {
+                    model_names.insert(format!("mcp_tool:{}-{tool}", server.name));
+                }
+            }
+            provider_names.insert(format!("mcp:{}", server.name));
+        }
     }
 
     fn validate_upstreams(&self) -> AnyResult<HashSet<&str>> {

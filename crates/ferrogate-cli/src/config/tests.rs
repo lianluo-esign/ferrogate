@@ -37,6 +37,12 @@ config_poll_interval_secs = 7
 service_name = "ferrogate-dev"
 otlp_endpoint = "http://127.0.0.1:4318"
 
+[cache]
+enabled = true
+mode = "exact_match"
+ttl_secs = 120
+max_records = 256
+
 [reliability]
 provider_circuit_breaker_failure_threshold = 2
 provider_circuit_breaker_cooldown_secs = 30
@@ -118,6 +124,10 @@ timeout_ms = 30000
     let config = Config::load(&path).unwrap();
     assert_eq!(config.listen, "0.0.0.0:8080");
     assert!(config.cluster.enabled);
+    assert!(config.cache.enabled);
+    assert_eq!(config.cache.mode, CacheMode::ExactMatch);
+    assert_eq!(config.cache.ttl_secs, 120);
+    assert_eq!(config.cache.max_records, 256);
     assert_eq!(config.cluster.cluster_id, "prod-us");
     assert_eq!(config.cluster.node_id, "gateway-a");
     assert_eq!(config.cluster.node_region.as_deref(), Some("us-east-1"));
@@ -197,6 +207,25 @@ timeout_ms = 30000
     );
     assert_eq!(config.upstreams.len(), 1);
     assert_eq!(config.routes.len(), 1);
+}
+
+#[test]
+fn rejects_unsupported_cache_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &path,
+        r#"
+[cache]
+enabled = true
+mode = "semantic"
+"#,
+    )
+    .unwrap();
+
+    let error = format!("{:#}", Config::load(&path).unwrap_err());
+    assert!(error.contains("unknown variant"), "{error}");
+    assert!(error.contains("semantic"), "{error}");
 }
 
 #[test]

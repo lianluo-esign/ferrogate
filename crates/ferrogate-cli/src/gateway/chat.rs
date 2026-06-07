@@ -11,7 +11,7 @@ use crate::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         write_streaming_response,
     },
-    state::AppState,
+    state::{AppState, ToolInjectionContext},
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
@@ -566,12 +566,17 @@ impl FerroGateway {
 
             let prepared = match prepare_ai_provider_request(
                 &state,
-                endpoint,
-                provider,
-                model_route,
-                request.model.clone(),
-                request.stream,
-                body_json.clone(),
+                AiProviderRequestInput {
+                    endpoint,
+                    provider,
+                    model_route,
+                    tenant: &policy_request.tenant,
+                    api_key_id: auth.api_key_id.as_deref(),
+                    route: policy_request.route.as_deref(),
+                    logical_model: request.model.clone(),
+                    stream: request.stream,
+                    body: body_json.clone(),
+                },
             ) {
                 Ok(prepared) => prepared,
                 Err(error) if has_next_candidate(candidate_index, route_count) => {
@@ -1078,26 +1083,46 @@ struct AiErrorLog<'a> {
     error_code: &'a str,
 }
 
+struct AiProviderRequestInput<'a> {
+    endpoint: AiEndpoint,
+    provider: &'a Provider,
+    model_route: &'a ModelRoute,
+    tenant: &'a TenantContext,
+    api_key_id: Option<&'a str>,
+    route: Option<&'a str>,
+    logical_model: String,
+    stream: bool,
+    body: serde_json::Value,
+}
+
 fn has_next_candidate(candidate_index: usize, route_count: usize) -> bool {
     candidate_index + 1 < route_count
 }
 
 fn prepare_ai_provider_request(
     state: &AppState,
-    endpoint: AiEndpoint,
-    provider: &Provider,
-    model_route: &ModelRoute,
-    logical_model: String,
-    stream: bool,
-    body: serde_json::Value,
+    input: AiProviderRequestInput<'_>,
 ) -> Result<ProviderHttpRequest, ferrogate_providers::AdapterError> {
-    match endpoint {
-        AiEndpoint::ChatCompletions => {
-            state.prepare_chat_completions(provider, model_route, logical_model, stream, body)
-        }
-        AiEndpoint::Responses => {
-            state.prepare_responses(provider, model_route, logical_model, stream, body)
-        }
+    match input.endpoint {
+        AiEndpoint::ChatCompletions => state.prepare_chat_completions(
+            input.provider,
+            input.model_route,
+            ToolInjectionContext {
+                tenant: input.tenant,
+                api_key_id: input.api_key_id,
+                route: input.route,
+            },
+            input.logical_model,
+            input.stream,
+            input.body,
+        ),
+        AiEndpoint::Responses => state.prepare_responses(
+            input.provider,
+            input.model_route,
+            input.logical_model,
+            input.stream,
+            input.body,
+        ),
     }
 }
 

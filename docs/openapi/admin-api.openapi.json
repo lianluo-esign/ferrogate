@@ -104,6 +104,52 @@
         }
       }
     },
+    "/v1/mcp/tool/execute": {
+      "post": {
+        "operationId": "executeMcpTool",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Execute a namespaced MCP tool through gateway auth, policy, billing, and observability.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolExecutionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tool execution response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolExecutionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
     "/admin/v1/status": {
       "get": {
         "operationId": "getAdminStatus",
@@ -253,6 +299,33 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AdminToolList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/mcp-servers": {
+      "get": {
+        "operationId": "listAdminMcpServers",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List MCP server session health and discovered tool counts.",
+        "responses": {
+          "200": {
+            "description": "MCP server status list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpServerStatusList"
                 }
               }
             }
@@ -3222,6 +3295,172 @@
           }
         },
         "additionalProperties": false
+      },
+      "ToolExecutionRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Namespaced tool name, for MCP using serverName-toolName."
+          },
+          "arguments": {
+            "type": "object",
+            "default": {}
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ToolExecutionResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "name",
+          "content",
+          "is_error",
+          "request_id",
+          "session_id",
+          "latency_ms"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "tool_execution"
+          },
+          "name": {
+            "type": "string"
+          },
+          "content": {},
+          "is_error": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latency_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpServerStatus": {
+        "type": "object",
+        "required": [
+          "name",
+          "transport",
+          "connected",
+          "health",
+          "tools",
+          "reconnect_attempts",
+          "last_error",
+          "last_connected_at_unix",
+          "next_reconnect_backoff_secs"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "streamable_http",
+              "sse",
+              "stdio"
+            ]
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "health": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ]
+          },
+          "tools": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reconnect_attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_connected_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "next_reconnect_backoff_secs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_McpServerStatus": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/McpServerStatus"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpServerStatusList": {
+        "$ref": "#/components/schemas/AdminList_McpServerStatus"
       }
     }
   }

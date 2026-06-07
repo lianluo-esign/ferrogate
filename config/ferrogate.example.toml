@@ -22,6 +22,12 @@ billing_event_retention_records = 10000
 admin_list_default_limit = 100
 admin_list_max_limit = 1000
 
+[cache]
+enabled = false
+mode = "exact_match"
+ttl_secs = 300
+max_records = 1000
+
 [tls]
 enabled = false
 # cert_path = "./certs/fullchain.pem"
@@ -147,16 +153,45 @@ context_window = 1000000
 id = "key_dev"
 name = "Development key"
 key = "dev-secret"
-scopes = ["models.read", "chat.completions", "responses.create", "admin.read"]
+scopes = ["models.read", "tools.read", "tools.execute", "chat.completions", "responses.create", "admin.read"]
 allowed_models = ["fast-chat", "best-reasoning", "gemini-flash"]
 denied_models = []
-allowed_providers = ["openai", "anthropic", "gemini"]
+allowed_providers = ["openai", "anthropic", "gemini", "mcp:github"]
 denied_providers = []
 organization_id = "org_demo"
 team_id = "team_platform"
 project_id = "project_ferrogate"
 monthly_token_budget = 1000000
 request_limit_per_minute = 60
+
+[[mcp_servers]]
+name = "github"
+transport = "streamable_http"
+url = "http://127.0.0.1:9000/mcp"
+auth_type = "headers"
+tools_to_execute = ["search"]
+tools_to_auto_execute = ["search"]
+tool_include = ["search"]
+timeout_ms = 3000
+health_ping_interval_secs = 10
+max_reconnect_attempts = 5
+min_reconnect_backoff_secs = 1
+max_reconnect_backoff_secs = 30
+
+[[mcp_servers.headers]]
+name = "Authorization"
+value_env = "GITHUB_MCP_TOKEN"
+
+# MCP policy targets use model "mcp_tool:<server>-<tool>" and provider
+# "mcp:<server>".
+[[policies]]
+name = "deny blocked MCP search"
+effect = "deny"
+enabled = false
+api_key_ids = []
+models = ["mcp_tool:github-search"]
+providers = ["mcp:github"]
+message = "MCP search is blocked for this caller"
 
 # Optional cluster-safe counters for multi-node deployments.
 # Keep the default local counter backend for single-node development.

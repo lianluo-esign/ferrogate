@@ -14,7 +14,15 @@ use pingora::{
         Server,
     },
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 use tracing::info;
 
 use crate::{
@@ -62,6 +70,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let _otlp_sender = start_otlp_background_sender(state.current());
     let _acme_renewal =
         start_acme_renewal_if_configured(&tls, resolved_tls.as_ref(), acme_renewal_state, &state);
+    let _mcp_health = start_mcp_health_scheduler(&state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -100,6 +109,52 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     server.add_service(service);
 
     server.run_forever();
+}
+
+#[derive(Debug)]
+struct McpHealthHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for McpHealthHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn start_mcp_health_scheduler(state: &SharedAppState) -> Option<McpHealthHandle> {
+    if state.current().config.mcp_servers.is_empty() {
+        return None;
+    }
+    Some(start_mcp_health_scheduler_with_interval(
+        state.clone(),
+        Duration::from_secs(10),
+    ))
+}
+
+fn start_mcp_health_scheduler_with_interval(
+    state: SharedAppState,
+    interval: Duration,
+) -> McpHealthHandle {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            thread::sleep(interval);
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            state.current().mcp_health_check_and_reconnect();
+        }
+    });
+    McpHealthHandle {
+        stop,
+        handle: Some(handle),
+    }
 }
 
 fn start_acme_renewal_if_configured(

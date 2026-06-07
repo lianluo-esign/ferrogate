@@ -340,6 +340,8 @@ pub struct GatewayMetricsSnapshot {
     pub cache_hits_total: u64,
     pub cache_misses_total: u64,
     pub billing_event_total: u64,
+    pub tool_call_total: u64,
+    pub tool_latency_ms_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
 }
@@ -421,6 +423,27 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_billing_events_total {}\n",
         snapshot.billing_event_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_mcp_tool_calls_total",
+        "Total MCP tool calls executed by FerroGate.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_tool_calls_total {}\n",
+        snapshot.tool_call_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_tool_latency_ms_total",
+        "Total MCP tool execution latency in milliseconds.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_tool_latency_ms_total {}\n",
+        snapshot.tool_latency_ms_total
     ));
 
     push_help(
@@ -645,6 +668,18 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "ferrogate.billing_events",
             "Total token metering events recorded by FerroGate.",
             snapshot.billing_event_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_tool.calls",
+            "Total MCP tool calls executed by FerroGate.",
+            snapshot.tool_call_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_tool.latency_ms",
+            "Total MCP tool execution latency in milliseconds.",
+            snapshot.tool_latency_ms_total as f64,
             vec![],
         ),
         sum_metric_json(
@@ -1026,6 +1061,8 @@ mod tests {
             cache_hits_total: 1,
             cache_misses_total: 1,
             billing_event_total: 1,
+            tool_call_total: 2,
+            tool_latency_ms_total: 17,
             token_totals: TokenMetricTotals {
                 prompt_tokens: 3,
                 completion_tokens: 5,
@@ -1045,6 +1082,8 @@ mod tests {
         assert!(text.contains("ferrogate_request_errors_total 1"));
         assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"hit\"} 1"));
         assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"miss\"} 1"));
+        assert!(text.contains("ferrogate_mcp_tool_calls_total 2"));
+        assert!(text.contains("ferrogate_mcp_tool_latency_ms_total 17"));
         assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));
         assert!(text.contains(
             "ferrogate_model_provider_requests_total{logical_model=\"fast-chat\",provider=\"openai\"} 1"

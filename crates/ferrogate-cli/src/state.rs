@@ -27,6 +27,9 @@ use ferrogate_billing::{
     TokenUsage as BillingTokenUsage,
 };
 use ferrogate_core::RequestContext;
+use ferrogate_mcp::{
+    McpExecutionError, McpManager, McpServerStatus, McpToolExecutionRequest, McpToolExecutionResult,
+};
 use ferrogate_observability::{
     GatewayMetricsSnapshot, ModelProviderMetricTotal, RequestStatusMetric, TokenMetricTotals,
 };
@@ -488,6 +491,7 @@ pub(crate) struct AppState {
     usage_aggregates: Arc<Mutex<InMemoryRepository<StoredUsageAggregate>>>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
+    mcp_manager: Arc<McpManager>,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
@@ -641,6 +645,12 @@ pub(crate) struct RuntimeUpstreamEndpoint {
     pub(crate) endpoint: crate::routing::UpstreamEndpoint,
 }
 
+pub(crate) struct ToolInjectionContext<'a> {
+    pub(crate) tenant: &'a ferrogate_core::TenantContext,
+    pub(crate) api_key_id: Option<&'a str>,
+    pub(crate) route: Option<&'a str>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdminAuditEventDraft {
     pub(crate) request_id: String,
@@ -676,6 +686,8 @@ struct GatewayMetricsAccumulator {
     billing_event_total: u64,
     token_totals: TokenMetricTotals,
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
+    tool_call_total: u64,
+    tool_latency_ms_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -902,6 +914,11 @@ impl GatewayMetricsAccumulator {
         self.cache_misses_total = self.cache_misses_total.saturating_add(1);
     }
 
+    fn record_tool_call(&mut self, _tool_name: &str, latency_ms: u64) {
+        self.tool_call_total = self.tool_call_total.saturating_add(1);
+        self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
+    }
+
     fn snapshot(&self, service_name: String) -> GatewayMetricsSnapshot {
         GatewayMetricsSnapshot {
             service_name,
@@ -918,6 +935,8 @@ impl GatewayMetricsAccumulator {
             cache_hits_total: self.cache_hits_total,
             cache_misses_total: self.cache_misses_total,
             billing_event_total: self.billing_event_total,
+            tool_call_total: self.tool_call_total,
+            tool_latency_ms_total: self.tool_latency_ms_total,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
         }
@@ -1132,6 +1151,7 @@ impl AppState {
             HashMap::new()
         };
         let storage = config.storage.clone();
+        let mcp_servers = config.mcp_servers.clone();
         let cluster_sync = initial_cluster_sync_status(&config);
         let metering_exporter = MeteringExporter::from_config(&config.metering)
             .ok()
@@ -1168,6 +1188,7 @@ impl AppState {
             usage_aggregates: Arc::new(Mutex::new(InMemoryRepository::new())),
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
+            mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
             upstream_counters: Arc::new(upstream_counters),
@@ -1188,11 +1209,39 @@ impl AppState {
         api_key_id: Option<&str>,
         route: Option<&str>,
     ) -> Vec<RegisteredTool> {
-        self.extension_registry.tools_for(tenant, api_key_id, route)
+        let mut tools = self.extension_registry.tools_for(tenant, api_key_id, route);
+        tools.extend(self.mcp_registered_tools());
+        tools
     }
 
     pub(crate) fn all_tools(&self) -> Vec<RegisteredTool> {
-        self.extension_registry.all_tools()
+        let mut tools = self.extension_registry.all_tools();
+        tools.extend(self.mcp_registered_tools());
+        tools
+    }
+
+    pub(crate) fn mcp_statuses(&self) -> Vec<McpServerStatus> {
+        self.mcp_manager.statuses()
+    }
+
+    pub(crate) fn mcp_health_check_and_reconnect(&self) {
+        self.mcp_manager.health_check_and_reconnect();
+    }
+
+    fn mcp_registered_tools(&self) -> Vec<RegisteredTool> {
+        self.mcp_manager
+            .tools()
+            .into_iter()
+            .map(|tool| RegisteredTool {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+                extension_id: format!("mcp.{}", tool.server_name),
+                tenant_allowlist: Vec::new(),
+                api_key_allowlist: Vec::new(),
+                route_allowlist: Vec::new(),
+            })
+            .collect()
     }
 
     pub(crate) async fn execute_tool(
@@ -1205,6 +1254,55 @@ impl AppState {
         self.extension_registry
             .execute_tool(request, request_id, tenant, api_key_id)
             .await
+    }
+
+    pub(crate) async fn execute_mcp_tool(
+        &self,
+        request: ToolExecutionRequest,
+        request_id: String,
+        tenant: ferrogate_core::TenantContext,
+    ) -> Result<ToolExecutionResponse, ToolExecutionError> {
+        let (server_name, _) = request.name.split_once('-').ok_or_else(|| {
+            ToolExecutionError::NotFound(format!(
+                "MCP tool {} must use serverName-toolName namespace",
+                request.name
+            ))
+        })?;
+        let policy_request = RequestContext {
+            request_id: request_id.clone(),
+            trace_id: None,
+            route: Some("/v1/mcp/tool/execute".into()),
+            upstream: Some(format!("mcp:{server_name}")),
+            tenant: tenant.clone(),
+        };
+        let policy_model = format!("mcp_tool:{}", request.name);
+        let policy_provider = format!("mcp:{server_name}");
+        if let PolicyDecision::Deny { code: _, message } =
+            self.evaluate_policy(&policy_request, Some(&policy_model), Some(&policy_provider))
+        {
+            self.record_tool_billing_event(&request_id, &tenant, &request.name, 0, 403);
+            return Err(ToolExecutionError::Denied(message));
+        }
+
+        let started = std::time::Instant::now();
+        let result = self
+            .mcp_manager
+            .execute_tool(McpToolExecutionRequest {
+                name: request.name.clone(),
+                arguments: request.arguments.clone(),
+            })
+            .map_err(tool_error_from_mcp)?;
+        let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        self.record_tool_billing_event(
+            &request_id,
+            &tenant,
+            &request.name,
+            latency_ms,
+            if result.is_error { 502 } else { 200 },
+        );
+        Ok(tool_response_from_mcp(
+            request, request_id, result, latency_ms,
+        ))
     }
 
     pub(crate) fn run_pre_request_hooks(
@@ -1233,6 +1331,8 @@ impl AppState {
         next.usage_aggregates = Arc::clone(&self.usage_aggregates);
         next.metrics = Arc::clone(&self.metrics);
         next.response_cache = Arc::clone(&self.response_cache);
+        next.mcp_manager = Arc::clone(&self.mcp_manager);
+        next.mcp_manager.reconfigure(&next.config.mcp_servers);
         next.request_ids = Arc::clone(&self.request_ids);
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
@@ -1335,10 +1435,27 @@ impl AppState {
         &self,
         provider: &Provider,
         model_route: &ModelRoute,
+        tool_context: ToolInjectionContext<'_>,
         logical_model: String,
         stream: bool,
         body: serde_json::Value,
     ) -> Result<ProviderHttpRequest, AdapterError> {
+        let tools = self
+            .tools_for(
+                tool_context.tenant,
+                tool_context.api_key_id,
+                tool_context.route,
+            )
+            .into_iter()
+            .map(|tool| ferrogate_core::ToolDef {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect::<Vec<_>>();
+        let body = self
+            .provider_adapters
+            .inject_tools(&provider.kind, body, &tools)?;
         self.provider_adapters.prepare_chat_completions(
             ProviderConfig {
                 name: provider.name.clone(),
@@ -2021,6 +2138,38 @@ impl AppState {
         }
     }
 
+    fn record_tool_billing_event(
+        &self,
+        request_id: &str,
+        tenant: &ferrogate_core::TenantContext,
+        tool_name: &str,
+        latency_ms: u64,
+        status_code: u16,
+    ) {
+        let event = BillingEvent {
+            request_id: request_id.into(),
+            trace_id: None,
+            cluster_id: Some(self.cluster_identity.cluster_id.clone()),
+            node_id: Some(self.cluster_identity.node_id.clone()),
+            tenant: tenant.clone(),
+            logical_model: format!("mcp_tool:{tool_name}"),
+            provider: "mcp".into(),
+            provider_model: tool_name.into(),
+            usage: BillingTokenUsage::new(0, 0, 0),
+            usage_source: BillingUsageSource::GatewayEstimate,
+            status_code,
+            occurred_at_unix: now_unix_seconds(),
+        };
+        let _ = self.metering_events.record(event.clone());
+        self.record_billing_metrics(&event);
+        if let Some(exporter) = &self.metering_exporter {
+            exporter.export_event(event);
+        }
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_tool_call(tool_name, latency_ms);
+        }
+    }
+
     pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
         self.metrics
             .lock()
@@ -2033,6 +2182,8 @@ impl AppState {
                 cache_hits_total: 0,
                 cache_misses_total: 0,
                 billing_event_total: 0,
+                tool_call_total: 0,
+                tool_latency_ms_total: 0,
                 token_totals: TokenMetricTotals::default(),
                 model_provider_totals: Vec::new(),
             })
@@ -2805,6 +2956,33 @@ fn route_estimated_cost(route: &ModelRoute, usage: Option<&BillingTokenUsage>) -
             price.estimate(usage).total_cost
         }
         _ => route_estimated_unit_cost(route),
+    }
+}
+
+fn tool_error_from_mcp(error: McpExecutionError) -> ToolExecutionError {
+    match error {
+        McpExecutionError::Denied(message) => ToolExecutionError::Denied(message),
+        McpExecutionError::NotFound(message) => ToolExecutionError::NotFound(message),
+        McpExecutionError::Unavailable(message) | McpExecutionError::Failed(message) => {
+            ToolExecutionError::Failed(message)
+        }
+    }
+}
+
+fn tool_response_from_mcp(
+    request: ToolExecutionRequest,
+    request_id: String,
+    result: McpToolExecutionResult,
+    latency_ms: u64,
+) -> ToolExecutionResponse {
+    ToolExecutionResponse {
+        object: "tool_execution",
+        name: request.name,
+        content: result.content,
+        is_error: result.is_error,
+        request_id,
+        session_id: request.session_id,
+        latency_ms,
     }
 }
 

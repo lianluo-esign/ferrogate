@@ -22,6 +22,12 @@ use crate::{
 use super::body::read_request_body;
 use super::{FerroGateway, ProxyContext};
 
+#[derive(Debug, Clone, Copy)]
+enum ToolExecuteBackend {
+    Extension,
+    Mcp,
+}
+
 impl FerroGateway {
     pub(super) async fn handle_healthz(
         &self,
@@ -183,6 +189,34 @@ impl FerroGateway {
         }
     }
 
+    pub(super) async fn handle_admin_mcp_servers(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                state.mcp_health_check_and_reconnect();
+                let statuses = state.mcp_statuses();
+                let total = statuses.len();
+                let body = AdminList::paginated(statuses, total, 0, total);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_tools(
         &self,
         session: &mut Session,
@@ -222,6 +256,41 @@ impl FerroGateway {
         ctx: &ProxyContext,
         headers: http::HeaderMap,
         method: &Method,
+    ) -> PingoraResult<()> {
+        self.handle_tool_execute_with_backend(
+            session,
+            ctx,
+            headers,
+            method,
+            ToolExecuteBackend::Extension,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_mcp_tool_execute(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+    ) -> PingoraResult<()> {
+        self.handle_tool_execute_with_backend(
+            session,
+            ctx,
+            headers,
+            method,
+            ToolExecuteBackend::Mcp,
+        )
+        .await
+    }
+
+    async fn handle_tool_execute_with_backend(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+        backend: ToolExecuteBackend,
     ) -> PingoraResult<()> {
         if *method != Method::POST {
             return write_json_error(
@@ -284,15 +353,29 @@ impl FerroGateway {
             .map(|session_id| tool_session_audit_target(session_id))
             .unwrap_or_else(|| request.name.clone());
 
-        match state
-            .execute_tool(
-                request.clone(),
-                ctx.request_id.clone(),
-                auth.tenant_context(),
-                auth.api_key_id.as_deref(),
-            )
-            .await
-        {
+        let result = match backend {
+            ToolExecuteBackend::Extension => {
+                state
+                    .execute_tool(
+                        request.clone(),
+                        ctx.request_id.clone(),
+                        auth.tenant_context(),
+                        auth.api_key_id.as_deref(),
+                    )
+                    .await
+            }
+            ToolExecuteBackend::Mcp => {
+                state
+                    .execute_mcp_tool(
+                        request.clone(),
+                        ctx.request_id.clone(),
+                        auth.tenant_context(),
+                    )
+                    .await
+            }
+        };
+
+        match result {
             Ok(response) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
                     ctx,

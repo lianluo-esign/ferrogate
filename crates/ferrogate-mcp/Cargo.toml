@@ -1,0 +1,19 @@
+[package]
+name = "ferrogate-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FerroGate MCP host/client manager."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ferrogate-core = { path = "../ferrogate-core" }
+http.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

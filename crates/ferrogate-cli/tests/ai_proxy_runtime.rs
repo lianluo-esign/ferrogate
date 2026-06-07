@@ -540,6 +540,7 @@ listen = "{gateway_addr}"
 
 [cache]
 enabled = true
+mode = "exact_match"
 ttl_secs = 60
 max_records = 16
 
@@ -588,6 +589,7 @@ cache_enabled = true
     assert!(first.contains("200 OK"), "{first}");
     assert!(first.contains("cached ok"));
 
+    let second_body = r#"{"temperature":0,"messages":[{"content":"hello cache","role":"user"}],"model":"fast-chat"}"#;
     let second = http_request(
         &gateway_addr,
         "POST",
@@ -596,7 +598,7 @@ cache_enabled = true
             "Authorization: Bearer client-secret",
             "Content-Type: application/json",
         ],
-        body,
+        second_body,
     );
     assert!(second.contains("200 OK"), "{second}");
     assert!(second.contains("cached ok"));

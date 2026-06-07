@@ -18,8 +18,9 @@ pub(crate) use self::secrets::resolve_env_placeholders;
 pub(crate) use self::snapshot::config_snapshot_id;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
-    AccessLogMode, AdminConfig, ApiKey, CacheConfig, ClusterConfig, Config, ExtensionConfig,
-    ExtensionKind, ExtensionPermissions, HeaderMatcher, HeaderMutation, MeteringConfig, Model,
-    ModelFallback, PolicyRule, Provider, ReliabilityConfig, RouteRule, StorageConfig,
+    AccessLogMode, AdminConfig, ApiKey, CacheConfig, CacheMode, ClusterConfig, Config,
+    ExtensionConfig, ExtensionKind, ExtensionPermissions, HeaderMatcher, HeaderMutation,
+    McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport, MeteringConfig,
+    Model, ModelFallback, PolicyRule, Provider, ReliabilityConfig, RouteRule, StorageConfig,
     TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
 };

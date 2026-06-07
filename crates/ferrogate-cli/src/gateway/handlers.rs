@@ -73,6 +73,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/v1/mcp/tool/execute" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_mcp_tool_execute(session, ctx, headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/v1/chat/completions" {
             self.handle_chat_completions(session, ctx, req.headers.clone())
                 .await?;
@@ -153,6 +161,13 @@ impl FerroGateway {
         if path == "/admin/v1/tools" {
             let headers = req.headers.clone();
             self.handle_admin_tools(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/mcp-servers" {
+            let headers = req.headers.clone();
+            self.handle_admin_mcp_servers(session, ctx, &headers)
+                .await?;
             return Ok(true);
         }
 
