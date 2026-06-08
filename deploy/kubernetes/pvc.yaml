@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ferrogate-shared-state
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ferrogate-acme
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

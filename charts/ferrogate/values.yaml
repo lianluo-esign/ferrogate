@@ -1,0 +1,126 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/lianluo-esign/ferrogate
+  tag: v2026.06.07
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "8080"
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+  hosts:
+    - host: ferrogate.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+secrets:
+  create: true
+  name: ""
+  values:
+    OPENAI_API_KEY: replace-with-provider-key
+    FERROGATE_CLIENT_SECRET: replace-with-client-secret
+    FERROGATE_ADMIN_SECRET: replace-with-admin-secret
+
+redis:
+  enabled: true
+  image: redis:7-alpine
+
+persistence:
+  sharedState:
+    enabled: true
+    size: 1Gi
+    accessModes:
+      - ReadWriteMany
+    storageClassName: ""
+  acme:
+    enabled: true
+    size: 1Gi
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: ""
+
+podAnnotations: {}
+podLabels: {}
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+terminationGracePeriodSeconds: 45
+drainSleepSeconds: 10
+
+config: |
+  listen = "0.0.0.0:8080"
+
+  [telemetry]
+  service_name = "ferrogate"
+  log_bodies = false
+  access_log = "error"
+
+  [storage]
+  request_log_retention_records = 10000
+  audit_event_retention_records = 10000
+  billing_event_retention_records = 10000
+
+  [reliability]
+  graceful_shutdown_grace_period_secs = 10
+  graceful_shutdown_timeout_secs = 30
+
+  [cluster]
+  enabled = true
+  cluster_id = "prod-k8s"
+  node_id = "auto"
+  state_backend = "file"
+  file_state_path = "/var/lib/ferrogate/state/cluster-state.json"
+  counter_backend = "redis"
+  redis_url = "redis://{{ include "ferrogate.redisName" . }}:6379/0"
+  counter_timeout_millis = 500
+  heartbeat_interval_secs = 10
+  config_poll_interval_secs = 5
+
+  [[providers]]
+  name = "openai"
+  kind = "openai"
+  base_url = "https://api.openai.com/v1"
+  api_key_env = "OPENAI_API_KEY"
+
+  [[models]]
+  name = "fast-chat"
+  provider = "openai"
+  provider_model = "gpt-4o-mini"
+  capabilities = ["chat", "streaming"]
+  context_window = 128000
+  input_price_per_1m = 0.15
+  output_price_per_1m = 0.60
+
+  [[api_keys]]
+  id = "client"
+  name = "Kubernetes client key"
+  key_env = "FERROGATE_CLIENT_SECRET"
+  scopes = ["models.read", "chat.completions", "responses.create"]
+  allowed_models = ["fast-chat"]
+  allowed_providers = ["openai"]
+
+  [[api_keys]]
+  id = "admin"
+  name = "Kubernetes admin key"
+  key_env = "FERROGATE_ADMIN_SECRET"
+  scopes = ["admin.read", "admin.write"]

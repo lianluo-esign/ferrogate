@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ferrogate
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferrogate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferrogate
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: ferrogate
+          image: ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: FERROGATE_CONFIG
+              value: /etc/ferrogate/ferrogate.toml
+            - name: FERROGATE_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-secret
+                  key: OPENAI_API_KEY
+            - name: FERROGATE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-secret
+                  key: FERROGATE_CLIENT_SECRET
+            - name: FERROGATE_ADMIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ferrogate-secret
+                  key: FERROGATE_ADMIN_SECRET
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ferrogate/ferrogate.toml
+              subPath: ferrogate.toml
+              readOnly: true
+            - name: shared-state
+              mountPath: /var/lib/ferrogate/state
+            - name: acme
+              mountPath: /var/lib/ferrogate/acme
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - >
+                    curl -fsS -X POST http://127.0.0.1:8080/admin/v1/drain
+                    -H "Authorization: Bearer ${FERROGATE_ADMIN_SECRET}"
+                    -H "Content-Type: application/json"
+                    -d '{"drain":true}' || true;
+                    sleep 10
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: config
+          configMap:
+            name: ferrogate-config
+        - name: shared-state
+          persistentVolumeClaim:
+            claimName: ferrogate-shared-state
+        - name: acme
+          persistentVolumeClaim:
+            claimName: ferrogate-acme

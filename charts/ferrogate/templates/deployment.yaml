@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ferrogate.fullname" . }}
+  labels:
+    {{- include "ferrogate.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "ferrogate.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ferrogate.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: ferrogate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: FERROGATE_CONFIG
+              value: /etc/ferrogate/ferrogate.toml
+            - name: FERROGATE_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ferrogate.secretName" . }}
+                  key: OPENAI_API_KEY
+            - name: FERROGATE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ferrogate.secretName" . }}
+                  key: FERROGATE_CLIENT_SECRET
+            - name: FERROGATE_ADMIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ferrogate.secretName" . }}
+                  key: FERROGATE_ADMIN_SECRET
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ferrogate/ferrogate.toml
+              subPath: ferrogate.toml
+              readOnly: true
+            {{- if .Values.persistence.sharedState.enabled }}
+            - name: shared-state
+              mountPath: /var/lib/ferrogate/state
+            {{- end }}
+            {{- if .Values.persistence.acme.enabled }}
+            - name: acme
+              mountPath: /var/lib/ferrogate/acme
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - >
+                    curl -fsS -X POST http://127.0.0.1:8080/admin/v1/drain
+                    -H "Authorization: Bearer ${FERROGATE_ADMIN_SECRET}"
+                    -H "Content-Type: application/json"
+                    -d '{"drain":true}' || true;
+                    sleep {{ .Values.drainSleepSeconds }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "ferrogate.fullname" . }}-config
+        {{- if .Values.persistence.sharedState.enabled }}
+        - name: shared-state
+          persistentVolumeClaim:
+            claimName: {{ include "ferrogate.fullname" . }}-shared-state
+        {{- end }}
+        {{- if .Values.persistence.acme.enabled }}
+        - name: acme
+          persistentVolumeClaim:
+            claimName: {{ include "ferrogate.fullname" . }}-acme
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

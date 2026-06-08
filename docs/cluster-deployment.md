@@ -22,10 +22,10 @@ cluster contract is owned by FerroGate runtime state:
 - request logs, audit events, metering events, and provider health expose
   cluster and node identity so operators can debug by replica.
 
-Kubernetes examples and a future Helm chart belong to issue #19. This document
-defines the runtime deployment contract that should work the same way on
-Kubernetes, ECS/Fargate, Nomad, Docker/systemd on VMs, and private on-prem
-schedulers.
+Checked-in Kubernetes manifests live in `deploy/kubernetes/`, and the optional
+Helm chart lives in `charts/ferrogate/`. This document defines the runtime
+deployment contract that should work the same way on Kubernetes, ECS/Fargate,
+Nomad, Docker/systemd on VMs, and private on-prem schedulers.
 
 ## Minimum Cluster Contract
 
@@ -93,6 +93,56 @@ Kubernetes does not replace FerroGate cluster state. It schedules and restarts
 processes; it does not provide shared API key propagation, revision validation,
 distributed token-budget reservations, or gateway audit/billing aggregation by
 itself.
+
+### Checked-In Examples
+
+The static examples can be applied to a test cluster:
+
+```bash
+kubectl apply -f deploy/kubernetes
+```
+
+They include:
+
+- `Deployment` with two replicas, `/readyz` readiness, `/healthz` liveness, and
+  a `preStop` drain hook that calls `POST /admin/v1/drain`;
+- `Service` with Prometheus scrape annotations for `/metrics`;
+- `ConfigMap` with FerroGate TOML config and no inline provider/API secrets;
+- `Secret` with placeholder provider, client, and admin key values;
+- `PersistentVolumeClaim` examples for file-backed shared state and ACME
+  storage;
+- a small Redis `Deployment` and `Service` for local/test cluster counters;
+- optional `Ingress` wiring for HTTP routing and TLS termination.
+
+Production operators should replace the example Secret through their cluster
+secret manager, use managed or highly available Redis, and choose storage that
+actually supports the requested PVC access modes. The examples intentionally do
+not contain real provider keys.
+
+Render the Helm chart locally:
+
+```bash
+helm template ferrogate charts/ferrogate
+```
+
+Install while referencing an externally managed Secret:
+
+```bash
+helm upgrade --install ferrogate charts/ferrogate \
+  --set secrets.create=false \
+  --set secrets.name=ferrogate-secret \
+  --set image.tag=v2026.06.07
+```
+
+Validate the checked-in examples without a live cluster:
+
+```bash
+scripts/check-kubernetes-examples.sh
+```
+
+The script verifies YAML structure and the FerroGate-specific runtime contract,
+then runs `kubectl apply --dry-run=client` and `helm lint/template` when those
+tools are available.
 
 ## Non-Kubernetes Paths
 

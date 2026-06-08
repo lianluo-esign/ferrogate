@@ -48,6 +48,9 @@ jobs:
       - name: Validate OpenAPI schemas
         run: python3 scripts/check-openapi.py
 
+      - name: Validate Kubernetes examples
+        run: scripts/check-kubernetes-examples.sh
+
       - name: Run workspace tests
         run: cargo test --workspace --all-features
 

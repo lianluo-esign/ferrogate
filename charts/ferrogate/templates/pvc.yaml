@@ -1,0 +1,39 @@
+{{- if .Values.persistence.sharedState.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ferrogate.fullname" . }}-shared-state
+  labels:
+    {{- include "ferrogate.labels" . | nindent 4 }}
+spec:
+  accessModes:
+{{- range .Values.persistence.sharedState.accessModes }}
+    - {{ . }}
+{{- end }}
+  {{- if .Values.persistence.sharedState.storageClassName }}
+  storageClassName: {{ .Values.persistence.sharedState.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.sharedState.size }}
+---
+{{- end }}
+{{- if .Values.persistence.acme.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ferrogate.fullname" . }}-acme
+  labels:
+    {{- include "ferrogate.labels" . | nindent 4 }}
+spec:
+  accessModes:
+{{- range .Values.persistence.acme.accessModes }}
+    - {{ . }}
+{{- end }}
+  {{- if .Values.persistence.acme.storageClassName }}
+  storageClassName: {{ .Values.persistence.acme.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.acme.size }}
+{{- end }}

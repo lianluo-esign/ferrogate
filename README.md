@@ -340,8 +340,9 @@ if the counter backend is unavailable, guarded AI requests return a governance
 backend error instead of falling back to per-process counters.
 
 For the full Kubernetes-first, not Kubernetes-only cluster deployment contract,
-including readiness, drain, shared state, Redis counters, and non-Kubernetes
-paths, see [Cluster Deployment](docs/cluster-deployment.md).
+including readiness, drain, shared state, Redis counters, checked-in manifests,
+the optional Helm chart, and non-Kubernetes paths, see
+[Cluster Deployment](docs/cluster-deployment.md).
 
 ### OpenRouter Provider
 
@@ -606,6 +607,14 @@ For two or more Docker, VM, ECS/Fargate, Nomad, or Kubernetes replicas, follow
 the cluster deployment runbook instead of relying on Docker alone for gateway
 state consistency. Docker runs the process; FerroGate cluster mode owns shared
 state revisioning, readiness, drain, and distributed counters.
+
+Kubernetes examples are checked in under `deploy/kubernetes/`, and an optional
+Helm chart is available under `charts/ferrogate/`:
+
+```bash
+scripts/check-kubernetes-examples.sh
+helm template ferrogate charts/ferrogate
+```
 
 For automatic HTTPS, publish the relevant ports and mount ACME storage:
 

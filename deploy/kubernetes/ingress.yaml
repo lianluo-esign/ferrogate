@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ferrogate
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - ferrogate.example.com
+      secretName: ferrogate-tls
+  rules:
+    - host: ferrogate.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ferrogate
+                port:
+                  name: http

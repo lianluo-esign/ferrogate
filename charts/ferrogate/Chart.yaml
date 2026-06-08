@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ferrogate
+description: Self-hosted FerroGate API gateway and AI gateway.
+type: application
+version: 0.1.0
+appVersion: v2026.06.07
