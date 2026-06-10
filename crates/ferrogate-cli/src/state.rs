@@ -13,8 +13,9 @@ use std::{
 
 use crate::acme::{AcmeRenewalStatus, SharedAcmeRenewalState};
 use crate::config::{
-    config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config, HeaderMutation,
-    Model, PolicyRule as ConfigPolicyRule, Provider, RouteRule, StorageConfig, Upstream,
+    config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config,
+    GatewayConfigProfile, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, Provider,
+    RouteRule, StorageConfig, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -700,6 +701,20 @@ pub(crate) struct AiCachedResponse {
     pub(crate) status_code: u16,
     pub(crate) content_type: String,
     pub(crate) body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatewayConfigUse {
+    pub(crate) id: String,
+    pub(crate) revision: u32,
+    pub(crate) cache_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatewayConfigResolveError {
+    NotFound(String),
+    Disabled { id: String, revision: u32 },
+    NotAllowed { id: String, revision: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -1505,8 +1520,12 @@ impl AppState {
         api_key_id: Option<&str>,
         logical_model: &str,
         provider_name: &str,
+        gateway_config: Option<&GatewayConfigUse>,
     ) -> bool {
         if !self.config.cache.enabled {
+            return false;
+        }
+        if gateway_config.and_then(|profile| profile.cache_enabled) == Some(false) {
             return false;
         }
         let _ = provider_name;
@@ -1533,6 +1552,25 @@ impl AppState {
             }
         }
         true
+    }
+
+    pub(crate) fn resolve_gateway_config_profile(
+        &self,
+        profile_id: Option<&str>,
+        api_key_id: Option<&str>,
+    ) -> Result<Option<GatewayConfigUse>, GatewayConfigResolveError> {
+        let Some(profile_id) = profile_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return Ok(None);
+        };
+        let Some(profile) = self
+            .config
+            .gateway_configs
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Err(GatewayConfigResolveError::NotFound(profile_id.to_string()));
+        };
+        gateway_config_use(profile, api_key_id).map(Some)
     }
 
     pub(crate) fn ai_response_cache_key(
@@ -2852,6 +2890,36 @@ fn provider_circuit_config(config: &Config) -> Option<ProviderCircuitConfig> {
     })
 }
 
+fn gateway_config_use(
+    profile: &GatewayConfigProfile,
+    api_key_id: Option<&str>,
+) -> Result<GatewayConfigUse, GatewayConfigResolveError> {
+    if !profile.enabled {
+        return Err(GatewayConfigResolveError::Disabled {
+            id: profile.id.clone(),
+            revision: profile.revision,
+        });
+    }
+    if !profile.api_key_ids.is_empty()
+        && !api_key_id.is_some_and(|api_key_id| {
+            profile
+                .api_key_ids
+                .iter()
+                .any(|allowed| allowed == api_key_id)
+        })
+    {
+        return Err(GatewayConfigResolveError::NotAllowed {
+            id: profile.id.clone(),
+            revision: profile.revision,
+        });
+    }
+    Ok(GatewayConfigUse {
+        id: profile.id.clone(),
+        revision: profile.revision,
+        cache_enabled: profile.cache_enabled,
+    })
+}
+
 fn probe_provider_endpoint(base_url: &str, timeout: Duration) -> Result<(), String> {
     let uri = base_url
         .parse::<Uri>()
@@ -3831,6 +3899,8 @@ mod tests {
             provider: Some("openai".into()),
             logical_model: Some("fast-chat".into()),
             provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
             status_code: 200,
             error_code: None,
             prompt_recorded: false,
@@ -3875,6 +3945,8 @@ mod tests {
                 provider: None,
                 logical_model: None,
                 provider_model: None,
+                gateway_config_id: None,
+                gateway_config_revision: None,
                 status_code,
                 error_code: None,
                 prompt_recorded: false,
@@ -4027,6 +4099,8 @@ mod tests {
             provider: Some("openai".into()),
             logical_model: Some("fast-chat".into()),
             provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
             status_code: 200,
             error_code: None,
             prompt_recorded: false,
@@ -4164,6 +4238,8 @@ mod tests {
             provider: Some(provider.into()),
             logical_model: Some("fast-chat".into()),
             provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
             status_code,
             error_code: (status_code >= 400).then(|| "provider_error".into()),
             prompt_recorded: false,

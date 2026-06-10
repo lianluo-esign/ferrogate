@@ -175,6 +175,17 @@ fn request_log_attributes(log: &StoredRequestLog) -> Vec<OtlpAttribute> {
         "provider_model",
         log.provider_model.as_deref(),
     );
+    push_optional_attribute(
+        &mut attributes,
+        "gateway_config_id",
+        log.gateway_config_id.as_deref(),
+    );
+    if let Some(revision) = log.gateway_config_revision {
+        attributes.push(OtlpAttribute::new(
+            "gateway_config_revision",
+            revision.to_string(),
+        ));
+    }
     push_optional_attribute(&mut attributes, "error_code", log.error_code.as_deref());
 
     attributes
@@ -424,6 +435,8 @@ mod tests {
             provider: Some("openai".into()),
             logical_model: Some("fast-chat".into()),
             provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
             status_code: 200,
             error_code: None,
             prompt_recorded: true,

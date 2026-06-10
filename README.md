@@ -54,8 +54,8 @@ The project is developed as the open-source gateway foundation behind
   and OTLP/HTTP metrics/logs/traces export.
 - **Admin API and dashboard** for gateway status, providers, models, API keys,
   tenants, policies, request logs, metering events, usage aggregates, audit
-  events, provider health, extensions, tools, MCP servers, config validation,
-  process-local reload, and node drain/readiness.
+  events, gateway config profiles, provider health, extensions, tools, MCP
+  servers, config validation, process-local reload, and node drain/readiness.
 - **Cluster operations** for multi-node deployments with node identity, shared
   file control-plane state, Redis-backed request and token counters, status,
   readiness, and drain semantics.
@@ -80,6 +80,9 @@ Validated end-to-end:
 - Agent framework compatibility for OpenAI-compatible clients using FerroGate
   `base_url`, virtual API keys, logical models, request logs, metering events,
   and Prometheus model/provider metrics.
+- Reusable request-time gateway config profiles through `x-ferrogate-config`,
+  with cache-policy overrides, API-key allowlists, Admin API visibility, and
+  request-log profile evidence.
 - Provider adapters and priority, weighted, cost, latency, and balanced routing.
 - Virtual API key auth, policy checks, rate limits, and token budget handling.
 - Exact-match response cache for non-streaming AI requests.
@@ -323,6 +326,32 @@ responses when the tenant context, route, logical model, provider route/model,
 and normalized JSON request body are identical. Semantic/vector cache matching
 is intentionally not part of this first version.
 
+Reusable gateway config profiles can be selected per request with
+`x-ferrogate-config`. The first profile slice supports cache policy overrides
+inside the operator's global cache policy; it cannot enable caching when
+`[cache].enabled = false`, but it can disable caching for selected workflows.
+
+```toml
+[[gateway_configs]]
+id = "no-cache-agent"
+name = "No-cache agent workflow"
+revision = 1
+cache_enabled = false
+api_key_ids = ["dev"]
+```
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Authorization: Bearer dev-secret' \
+  -H 'Content-Type: application/json' \
+  -H 'x-ferrogate-config: no-cache-agent' \
+  -d '{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Profile ID and revision are recorded in request logs as
+`gateway_config_id` and `gateway_config_revision`. Operators can inspect
+configured profiles with `GET /admin/v1/gateway-configs`.
+
 `[[mcp_servers]]` makes FerroGate an MCP host/client. Each server is connected
 as a long-lived session at startup or reload, initialized with `initialize` plus
 `tools/list`, and health checked in the background. Tool names are exposed as
@@ -557,6 +586,7 @@ GET  /admin/v1/tools
 GET  /admin/v1/mcp-servers
 GET  /admin/v1/tool-sessions/{session_id}
 GET  /admin/v1/models
+GET  /admin/v1/gateway-configs
 GET  /admin/v1/api-keys
 GET  /admin/v1/api-keys/{id}
 POST /admin/v1/api-keys

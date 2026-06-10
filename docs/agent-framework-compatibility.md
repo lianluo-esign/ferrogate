@@ -31,6 +31,40 @@ FerroGate rewrites the logical model to the configured provider model before
 provider dispatch. Provider keys stay server-side and are never exposed to the
 framework process.
 
+## Gateway Config Profiles
+
+Framework clients that support extra request headers can select reusable
+gateway behavior with `x-ferrogate-config`. This lets operators define a stable
+profile in FerroGate and let agent code reference the profile ID without
+hardcoding gateway policy into prompts or application logic.
+
+The first profile slice supports cache-policy overrides inside the global cache
+policy. For example, an agent workflow can disable exact-match caching while
+other traffic keeps the normal cache path:
+
+```toml
+[[gateway_configs]]
+id = "no-cache-agent"
+name = "No-cache agent workflow"
+revision = 1
+cache_enabled = false
+api_key_ids = ["agent_key"]
+```
+
+Then attach the profile through the framework's extra-header hook:
+
+```python
+client.chat.completions.create(
+    model="agent-chat",
+    messages=[{"role": "user", "content": "hello"}],
+    extra_headers={"x-ferrogate-config": "no-cache-agent"},
+)
+```
+
+Profile ID and revision are recorded in `/admin/v1/request-logs` as
+`gateway_config_id` and `gateway_config_revision`, and profiles are visible
+through `GET /admin/v1/gateway-configs`.
+
 ## Compatibility Matrix
 
 | Framework/client | Chat completions | Streaming | Tool/function calls | Minimal wiring |
@@ -198,4 +232,3 @@ that a standard SDK-shaped Chat Completions request reaches the provider path,
 uses the configured provider model, returns request/trace headers, and records
 request-log plus Prometheus model/provider evidence without leaking client or
 provider secrets.
-

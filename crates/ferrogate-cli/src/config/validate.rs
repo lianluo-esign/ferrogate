@@ -25,6 +25,7 @@ impl Config {
         self.add_mcp_policy_targets(&mut model_names, &mut provider_names);
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
+        self.validate_gateway_configs(&api_key_ids)?;
         self.validate_extensions()?;
         self.validate_tls()?;
         self.validate_telemetry()?;
@@ -639,6 +640,40 @@ impl Config {
                         "field policies[{index}].providers: policy {} references unknown provider {}",
                         policy.name,
                         provider
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_gateway_configs(&self, api_key_ids: &HashSet<String>) -> AnyResult<()> {
+        let mut ids = HashSet::new();
+        for (index, profile) in self.gateway_configs.iter().enumerate() {
+            if profile.id.trim().is_empty() {
+                bail!("field gateway_configs[{index}].id: cannot be empty");
+            }
+            if !ids.insert(profile.id.as_str()) {
+                bail!(
+                    "field gateway_configs[{index}].id: duplicate gateway config id {}",
+                    profile.id
+                );
+            }
+            if profile.name.trim().is_empty() {
+                bail!("field gateway_configs[{index}].name: cannot be empty");
+            }
+            if profile.revision == 0 {
+                bail!("field gateway_configs[{index}].revision: must be greater than zero");
+            }
+            if profile.cache_enabled.is_none() {
+                bail!("field gateway_configs[{index}]: cache_enabled is required for this profile slice");
+            }
+            for api_key_id in &profile.api_key_ids {
+                if !api_key_ids.contains(api_key_id.as_str()) {
+                    bail!(
+                        "field gateway_configs[{index}].api_key_ids: gateway config {} references unknown api key {}",
+                        profile.id,
+                        api_key_id
                     );
                 }
             }

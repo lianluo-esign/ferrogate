@@ -23,6 +23,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) policies: Vec<PolicyRule>,
     #[serde(default)]
+    pub(crate) gateway_configs: Vec<GatewayConfigProfile>,
+    #[serde(default)]
     pub(crate) extensions: Vec<ExtensionConfig>,
     #[serde(default)]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
@@ -295,6 +297,21 @@ pub(crate) struct PolicyRule {
     pub(crate) enabled: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GatewayConfigProfile {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(default = "default_gateway_config_revision")]
+    pub(crate) revision: u32,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) api_key_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) cache_enabled: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ExtensionKind {
@@ -561,6 +578,10 @@ fn default_policy_message() -> String {
     "request denied by policy".to_string()
 }
 
+fn default_gateway_config_revision() -> u32 {
+    1
+}
+
 fn default_extension_source() -> String {
     "builtin".to_string()
 }
@@ -690,6 +711,7 @@ impl Default for Config {
             models: Vec::new(),
             api_keys: Vec::new(),
             policies: Vec::new(),
+            gateway_configs: Vec::new(),
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),

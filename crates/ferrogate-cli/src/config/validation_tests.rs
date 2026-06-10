@@ -642,6 +642,65 @@ fn rejects_policy_with_unknown_references() {
 }
 
 #[test]
+fn validates_gateway_config_profiles() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        gateway_configs: vec![GatewayConfigProfile {
+            id: "no-cache-agent".into(),
+            name: "No-cache agent workflow".into(),
+            revision: 1,
+            enabled: true,
+            api_key_ids: vec!["key_dev".into()],
+            cache_enabled: Some(false),
+        }],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_invalid_gateway_config_profiles() {
+    let mut missing_behavior = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        gateway_configs: vec![GatewayConfigProfile {
+            id: "empty".into(),
+            name: "Empty".into(),
+            revision: 1,
+            enabled: true,
+            api_key_ids: vec!["key_dev".into()],
+            cache_enabled: None,
+        }],
+        ..Config::default()
+    };
+    let error = missing_behavior.validate().unwrap_err().to_string();
+    assert!(error.contains("field gateway_configs[0]"));
+    assert!(error.contains("cache_enabled"));
+
+    missing_behavior.gateway_configs[0].cache_enabled = Some(false);
+    missing_behavior.gateway_configs[0].api_key_ids = vec!["missing-key".into()];
+    let error = missing_behavior.validate().unwrap_err().to_string();
+    assert!(error.contains("field gateway_configs[0].api_key_ids"));
+    assert!(error.contains("missing-key"));
+
+    missing_behavior.gateway_configs.push(GatewayConfigProfile {
+        id: "empty".into(),
+        name: "Duplicate".into(),
+        revision: 1,
+        enabled: true,
+        api_key_ids: vec![],
+        cache_enabled: Some(false),
+    });
+    missing_behavior.gateway_configs[0].api_key_ids = vec![];
+    let error = missing_behavior.validate().unwrap_err().to_string();
+    assert!(error.contains("duplicate gateway config id empty"));
+}
+
+#[test]
 fn rejects_invalid_otlp_endpoint_with_field_name() {
     let config = Config {
         telemetry: TelemetryConfig {

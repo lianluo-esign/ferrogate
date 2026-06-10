@@ -782,6 +782,187 @@ cache_enabled = true
 }
 
 #[test]
+fn gateway_config_profile_header_controls_cache_and_records_evidence() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        2,
+        r#"{"id":"chatcmpl_profile","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"profile ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[cache]
+enabled = true
+mode = "exact_match"
+ttl_secs = 60
+max_records = 16
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+cache_enabled = true
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+cache_enabled = true
+
+[[api_keys]]
+id = "other"
+name = "Other key"
+key = "other-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+
+[[gateway_configs]]
+id = "no-cache-agent"
+name = "No-cache agent workflow"
+revision = 7
+cache_enabled = false
+api_key_ids = ["key_dev"]
+
+[[gateway_configs]]
+id = "disabled-agent"
+name = "Disabled agent workflow"
+revision = 2
+enabled = false
+cache_enabled = false
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let body = r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello profile"}]}"#;
+    for _ in 0..2 {
+        let response = http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/chat/completions",
+            &[
+                "Authorization: Bearer client-secret",
+                "Content-Type: application/json",
+                "x-ferrogate-config: no-cache-agent",
+            ],
+            body,
+        );
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(response.contains("profile ok"), "{response}");
+    }
+
+    let missing = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-config: missing-agent",
+        ],
+        body,
+    );
+    assert!(missing.contains("400 Bad Request"), "{missing}");
+    assert!(missing.contains("gateway_config_not_found"), "{missing}");
+
+    let disabled = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-config: disabled-agent",
+        ],
+        body,
+    );
+    assert!(disabled.contains("403 Forbidden"), "{disabled}");
+    assert!(disabled.contains("gateway_config_disabled"), "{disabled}");
+
+    let forbidden = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer other-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-config: no-cache-agent",
+        ],
+        body,
+    );
+    assert!(forbidden.contains("403 Forbidden"), "{forbidden}");
+    assert!(
+        forbidden.contains("gateway_config_not_allowed"),
+        "{forbidden}"
+    );
+
+    let profiles = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/gateway-configs",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(profiles.contains("200 OK"), "{profiles}");
+    assert!(profiles.contains("\"id\":\"no-cache-agent\""), "{profiles}");
+    assert!(profiles.contains("\"revision\":7"), "{profiles}");
+    assert!(profiles.contains("\"cache_enabled\":false"), "{profiles}");
+    assert!(!profiles.contains("client-secret"), "{profiles}");
+
+    let logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(logs.contains("200 OK"), "{logs}");
+    assert!(
+        logs.contains("\"gateway_config_id\":\"no-cache-agent\""),
+        "{logs}"
+    );
+    assert!(logs.contains("\"gateway_config_revision\":7"), "{logs}");
+    assert!(!logs.contains("\"cache_status\":\"hit\""), "{logs}");
+    assert!(!logs.contains("\"cache_status\":\"miss\""), "{logs}");
+    assert!(logs.contains("gateway_config_not_found"), "{logs}");
+    assert!(logs.contains("gateway_config_disabled"), "{logs}");
+    assert!(logs.contains("gateway_config_not_allowed"), "{logs}");
+    assert!(!logs.contains("client-secret"), "{logs}");
+    assert!(!logs.contains("provider-secret"), "{logs}");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
+    assert!(provider_requests
+        .iter()
+        .all(|request| request.contains(r#""model":"gpt-4o-mini""#)));
+    assert!(provider_requests
+        .iter()
+        .all(|request| !request.contains("client-secret")));
+}
+
+#[test]
 fn exact_match_cache_hit_does_not_require_token_budget_headroom() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(

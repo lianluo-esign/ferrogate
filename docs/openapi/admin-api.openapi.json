@@ -1103,6 +1103,33 @@
           }
         }
       }
+    },
+    "/admin/v1/gateway-configs": {
+      "get": {
+        "operationId": "listAdminGatewayConfigs",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List configured reusable gateway config profiles.",
+        "responses": {
+          "200": {
+            "description": "Gateway config profile list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminGatewayConfigProfileList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2693,6 +2720,19 @@
               "null"
             ],
             "minimum": 0
+          },
+          "gateway_config_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gateway_config_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
           }
         },
         "additionalProperties": false
@@ -3461,6 +3501,65 @@
       },
       "McpServerStatusList": {
         "$ref": "#/components/schemas/AdminList_McpServerStatus"
+      },
+      "AdminGatewayConfigProfile": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "revision",
+          "enabled",
+          "api_key_ids"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "api_key_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "cache_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Optional request-time override for exact-match AI response caching within the global cache policy."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminGatewayConfigProfileList": {
+        "$ref": "#/components/schemas/AdminList_AdminGatewayConfigProfile"
+      },
+      "AdminList_AdminGatewayConfigProfile": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminGatewayConfigProfile"
+            }
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

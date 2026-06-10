@@ -12,9 +12,9 @@ use crate::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse,
         AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
-        AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse, AdminList, AdminPolicyMutation,
-        AdminPolicyMutationResponse, AdminProvider, AdminStatus, AdminTenantRef, HealthResponse,
-        OpenAiModel, OpenAiModelList, ReadinessResponse,
+        AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigProfile,
+        AdminList, AdminPolicyMutation, AdminPolicyMutationResponse, AdminProvider, AdminStatus,
+        AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList, ReadinessResponse,
     },
     state::AdminAuditEventDraft,
 };
@@ -203,6 +203,49 @@ impl FerroGateway {
                 let total = statuses.len();
                 let body = AdminList::paginated(statuses, total, 0, total);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_gateway_configs(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let data = state
+                    .config
+                    .gateway_configs
+                    .iter()
+                    .map(|profile| AdminGatewayConfigProfile {
+                        id: profile.id.clone(),
+                        name: profile.name.clone(),
+                        revision: profile.revision,
+                        enabled: profile.enabled,
+                        api_key_ids: profile.api_key_ids.clone(),
+                        cache_enabled: profile.cache_enabled,
+                    })
+                    .collect();
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminList::new(data),
+                    &ctx.request_id,
+                )
+                .await
             }
             Err(error) => {
                 write_json_error(

@@ -184,6 +184,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/gateway-configs" {
+            let headers = req.headers.clone();
+            self.handle_admin_gateway_configs(session, ctx, &headers)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/api-keys" || path.starts_with("/admin/v1/api-keys/") {
             let headers = req.headers.clone();
             let method = req.method.clone();

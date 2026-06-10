@@ -140,6 +140,7 @@ impl Config {
                 })
                 .collect(),
             policies: Vec::new(),
+            gateway_configs: Vec::new(),
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),

@@ -106,6 +106,16 @@ pub(crate) struct AdminProvider {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminGatewayConfigProfile {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) revision: u32,
+    pub(crate) enabled: bool,
+    pub(crate) api_key_ids: Vec<String>,
+    pub(crate) cache_enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AdminApiKey {
     pub(crate) id: String,
     pub(crate) name: String,

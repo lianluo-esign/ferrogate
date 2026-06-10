@@ -11,7 +11,7 @@ use crate::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         write_streaming_response,
     },
-    state::{AppState, ToolInjectionContext},
+    state::{AppState, GatewayConfigResolveError, ToolInjectionContext},
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
@@ -62,6 +62,7 @@ impl AiEndpoint {
 }
 
 const DEFAULT_COMPLETION_TOKEN_RESERVATION: u64 = 512;
+const GATEWAY_CONFIG_HEADER: &str = "x-ferrogate-config";
 
 impl FerroGateway {
     pub(super) async fn handle_chat_completions(
@@ -111,6 +112,51 @@ impl FerroGateway {
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let gateway_config = match requested_gateway_config_id(&headers) {
+            Ok(profile_id) => {
+                match state.resolve_gateway_config_profile(profile_id, auth.api_key_id.as_deref()) {
+                    Ok(profile) => profile,
+                    Err(error) => {
+                        let (status, code, message) = gateway_config_error_response(error);
+                        self.record_ai_error_log(
+                            endpoint,
+                            ctx,
+                            AiErrorLog {
+                                tenant: auth.tenant_context(),
+                                logical_model: None,
+                                provider: None,
+                                status,
+                                error_code: code,
+                            },
+                        );
+                        write_json_error(session, status, code, message, &ctx.request_id).await?;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(message) => {
+                self.record_ai_error_log(
+                    endpoint,
+                    ctx,
+                    AiErrorLog {
+                        tenant: auth.tenant_context(),
+                        logical_model: None,
+                        provider: None,
+                        status: StatusCode::BAD_REQUEST,
+                        error_code: "invalid_gateway_config_header",
+                    },
+                );
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_gateway_config_header",
+                    message,
                     &ctx.request_id,
                 )
                 .await?;
@@ -444,7 +490,12 @@ impl FerroGateway {
                 None
             } else {
                 state
-                    .ai_cache_enabled(auth.api_key_id.as_deref(), &request.model, &provider.name)
+                    .ai_cache_enabled(
+                        auth.api_key_id.as_deref(),
+                        &request.model,
+                        &provider.name,
+                        gateway_config.as_ref(),
+                    )
                     .then(|| {
                         state.ai_response_cache_key(
                             endpoint.route(),
@@ -470,6 +521,12 @@ impl FerroGateway {
                         provider: Some(provider.name.clone()),
                         logical_model: Some(request.model.clone()),
                         provider_model: Some(model_route.provider_model.clone()),
+                        gateway_config_id: gateway_config
+                            .as_ref()
+                            .map(|profile| profile.id.clone()),
+                        gateway_config_revision: gateway_config
+                            .as_ref()
+                            .map(|profile| profile.revision),
                         status_code: cached.status_code,
                         error_code: None,
                         prompt_recorded: record_bodies,
@@ -953,6 +1010,12 @@ impl FerroGateway {
                             provider: Some(provider.name.clone()),
                             logical_model: Some(request.model.clone()),
                             provider_model: Some(model_route.provider_model.clone()),
+                            gateway_config_id: gateway_config
+                                .as_ref()
+                                .map(|profile| profile.id.clone()),
+                            gateway_config_revision: gateway_config
+                                .as_ref()
+                                .map(|profile| profile.revision),
                             status_code: response.status.as_u16(),
                             error_code: None,
                             prompt_recorded: record_bodies,
@@ -1062,6 +1125,8 @@ impl FerroGateway {
             provider: log.provider.map(ToOwned::to_owned),
             logical_model: log.logical_model.map(ToOwned::to_owned),
             provider_model: None,
+            gateway_config_id: None,
+            gateway_config_revision: None,
             status_code: log.status.as_u16(),
             error_code: Some(log.error_code.to_string()),
             prompt_recorded: false,
@@ -1097,6 +1162,45 @@ struct AiProviderRequestInput<'a> {
 
 fn has_next_candidate(candidate_index: usize, route_count: usize) -> bool {
     candidate_index + 1 < route_count
+}
+
+fn requested_gateway_config_id(headers: &HeaderMap) -> Result<Option<&str>, String> {
+    let Some(value) = headers.get(GATEWAY_CONFIG_HEADER) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| {
+        format!("{GATEWAY_CONFIG_HEADER} must be valid visible ASCII/UTF-8 header text")
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn gateway_config_error_response(
+    error: GatewayConfigResolveError,
+) -> (StatusCode, &'static str, String) {
+    match error {
+        GatewayConfigResolveError::NotFound(id) => (
+            StatusCode::BAD_REQUEST,
+            "gateway_config_not_found",
+            format!("gateway config profile {id} was not found"),
+        ),
+        GatewayConfigResolveError::Disabled { id, revision } => (
+            StatusCode::FORBIDDEN,
+            "gateway_config_disabled",
+            format!("gateway config profile {id} revision {revision} is disabled"),
+        ),
+        GatewayConfigResolveError::NotAllowed { id, revision } => (
+            StatusCode::FORBIDDEN,
+            "gateway_config_not_allowed",
+            format!(
+                "API key is not allowed to use gateway config profile {id} revision {revision}"
+            ),
+        ),
+    }
 }
 
 fn prepare_ai_provider_request(
