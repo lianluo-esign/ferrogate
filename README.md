@@ -18,7 +18,10 @@ The project is developed as the open-source gateway foundation behind
   responses, graceful shutdown, and listener-level graceful upgrade.
 - **OpenAI-compatible AI API** with `GET /v1/models`,
   `POST /v1/chat/completions`, and `POST /v1/responses`, including
-  non-streaming and streaming SSE forwarding.
+  non-streaming and streaming SSE forwarding. See
+  [Agent Framework Compatibility](docs/agent-framework-compatibility.md) for
+  AutoGen, CrewAI, LangChain, LlamaIndex, Phidata, Control Flow, and custom SDK
+  wiring.
 - **Provider adapters** for OpenAI-compatible APIs, OpenAI, Azure OpenAI,
   OpenRouter, Anthropic, Gemini, and Grok/xAI.
 - **Model registry and fallback routing** with logical model names, provider
@@ -74,6 +77,9 @@ Validated end-to-end:
 
 - HTTP reverse proxy runtime on Pingora.
 - OpenAI-compatible Chat Completions and Responses API paths.
+- Agent framework compatibility for OpenAI-compatible clients using FerroGate
+  `base_url`, virtual API keys, logical models, request logs, metering events,
+  and Prometheus model/provider metrics.
 - Provider adapters and priority, weighted, cost, latency, and balanced routing.
 - Virtual API key auth, policy checks, rate limits, and token budget handling.
 - Exact-match response cache for non-streaming AI requests.

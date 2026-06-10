@@ -524,6 +524,141 @@ enabled = false
 }
 
 #[test]
+fn openai_compatible_client_shape_preserves_framework_traffic_evidence() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_framework","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"framework ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":11,"total_tokens":18}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai-compatible"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "agent-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[api_keys]]
+id = "framework-key"
+name = "Framework key"
+key = "client-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["agent-chat"]
+organization_id = "org_agents"
+team_id = "team_orchestration"
+project_id = "project_framework_smoke"
+user_id = "user_agent_runner"
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+            "User-Agent: OpenAI/Python framework-smoke",
+            "X-FerroGate-Framework: langchain",
+        ],
+        r#"{"model":"agent-chat","messages":[{"role":"system","content":"You are a terse assistant."},{"role":"user","content":"hello from a framework client"}],"temperature":0.2,"stream":false}"#,
+    );
+    assert!(chat.contains("200 OK"), "{chat}");
+    assert!(chat.contains("\"id\":\"chatcmpl_framework\""), "{chat}");
+    assert!(chat.contains("x-request-id:"), "{chat}");
+    assert!(chat.contains("x-trace-id:"), "{chat}");
+    assert!(!chat.contains("provider-secret"), "{chat}");
+    assert!(!chat.contains("client-secret"), "{chat}");
+
+    let logs = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(logs.contains("200 OK"), "{logs}");
+    assert!(
+        logs.contains("\"route\":\"openai.chat.completions\""),
+        "{logs}"
+    );
+    assert!(logs.contains("\"logical_model\":\"agent-chat\""), "{logs}");
+    assert!(logs.contains("\"provider\":\"openai\""), "{logs}");
+    assert!(
+        logs.contains("\"provider_model\":\"gpt-4o-mini\""),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("\"organization_id\":\"org_agents\""),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("\"team_id\":\"team_orchestration\""),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("\"project_id\":\"project_framework_smoke\""),
+        "{logs}"
+    );
+    assert!(logs.contains("\"user_id\":\"user_agent_runner\""), "{logs}");
+    assert!(!logs.contains("client-secret"), "{logs}");
+
+    let metrics = http_request(
+        &gateway_addr,
+        "GET",
+        "/metrics",
+        &["Authorization: Bearer client-secret"],
+        "",
+    );
+    assert!(metrics.contains("200 OK"), "{metrics}");
+    assert!(
+        metrics.contains(
+            "ferrogate_model_provider_requests_total{logical_model=\"agent-chat\",provider=\"openai\"} 1"
+        ),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains(
+            "ferrogate_model_provider_tokens_total{logical_model=\"agent-chat\",provider=\"openai\"} 18"
+        ),
+        "{metrics}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
+    let provider_request = &provider_requests[0];
+    assert!(provider_request.contains("POST /v1/chat/completions HTTP/1.1"));
+    assert!(provider_request.contains("authorization: Bearer provider-secret"));
+    assert!(provider_request.contains(r#""model":"gpt-4o-mini""#));
+    assert!(provider_request.contains(r#""temperature":0.2"#));
+    assert!(provider_request.contains(r#""stream":false"#));
+    assert!(!provider_request.contains("agent-chat"));
+    assert!(!provider_request.contains("client-secret"));
+}
+
+#[test]
 fn exact_match_cache_serves_repeated_non_streaming_chat_without_provider_call() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(
