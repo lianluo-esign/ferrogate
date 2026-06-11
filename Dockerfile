@@ -11,6 +11,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
+COPY tools ./tools
 COPY Ferrogate ./Ferrogate
 COPY config ./config
 RUN cargo build --release -p ferrogate-cli --locked
