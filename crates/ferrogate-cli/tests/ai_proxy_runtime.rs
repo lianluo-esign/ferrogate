@@ -43,6 +43,10 @@ fn clustered_gateways_report_shared_cluster_and_distinct_nodes() {
     let first_cluster = &first_status["cluster"];
     let second_cluster = &second_status["cluster"];
 
+    assert_eq!(first_status["service"], "ferrogate");
+    assert_eq!(second_status["service"], "ferrogate");
+    assert_eq!(first_ready["service"], "ferrogate");
+    assert_eq!(second_ready["service"], "ferrogate");
     assert_eq!(first_cluster["enabled"], true);
     assert_eq!(second_cluster["enabled"], true);
     assert_eq!(first_cluster["cluster_id"], "test-cluster");
@@ -208,6 +212,8 @@ enabled = false
         "",
     );
     assert!(admin_status.contains("200 OK"));
+    assert!(admin_status.contains("\"service\":\"ferrogate\""));
+    assert!(!admin_status.contains("\"service\":\"ferrogate-cli\""));
     assert!(admin_status.contains("\"runtime\":\"pingora\""));
     assert!(admin_status.contains("\"auth_required\":true"));
     assert!(admin_status.contains("\"cluster\":"));

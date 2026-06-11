@@ -23,6 +23,8 @@ use crate::{
 use super::body::read_request_body;
 use super::{FerroGateway, ProxyContext};
 
+const SERVICE_NAME: &str = "ferrogate";
+
 #[derive(Debug, Clone, Copy)]
 enum ToolExecuteBackend {
     Extension,
@@ -37,7 +39,7 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let body = HealthResponse {
             status: "ok",
-            service: env!("CARGO_PKG_NAME"),
+            service: SERVICE_NAME,
             version: env!("CARGO_PKG_VERSION"),
             runtime: "pingora",
         };
@@ -59,7 +61,7 @@ impl FerroGateway {
         };
         let body = ReadinessResponse {
             status,
-            service: env!("CARGO_PKG_NAME"),
+            service: SERVICE_NAME,
             version: env!("CARGO_PKG_VERSION"),
             runtime: "pingora",
             cluster,
@@ -137,7 +139,7 @@ impl FerroGateway {
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
                 let status = AdminStatus {
-                    service: env!("CARGO_PKG_NAME"),
+                    service: SERVICE_NAME,
                     version: env!("CARGO_PKG_VERSION"),
                     runtime: "pingora",
                     snapshot: config_snapshot_id(&state.config),

@@ -1598,7 +1598,8 @@
             "const": "ok"
           },
           "service": {
-            "type": "string"
+            "type": "string",
+            "const": "ferrogate"
           },
           "version": {
             "type": "string"
@@ -1628,7 +1629,8 @@
             ]
           },
           "service": {
-            "type": "string"
+            "type": "string",
+            "const": "ferrogate"
           },
           "version": {
             "type": "string"
@@ -1667,7 +1669,8 @@
         ],
         "properties": {
           "service": {
-            "type": "string"
+            "type": "string",
+            "const": "ferrogate"
           },
           "version": {
             "type": "string"
