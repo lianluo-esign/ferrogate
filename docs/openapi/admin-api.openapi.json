@@ -1129,6 +1129,151 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "operationId": "createAdminGatewayConfig",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create a reusable gateway config profile and apply it through process-local reload.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminGatewayConfigMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminGatewayConfigMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/gateway-configs/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/GatewayConfigId"
+        }
+      ],
+      "get": {
+        "operationId": "getAdminGatewayConfig",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one reusable gateway config profile.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminGatewayConfigMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminGatewayConfig",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace or create a reusable gateway config profile by id.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminGatewayConfigMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminGatewayConfigMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminGatewayConfig",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Upsert a reusable gateway config profile by id.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminGatewayConfigMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminGatewayConfigMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminGatewayConfig",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete a reusable gateway config profile and apply the change through process-local reload.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteGatewayConfigOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
       }
     }
   },
@@ -1151,6 +1296,14 @@
       },
       "PolicyName": {
         "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "GatewayConfigId": {
+        "name": "id",
         "in": "path",
         "required": true,
         "schema": {
@@ -1234,6 +1387,30 @@
           }
         }
       },
+      "AdminGatewayConfigMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminGatewayConfigMutation"
+            },
+            "examples": {
+              "disableCacheForAgent": {
+                "summary": "Disable exact-match cache for an agent workflow.",
+                "value": {
+                  "id": "no-cache-agent",
+                  "name": "No-cache agent workflow",
+                  "revision": 1,
+                  "api_key_ids": [
+                    "key_dev"
+                  ],
+                  "cache_enabled": false
+                }
+              }
+            }
+          }
+        }
+      },
       "AdminConfigValidateRequest": {
         "required": true,
         "content": {
@@ -1305,6 +1482,16 @@
           }
         }
       },
+      "AdminGatewayConfigMutationOk": {
+        "description": "Gateway config mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminGatewayConfigMutationResponse"
+            }
+          }
+        }
+      },
       "DeleteApiKeyOk": {
         "description": "API key delete response.",
         "content": {
@@ -1321,6 +1508,16 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/DeletePolicyResponse"
+            }
+          }
+        }
+      },
+      "DeleteGatewayConfigOk": {
+        "description": "Gateway config delete response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteGatewayConfigResponse"
             }
           }
         }
@@ -2398,6 +2595,51 @@
         },
         "additionalProperties": false
       },
+      "AdminGatewayConfigMutation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "api_key_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "cache_enabled": {
+            "type": "boolean",
+            "description": "Optional request-time override for exact-match AI response caching within the global cache policy."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminGatewayConfigMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "gateway_config"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "gateway_config"
+          },
+          "gateway_config": {
+            "$ref": "#/components/schemas/AdminGatewayConfigProfile"
+          }
+        },
+        "additionalProperties": false
+      },
       "DeleteApiKeyResponse": {
         "allOf": [
           {
@@ -2423,6 +2665,21 @@
             "properties": {
               "object": {
                 "const": "policy"
+              }
+            }
+          }
+        ]
+      },
+      "DeleteGatewayConfigResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "gateway_config"
               }
             }
           }

@@ -2153,6 +2153,250 @@ scopes = ["admin.read", "admin.write"]
 }
 
 #[test]
+fn admin_gateway_config_crud_updates_runtime_profile_selection() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        2,
+        r#"{"id":"chatcmpl_gateway_config_crud","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"profile crud ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[cache]
+enabled = true
+mode = "exact_match"
+ttl_secs = 60
+max_records = 16
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+cache_enabled = true
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+cache_enabled = true
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let create_body = serde_json::json!({
+        "id": "no-cache-agent",
+        "name": "No-cache agent",
+        "revision": 3,
+        "api_key_ids": ["client"],
+        "cache_enabled": false
+    })
+    .to_string();
+    let created = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/gateway-configs",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &create_body,
+    );
+    assert!(created.contains("201 Created"), "{created}");
+    assert!(
+        created.contains("\"object\":\"gateway_config\""),
+        "{created}"
+    );
+    assert!(created.contains("\"id\":\"no-cache-agent\""), "{created}");
+    assert!(created.contains("\"revision\":3"), "{created}");
+    assert!(created.contains("\"cache_enabled\":false"), "{created}");
+    assert!(!created.contains("client-secret"), "{created}");
+    assert!(!created.contains("admin-secret"), "{created}");
+
+    let unknown_field = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/gateway-configs",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"bad","name":"Bad","revision":1,"cache_enabled":false,"routing_strategy":"latency"}"#,
+    );
+    assert!(unknown_field.contains("400 Bad Request"), "{unknown_field}");
+    assert!(
+        unknown_field.contains("invalid_request_body"),
+        "{unknown_field}"
+    );
+
+    let bad_api_key = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/gateway-configs",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"bad-api-key","name":"Bad API key","revision":1,"cache_enabled":false,"api_key_ids":["missing"]}"#,
+    );
+    assert!(bad_api_key.contains("400 Bad Request"), "{bad_api_key}");
+    assert!(
+        bad_api_key.contains("invalid_gateway_config"),
+        "{bad_api_key}"
+    );
+    assert!(
+        bad_api_key.contains("unknown api key missing"),
+        "{bad_api_key}"
+    );
+
+    let body =
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello profile crud"}]}"#;
+    for _ in 0..2 {
+        let chat = http_request(
+            &gateway_addr,
+            "POST",
+            "/v1/chat/completions",
+            &[
+                "Authorization: Bearer client-secret",
+                "Content-Type: application/json",
+                "x-ferrogate-config: no-cache-agent",
+            ],
+            body,
+        );
+        assert!(chat.contains("200 OK"), "{chat}");
+        assert!(chat.contains("profile crud ok"), "{chat}");
+    }
+
+    let update_body = serde_json::json!({
+        "id": "no-cache-agent",
+        "name": "Disabled no-cache agent",
+        "revision": 4,
+        "enabled": false,
+        "api_key_ids": ["client"],
+        "cache_enabled": false
+    })
+    .to_string();
+    let updated = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/gateway-configs/no-cache-agent",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &update_body,
+    );
+    assert!(updated.contains("200 OK"), "{updated}");
+    assert!(updated.contains("\"revision\":4"), "{updated}");
+    assert!(updated.contains("\"enabled\":false"), "{updated}");
+
+    let disabled = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-config: no-cache-agent",
+        ],
+        body,
+    );
+    assert!(disabled.contains("403 Forbidden"), "{disabled}");
+    assert!(disabled.contains("gateway_config_disabled"), "{disabled}");
+
+    let get_one = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/gateway-configs/no-cache-agent",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(get_one.contains("200 OK"), "{get_one}");
+    assert!(
+        get_one.contains("\"object\":\"gateway_config\""),
+        "{get_one}"
+    );
+    assert!(get_one.contains("\"id\":\"no-cache-agent\""), "{get_one}");
+
+    let delete = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/gateway-configs/no-cache-agent",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(delete.contains("200 OK"), "{delete}");
+    assert!(delete.contains("\"object\":\"gateway_config\""), "{delete}");
+    assert!(delete.contains("\"deleted\":true"), "{delete}");
+
+    let missing_after_delete = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-config: no-cache-agent",
+        ],
+        body,
+    );
+    assert!(
+        missing_after_delete.contains("400 Bad Request"),
+        "{missing_after_delete}"
+    );
+    assert!(
+        missing_after_delete.contains("gateway_config_not_found"),
+        "{missing_after_delete}"
+    );
+
+    let audit_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(audit_events.contains("200 OK"), "{audit_events}");
+    assert!(
+        audit_events.contains("\"action\":\"gateway_config.upsert\""),
+        "{audit_events}"
+    );
+    assert!(
+        audit_events.contains("\"action\":\"gateway_config.delete\""),
+        "{audit_events}"
+    );
+    assert!(!audit_events.contains("client-secret"), "{audit_events}");
+    assert!(!audit_events.contains("admin-secret"), "{audit_events}");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 2);
+}
+
+#[test]
 fn graceful_upgrade_reload_transfers_listener_to_new_process() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();

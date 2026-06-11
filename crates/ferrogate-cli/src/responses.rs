@@ -115,6 +115,27 @@ pub(crate) struct AdminGatewayConfigProfile {
     pub(crate) cache_enabled: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminGatewayConfigMutation {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) revision: Option<u32>,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) api_key_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) cache_enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminGatewayConfigMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) gateway_config: AdminGatewayConfigProfile,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminApiKey {
     pub(crate) id: String,

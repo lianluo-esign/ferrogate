@@ -12,8 +12,9 @@ use crate::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse,
         AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
-        AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigProfile,
-        AdminList, AdminPolicyMutation, AdminPolicyMutationResponse, AdminProvider, AdminStatus,
+        AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigMutation,
+        AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile, AdminList,
+        AdminPolicyMutation, AdminPolicyMutationResponse, AdminProvider, AdminStatus,
         AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList, ReadinessResponse,
     },
     state::AdminAuditEventDraft,
@@ -222,37 +223,353 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let data = state
-                    .config
-                    .gateway_configs
-                    .iter()
-                    .map(|profile| AdminGatewayConfigProfile {
-                        id: profile.id.clone(),
-                        name: profile.name.clone(),
-                        revision: profile.revision,
-                        enabled: profile.enabled,
-                        api_key_ids: profile.api_key_ids.clone(),
-                        cache_enabled: profile.cache_enabled,
-                    })
-                    .collect();
+        let id = path.strip_prefix("/admin/v1/gateway-configs/");
+        match (method, id) {
+            (&Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let data = state
+                            .config
+                            .gateway_configs
+                            .iter()
+                            .map(admin_gateway_config)
+                            .collect();
+                        write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &AdminList::new(data),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::GET, Some(id)) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let Some(profile) = find_gateway_config(&state, id) else {
+                            return write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "gateway_config_not_found",
+                                format!("gateway config profile {id} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        };
+                        let body = AdminGatewayConfigMutationResponse {
+                            object: "gateway_config",
+                            gateway_config: admin_gateway_config(profile),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::POST, None) => {
+                self.handle_admin_gateway_config_upsert(session, ctx, headers, None)
+                    .await
+            }
+            (&Method::PUT | &Method::PATCH, Some(id)) => {
+                self.handle_admin_gateway_config_upsert(session, ctx, headers, Some(id))
+                    .await
+            }
+            (&Method::DELETE, Some(id)) => {
+                self.handle_admin_gateway_config_delete(session, ctx, headers, id)
+                    .await
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "gateway config endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_gateway_config_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_id: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let payload = match serde_json::from_slice::<AdminGatewayConfigMutation>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON gateway config object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let profile = match gateway_config_from_mutation(path_id, payload) {
+            Ok(profile) => profile,
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.upsert",
+                    path_id.unwrap_or("new"),
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_gateway_config",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let profile_id = profile.id.clone();
+        let response_profile = admin_gateway_config(&profile);
+        match self.state.upsert_gateway_config(profile) {
+            Ok(outcome) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.upsert",
+                    &profile_id,
+                    "committed",
+                    format!(
+                        "gateway config {profile_id} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminGatewayConfigMutationResponse {
+                    object: "gateway_config",
+                    gateway_config: response_profile,
+                };
                 write_json_response(
                     session,
-                    StatusCode::OK,
-                    &AdminList::new(data),
+                    if path_id.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &body,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate gateway config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.upsert",
+                    &profile_id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "gateway_config_reload_rejected",
+                    reason,
                     &ctx.request_id,
                 )
                 .await
             }
             Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.upsert",
+                    &profile_id,
+                    "rejected",
+                    message.clone(),
+                ));
                 write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_gateway_config",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_gateway_config_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
                     session,
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match self.state.delete_gateway_config(id) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.delete",
+                    id,
+                    "committed",
+                    format!(
+                        "gateway config {id} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminDeleteResponse {
+                    object: "gateway_config",
+                    id: id.to_string(),
+                    deleted: true,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate gateway config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.delete",
+                    id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "gateway_config_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "gateway_config_not_found",
+                    format!("gateway config profile {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "gateway_config.delete",
+                    id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_gateway_config_delete",
+                    message,
                     &ctx.request_id,
                 )
                 .await
@@ -1962,11 +2279,35 @@ fn admin_api_key(key: &crate::config::ApiKey) -> AdminApiKey {
     }
 }
 
+fn admin_gateway_config(
+    profile: &crate::config::GatewayConfigProfile,
+) -> AdminGatewayConfigProfile {
+    AdminGatewayConfigProfile {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        revision: profile.revision,
+        enabled: profile.enabled,
+        api_key_ids: profile.api_key_ids.clone(),
+        cache_enabled: profile.cache_enabled,
+    }
+}
+
 fn find_api_key<'a>(
     state: &'a crate::state::AppState,
     id: &str,
 ) -> Option<&'a crate::config::ApiKey> {
     state.config.api_keys.iter().find(|key| key.id == id)
+}
+
+fn find_gateway_config<'a>(
+    state: &'a crate::state::AppState,
+    id: &str,
+) -> Option<&'a crate::config::GatewayConfigProfile> {
+    state
+        .config
+        .gateway_configs
+        .iter()
+        .find(|profile| profile.id == id)
 }
 
 fn api_key_from_mutation(
@@ -2003,6 +2344,30 @@ fn api_key_from_mutation(
         request_limit_per_minute: payload.request_limit_per_minute,
         expires_at_unix: payload.expires_at_unix,
         log_bodies: payload.log_bodies,
+        cache_enabled: payload.cache_enabled,
+    })
+}
+
+fn gateway_config_from_mutation(
+    path_id: Option<&str>,
+    payload: AdminGatewayConfigMutation,
+) -> anyhow::Result<crate::config::GatewayConfigProfile> {
+    let id = payload
+        .id
+        .or_else(|| path_id.map(ToOwned::to_owned))
+        .ok_or_else(|| anyhow::anyhow!("field id is required"))?;
+    if path_id.is_some_and(|path_id| path_id != id) {
+        anyhow::bail!("request path id and body id must match");
+    }
+
+    Ok(crate::config::GatewayConfigProfile {
+        id,
+        name: payload
+            .name
+            .ok_or_else(|| anyhow::anyhow!("field name is required"))?,
+        revision: payload.revision.unwrap_or(1),
+        enabled: payload.enabled.unwrap_or(true),
+        api_key_ids: payload.api_key_ids.unwrap_or_default(),
         cache_enabled: payload.cache_enabled,
     })
 }

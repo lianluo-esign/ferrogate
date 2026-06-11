@@ -461,6 +461,40 @@ impl SharedAppState {
         Ok(Some(result))
     }
 
+    pub(crate) fn upsert_gateway_config(
+        &self,
+        profile: GatewayConfigProfile,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        if let Some(existing) = candidate
+            .gateway_configs
+            .iter_mut()
+            .find(|existing| existing.id == profile.id)
+        {
+            *existing = profile;
+        } else {
+            candidate.gateway_configs.push(profile);
+        }
+        candidate.validate()?;
+        Ok(self.reload_process_local(candidate))
+    }
+
+    pub(crate) fn delete_gateway_config(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        let before = candidate.gateway_configs.len();
+        candidate.gateway_configs.retain(|profile| profile.id != id);
+        if candidate.gateway_configs.len() == before {
+            return Ok(None);
+        }
+        candidate.validate()?;
+        Ok(Some(self.reload_process_local(candidate)))
+    }
+
     pub(crate) fn set_drain(&self, drain: bool) -> DrainStatus {
         let state = self.current();
         state.drain.store(drain, Ordering::Relaxed);

@@ -350,7 +350,8 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 Profile ID and revision are recorded in request logs as
 `gateway_config_id` and `gateway_config_revision`. Operators can inspect
-configured profiles with `GET /admin/v1/gateway-configs`.
+configured profiles with `GET /admin/v1/gateway-configs` and manage them with
+the Admin API `POST`, `PUT`/`PATCH`, and `DELETE` profile endpoints.
 
 `[[mcp_servers]]` makes FerroGate an MCP host/client. Each server is connected
 as a long-lived session at startup or reload, initialized with `initialize` plus
@@ -587,6 +588,10 @@ GET  /admin/v1/mcp-servers
 GET  /admin/v1/tool-sessions/{session_id}
 GET  /admin/v1/models
 GET  /admin/v1/gateway-configs
+GET  /admin/v1/gateway-configs/{id}
+POST /admin/v1/gateway-configs
+PUT  /admin/v1/gateway-configs/{id}
+DELETE /admin/v1/gateway-configs/{id}
 GET  /admin/v1/api-keys
 GET  /admin/v1/api-keys/{id}
 POST /admin/v1/api-keys

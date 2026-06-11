@@ -63,7 +63,8 @@ client.chat.completions.create(
 
 Profile ID and revision are recorded in `/admin/v1/request-logs` as
 `gateway_config_id` and `gateway_config_revision`, and profiles are visible
-through `GET /admin/v1/gateway-configs`.
+through `GET /admin/v1/gateway-configs`. Operators can also create, update,
+and delete profiles through the Admin API without changing framework code.
 
 ## Compatibility Matrix
 
