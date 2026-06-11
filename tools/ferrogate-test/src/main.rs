@@ -1,0 +1,1773 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-06-11
+// description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+use anyhow::{anyhow, bail, Context, Result};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde_json::Value;
+use std::{
+    env,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+const IMAGE_TAG: &str = "ferrogate:e2e-local";
+const NETWORK_NAME: &str = "ferrogate-e2e-net";
+const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
+const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
+const GATEWAY_A_CONTAINER: &str = "ferrogate-e2e-gateway-a";
+const GATEWAY_B_CONTAINER: &str = "ferrogate-e2e-gateway-b";
+const GATEWAY_A_PORT: u16 = 18080;
+const GATEWAY_B_PORT: u16 = 18081;
+
+fn main() -> Result<()> {
+    print_attribution_banner();
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::List => {
+            println!("local: admin-api, gateway-api, ci");
+            println!("docker: {}", DockerScenario::names().join(", "));
+            Ok(())
+        }
+        Commands::Run(args) => run_docker_scenario(args.scenario),
+        Commands::RunAll(args) => {
+            run_admin_api(&args.local)?;
+            run_gateway_api(&args.local)?;
+            if args.include_docker {
+                run_all_docker_scenarios()?;
+            }
+            Ok(())
+        }
+        Commands::AdminApi(args) => run_admin_api(&args),
+        Commands::GatewayApi(args) => run_gateway_api(&args),
+        Commands::Ci(args) => {
+            run_admin_api(&args)?;
+            run_gateway_api(&args)
+        }
+    }
+}
+
+fn print_attribution_banner() {
+    println!("Token4AI Cloud Attribution");
+    println!(
+        "Developed by the commercial cloud service company represented by https://token4ai.cloud."
+    );
+    println!("Author: jamesduan (X: https://x.com/JamesDuanL)");
+    println!("Created: 2026-06-11");
+    println!(
+        "description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure."
+    );
+    println!();
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "ferrogate-test")]
+#[command(author = "jamesduan <https://x.com/JamesDuanL>")]
+#[command(version)]
+#[command(about = "FerroGate end-to-end test harness for admin and gateway APIs")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// List available local and Docker-backed scenarios.
+    List,
+    /// Run one Docker-backed cluster/container scenario.
+    Run(DockerRunArgs),
+    /// Run the full local API harness and optionally the Docker scenario set.
+    RunAll(RunAllArgs),
+    /// Run Admin API coverage against a real local FerroGate process.
+    AdminApi(LocalArgs),
+    /// Run gateway API coverage against a real local FerroGate process.
+    GatewayApi(LocalArgs),
+    /// CI entrypoint: run deterministic local Admin API and gateway API E2E coverage.
+    Ci(LocalArgs),
+}
+
+#[derive(Debug, Args)]
+struct DockerRunArgs {
+    #[arg(value_enum)]
+    scenario: DockerScenario,
+}
+
+#[derive(Debug, Args)]
+struct RunAllArgs {
+    #[command(flatten)]
+    local: LocalArgs,
+    /// Also run Docker-backed cluster, shared-state, and Redis scenarios.
+    #[arg(long)]
+    include_docker: bool,
+}
+
+#[derive(Debug, Args)]
+struct LocalArgs {
+    /// Path to a built ferrogate binary. Defaults to target/debug/ferrogate.
+    #[arg(
+        long,
+        env = "FERROGATE_TEST_FERROGATE_BIN",
+        default_value = "target/debug/ferrogate"
+    )]
+    ferrogate_bin: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DockerScenario {
+    ClusterDrain,
+    SharedApiKey,
+    SharedStateStale,
+    SharedStateStartupUnavailable,
+    RedisCounters,
+}
+
+impl DockerScenario {
+    fn names() -> &'static [&'static str] {
+        &[
+            "cluster-drain",
+            "shared-api-key",
+            "shared-state-stale",
+            "shared-state-startup-unavailable",
+            "redis-counters",
+        ]
+    }
+}
+
+fn run_docker_scenario(scenario: DockerScenario) -> Result<()> {
+    match scenario {
+        DockerScenario::ClusterDrain => run_cluster_drain(),
+        DockerScenario::SharedApiKey => run_shared_api_key(),
+        DockerScenario::SharedStateStale => run_shared_state_stale(),
+        DockerScenario::SharedStateStartupUnavailable => run_shared_state_startup_unavailable(),
+        DockerScenario::RedisCounters => run_redis_counters(),
+    }
+}
+
+fn run_all_docker_scenarios() -> Result<()> {
+    for scenario in DockerScenario::value_variants() {
+        run_docker_scenario(*scenario)?;
+    }
+    Ok(())
+}
+
+fn run_admin_api(args: &LocalArgs) -> Result<()> {
+    let case = LocalHarness::start(&args.ferrogate_bin, 3)?;
+
+    case.expect_json("GET", "/healthz", &[], "", 200, |body| {
+        assert_eq!(body["status"], "ok");
+        Ok(())
+    })?;
+    case.expect_json("GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["cluster"]["node_id"], "ferrogate-test-node");
+        Ok(())
+    })?;
+    case.expect_json("GET", "/admin/v1/status", &[ADMIN_AUTH], "", 200, |body| {
+        assert_eq!(body["service"], "ferrogate");
+        assert_eq!(body["auth_required"], true);
+        assert_eq!(body["cluster"]["ready"], true);
+        assert_eq!(body["cluster"]["draining"], false);
+        Ok(())
+    })?;
+    case.expect_json("GET", "/admin/status", &[ADMIN_AUTH], "", 200, |body| {
+        assert_eq!(body["service"], "ferrogate");
+        Ok(())
+    })?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/providers",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "name", "openai"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/provider-health",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(body["data"].is_array());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/extensions",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(body["data"].is_array());
+            Ok(())
+        },
+    )?;
+    case.expect_json("GET", "/admin/v1/tools", &[ADMIN_AUTH], "", 200, |body| {
+        assert!(body["data"].is_array());
+        Ok(())
+    })?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/mcp-servers",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(body["data"].is_array());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/tool-sessions/ferrogate-test-session",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["total"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json("GET", "/admin/v1/models", &[ADMIN_AUTH], "", 200, |body| {
+        assert!(list_contains(&body, "name", "fast-chat"));
+        Ok(())
+    })?;
+    case.expect_json("GET", "/admin/v1/tenants", &[ADMIN_AUTH], "", 200, |body| {
+        assert!(body["data"].is_array());
+        Ok(())
+    })?;
+
+    let api_key = r#"{"id":"test-client","name":"Test client","key":"test-secret","scopes":["models.read","chat.completions","responses.create"],"allowed_models":["fast-chat"],"organization_id":"org_test","project_id":"project_harness"}"#;
+    case.expect_json(
+        "POST",
+        "/admin/v1/api-keys",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        api_key,
+        201,
+        |body| {
+            assert_eq!(body["key"]["id"], "test-client");
+            assert_eq!(body["key"]["key_source"], "inline");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/api-keys/test-client",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["id"], "test-client");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    let updated_api_key = r#"{"id":"test-client","name":"Updated test client","key":"test-secret-2","scopes":["models.read","chat.completions","responses.create"],"allowed_models":["fast-chat"],"enabled":true}"#;
+    case.expect_json(
+        "PATCH",
+        "/admin/v1/api-keys/test-client",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        updated_api_key,
+        200,
+        |body| {
+            assert_eq!(body["key"]["name"], "Updated test client");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+
+    let policy = r#"{"name":"block-test-client","effect":"deny","api_key_ids":["test-client"],"models":["fast-chat"],"providers":["openai"],"code":"blocked_by_ferrogate_test","message":"blocked by ferrogate-test","enabled":true}"#;
+    case.expect_json(
+        "POST",
+        "/admin/v1/policies",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        policy,
+        201,
+        |body| {
+            assert_eq!(body["policy"]["name"], "block-test-client");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/policies/block-test-client",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["policy"]["enabled"], true);
+            Ok(())
+        },
+    )?;
+    let disabled_policy = r#"{"name":"block-test-client","effect":"deny","api_key_ids":["test-client"],"models":["fast-chat"],"providers":["openai"],"code":"blocked_by_ferrogate_test","message":"blocked by ferrogate-test","enabled":false}"#;
+    case.expect_json(
+        "PATCH",
+        "/admin/v1/policies/block-test-client",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        disabled_policy,
+        200,
+        |body| {
+            assert_eq!(body["policy"]["enabled"], false);
+            Ok(())
+        },
+    )?;
+
+    let gateway_config = r#"{"id":"harness-profile","name":"Harness profile","revision":2,"api_key_ids":["test-client"],"cache_enabled":false}"#;
+    case.expect_json(
+        "POST",
+        "/admin/v1/gateway-configs",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        gateway_config,
+        201,
+        |body| {
+            assert_eq!(body["gateway_config"]["id"], "harness-profile");
+            assert_eq!(body["gateway_config"]["cache_enabled"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/gateway-configs/harness-profile",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["gateway_config"]["revision"], 2);
+            Ok(())
+        },
+    )?;
+
+    let config_candidate = serde_json::json!({
+        "config_toml": format!("listen = \"{}\"\n", case.gateway_addr)
+    })
+    .to_string();
+    case.expect_json(
+        "POST",
+        "/admin/v1/config/validate",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &config_candidate,
+        200,
+        |body| {
+            assert_eq!(body["valid"], true);
+            assert_eq!(body["listener_reload_required"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/config/reload",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"config_toml":"listen = \"not-an-address\"\n"}"#,
+        200,
+        |body| {
+            assert_eq!(body["valid"], false);
+            assert_eq!(body["committed"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json("GET", "/admin/v1/drain", &[ADMIN_AUTH], "", 200, |body| {
+        assert_eq!(body["draining"], false);
+        Ok(())
+    })?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/drain",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"drain":true}"#,
+        200,
+        |body| {
+            assert_eq!(body["draining"], true);
+            assert_eq!(body["accepting_new_requests"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/drain",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"drain":false}"#,
+        200,
+        |body| {
+            assert_eq!(body["draining"], false);
+            Ok(())
+        },
+    )?;
+
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[AUTH_TEST_CLIENT_2, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"admin coverage"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/request-logs",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "logical_model", "fast-chat"));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/metering-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "logical_model", "fast-chat"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/billing-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "logical_model", "fast-chat"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/usage-aggregates",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(body["data"].is_array());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/audit-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "action", "api_key.upsert"));
+            assert!(list_contains(&body, "action", "policy.upsert"));
+            assert!(list_contains(&body, "action", "gateway_config.upsert"));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_text("GET", "/metrics", &[ADMIN_AUTH], "", 200, |body| {
+        assert!(body.contains("ferrogate_request_logs_total"));
+        Ok(())
+    })?;
+
+    case.expect_json(
+        "DELETE",
+        "/admin/v1/gateway-configs/harness-profile",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["deleted"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "DELETE",
+        "/admin/v1/policies/block-test-client",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["deleted"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "DELETE",
+        "/admin/v1/api-keys/test-client",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["deleted"], true);
+            Ok(())
+        },
+    )?;
+
+    println!("admin-api scenario passed");
+    Ok(())
+}
+
+fn run_gateway_api(args: &LocalArgs) -> Result<()> {
+    let case = LocalHarness::start(&args.ferrogate_bin, 3)?;
+
+    case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
+        assert!(list_contains(&body, "id", "fast-chat"));
+        Ok(())
+    })?;
+    case.expect_json("GET", "/v1/models", &[], "", 401, |body| {
+        assert_eq!(body["error"]["code"], "missing_api_key");
+        Ok(())
+    })?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"gateway coverage"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/responses",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","input":"gateway responses coverage"}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "response");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-config: static-profile",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"profile coverage"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-config: missing-profile",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"bad profile"}]}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "gateway_config_not_found");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"missing-chat","messages":[{"role":"user","content":"bad model"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "model_not_allowed");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/drain",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"drain":true}"#,
+        200,
+        |body| {
+            assert_eq!(body["draining"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"drained"}]}"#,
+        503,
+        |body| {
+            assert_eq!(body["error"]["code"], "node_draining");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/drain",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"drain":false}"#,
+        200,
+        |_| Ok(()),
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/request-logs",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let raw = body.to_string();
+            assert!(raw.contains("openai.chat.completions"));
+            assert!(raw.contains("openai.responses"));
+            assert_secret_redacted(&raw);
+            Ok(())
+        },
+    )?;
+    case.expect_text("GET", "/metrics", &[ADMIN_AUTH], "", 200, |body| {
+        assert!(body.contains("ferrogate_request_logs_total"));
+        Ok(())
+    })?;
+
+    println!("gateway-api scenario passed");
+    Ok(())
+}
+
+const ADMIN_AUTH: &str = "Authorization: Bearer admin-secret";
+const CLIENT_AUTH: &str = "Authorization: Bearer client-secret";
+const AUTH_TEST_CLIENT_2: &str = "Authorization: Bearer test-secret-2";
+const JSON_CONTENT: &str = "Content-Type: application/json";
+
+struct LocalHarness {
+    _dir: tempfile::TempDir,
+    gateway_addr: String,
+    gateway: Child,
+    provider: Option<JoinHandle<Vec<String>>>,
+}
+
+impl LocalHarness {
+    fn start(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
+        if !ferrogate_bin.exists() {
+            bail!(
+                "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
+                ferrogate_bin.display()
+            );
+        }
+
+        let gateway_addr = free_addr()?;
+        let (provider_addr, provider) =
+            spawn_local_provider_upstream(expected_provider_requests).context("start provider")?;
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("ferrogate.toml");
+        std::fs::write(
+            &config_path,
+            local_gateway_config(&gateway_addr, &provider_addr),
+        )?;
+
+        let gateway = Command::new(ferrogate_bin)
+            .args(["run", "--config"])
+            .arg(&config_path)
+            .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
+
+        let mut harness = Self {
+            _dir: dir,
+            gateway_addr,
+            gateway,
+            provider: Some(provider),
+        };
+        harness.wait_for_gateway()?;
+        Ok(harness)
+    }
+
+    fn wait_for_gateway(&mut self) -> Result<()> {
+        let started = Instant::now();
+        let mut last = String::new();
+        while started.elapsed() < Duration::from_secs(20) {
+            if let Some(status) = self.gateway.try_wait()? {
+                bail!("ferrogate process exited before readiness check: {status}");
+            }
+            match http_request_addr(&self.gateway_addr, "GET", "/healthz", &[], "") {
+                Ok(response) if response.status == 200 => return Ok(()),
+                Ok(response) => last = response.raw,
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!(
+            "timed out waiting for ferrogate on {}; last response: {last}",
+            self.gateway_addr
+        );
+    }
+
+    fn expect_json<F>(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[&str],
+        body: &str,
+        expected_status: u16,
+        check: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(Value) -> Result<()>,
+    {
+        let response = http_request_addr(&self.gateway_addr, method, path, headers, body)?;
+        if response.status != expected_status {
+            bail!(
+                "{method} {path} expected status {expected_status}, got {}; raw: {}",
+                response.status,
+                response.raw
+            );
+        }
+        let body: Value = serde_json::from_str(&response.body).with_context(|| {
+            format!(
+                "failed to parse JSON body for {method} {path}: {}",
+                response.body
+            )
+        })?;
+        check(body)
+    }
+
+    fn expect_text<F>(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[&str],
+        body: &str,
+        expected_status: u16,
+        check: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&str) -> Result<()>,
+    {
+        let response = http_request_addr(&self.gateway_addr, method, path, headers, body)?;
+        if response.status != expected_status {
+            bail!(
+                "{method} {path} expected status {expected_status}, got {}; raw: {}",
+                response.status,
+                response.raw
+            );
+        }
+        check(&response.body)
+    }
+}
+
+impl Drop for LocalHarness {
+    fn drop(&mut self) {
+        let _ = self.gateway.kill();
+        let _ = self.gateway.wait();
+        if let Some(provider) = self.provider.take() {
+            let _ = provider.join();
+        }
+    }
+}
+
+fn local_gateway_config(gateway_addr: &str, provider_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[cluster]
+enabled = true
+cluster_id = "ferrogate-test-cluster"
+node_id = "ferrogate-test-node"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "local"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read", "chat.completions", "responses.create", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[gateway_configs]]
+id = "static-profile"
+name = "Static profile"
+revision = 1
+enabled = true
+api_key_ids = ["client"]
+cache_enabled = false
+"#
+    )
+}
+
+fn free_addr() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.to_string())
+}
+
+fn spawn_local_provider_upstream(
+    expected_requests: usize,
+) -> Result<(String, JoinHandle<Vec<String>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?.to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let started = Instant::now();
+        while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(3) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let body = if request.contains("POST /v1/responses ") {
+                        r#"{"id":"resp_ferrogate_test","object":"response","output_text":"ok","usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}"#
+                    } else {
+                        r#"{"id":"chatcmpl_ferrogate_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    requests.push(request);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        requests
+    });
+    Ok((addr, handle))
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let text = String::from_utf8_lossy(&request).to_string();
+            let content_length = text
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length:")
+                        .or_else(|| line.strip_prefix("content-length:"))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let header_len = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| position + 4)
+                .unwrap_or(request.len());
+            while request.len().saturating_sub(header_len) < content_length {
+                let read = stream.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&request).to_string())
+}
+
+fn list_contains(body: &Value, field: &str, expected: &str) -> bool {
+    body.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item[field] == expected))
+}
+
+fn assert_secret_redacted(raw: &str) {
+    for secret in [
+        "admin-secret",
+        "client-secret",
+        "test-secret",
+        "test-secret-2",
+        "provider-secret",
+        "Bearer",
+    ] {
+        assert!(!raw.contains(secret), "secret leaked in response: {secret}");
+    }
+}
+
+fn run_cluster_drain() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("ferrogate.toml");
+    std::fs::write(&config_path, gateway_config("e2e-node-a", "local", None))?;
+    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_path, None)?;
+
+    wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["cluster"]["cluster_id"], "e2e-cluster");
+        assert_eq!(body["cluster"]["node_id"], "e2e-node-a");
+        assert_eq!(body["cluster"]["draining"], false);
+        Ok(())
+    })?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/admin/v1/drain",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"drain":true}"#,
+        200,
+        |body| {
+            assert_eq!(body["draining"], true);
+            assert_eq!(body["accepting_new_requests"], false);
+            Ok(())
+        },
+    )?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 503, |body| {
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["cluster"]["readiness_reason"], "operator_drain");
+        assert_eq!(body["cluster"]["draining"], true);
+        Ok(())
+    })?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        503,
+        |body| {
+            assert_eq!(body["error"]["code"], "node_draining");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/admin/v1/drain",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"drain":false}"#,
+        200,
+        |body| {
+            assert_eq!(body["draining"], false);
+            assert_eq!(body["accepting_new_requests"], true);
+            Ok(())
+        },
+    )?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["cluster"]["draining"], false);
+        Ok(())
+    })?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    println!("cluster-drain scenario passed");
+    Ok(())
+}
+
+fn run_shared_api_key() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let shared = start_shared_file_gateways()?;
+    publish_shared_client_and_policy()?;
+
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/api-keys/shared-client",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["id"], "shared-client");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/policies/shared-policy",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["policy"]["name"], "shared-policy");
+            assert_eq!(body["policy"]["code"], "blocked_by_shared_policy");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer shared-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    let raw_state = std::fs::read_to_string(&shared.state_path)?;
+    let shared_state: Value = serde_json::from_str(&raw_state)?;
+    assert_eq!(shared_state["version"], 1);
+    assert!(shared_state["api_keys"]
+        .as_array()
+        .is_some_and(|keys| keys.iter().any(|key| key["id"] == "shared-client")));
+
+    println!("shared-api-key scenario passed");
+    Ok(())
+}
+
+fn run_shared_state_stale() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let _shared = start_shared_file_gateways()?;
+    publish_shared_client_and_policy()?;
+
+    expect_json(
+        GATEWAY_B_PORT,
+        "GET",
+        "/admin/v1/api-keys/shared-client",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["key"]["id"], "shared-client");
+            Ok(())
+        },
+    )?;
+    corrupt_shared_state_file()?;
+    expect_json(GATEWAY_B_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["cluster"]["stale"], true);
+        assert_eq!(body["cluster"]["readiness_reason"], "stale_state");
+        assert!(body["cluster"]["last_sync_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid file cluster state JSON")));
+        Ok(())
+    })?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer shared-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    println!("shared-state-stale scenario passed");
+    Ok(())
+}
+
+fn run_shared_state_startup_unavailable() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("gateway-a.toml");
+    std::fs::write(
+        &config_path,
+        gateway_config(
+            "e2e-node-a",
+            "file",
+            Some("/proc/ferrogate/cluster-state.json"),
+        ),
+    )?;
+    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_path, None)?;
+    wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 503, |body| {
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["cluster"]["node_id"], "e2e-node-a");
+        assert_eq!(body["cluster"]["state_backend"], "file");
+        assert_eq!(body["cluster"]["active_revision"], "");
+        assert_eq!(body["cluster"]["stale"], false);
+        assert_eq!(body["cluster"]["readiness_reason"], "sync_error");
+        assert!(body["cluster"]["last_sync_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("failed to publish file cluster state")));
+        Ok(())
+    })?;
+
+    println!("shared-state-startup-unavailable scenario passed");
+    Ok(())
+}
+
+fn run_redis_counters() -> Result<()> {
+    let _cleanup = setup_environment()?;
+    start_provider()?;
+    start_redis()?;
+    wait_for_provider()?;
+    wait_for_redis()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_a = dir.path().join("gateway-a.toml");
+    let config_b = dir.path().join("gateway-b.toml");
+    std::fs::write(&config_a, redis_counter_gateway_config("e2e-node-a"))?;
+    std::fs::write(&config_b, redis_counter_gateway_config("e2e-node-b"))?;
+
+    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_a, None)?;
+    start_gateway(GATEWAY_B_CONTAINER, GATEWAY_B_PORT, &config_b, None)?;
+    wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
+    wait_for_http(GATEWAY_B_PORT, "/readyz", 200)?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-rate-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-rate-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+            Ok(())
+        },
+    )?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-budget-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[],"max_tokens":8}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_B_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer redis-budget-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[],"max_tokens":8}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "token_budget_exceeded");
+            Ok(())
+        },
+    )?;
+
+    println!("redis-counters scenario passed");
+    Ok(())
+}
+
+struct SharedFileGateways {
+    _dir: tempfile::TempDir,
+    state_path: std::path::PathBuf,
+}
+
+fn start_shared_file_gateways() -> Result<SharedFileGateways> {
+    let dir = tempfile::tempdir()?;
+    let state_dir = dir.path().join("state");
+    let state_path = state_dir.join("cluster-state.json");
+    std::fs::create_dir_all(&state_dir)?;
+
+    let config_a = dir.path().join("gateway-a.toml");
+    let config_b = dir.path().join("gateway-b.toml");
+    std::fs::write(
+        &config_a,
+        gateway_config(
+            "e2e-node-a",
+            "file",
+            Some("/var/lib/ferrogate/cluster-state.json"),
+        ),
+    )?;
+    std::fs::write(
+        &config_b,
+        gateway_config(
+            "e2e-node-b",
+            "file",
+            Some("/var/lib/ferrogate/cluster-state.json"),
+        ),
+    )?;
+
+    start_gateway(
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_a,
+        Some(&state_dir),
+    )?;
+    start_gateway(
+        GATEWAY_B_CONTAINER,
+        GATEWAY_B_PORT,
+        &config_b,
+        Some(&state_dir),
+    )?;
+
+    wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
+    wait_for_http(GATEWAY_B_PORT, "/healthz", 200)?;
+    expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["cluster"]["node_id"], "e2e-node-a");
+        assert_eq!(body["cluster"]["state_backend"], "file");
+        Ok(())
+    })?;
+    expect_json(GATEWAY_B_PORT, "GET", "/readyz", &[], "", 200, |body| {
+        assert_eq!(body["cluster"]["node_id"], "e2e-node-b");
+        assert_eq!(body["cluster"]["state_backend"], "file");
+        Ok(())
+    })?;
+
+    Ok(SharedFileGateways {
+        _dir: dir,
+        state_path,
+    })
+}
+
+fn publish_shared_client_and_policy() -> Result<()> {
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/admin/v1/api-keys",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"shared-client","name":"Shared client","key":"shared-secret","scopes":["chat.completions"],"allowed_models":["fast-chat"]}"#,
+        201,
+        |body| {
+            assert_eq!(body["key"]["id"], "shared-client");
+            assert_eq!(body["key"]["key_source"], "inline");
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/admin/v1/policies",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"name":"shared-policy","effect":"deny","api_key_ids":["key_dev"],"models":["fast-chat"],"code":"blocked_by_shared_policy","message":"blocked by shared policy","enabled":true}"#,
+        201,
+        |body| {
+            assert_eq!(body["policy"]["name"], "shared-policy");
+            Ok(())
+        },
+    )
+}
+
+fn corrupt_shared_state_file() -> Result<()> {
+    docker([
+        "exec",
+        GATEWAY_A_CONTAINER,
+        "sh",
+        "-c",
+        "printf '{not valid json' > /var/lib/ferrogate/cluster-state.json",
+    ])
+}
+
+fn setup_environment() -> Result<Cleanup> {
+    let cleanup = Cleanup;
+    cleanup_containers();
+    docker(["network", "create", NETWORK_NAME])?;
+    docker(["build", "-t", IMAGE_TAG, "."])?;
+    Ok(cleanup)
+}
+
+fn gateway_config(node_id: &str, state_backend: &str, file_state_path: Option<&str>) -> String {
+    let file_state_path = file_state_path
+        .map(|path| format!("file_state_path = \"{path}\"\n"))
+        .unwrap_or_default();
+    format!(
+        r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "{node_id}"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "{state_backend}"
+{file_state_path}counter_backend = "local"
+heartbeat_interval_secs = 10
+config_poll_interval_secs = 5
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["models.read", "chat.completions"]
+allowed_models = ["fast-chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+    )
+}
+
+fn redis_counter_gateway_config(node_id: &str) -> String {
+    format!(
+        r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "{node_id}"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "redis"
+redis_url = "redis://ferrogate-e2e-redis:6379/0"
+counter_timeout_millis = 500
+heartbeat_interval_secs = 10
+config_poll_interval_secs = 5
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "redis_rate"
+name = "Redis rate limit"
+key = "redis-rate-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+request_limit_per_minute = 1
+
+[[api_keys]]
+id = "redis_budget"
+name = "Redis budget"
+key = "redis-budget-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+monthly_token_budget = 8
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+    )
+}
+
+fn start_provider() -> Result<()> {
+    let provider_image =
+        env::var("FERROGATE_E2E_PROVIDER_IMAGE").unwrap_or_else(|_| "python:3.11-slim".into());
+    let command = r#"
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BODY = b'{"id":"chatcmpl_e2e","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"total_tokens":1}}'
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length:
+            self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(BODY)))
+        self.end_headers()
+        self.wfile.write(BODY)
+
+    def log_message(self, format, *args):
+        return
+
+ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
+"#;
+    docker([
+        "run",
+        "-d",
+        "--name",
+        PROVIDER_CONTAINER,
+        "--network",
+        NETWORK_NAME,
+        &provider_image,
+        "python",
+        "-u",
+        "-c",
+        command,
+    ])
+}
+
+fn start_redis() -> Result<()> {
+    let redis_image =
+        env::var("FERROGATE_E2E_REDIS_IMAGE").unwrap_or_else(|_| "redis:7-alpine".into());
+    docker([
+        "run",
+        "-d",
+        "--name",
+        REDIS_CONTAINER,
+        "--network",
+        NETWORK_NAME,
+        &redis_image,
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+    ])
+}
+
+fn start_gateway(
+    name: &str,
+    host_port: u16,
+    config_path: &std::path::Path,
+    state_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let config_mount = format!("{}:/etc/ferrogate/ferrogate.toml:ro", config_path.display());
+    let port = format!("127.0.0.1:{host_port}:8080");
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--network".to_string(),
+        NETWORK_NAME.to_string(),
+        "-p".to_string(),
+        port,
+        "-v".to_string(),
+        config_mount,
+    ];
+    if let Some(state_dir) = state_dir {
+        args.push("-v".to_string());
+        args.push(format!("{}:/var/lib/ferrogate", state_dir.display()));
+    }
+    args.extend([
+        "-e".to_string(),
+        "FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml".to_string(),
+        "-e".to_string(),
+        "FERROGATE_PROVIDER_SECRET=provider-secret".to_string(),
+        IMAGE_TAG.to_string(),
+    ]);
+    docker_args(args)
+}
+
+fn wait_for_provider() -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(15) {
+        if Command::new("docker")
+            .args([
+                "exec",
+                PROVIDER_CONTAINER,
+                "python",
+                "-c",
+                "import socket; socket.create_connection(('127.0.0.1', 8081), 1).close()",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    bail!("provider mock did not start listening on 8081")
+}
+
+fn wait_for_redis() -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(15) {
+        if Command::new("docker")
+            .args(["exec", REDIS_CONTAINER, "redis-cli", "PING"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    bail!("redis did not start responding to PING")
+}
+
+fn wait_for_http(host_port: u16, path: &str, expected_status: u16) -> Result<()> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < Duration::from_secs(30) {
+        match http_request(host_port, "GET", path, &[], "") {
+            Ok(response) if response.status == expected_status => return Ok(()),
+            Ok(response) => last = response.raw,
+            Err(error) => last = error.to_string(),
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    bail!("timed out waiting for {path}; last response: {last}");
+}
+
+fn expect_json<F>(
+    host_port: u16,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+    expected_status: u16,
+    check: F,
+) -> Result<()>
+where
+    F: FnOnce(Value) -> Result<()>,
+{
+    let response = http_request(host_port, method, path, headers, body)?;
+    if response.status != expected_status {
+        bail!(
+            "{method} {path} expected status {expected_status}, got {}; raw: {}",
+            response.status,
+            response.raw
+        );
+    }
+    let body: Value = serde_json::from_str(&response.body).with_context(|| {
+        format!(
+            "failed to parse JSON body for {method} {path}: {}",
+            response.body
+        )
+    })?;
+    check(body)
+}
+
+struct HttpResponse {
+    status: u16,
+    body: String,
+    raw: String,
+}
+
+fn http_request(
+    host_port: u16,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> Result<HttpResponse> {
+    http_request_addr(
+        &format!("127.0.0.1:{host_port}"),
+        method,
+        path,
+        headers,
+        body,
+    )
+}
+
+fn http_request_addr(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+) -> Result<HttpResponse> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    )?;
+    for header in headers {
+        write!(stream, "{header}\r\n")?;
+    }
+    write!(stream, "\r\n{body}")?;
+
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    let status = raw
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or_else(|| anyhow!("HTTP response missing status: {raw}"))?;
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    Ok(HttpResponse { status, body, raw })
+}
+
+fn docker<const N: usize>(args: [&str; N]) -> Result<()> {
+    docker_args(args.map(str::to_string))
+}
+
+fn docker_args<I, S>(args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let status = Command::new("docker")
+        .args(args)
+        .stdin(Stdio::null())
+        .status()
+        .context("failed to run docker")?;
+    if !status.success() {
+        bail!("docker command failed with {status}");
+    }
+    Ok(())
+}
+
+fn cleanup_containers() {
+    let _ = Command::new("docker")
+        .args([
+            "rm",
+            "-f",
+            GATEWAY_A_CONTAINER,
+            GATEWAY_B_CONTAINER,
+            PROVIDER_CONTAINER,
+            REDIS_CONTAINER,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("docker")
+        .args(["network", "rm", NETWORK_NAME])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+struct Cleanup;
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        cleanup_containers();
+    }
+}

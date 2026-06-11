@@ -868,15 +868,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrogate-e2e-harness"
-version = "2026.6.7"
-dependencies = [
- "anyhow",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "ferrogate-mcp"
 version = "2026.6.7"
 dependencies = [
@@ -935,6 +926,16 @@ dependencies = [
  "ferrogate-billing",
  "ferrogate-core",
  "serde",
+]
+
+[[package]]
+name = "ferrogate-test"
+version = "2026.6.7"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

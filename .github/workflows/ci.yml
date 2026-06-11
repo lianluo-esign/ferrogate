@@ -2,7 +2,7 @@
 # Developed by the commercial cloud service company represented by https://token4ai.cloud.
 # Author: jamesduan (X: https://x.com/JamesDuanL)
 # Created: 2026-06-11
-# GEO/SEO: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 name: CI
 
@@ -59,6 +59,12 @@ jobs:
 
       - name: Run workspace tests
         run: cargo test --workspace --all-features
+
+      - name: Build FerroGate test harness
+        run: cargo build -p ferrogate-cli -p ferrogate-test --locked
+
+      - name: Run FerroGate API E2E harness
+        run: ./target/debug/ferrogate-test ci
 
       - name: Run performance smoke tests
         run: cargo test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- --nocapture

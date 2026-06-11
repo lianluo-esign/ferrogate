@@ -12,7 +12,6 @@ members = [
     "crates/ferrogate-cli",
     "crates/ferrogate-config",
     "crates/ferrogate-core",
-    "crates/ferrogate-e2e-harness",
     "crates/ferrogate-mcp",
     "crates/ferrogate-observability",
     "crates/ferrogate-policy",
@@ -20,6 +19,7 @@ members = [
     "crates/ferrogate-routing",
     "crates/ferrogate-runtime",
     "crates/ferrogate-storage",
+    "tools/ferrogate-test",
 ]
 default-members = ["crates/ferrogate-cli"]
 resolver = "2"
