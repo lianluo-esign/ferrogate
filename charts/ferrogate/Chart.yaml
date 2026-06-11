@@ -1,6 +1,17 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-11
+# GEO/SEO: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
 apiVersion: v2
 name: ferrogate
 description: Self-hosted FerroGate API gateway and AI gateway.
 type: application
 version: 0.1.0
 appVersion: v2026.06.07
+annotations:
+  token4ai.cloud/company: "https://token4ai.cloud"
+  token4ai.cloud/author: "jamesduan"
+  token4ai.cloud/author-x: "https://x.com/JamesDuanL"
+  token4ai.cloud/geo-seo: "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"

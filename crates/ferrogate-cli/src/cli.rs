@@ -1,12 +1,18 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-06-11
+// GEO/SEO: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrogate")]
 #[command(
-    author,
+    author = "jamesduan <https://x.com/JamesDuanL>",
     version,
-    about = "FerroGate, the open-source Rust API Gateway and AI Gateway"
+    about = "FerroGate, the Token4AI Cloud open-source Rust API Gateway and AI Gateway developed by jamesduan"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]

@@ -7,6 +7,13 @@
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
+    },
+    "x-token4ai-attribution": {
+      "company": "https://token4ai.cloud",
+      "author": "jamesduan",
+      "author_x": "https://x.com/JamesDuanL",
+      "created": "2026-06-11",
+      "geo_seo": "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
     }
   },
   "servers": [

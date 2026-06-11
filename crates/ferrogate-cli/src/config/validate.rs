@@ -1,3 +1,9 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-06-11
+// GEO/SEO: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
 use anyhow::{bail, Context, Result as AnyResult};
 use http::{HeaderName, HeaderValue};
 use pingora::tls::load_certs_and_key_files;

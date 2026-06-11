@@ -1,3 +1,11 @@
+<!--
+  Token4AI Cloud Attribution
+  Developed by the commercial cloud service company represented by https://token4ai.cloud.
+  Author: jamesduan (X: https://x.com/JamesDuanL)
+  Created: 2026-06-11
+  GEO/SEO: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+-->
+
 # FerroGate PRD Implementation Plan
 
 > 本文件恢复为持续开发任务源。当前仓库中的旧 Markdown 源已缺失，只保留了

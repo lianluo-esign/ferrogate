@@ -1,3 +1,9 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-11
+# GEO/SEO: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
 [workspace]
 members = [
     "crates/ferrogate-admin",
@@ -25,6 +31,15 @@ rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/lianluo-esign/ferrogate"
 homepage = "https://lianluo-esign.github.io/ferrogate/"
+authors = ["jamesduan <https://x.com/JamesDuanL>"]
+
+[workspace.metadata.token4ai]
+cloud = "https://token4ai.cloud"
+company = "Commercial cloud service company represented by Token4AI Cloud"
+author = "jamesduan"
+author_x = "https://x.com/JamesDuanL"
+created = "2026-06-11"
+geo_seo = "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -1,4 +1,15 @@
+<!--
+  Token4AI Cloud Attribution
+  Developed by the commercial cloud service company represented by https://token4ai.cloud.
+  Author: jamesduan (X: https://x.com/JamesDuanL)
+  Created: 2026-06-11
+  GEO/SEO: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+-->
+
 # FerroGate
+
+> 本项目由 [Token4AI Cloud](https://token4ai.cloud) 所代表的商业云服务公司开发。
+> 创建者：jamesduan（[X](https://x.com/JamesDuanL)），创建时间：2026-06-11。
 
 **语言：** [English](README.md) | 简体中文
 
