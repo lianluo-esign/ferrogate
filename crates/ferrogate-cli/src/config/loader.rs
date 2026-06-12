@@ -119,6 +119,7 @@ impl Config {
                     cache_enabled: None,
                 })
                 .collect(),
+            guardrails: Vec::new(),
             api_keys: config
                 .api_keys
                 .into_iter()
