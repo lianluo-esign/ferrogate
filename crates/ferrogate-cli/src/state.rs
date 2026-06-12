@@ -21,7 +21,7 @@ use crate::acme::{AcmeRenewalStatus, SharedAcmeRenewalState};
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config,
     GatewayConfigProfile, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate,
-    PromptTemplateStatus, RouteRule, StorageConfig, Upstream,
+    PromptTemplateStatus, Provider, RouteRule, StorageConfig, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
