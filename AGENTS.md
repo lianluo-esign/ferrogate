@@ -120,37 +120,42 @@ feature is not done.
 ## Verification
 
 Run the narrowest verification that proves the claim, then read the output.
-For meaningful code changes, prefer:
+In this repository, the user has set a hard build/package contract: do not
+compile, clippy, test, or package FerroGate locally on this server. Rust
+compilation, workspace tests, Docker image builds, and package publication must
+run through GitHub Actions. The local machine is used for source edits,
+non-compiling validation, GitHub CI orchestration, pulling the exact GHCR image,
+and Docker runtime verification of that CI-built image.
+
+For meaningful code changes, run only non-compiling local checks when they are
+relevant:
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo fmt --all -- --check
+cargo metadata --locked --format-version=1
+python3 scripts/check-openapi.py
+git diff --check
 ```
 
-Before pushing changes that will trigger GitHub `rust-ci`, reproduce that CI
-gate locally with the pinned workflow toolchain first. Use Rust `1.88.0` unless
-`.github/workflows/ci.yml` changes, and run:
+Do not run these local compile/test commands on this server unless the user
+explicitly reverses the project contract:
 
 ```bash
-cargo +1.88.0 fmt --all -- --check
 cargo +1.88.0 clippy --workspace --all-targets --all-features -- -D warnings
-cargo +1.88.0 metadata --locked --format-version=1 >/dev/null
-python3 scripts/check-openapi.py
 cargo +1.88.0 test --workspace --all-features
 cargo +1.88.0 test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- --nocapture
 ```
 
-Do not push to run GitHub CI as the first build signal when these commands can
-be run locally.
+After pushing code that changes Rust behavior or packaging, use GitHub Actions
+as the authoritative build signal. Wait for `rust-ci` and the GHCR image job,
+pull the exact image tag or digest that CI published, and verify the relevant
+runtime behavior with local Docker. Record the CI run URL, image reference,
+digest, and Docker verification result in the related GitHub issue.
 
 For config parser, provider, policy, billing, storage, or streaming changes,
-add or update focused regression tests. For security-sensitive changes, also
-run the local security gate when practical:
-
-```bash
-scripts/security-check.sh
-```
+add or update focused regression tests, but let GitHub CI compile and execute
+them. For security-sensitive changes, run security checks through CI or another
+approved non-local-build path.
 
 Do not claim production readiness from unit tests alone when the change affects
 runtime wiring, live reload, TLS/ACME, provider streaming, or billing

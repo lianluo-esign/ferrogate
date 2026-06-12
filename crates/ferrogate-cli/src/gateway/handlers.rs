@@ -87,6 +87,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path.starts_with("/v1/prompts/") && path.ends_with("/render") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_prompt_template_render(session, ctx, headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/v1/chat/completions" {
             self.handle_chat_completions(session, ctx, req.headers.clone())
                 .await?;
@@ -194,6 +202,14 @@ impl FerroGateway {
             let headers = req.headers.clone();
             let method = req.method.clone();
             self.handle_admin_gateway_configs(session, ctx, &headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/prompt-templates" || path.starts_with("/admin/v1/prompt-templates/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_prompt_templates(session, ctx, &headers, &method, &path)
                 .await?;
             return Ok(true);
         }

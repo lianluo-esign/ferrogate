@@ -9,10 +9,14 @@ use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
 use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
+use std::collections::BTreeMap;
 
 use crate::{
     auth::authenticate,
-    config::{config_snapshot_id, ApiKey, Config, PolicyRule},
+    config::{
+        config_snapshot_id, ApiKey, Config, PolicyRule, PromptTemplate, PromptTemplateStatus,
+        PromptTemplateTarget, PromptTemplateVersion, PromptTemplateVersionStatus,
+    },
     extensions::ToolExecutionRequest,
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
@@ -20,8 +24,10 @@ use crate::{
         AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
         AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigMutation,
         AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile, AdminList,
-        AdminPolicyMutation, AdminPolicyMutationResponse, AdminProvider, AdminStatus,
-        AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList, ReadinessResponse,
+        AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
+        AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse, AdminProvider,
+        AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
+        PromptTemplateRenderRequest, ReadinessResponse,
     },
     state::AdminAuditEventDraft,
 };
@@ -154,6 +160,7 @@ impl FerroGateway {
                     models: state.config.models.len(),
                     enabled_models: state.config.models.iter().filter(|m| m.enabled).count(),
                     api_keys: state.config.api_keys.len(),
+                    prompt_templates: state.config.prompt_templates.len(),
                     upstreams: state.config.upstreams.len(),
                     enabled_upstreams: state.config.upstreams.iter().filter(|u| u.enabled).count(),
                     routes: state.config.routes.len(),
@@ -583,6 +590,565 @@ impl FerroGateway {
                 .await
             }
         }
+    }
+
+    pub(super) async fn handle_admin_prompt_templates(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let id = path.strip_prefix("/admin/v1/prompt-templates/");
+        match (method, id) {
+            (&Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let data = state
+                            .config
+                            .prompt_templates
+                            .iter()
+                            .map(admin_prompt_template)
+                            .collect();
+                        write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &AdminList::new(data),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::GET, Some(id)) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let Some(template) = find_prompt_template(&state, id) else {
+                            return write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "prompt_template_not_found",
+                                format!("prompt template {id} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        };
+                        let body = AdminPromptTemplateMutationResponse {
+                            object: "prompt_template",
+                            prompt_template: admin_prompt_template(template),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::POST, None) => {
+                self.handle_admin_prompt_template_upsert(session, ctx, headers, None)
+                    .await
+            }
+            (&Method::PUT | &Method::PATCH, Some(id)) => {
+                self.handle_admin_prompt_template_upsert(session, ctx, headers, Some(id))
+                    .await
+            }
+            (&Method::DELETE, Some(id)) => {
+                self.handle_admin_prompt_template_archive(session, ctx, headers, id)
+                    .await
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "prompt template endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_prompt_template_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_id: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let payload = match serde_json::from_slice::<AdminPromptTemplateMutation>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON prompt template object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let existing = path_id.and_then(|id| find_prompt_template(&state, id));
+        let template = match prompt_template_from_mutation(path_id, existing, payload) {
+            Ok(template) => template,
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.upsert",
+                    path_id.unwrap_or("new"),
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_prompt_template",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let template_id = template.id.clone();
+        let response_template = admin_prompt_template(&template);
+        match self.state.upsert_prompt_template(template) {
+            Ok(outcome) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.upsert",
+                    &template_id,
+                    "committed",
+                    format!(
+                        "prompt template {template_id} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminPromptTemplateMutationResponse {
+                    object: "prompt_template",
+                    prompt_template: response_template,
+                };
+                write_json_response(
+                    session,
+                    if path_id.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &body,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate prompt template".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.upsert",
+                    &template_id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "prompt_template_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.upsert",
+                    &template_id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_prompt_template",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_prompt_template_archive(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match self.state.archive_prompt_template(id) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.archive",
+                    id,
+                    "committed",
+                    format!(
+                        "prompt template {id} archived: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminDeleteResponse {
+                    object: "prompt_template",
+                    id: id.to_string(),
+                    deleted: false,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected prompt template archive".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.archive",
+                    id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "prompt_template_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "prompt_template_not_found",
+                    format!("prompt template {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.archive",
+                    id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_prompt_template_archive",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_prompt_template_render(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        if *method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "prompt template render requires POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let Some(id) = prompt_template_id_from_render_path(path) else {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "prompt_template_not_found",
+                "prompt template render path must be /v1/prompts/{prompt_id}/render",
+                &ctx.request_id,
+            )
+            .await;
+        };
+
+        let state = self.state.current();
+        let auth = match authenticate(&state, &headers, "prompts.render", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.render",
+                    id,
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let request = if body.is_empty() {
+            PromptTemplateRenderRequest {
+                variables: BTreeMap::new(),
+                revision: None,
+            }
+        } else {
+            match serde_json::from_slice::<PromptTemplateRenderRequest>(&body) {
+                Ok(request) => request,
+                Err(error) => {
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "prompt_template.render",
+                        id,
+                        "error",
+                        format!("invalid request body: {error}"),
+                    ));
+                    return write_json_error(
+                        session,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_body",
+                        "request body must be JSON with variables and optional revision",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            }
+        };
+
+        let Some(template) = find_prompt_template(&state, id) else {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "prompt_template_not_found",
+                format!("prompt template {id} was not found"),
+                &ctx.request_id,
+            )
+            .await;
+        };
+        if template.status != PromptTemplateStatus::Active {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "prompt_template.render",
+                id,
+                "rejected",
+                "prompt template is not active",
+            ));
+            return write_json_error(
+                session,
+                StatusCode::CONFLICT,
+                "prompt_template_inactive",
+                format!("prompt template {id} is not active"),
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let version = match find_prompt_template_version(template, request.revision) {
+            Some(version) => version,
+            None => {
+                return write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "prompt_template_version_not_found",
+                    "prompt template version was not found",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if version.status != PromptTemplateVersionStatus::Active {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "prompt_template.render",
+                id,
+                "rejected",
+                format!("prompt template version {} is not active", version.revision),
+            ));
+            return write_json_error(
+                session,
+                StatusCode::CONFLICT,
+                "prompt_template_version_inactive",
+                format!("prompt template version {} is not active", version.revision),
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let rendered = match render_prompt_template(template, version, &request.variables) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.render",
+                    id,
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "prompt_template_render_failed",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            ctx,
+            &auth,
+            "prompt_template.render",
+            id,
+            "success",
+            format!(
+                "prompt template {id} rendered revision {} for api key {}",
+                version.revision,
+                auth.api_key_id.as_deref().unwrap_or("anonymous")
+            ),
+        ));
+        write_json_response(session, StatusCode::OK, &rendered, &ctx.request_id).await
     }
 
     pub(super) async fn handle_tools(
@@ -2300,6 +2866,19 @@ fn admin_gateway_config(
     }
 }
 
+fn admin_prompt_template(template: &PromptTemplate) -> AdminPromptTemplate {
+    AdminPromptTemplate {
+        id: template.id.clone(),
+        name: template.name.clone(),
+        status: template.status,
+        target: template.target,
+        model: template.model.clone(),
+        variables: template.variables.clone(),
+        active_revision: active_prompt_template_version(template).map(|version| version.revision),
+        versions: template.versions.clone(),
+    }
+}
+
 fn find_api_key<'a>(
     state: &'a crate::state::AppState,
     id: &str,
@@ -2316,6 +2895,28 @@ fn find_gateway_config<'a>(
         .gateway_configs
         .iter()
         .find(|profile| profile.id == id)
+}
+
+fn find_prompt_template<'a>(
+    state: &'a crate::state::AppState,
+    id: &str,
+) -> Option<&'a PromptTemplate> {
+    state
+        .config
+        .prompt_templates
+        .iter()
+        .find(|template| template.id == id)
+}
+
+fn prompt_template_id_from_render_path(path: &str) -> Option<&str> {
+    let id = path
+        .strip_prefix("/v1/prompts/")?
+        .strip_suffix("/render")?
+        .trim_matches('/');
+    if id.is_empty() || id.contains('/') {
+        return None;
+    }
+    Some(id)
 }
 
 fn api_key_from_mutation(
@@ -2378,6 +2979,226 @@ fn gateway_config_from_mutation(
         api_key_ids: payload.api_key_ids.unwrap_or_default(),
         cache_enabled: payload.cache_enabled,
     })
+}
+
+fn prompt_template_from_mutation(
+    path_id: Option<&str>,
+    existing: Option<&PromptTemplate>,
+    payload: AdminPromptTemplateMutation,
+) -> anyhow::Result<PromptTemplate> {
+    let id = payload
+        .id
+        .or_else(|| path_id.map(ToOwned::to_owned))
+        .or_else(|| existing.map(|template| template.id.clone()))
+        .ok_or_else(|| anyhow::anyhow!("field id is required"))?;
+    if path_id.is_some_and(|path_id| path_id != id) {
+        anyhow::bail!("request path id and body id must match");
+    }
+
+    let mut versions = if let Some(existing) = existing {
+        existing.versions.clone()
+    } else {
+        Vec::new()
+    };
+    if let Some(mut version) = payload.version {
+        normalize_appended_prompt_template_revision(existing, &mut version);
+        if versions
+            .iter()
+            .any(|existing| existing.revision == version.revision)
+        {
+            anyhow::bail!(
+                "prompt template revision {} already exists",
+                version.revision
+            );
+        }
+        versions.push(version);
+    }
+    if let Some(mut replacement_versions) = payload.versions {
+        if existing.is_some() {
+            for version in &mut replacement_versions {
+                normalize_appended_prompt_template_revision(existing, version);
+                if versions
+                    .iter()
+                    .any(|existing| existing.revision == version.revision)
+                {
+                    anyhow::bail!(
+                        "prompt template revision {} already exists",
+                        version.revision
+                    );
+                }
+            }
+            versions.extend(replacement_versions);
+        } else {
+            versions = replacement_versions;
+        }
+    }
+    if versions.is_empty() {
+        anyhow::bail!("field version or versions is required");
+    }
+
+    Ok(PromptTemplate {
+        id,
+        name: payload
+            .name
+            .or_else(|| existing.map(|template| template.name.clone()))
+            .ok_or_else(|| anyhow::anyhow!("field name is required"))?,
+        status: payload
+            .status
+            .or_else(|| existing.map(|template| template.status))
+            .unwrap_or(PromptTemplateStatus::Active),
+        target: payload
+            .target
+            .or_else(|| existing.map(|template| template.target))
+            .unwrap_or(PromptTemplateTarget::ChatCompletions),
+        model: payload
+            .model
+            .or_else(|| existing.map(|template| template.model.clone()))
+            .ok_or_else(|| anyhow::anyhow!("field model is required"))?,
+        variables: payload
+            .variables
+            .or_else(|| existing.map(|template| template.variables.clone()))
+            .unwrap_or_default(),
+        versions,
+    })
+}
+
+fn normalize_appended_prompt_template_revision(
+    existing: Option<&PromptTemplate>,
+    version: &mut PromptTemplateVersion,
+) {
+    let Some(existing) = existing else {
+        return;
+    };
+    let max_revision = existing
+        .versions
+        .iter()
+        .map(|version| version.revision)
+        .max()
+        .unwrap_or(0);
+    if version.revision <= max_revision {
+        version.revision = max_revision.saturating_add(1);
+    }
+}
+
+fn find_prompt_template_version(
+    template: &PromptTemplate,
+    revision: Option<u32>,
+) -> Option<&PromptTemplateVersion> {
+    if let Some(revision) = revision {
+        return template
+            .versions
+            .iter()
+            .find(|version| version.revision == revision);
+    }
+    active_prompt_template_version(template)
+}
+
+fn active_prompt_template_version(template: &PromptTemplate) -> Option<&PromptTemplateVersion> {
+    template
+        .versions
+        .iter()
+        .filter(|version| version.status == PromptTemplateVersionStatus::Active)
+        .max_by_key(|version| version.revision)
+        .or_else(|| {
+            template
+                .versions
+                .iter()
+                .max_by_key(|version| version.revision)
+        })
+}
+
+fn render_prompt_template(
+    template: &PromptTemplate,
+    version: &PromptTemplateVersion,
+    variables: &BTreeMap<String, serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut rendered_messages = Vec::with_capacity(version.messages.len());
+    for message in &version.messages {
+        rendered_messages.push(serde_json::json!({
+            "role": message.role,
+            "content": render_prompt_template_text(template, &message.content, variables)?,
+        }));
+    }
+
+    let mut request = serde_json::Map::new();
+    request.insert("model".into(), serde_json::json!(template.model));
+    match template.target {
+        PromptTemplateTarget::ChatCompletions => {
+            request.insert(
+                "messages".into(),
+                serde_json::Value::Array(rendered_messages),
+            );
+        }
+        PromptTemplateTarget::Responses => {
+            request.insert("input".into(), serde_json::Value::Array(rendered_messages));
+        }
+    }
+    if let Some(temperature) = version.temperature {
+        request.insert("temperature".into(), serde_json::json!(temperature));
+    }
+    if let Some(top_p) = version.top_p {
+        request.insert("top_p".into(), serde_json::json!(top_p));
+    }
+    if let Some(max_tokens) = version.max_tokens {
+        request.insert("max_tokens".into(), serde_json::json!(max_tokens));
+    }
+    Ok(serde_json::Value::Object(request))
+}
+
+fn render_prompt_template_text(
+    template: &PromptTemplate,
+    content: &str,
+    variables: &BTreeMap<String, serde_json::Value>,
+) -> anyhow::Result<String> {
+    let mut rendered = String::with_capacity(content.len());
+    let mut cursor = 0;
+    while let Some(start) = content[cursor..].find("{{") {
+        let literal_end = cursor + start;
+        rendered.push_str(&content[cursor..literal_end]);
+        let placeholder_start = literal_end + 2;
+        let Some(end) = content[placeholder_start..].find("}}") else {
+            anyhow::bail!("unclosed prompt variable");
+        };
+        let placeholder_end = placeholder_start + end;
+        let name = content[placeholder_start..placeholder_end].trim();
+        let value = prompt_template_variable_value(template, name, variables)?;
+        rendered.push_str(&value);
+        cursor = placeholder_end + 2;
+    }
+    rendered.push_str(&content[cursor..]);
+    Ok(rendered)
+}
+
+fn prompt_template_variable_value(
+    template: &PromptTemplate,
+    name: &str,
+    variables: &BTreeMap<String, serde_json::Value>,
+) -> anyhow::Result<String> {
+    let declaration = template
+        .variables
+        .iter()
+        .find(|variable| variable.name == name)
+        .ok_or_else(|| anyhow::anyhow!("prompt variable {name} is not declared"))?;
+    if let Some(value) = variables.get(name) {
+        return Ok(prompt_template_json_value_to_string(value));
+    }
+    if let Some(default) = &declaration.default {
+        return Ok(default.clone());
+    }
+    if declaration.required {
+        anyhow::bail!("required prompt variable {name} is missing");
+    }
+    Ok(String::new())
+}
+
+fn prompt_template_json_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => value.to_string(),
+    }
 }
 
 fn find_policy<'a>(

@@ -671,6 +671,214 @@ user_id = "user_agent_runner"
 }
 
 #[test]
+fn prompt_template_admin_render_and_chat_submission_work() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_prompt_template","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"template ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai-compatible"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "prompt-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "prompt-client"
+name = "Prompt client"
+key = "client-secret"
+scopes = ["chat.completions", "prompts.render", "admin.read"]
+allowed_models = ["prompt-chat"]
+organization_id = "org_prompt"
+project_id = "project_templates"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let create = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/prompt-templates",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"support-reply","name":"Support Reply","model":"prompt-chat","variables":[{"name":"customer","required":true},{"name":"tone","required":false,"default":"brief"}],"version":{"messages":[{"role":"system","content":"Reply in {{tone}} mode."},{"role":"user","content":"Hello {{customer}}"}],"temperature":0.2}}"#,
+    );
+    assert!(create.contains("201 Created"), "{create}");
+    assert!(
+        create.contains("\"object\":\"prompt_template\""),
+        "{create}"
+    );
+    assert!(create.contains("\"active_revision\":1"), "{create}");
+    assert!(!create.contains("admin-secret"), "{create}");
+
+    let status = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/status",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(status.contains("200 OK"), "{status}");
+    assert!(status.contains("\"prompt_templates\":1"), "{status}");
+
+    let render = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/prompts/support-reply/render",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"variables":{"customer":"Ada"}}"#,
+    );
+    assert!(render.contains("200 OK"), "{render}");
+    let rendered: serde_json::Value =
+        serde_json::from_str(render.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(rendered["model"], "prompt-chat");
+    assert_eq!(rendered["temperature"], 0.2);
+    assert_eq!(rendered["messages"][0]["content"], "Reply in brief mode.");
+    assert_eq!(rendered["messages"][1]["content"], "Hello Ada");
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        &rendered.to_string(),
+    );
+    assert!(chat.contains("200 OK"), "{chat}");
+    assert!(
+        chat.contains("\"id\":\"chatcmpl_prompt_template\""),
+        "{chat}"
+    );
+    assert!(!chat.contains("client-secret"), "{chat}");
+    assert!(!chat.contains("provider-secret"), "{chat}");
+
+    let update = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/prompt-templates/support-reply",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"version":{"messages":[{"role":"user","content":"V2 hello {{customer}}"}],"temperature":0.1}}"#,
+    );
+    assert!(update.contains("200 OK"), "{update}");
+    assert!(update.contains("\"active_revision\":2"), "{update}");
+    assert!(update.contains("\"revision\":1"), "{update}");
+    assert!(update.contains("\"revision\":2"), "{update}");
+
+    let missing_variable = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/prompts/support-reply/render",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"variables":{}}"#,
+    );
+    assert!(
+        missing_variable.contains("400 Bad Request"),
+        "{missing_variable}"
+    );
+    assert!(
+        missing_variable.contains("prompt_template_render_failed"),
+        "{missing_variable}"
+    );
+    assert!(missing_variable.contains("required prompt variable customer is missing"));
+
+    let archive = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/prompt-templates/support-reply",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(archive.contains("200 OK"), "{archive}");
+    assert!(
+        archive.contains("\"object\":\"prompt_template\""),
+        "{archive}"
+    );
+    assert!(archive.contains("\"deleted\":false"), "{archive}");
+
+    let inactive_render = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/prompts/support-reply/render",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"variables":{"customer":"Ada"}}"#,
+    );
+    assert!(
+        inactive_render.contains("409 Conflict"),
+        "{inactive_render}"
+    );
+    assert!(inactive_render.contains("prompt_template_inactive"));
+
+    let audit_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(audit_events.contains("200 OK"), "{audit_events}");
+    assert!(audit_events.contains("\"action\":\"prompt_template.upsert\""));
+    assert!(audit_events.contains("\"action\":\"prompt_template.render\""));
+    assert!(audit_events.contains("\"action\":\"prompt_template.archive\""));
+    assert!(audit_events.contains("\"actor_api_key_id\":\"prompt-client\""));
+    assert!(!audit_events.contains("client-secret"), "{audit_events}");
+    assert!(!audit_events.contains("admin-secret"), "{audit_events}");
+    assert!(!audit_events.contains("\"Ada\""), "{audit_events}");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
+    assert!(provider_requests[0].contains("POST /v1/chat/completions HTTP/1.1"));
+    assert!(provider_requests[0].contains("authorization: Bearer provider-secret"));
+    assert!(provider_requests[0].contains(r#""model":"gpt-4o-mini""#));
+    assert!(provider_requests[0].contains("Reply in brief mode."));
+    assert!(provider_requests[0].contains("Hello Ada"));
+    assert!(!provider_requests[0].contains("prompt-chat"));
+    assert!(!provider_requests[0].contains("client-secret"));
+}
+
+#[test]
 fn exact_match_cache_serves_repeated_non_streaming_chat_without_provider_call() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(

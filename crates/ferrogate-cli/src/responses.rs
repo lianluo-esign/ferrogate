@@ -8,7 +8,7 @@ use bytes::Bytes;
 use http::{header, StatusCode};
 use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
-use std::io::Read;
+use std::{collections::BTreeMap, io::Read};
 use tokio::{sync::mpsc, task};
 
 #[derive(Debug, Serialize)]
@@ -39,6 +39,7 @@ pub(crate) struct AdminStatus<'a> {
     pub(crate) models: usize,
     pub(crate) enabled_models: usize,
     pub(crate) api_keys: usize,
+    pub(crate) prompt_templates: usize,
     pub(crate) upstreams: usize,
     pub(crate) enabled_upstreams: usize,
     pub(crate) routes: usize,
@@ -140,6 +141,52 @@ pub(crate) struct AdminGatewayConfigMutation {
 pub(crate) struct AdminGatewayConfigMutationResponse {
     pub(crate) object: &'static str,
     pub(crate) gateway_config: AdminGatewayConfigProfile,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPromptTemplate {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) status: crate::config::PromptTemplateStatus,
+    pub(crate) target: crate::config::PromptTemplateTarget,
+    pub(crate) model: String,
+    pub(crate) variables: Vec<crate::config::PromptTemplateVariable>,
+    pub(crate) active_revision: Option<u32>,
+    pub(crate) versions: Vec<crate::config::PromptTemplateVersion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminPromptTemplateMutation {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<crate::config::PromptTemplateStatus>,
+    #[serde(default)]
+    pub(crate) target: Option<crate::config::PromptTemplateTarget>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) variables: Option<Vec<crate::config::PromptTemplateVariable>>,
+    #[serde(default)]
+    pub(crate) version: Option<crate::config::PromptTemplateVersion>,
+    #[serde(default)]
+    pub(crate) versions: Option<Vec<crate::config::PromptTemplateVersion>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPromptTemplateMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) prompt_template: AdminPromptTemplate,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptTemplateRenderRequest {
+    #[serde(default)]
+    pub(crate) variables: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub(crate) revision: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

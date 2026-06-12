@@ -32,6 +32,7 @@ impl Config {
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_gateway_configs(&api_key_ids)?;
+        self.validate_prompt_templates(&model_names)?;
         self.validate_extensions()?;
         self.validate_tls()?;
         self.validate_telemetry()?;
@@ -687,6 +688,125 @@ impl Config {
         Ok(())
     }
 
+    fn validate_prompt_templates(&self, model_names: &HashSet<String>) -> AnyResult<()> {
+        let mut ids = HashSet::new();
+        for (index, template) in self.prompt_templates.iter().enumerate() {
+            if template.id.trim().is_empty() {
+                bail!("field prompt_templates[{index}].id: cannot be empty");
+            }
+            if !ids.insert(template.id.as_str()) {
+                bail!(
+                    "field prompt_templates[{index}].id: duplicate prompt template id {}",
+                    template.id
+                );
+            }
+            if template.name.trim().is_empty() {
+                bail!("field prompt_templates[{index}].name: cannot be empty");
+            }
+            if template.model.trim().is_empty() {
+                bail!("field prompt_templates[{index}].model: cannot be empty");
+            }
+            if !model_names.contains(template.model.as_str()) {
+                bail!(
+                    "field prompt_templates[{index}].model: prompt template {} references unknown model {}",
+                    template.id,
+                    template.model
+                );
+            }
+            if template.versions.is_empty() {
+                bail!("field prompt_templates[{index}].versions: at least one version is required");
+            }
+
+            let mut variable_names = HashSet::new();
+            for (variable_index, variable) in template.variables.iter().enumerate() {
+                if variable.name.trim().is_empty() {
+                    bail!(
+                        "field prompt_templates[{index}].variables[{variable_index}].name: cannot be empty"
+                    );
+                }
+                if !is_prompt_variable_name(variable.name.as_str()) {
+                    bail!(
+                        "field prompt_templates[{index}].variables[{variable_index}].name: must use letters, numbers, _, or -"
+                    );
+                }
+                if !variable_names.insert(variable.name.as_str()) {
+                    bail!(
+                        "field prompt_templates[{index}].variables[{variable_index}].name: duplicate variable {}",
+                        variable.name
+                    );
+                }
+                if variable.default.as_deref().is_some_and(str::is_empty) {
+                    bail!(
+                        "field prompt_templates[{index}].variables[{variable_index}].default: cannot be empty"
+                    );
+                }
+            }
+
+            let mut revisions = HashSet::new();
+            for (version_index, version) in template.versions.iter().enumerate() {
+                if version.revision == 0 {
+                    bail!(
+                        "field prompt_templates[{index}].versions[{version_index}].revision: must be greater than zero"
+                    );
+                }
+                if !revisions.insert(version.revision) {
+                    bail!(
+                        "field prompt_templates[{index}].versions[{version_index}].revision: duplicate revision {}",
+                        version.revision
+                    );
+                }
+                if version.messages.is_empty() {
+                    bail!(
+                        "field prompt_templates[{index}].versions[{version_index}].messages: at least one message is required"
+                    );
+                }
+                for (message_index, message) in version.messages.iter().enumerate() {
+                    validate_prompt_message_role(
+                        index,
+                        version_index,
+                        message_index,
+                        &message.role,
+                    )?;
+                    if message.content.trim().is_empty() {
+                        bail!(
+                            "field prompt_templates[{index}].versions[{version_index}].messages[{message_index}].content: cannot be empty"
+                        );
+                    }
+                    validate_prompt_placeholders(
+                        index,
+                        version_index,
+                        message_index,
+                        &message.content,
+                        &variable_names,
+                    )?;
+                }
+                if version
+                    .temperature
+                    .is_some_and(|value| !(0.0..=2.0).contains(&value))
+                {
+                    bail!(
+                        "field prompt_templates[{index}].versions[{version_index}].temperature: must be between 0 and 2"
+                    );
+                }
+                if version
+                    .top_p
+                    .is_some_and(|value| !(0.0..=1.0).contains(&value))
+                {
+                    bail!(
+                        "field prompt_templates[{index}].versions[{version_index}].top_p: must be between 0 and 1"
+                    );
+                }
+                if version.max_tokens == Some(0) {
+                    bail!(
+                        "field prompt_templates[{index}].versions[{version_index}].max_tokens: must be greater than zero"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn validate_extensions(&self) -> AnyResult<()> {
         let mut ids = HashSet::new();
         let mut enabled_orders = HashSet::new();
@@ -888,6 +1008,59 @@ fn validate_extension_permission_names(
         }
     }
     Ok(())
+}
+
+fn validate_prompt_message_role(
+    template_index: usize,
+    version_index: usize,
+    message_index: usize,
+    role: &str,
+) -> AnyResult<()> {
+    match role {
+        "system" | "developer" | "user" | "assistant" | "tool" => Ok(()),
+        _ => bail!(
+            "field prompt_templates[{template_index}].versions[{version_index}].messages[{message_index}].role: must be system, developer, user, assistant, or tool"
+        ),
+    }
+}
+
+fn validate_prompt_placeholders(
+    template_index: usize,
+    version_index: usize,
+    message_index: usize,
+    content: &str,
+    variable_names: &HashSet<&str>,
+) -> AnyResult<()> {
+    let mut cursor = 0;
+    while let Some(start) = content[cursor..].find("{{") {
+        let placeholder_start = cursor + start + 2;
+        let Some(end) = content[placeholder_start..].find("}}") else {
+            bail!(
+                "field prompt_templates[{template_index}].versions[{version_index}].messages[{message_index}].content: unclosed prompt variable"
+            );
+        };
+        let placeholder_end = placeholder_start + end;
+        let name = content[placeholder_start..placeholder_end].trim();
+        if !is_prompt_variable_name(name) {
+            bail!(
+                "field prompt_templates[{template_index}].versions[{version_index}].messages[{message_index}].content: invalid prompt variable name {name}"
+            );
+        }
+        if !variable_names.contains(name) {
+            bail!(
+                "field prompt_templates[{template_index}].versions[{version_index}].messages[{message_index}].content: unknown prompt variable {name}"
+            );
+        }
+        cursor = placeholder_end + 2;
+    }
+    Ok(())
+}
+
+fn is_prompt_variable_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn validate_builtin_extension_shape(

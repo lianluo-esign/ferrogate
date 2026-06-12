@@ -31,6 +31,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) gateway_configs: Vec<GatewayConfigProfile>,
     #[serde(default)]
+    pub(crate) prompt_templates: Vec<PromptTemplate>,
+    #[serde(default)]
     pub(crate) extensions: Vec<ExtensionConfig>,
     #[serde(default)]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
@@ -316,6 +318,82 @@ pub(crate) struct GatewayConfigProfile {
     pub(crate) api_key_ids: Vec<String>,
     #[serde(default)]
     pub(crate) cache_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptTemplate {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) status: PromptTemplateStatus,
+    #[serde(default)]
+    pub(crate) target: PromptTemplateTarget,
+    pub(crate) model: String,
+    #[serde(default)]
+    pub(crate) variables: Vec<PromptTemplateVariable>,
+    pub(crate) versions: Vec<PromptTemplateVersion>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PromptTemplateStatus {
+    Draft,
+    #[default]
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PromptTemplateTarget {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptTemplateVariable {
+    pub(crate) name: String,
+    #[serde(default = "default_true")]
+    pub(crate) required: bool,
+    #[serde(default)]
+    pub(crate) default: Option<String>,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptTemplateVersion {
+    #[serde(default = "default_gateway_config_revision")]
+    pub(crate) revision: u32,
+    #[serde(default)]
+    pub(crate) status: PromptTemplateVersionStatus,
+    pub(crate) messages: Vec<PromptTemplateMessage>,
+    #[serde(default)]
+    pub(crate) temperature: Option<f64>,
+    #[serde(default)]
+    pub(crate) top_p: Option<f64>,
+    #[serde(default)]
+    pub(crate) max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PromptTemplateVersionStatus {
+    Draft,
+    #[default]
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptTemplateMessage {
+    pub(crate) role: String,
+    pub(crate) content: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -718,6 +796,7 @@ impl Default for Config {
             api_keys: Vec::new(),
             policies: Vec::new(),
             gateway_configs: Vec::new(),
+            prompt_templates: Vec::new(),
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),

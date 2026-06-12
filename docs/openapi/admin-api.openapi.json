@@ -1282,6 +1282,226 @@
           }
         }
       }
+    },
+    "/admin/v1/prompt-templates": {
+      "get": {
+        "operationId": "listAdminPromptTemplates",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List versioned prompt templates.",
+        "responses": {
+          "200": {
+            "description": "Prompt template list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPromptTemplateList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAdminPromptTemplate",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create a versioned prompt template and apply it through process-local reload.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminPromptTemplateMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminPromptTemplateMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/prompt-templates/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PromptTemplateId"
+        }
+      ],
+      "get": {
+        "operationId": "getAdminPromptTemplate",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one prompt template with inspectable versions.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminPromptTemplateMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminPromptTemplate",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace prompt template metadata or append supplied versions.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminPromptTemplateMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminPromptTemplateMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminPromptTemplate",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Update prompt template metadata or append a new version while preserving history.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminPromptTemplateMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminPromptTemplateMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "archiveAdminPromptTemplate",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Archive a prompt template without deleting version history.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeletePromptTemplateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/prompts/{id}/render": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PromptTemplateId"
+        }
+      ],
+      "post": {
+        "operationId": "renderPromptTemplate",
+        "tags": [
+          "ai-runtime"
+        ],
+        "summary": "Render a prompt template into an OpenAI-compatible request body.",
+        "description": "Requires prompts.render scope. Render audit events record template id, revision, API key, and request id without raw variable values.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PromptTemplateRenderRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Rendered OpenAI-compatible chat or Responses request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenderedPromptRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1336,6 +1556,15 @@
           "minimum": 1
         },
         "description": "Clamped by storage.admin_list_max_limit."
+      },
+      "PromptTemplateId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Stable prompt template id."
       }
     },
     "requestBodies": {
@@ -1466,6 +1695,70 @@
             }
           }
         }
+      },
+      "AdminPromptTemplateMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminPromptTemplateMutation"
+            },
+            "examples": {
+              "supportReply": {
+                "summary": "Create a chat prompt template with variables.",
+                "value": {
+                  "id": "support-reply",
+                  "name": "Support Reply",
+                  "model": "fast-chat",
+                  "variables": [
+                    {
+                      "name": "customer",
+                      "required": true
+                    },
+                    {
+                      "name": "tone",
+                      "required": false,
+                      "default": "brief"
+                    }
+                  ],
+                  "version": {
+                    "messages": [
+                      {
+                        "role": "system",
+                        "content": "Reply in {{tone}} mode."
+                      },
+                      {
+                        "role": "user",
+                        "content": "Hello {{customer}}"
+                      }
+                    ],
+                    "temperature": 0.2
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "PromptTemplateRenderRequest": {
+        "required": false,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PromptTemplateRenderRequest"
+            },
+            "examples": {
+              "renderVariables": {
+                "summary": "Render a template using variable values.",
+                "value": {
+                  "variables": {
+                    "customer": "Ada"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -1588,6 +1881,26 @@
             }
           }
         }
+      },
+      "AdminPromptTemplateMutationOk": {
+        "description": "Prompt template mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminPromptTemplateMutationResponse"
+            }
+          }
+        }
+      },
+      "DeletePromptTemplateOk": {
+        "description": "Prompt template archive response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeletePromptTemplateResponse"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -1664,6 +1977,7 @@
           "models",
           "enabled_models",
           "api_keys",
+          "prompt_templates",
           "upstreams",
           "enabled_upstreams",
           "routes",
@@ -1752,6 +2066,10 @@
                 "type": "null"
               }
             ]
+          },
+          "prompt_templates": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -3827,6 +4145,317 @@
           }
         },
         "additionalProperties": false
+      },
+      "PromptTemplateStatus": {
+        "type": "string",
+        "enum": [
+          "draft",
+          "active",
+          "archived"
+        ]
+      },
+      "PromptTemplateTarget": {
+        "type": "string",
+        "enum": [
+          "chat_completions",
+          "responses"
+        ]
+      },
+      "PromptTemplateVersionStatus": {
+        "type": "string",
+        "enum": [
+          "draft",
+          "active",
+          "archived"
+        ]
+      },
+      "PromptTemplateVariable": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean",
+            "default": true
+          },
+          "default": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptTemplateMessage": {
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "system",
+              "developer",
+              "user",
+              "assistant",
+              "tool"
+            ]
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptTemplateVersion": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "status": {
+            "$ref": "#/components/schemas/PromptTemplateVersionStatus"
+          },
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplateMessage"
+            }
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 2
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPromptTemplate": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "target",
+          "model",
+          "variables",
+          "versions"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PromptTemplateStatus"
+          },
+          "target": {
+            "$ref": "#/components/schemas/PromptTemplateTarget"
+          },
+          "model": {
+            "type": "string"
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplateVariable"
+            }
+          },
+          "active_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplateVersion"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPromptTemplateMutation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PromptTemplateStatus"
+          },
+          "target": {
+            "$ref": "#/components/schemas/PromptTemplateTarget"
+          },
+          "model": {
+            "type": "string"
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplateVariable"
+            }
+          },
+          "version": {
+            "$ref": "#/components/schemas/PromptTemplateVersion"
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplateVersion"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPromptTemplateMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "prompt_template"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "prompt_template"
+          },
+          "prompt_template": {
+            "$ref": "#/components/schemas/AdminPromptTemplate"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeletePromptTemplateResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "prompt_template"
+              }
+            }
+          }
+        ]
+      },
+      "AdminPromptTemplateList": {
+        "$ref": "#/components/schemas/AdminList_AdminPromptTemplate"
+      },
+      "AdminList_AdminPromptTemplate": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminPromptTemplate"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptTemplateRenderRequest": {
+        "type": "object",
+        "properties": {
+          "variables": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "RenderedPromptRequest": {
+        "type": "object",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplateMessage"
+            }
+          },
+          "input": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplateMessage"
+            }
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "top_p": {
+            "type": "number"
+          },
+          "max_tokens": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
       }
     }
   }

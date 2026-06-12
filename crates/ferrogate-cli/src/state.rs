@@ -20,8 +20,8 @@ use std::{
 use crate::acme::{AcmeRenewalStatus, SharedAcmeRenewalState};
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config,
-    GatewayConfigProfile, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, Provider,
-    RouteRule, StorageConfig, Upstream,
+    GatewayConfigProfile, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate,
+    PromptTemplateStatus, RouteRule, StorageConfig, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -497,6 +497,43 @@ impl SharedAppState {
         if candidate.gateway_configs.len() == before {
             return Ok(None);
         }
+        candidate.validate()?;
+        Ok(Some(self.reload_process_local(candidate)))
+    }
+
+    pub(crate) fn upsert_prompt_template(
+        &self,
+        template: PromptTemplate,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        if let Some(existing) = candidate
+            .prompt_templates
+            .iter_mut()
+            .find(|existing| existing.id == template.id)
+        {
+            *existing = template;
+        } else {
+            candidate.prompt_templates.push(template);
+        }
+        candidate.validate()?;
+        Ok(self.reload_process_local(candidate))
+    }
+
+    pub(crate) fn archive_prompt_template(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        let mut candidate = (*active.config).clone();
+        let Some(template) = candidate
+            .prompt_templates
+            .iter_mut()
+            .find(|template| template.id == id)
+        else {
+            return Ok(None);
+        };
+        template.status = PromptTemplateStatus::Archived;
         candidate.validate()?;
         Ok(Some(self.reload_process_local(candidate)))
     }
