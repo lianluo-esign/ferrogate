@@ -572,6 +572,7 @@ pub(crate) struct AppState {
     mcp_manager: Arc<McpManager>,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
+    guardrail_rules: Arc<Vec<GuardrailRuleRuntime>>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
@@ -737,6 +738,30 @@ pub(crate) struct AdminAuditEventDraft {
     pub(crate) action: String,
     pub(crate) target: String,
     pub(crate) outcome: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone)]
+struct GuardrailRuleRuntime {
+    id: String,
+    name: String,
+    enabled: bool,
+    organization_ids: Vec<String>,
+    project_ids: Vec<String>,
+    api_key_ids: Vec<String>,
+    models: Vec<String>,
+    providers: Vec<String>,
+    keywords: Vec<String>,
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GuardrailMatch {
+    pub(crate) rule_id: String,
+    pub(crate) rule_name: String,
+    pub(crate) keyword: String,
+    pub(crate) code: String,
     pub(crate) message: String,
 }
 
@@ -1232,6 +1257,23 @@ impl AppState {
             .expect("config validation must reject invalid model registry entries");
 
         let policy_engine = build_policy_engine(&config.policies);
+        let guardrail_rules = config
+            .guardrails
+            .iter()
+            .map(|rule| GuardrailRuleRuntime {
+                id: rule.id.clone(),
+                name: rule.name.clone(),
+                enabled: rule.enabled,
+                organization_ids: rule.organization_ids.clone(),
+                project_ids: rule.project_ids.clone(),
+                api_key_ids: rule.api_key_ids.clone(),
+                models: rule.models.clone(),
+                providers: rule.providers.clone(),
+                keywords: rule.keywords.clone(),
+                code: rule.code.clone(),
+                message: rule.message.clone(),
+            })
+            .collect();
         let provider_circuit_config = provider_circuit_config(&config);
         let provider_circuits = if provider_circuit_config.is_some() {
             config
@@ -1283,6 +1325,7 @@ impl AppState {
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
+            guardrail_rules: Arc::new(guardrail_rules),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
             request_ids: Arc::new(AtomicU64::new(1)),
@@ -2063,6 +2106,47 @@ impl AppState {
         provider: Option<&str>,
     ) -> PolicyDecision {
         self.policy_engine.evaluate(request, model, provider)
+    }
+
+    pub(crate) fn match_request_guardrail(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        model: Option<&str>,
+        provider: Option<&str>,
+        body_text: &str,
+    ) -> Option<GuardrailMatch> {
+        self.guardrail_rules.iter().find_map(|rule| {
+            if !rule.enabled {
+                return None;
+            }
+            if !allows_optional_scope(&rule.organization_ids, tenant.organization_id.as_deref()) {
+                return None;
+            }
+            if !allows_optional_scope(&rule.project_ids, tenant.project_id.as_deref()) {
+                return None;
+            }
+            if !allows_optional_scope(&rule.api_key_ids, tenant.api_key_id.as_deref()) {
+                return None;
+            }
+            if !allows_optional_scope(&rule.models, model) {
+                return None;
+            }
+            if !allows_optional_scope(&rule.providers, provider) {
+                return None;
+            }
+            let matched_keyword = rule
+                .keywords
+                .iter()
+                .find(|keyword| body_text.contains(keyword.as_str()))?
+                .clone();
+            Some(GuardrailMatch {
+                rule_id: rule.id.clone(),
+                rule_name: rule.name.clone(),
+                keyword: matched_keyword,
+                code: rule.code.clone(),
+                message: rule.message.clone(),
+            })
+        })
     }
 
     pub(crate) fn record_billing_event(
@@ -3442,6 +3526,130 @@ mod tests {
         );
         assert!(state
             .match_runtime_route(Some("api.example.com"), "/v1/chat", &HeaderMap::new())
+            .is_none());
+    }
+
+    #[test]
+    fn matches_request_guardrail_by_tenant_model_provider_and_keyword() {
+        let config = Config {
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: None,
+                output_price_per_1m: None,
+                enabled: true,
+                cache_enabled: None,
+            }],
+            guardrails: vec![crate::config::GuardrailRule {
+                id: "block-secret".into(),
+                name: "Block secret".into(),
+                enabled: true,
+                stage: crate::config::GuardrailStage::Request,
+                organization_ids: vec!["org_demo".into()],
+                project_ids: vec!["project_demo".into()],
+                api_key_ids: vec!["key_demo".into()],
+                models: vec!["fast-chat".into()],
+                providers: vec!["openai".into()],
+                keywords: vec!["secret".into()],
+                effect: crate::config::GuardrailEffect::Deny,
+                code: "guardrail_blocked".into(),
+                message: "blocked by guardrail".into(),
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("org_demo".into()),
+            project_id: Some("project_demo".into()),
+            api_key_id: Some("key_demo".into()),
+            ..Default::default()
+        };
+
+        let matched = state
+            .match_request_guardrail(
+                &tenant,
+                Some("fast-chat"),
+                Some("openai"),
+                "contains secret",
+            )
+            .expect("guardrail should match");
+
+        assert_eq!(matched.rule_id, "block-secret");
+        assert_eq!(matched.rule_name, "Block secret");
+        assert_eq!(matched.keyword, "secret");
+        assert_eq!(matched.code, "guardrail_blocked");
+        assert_eq!(matched.message, "blocked by guardrail");
+    }
+
+    #[test]
+    fn ignores_disabled_guardrails() {
+        let config = Config {
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: None,
+                output_price_per_1m: None,
+                enabled: true,
+                cache_enabled: None,
+            }],
+            guardrails: vec![crate::config::GuardrailRule {
+                id: "block-secret".into(),
+                name: "Block secret".into(),
+                enabled: false,
+                stage: crate::config::GuardrailStage::Request,
+                organization_ids: vec![],
+                project_ids: vec![],
+                api_key_ids: vec![],
+                models: vec![],
+                providers: vec![],
+                keywords: vec!["secret".into()],
+                effect: crate::config::GuardrailEffect::Deny,
+                code: "guardrail_blocked".into(),
+                message: "blocked by guardrail".into(),
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        assert!(state
+            .match_request_guardrail(
+                &ferrogate_core::TenantContext::default(),
+                Some("fast-chat"),
+                Some("openai"),
+                "contains secret"
+            )
             .is_none());
     }
 

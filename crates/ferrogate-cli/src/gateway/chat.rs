@@ -376,6 +376,7 @@ impl FerroGateway {
         let dispatch_timeout = state.provider_dispatch_timeout();
         let max_dispatch_retries = state.provider_dispatch_max_retries();
         let provider_response_body_max_bytes = state.provider_response_body_max_bytes();
+        let body_text = body_json.to_string();
         let mut token_reservation = None;
 
         'routes: for (candidate_index, model_route) in routes.iter().enumerate() {
@@ -467,6 +468,45 @@ impl FerroGateway {
                 upstream: Some(provider.name.clone()),
                 tenant: auth.tenant_context(),
             };
+            if let Some(guardrail) = state.match_request_guardrail(
+                &policy_request.tenant,
+                Some(&request.model),
+                Some(&provider.name),
+                &body_text,
+            ) {
+                self.record_ai_error_log(
+                    endpoint,
+                    ctx,
+                    AiErrorLog {
+                        tenant: policy_request.tenant.clone(),
+                        logical_model: Some(&request.model),
+                        provider: Some(&provider.name),
+                        status: StatusCode::FORBIDDEN,
+                        error_code: &guardrail.code,
+                    },
+                );
+                state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+                    request_id: ctx.request_id.clone(),
+                    trace_id: ctx.trace_id.clone(),
+                    actor_api_key_id: auth.api_key_id.clone(),
+                    action: "guardrail.deny".into(),
+                    target: guardrail.rule_id.clone(),
+                    outcome: "blocked".into(),
+                    message: format!(
+                        "guardrail {} blocked model {} provider {} via keyword {}",
+                        guardrail.rule_name, request.model, provider.name, guardrail.keyword
+                    ),
+                });
+                write_json_error(
+                    session,
+                    StatusCode::FORBIDDEN,
+                    &guardrail.code,
+                    &guardrail.message,
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(());
+            }
             if let PolicyDecision::Deny { code, message } =
                 state.evaluate_policy(&policy_request, Some(&request.model), Some(&provider.name))
             {

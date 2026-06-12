@@ -25,10 +25,11 @@ pub(crate) use self::snapshot::config_snapshot_id;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
     AccessLogMode, AdminConfig, ApiKey, CacheConfig, CacheMode, ClusterConfig, Config,
-    ExtensionConfig, ExtensionKind, ExtensionPermissions, GatewayConfigProfile, HeaderMatcher,
-    HeaderMutation, McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
-    MeteringConfig, Model, ModelFallback, PolicyRule, PromptTemplate, PromptTemplateMessage,
-    PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVariable, PromptTemplateVersion,
-    PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule, StorageConfig,
-    TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    ExtensionConfig, ExtensionKind, ExtensionPermissions, GatewayConfigProfile, GuardrailEffect,
+    GuardrailRule, GuardrailStage, HeaderMatcher, HeaderMutation, McpAuthType, McpHeaderConfig,
+    McpServerConfig, McpTlsConfig, McpTransport, MeteringConfig, Model, ModelFallback, PolicyRule,
+    PromptTemplate, PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget,
+    PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
+    ReliabilityConfig, RouteRule, StorageConfig, TelemetryConfig, TlsAcmeConfig, TlsConfig,
+    Upstream,
 };

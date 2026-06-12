@@ -294,6 +294,60 @@ fn validates_optional_metering_export_boundary() {
 }
 
 #[test]
+fn validates_guardrail_keyword_scope_and_effect() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![GuardrailRule {
+            id: "block-secret".into(),
+            name: "Block secret".into(),
+            enabled: true,
+            stage: GuardrailStage::Request,
+            organization_ids: vec!["org_demo".into()],
+            project_ids: vec!["project_demo".into()],
+            api_key_ids: vec!["key_dev".into()],
+            models: vec!["fast-chat".into()],
+            providers: vec!["openai".into()],
+            keywords: vec!["secret".into()],
+            effect: GuardrailEffect::Deny,
+            code: "guardrail_blocked".into(),
+            message: "blocked by guardrail".into(),
+        }],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_guardrail_with_unknown_model() {
+    let config = Config {
+        providers: vec![provider()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![GuardrailRule {
+            id: "block-secret".into(),
+            name: "Block secret".into(),
+            enabled: true,
+            stage: GuardrailStage::Request,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["key_dev".into()],
+            models: vec!["missing-model".into()],
+            providers: vec!["openai".into()],
+            keywords: vec!["secret".into()],
+            effect: GuardrailEffect::Deny,
+            code: "guardrail_blocked".into(),
+            message: "blocked by guardrail".into(),
+        }],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("unknown model missing-model"));
+}
+
+#[test]
 fn rejects_route_with_unknown_upstream() {
     let config = Config {
         routes: vec![route("missing", vec!["/"])],

@@ -35,12 +35,12 @@ fn main() -> Result<()> {
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
         }
-        Commands::Run(args) => run_docker_scenario(args.scenario),
+        Commands::Run(args) => run_docker_scenario(args.scenario, &args.image),
         Commands::RunAll(args) => {
             run_admin_api(&args.local)?;
             run_gateway_api(&args.local)?;
             if args.include_docker {
-                run_all_docker_scenarios()?;
+                run_all_docker_scenarios(&args.image)?;
             }
             Ok(())
         }
@@ -96,6 +96,9 @@ enum Commands {
 struct DockerRunArgs {
     #[arg(value_enum)]
     scenario: DockerScenario,
+    /// Docker image to verify. Defaults to a local build tag, but may point at a GHCR image.
+    #[arg(long, env = "FERROGATE_TEST_IMAGE", default_value = IMAGE_TAG)]
+    image: String,
 }
 
 #[derive(Debug, Args)]
@@ -105,6 +108,9 @@ struct RunAllArgs {
     /// Also run Docker-backed cluster, shared-state, and Redis scenarios.
     #[arg(long)]
     include_docker: bool,
+    /// Docker image to verify. Defaults to a local build tag, but may point at a GHCR image.
+    #[arg(long, env = "FERROGATE_TEST_IMAGE", default_value = IMAGE_TAG)]
+    image: String,
 }
 
 #[derive(Debug, Args)]
@@ -121,6 +127,7 @@ struct LocalArgs {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DockerScenario {
     ClusterDrain,
+    GuardrailRequestDeny,
     SharedApiKey,
     SharedStateStale,
     SharedStateStartupUnavailable,
@@ -131,6 +138,7 @@ impl DockerScenario {
     fn names() -> &'static [&'static str] {
         &[
             "cluster-drain",
+            "guardrail-request-deny",
             "shared-api-key",
             "shared-state-stale",
             "shared-state-startup-unavailable",
@@ -139,19 +147,22 @@ impl DockerScenario {
     }
 }
 
-fn run_docker_scenario(scenario: DockerScenario) -> Result<()> {
+fn run_docker_scenario(scenario: DockerScenario, image: &str) -> Result<()> {
     match scenario {
-        DockerScenario::ClusterDrain => run_cluster_drain(),
-        DockerScenario::SharedApiKey => run_shared_api_key(),
-        DockerScenario::SharedStateStale => run_shared_state_stale(),
-        DockerScenario::SharedStateStartupUnavailable => run_shared_state_startup_unavailable(),
-        DockerScenario::RedisCounters => run_redis_counters(),
+        DockerScenario::ClusterDrain => run_cluster_drain(image),
+        DockerScenario::GuardrailRequestDeny => run_guardrail_request_deny(image),
+        DockerScenario::SharedApiKey => run_shared_api_key(image),
+        DockerScenario::SharedStateStale => run_shared_state_stale(image),
+        DockerScenario::SharedStateStartupUnavailable => {
+            run_shared_state_startup_unavailable(image)
+        }
+        DockerScenario::RedisCounters => run_redis_counters(image),
     }
 }
 
-fn run_all_docker_scenarios() -> Result<()> {
+fn run_all_docker_scenarios(image: &str) -> Result<()> {
     for scenario in DockerScenario::value_variants() {
-        run_docker_scenario(*scenario)?;
+        run_docker_scenario(*scenario, image)?;
     }
     Ok(())
 }
@@ -936,15 +947,21 @@ fn assert_secret_redacted(raw: &str) {
     }
 }
 
-fn run_cluster_drain() -> Result<()> {
-    let _cleanup = setup_environment()?;
+fn run_cluster_drain(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
     start_provider()?;
     wait_for_provider()?;
 
     let dir = tempfile::tempdir()?;
     let config_path = dir.path().join("ferrogate.toml");
     std::fs::write(&config_path, gateway_config("e2e-node-a", "local", None))?;
-    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_path, None)?;
+    start_gateway(
+        image,
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_path,
+        None,
+    )?;
 
     wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
     expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 200, |body| {
@@ -1047,12 +1064,60 @@ fn run_cluster_drain() -> Result<()> {
     Ok(())
 }
 
-fn run_shared_api_key() -> Result<()> {
-    let _cleanup = setup_environment()?;
+fn run_guardrail_request_deny(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
     start_provider()?;
     wait_for_provider()?;
 
-    let shared = start_shared_file_gateways()?;
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("guardrail.toml");
+    std::fs::write(&config_path, guardrail_gateway_config())?;
+    start_gateway(
+        image,
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_path,
+        None,
+    )?;
+
+    wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"this contains secret"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "guardrail_blocked");
+            assert_eq!(body["error"]["message"], "blocked by guardrail");
+            Ok(())
+        },
+    )?;
+
+    let provider_log = Command::new("docker")
+        .args(["logs", PROVIDER_CONTAINER])
+        .output()
+        .context("failed to inspect provider logs")?;
+    let provider_log = String::from_utf8_lossy(&provider_log.stdout);
+    assert!(
+        !provider_log.contains("POST /v1/chat/completions"),
+        "provider should not receive a POST dispatch when guardrail denies the request"
+    );
+
+    println!("guardrail-request-deny scenario passed");
+    Ok(())
+}
+
+fn run_shared_api_key(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
+    start_provider()?;
+    wait_for_provider()?;
+
+    let shared = start_shared_file_gateways(image)?;
     publish_shared_client_and_policy()?;
 
     expect_json(
@@ -1107,12 +1172,12 @@ fn run_shared_api_key() -> Result<()> {
     Ok(())
 }
 
-fn run_shared_state_stale() -> Result<()> {
-    let _cleanup = setup_environment()?;
+fn run_shared_state_stale(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
     start_provider()?;
     wait_for_provider()?;
 
-    let _shared = start_shared_file_gateways()?;
+    let _shared = start_shared_file_gateways(image)?;
     publish_shared_client_and_policy()?;
 
     expect_json(
@@ -1157,8 +1222,8 @@ fn run_shared_state_stale() -> Result<()> {
     Ok(())
 }
 
-fn run_shared_state_startup_unavailable() -> Result<()> {
-    let _cleanup = setup_environment()?;
+fn run_shared_state_startup_unavailable(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
     start_provider()?;
     wait_for_provider()?;
 
@@ -1172,7 +1237,13 @@ fn run_shared_state_startup_unavailable() -> Result<()> {
             Some("/proc/ferrogate/cluster-state.json"),
         ),
     )?;
-    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_path, None)?;
+    start_gateway(
+        image,
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_path,
+        None,
+    )?;
     wait_for_http(GATEWAY_A_PORT, "/healthz", 200)?;
     expect_json(GATEWAY_A_PORT, "GET", "/readyz", &[], "", 503, |body| {
         assert_eq!(body["status"], "not_ready");
@@ -1191,8 +1262,8 @@ fn run_shared_state_startup_unavailable() -> Result<()> {
     Ok(())
 }
 
-fn run_redis_counters() -> Result<()> {
-    let _cleanup = setup_environment()?;
+fn run_redis_counters(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
     start_provider()?;
     start_redis()?;
     wait_for_provider()?;
@@ -1204,8 +1275,8 @@ fn run_redis_counters() -> Result<()> {
     std::fs::write(&config_a, redis_counter_gateway_config("e2e-node-a"))?;
     std::fs::write(&config_b, redis_counter_gateway_config("e2e-node-b"))?;
 
-    start_gateway(GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_a, None)?;
-    start_gateway(GATEWAY_B_CONTAINER, GATEWAY_B_PORT, &config_b, None)?;
+    start_gateway(image, GATEWAY_A_CONTAINER, GATEWAY_A_PORT, &config_a, None)?;
+    start_gateway(image, GATEWAY_B_CONTAINER, GATEWAY_B_PORT, &config_b, None)?;
     wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
     wait_for_http(GATEWAY_B_PORT, "/readyz", 200)?;
 
@@ -1280,7 +1351,7 @@ struct SharedFileGateways {
     state_path: std::path::PathBuf,
 }
 
-fn start_shared_file_gateways() -> Result<SharedFileGateways> {
+fn start_shared_file_gateways(image: &str) -> Result<SharedFileGateways> {
     let dir = tempfile::tempdir()?;
     let state_dir = dir.path().join("state");
     let state_path = state_dir.join("cluster-state.json");
@@ -1306,12 +1377,14 @@ fn start_shared_file_gateways() -> Result<SharedFileGateways> {
     )?;
 
     start_gateway(
+        image,
         GATEWAY_A_CONTAINER,
         GATEWAY_A_PORT,
         &config_a,
         Some(&state_dir),
     )?;
     start_gateway(
+        image,
         GATEWAY_B_CONTAINER,
         GATEWAY_B_PORT,
         &config_b,
@@ -1381,11 +1454,15 @@ fn corrupt_shared_state_file() -> Result<()> {
     ])
 }
 
-fn setup_environment() -> Result<Cleanup> {
+fn setup_environment(image: &str) -> Result<Cleanup> {
     let cleanup = Cleanup;
     cleanup_containers();
     docker(["network", "create", NETWORK_NAME])?;
-    docker(["build", "-t", IMAGE_TAG, "."])?;
+    if image == IMAGE_TAG {
+        docker(["build", "-t", IMAGE_TAG, "."])?;
+    } else {
+        docker(["pull", image])?;
+    }
     Ok(cleanup)
 }
 
@@ -1432,6 +1509,65 @@ id = "admin"
 name = "Admin"
 key = "admin-secret"
 scopes = ["admin.read", "admin.write"]
+"#
+    )
+}
+
+fn guardrail_gateway_config() -> String {
+    format!(
+        r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "e2e-node-a"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "local"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read", "chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[guardrails]]
+id = "block-secret"
+name = "Block secret"
+stage = "request"
+organization_ids = ["org_demo"]
+project_ids = ["project_gateway"]
+api_key_ids = ["client"]
+models = ["fast-chat"]
+providers = ["openai"]
+keywords = ["secret"]
+effect = "deny"
+code = "guardrail_blocked"
+message = "blocked by guardrail"
+enabled = true
 "#
     )
 }
@@ -1501,6 +1637,7 @@ BODY = b'{"id":"chatcmpl_e2e","object":"chat.completion","choices":[{"message":{
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        print(self.requestline, flush=True)
         length = int(self.headers.get("Content-Length", "0"))
         if length:
             self.rfile.read(length)
@@ -1550,6 +1687,7 @@ fn start_redis() -> Result<()> {
 }
 
 fn start_gateway(
+    image: &str,
     name: &str,
     host_port: u16,
     config_path: &std::path::Path,
@@ -1578,7 +1716,7 @@ fn start_gateway(
         "FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml".to_string(),
         "-e".to_string(),
         "FERROGATE_PROVIDER_SECRET=provider-secret".to_string(),
-        IMAGE_TAG.to_string(),
+        image.to_string(),
     ]);
     docker_args(args)
 }

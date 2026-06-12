@@ -148,9 +148,11 @@ cargo +1.88.0 test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- 
 
 After pushing code that changes Rust behavior or packaging, use GitHub Actions
 as the authoritative build signal. Wait for `rust-ci` and the GHCR image job,
-pull the exact image tag or digest that CI published, and verify the relevant
-runtime behavior with local Docker. Record the CI run URL, image reference,
-digest, and Docker verification result in the related GitHub issue.
+pull the exact image tag or digest that CI published, run that exact image in a
+local Docker container, and verify the relevant runtime behavior with
+`ferrogate-test` against the running container. Record the CI run URL, image
+reference, digest, Docker command, and `ferrogate-test` result in the related
+GitHub issue.
 
 For config parser, provider, policy, billing, storage, or streaming changes,
 add or update focused regression tests, but let GitHub CI compile and execute

@@ -33,6 +33,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) prompt_templates: Vec<PromptTemplate>,
     #[serde(default)]
+    pub(crate) guardrails: Vec<GuardrailRule>,
+    #[serde(default)]
     pub(crate) extensions: Vec<ExtensionConfig>,
     #[serde(default)]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
@@ -396,6 +398,49 @@ pub(crate) struct PromptTemplateMessage {
     pub(crate) content: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuardrailRule {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_guardrail_stage")]
+    pub(crate) stage: GuardrailStage,
+    #[serde(default)]
+    pub(crate) organization_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) project_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) api_key_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) models: Vec<String>,
+    #[serde(default)]
+    pub(crate) providers: Vec<String>,
+    #[serde(default)]
+    pub(crate) keywords: Vec<String>,
+    #[serde(default = "default_guardrail_effect")]
+    pub(crate) effect: GuardrailEffect,
+    #[serde(default = "default_guardrail_code")]
+    pub(crate) code: String,
+    #[serde(default = "default_guardrail_message")]
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuardrailStage {
+    #[default]
+    Request,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuardrailEffect {
+    #[default]
+    Deny,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ExtensionKind {
@@ -666,6 +711,22 @@ fn default_gateway_config_revision() -> u32 {
     1
 }
 
+fn default_guardrail_stage() -> GuardrailStage {
+    GuardrailStage::Request
+}
+
+fn default_guardrail_effect() -> GuardrailEffect {
+    GuardrailEffect::Deny
+}
+
+fn default_guardrail_code() -> String {
+    "guardrail_denied".to_string()
+}
+
+fn default_guardrail_message() -> String {
+    "request blocked by guardrail".to_string()
+}
+
 fn default_extension_source() -> String {
     "builtin".to_string()
 }
@@ -797,6 +858,7 @@ impl Default for Config {
             policies: Vec::new(),
             gateway_configs: Vec::new(),
             prompt_templates: Vec::new(),
+            guardrails: Vec::new(),
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),

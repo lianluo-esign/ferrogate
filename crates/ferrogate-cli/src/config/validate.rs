@@ -33,6 +33,7 @@ impl Config {
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_gateway_configs(&api_key_ids)?;
         self.validate_prompt_templates(&model_names)?;
+        self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
         self.validate_extensions()?;
         self.validate_tls()?;
         self.validate_telemetry()?;
@@ -801,6 +802,72 @@ impl Config {
                         "field prompt_templates[{index}].versions[{version_index}].max_tokens: must be greater than zero"
                     );
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_guardrails(
+        &self,
+        api_key_ids: &HashSet<String>,
+        model_names: &HashSet<String>,
+        provider_names: &HashSet<String>,
+    ) -> AnyResult<()> {
+        let mut ids = HashSet::new();
+        for (index, guardrail) in self.guardrails.iter().enumerate() {
+            if guardrail.id.trim().is_empty() {
+                bail!("field guardrails[{index}].id: cannot be empty");
+            }
+            if !ids.insert(guardrail.id.as_str()) {
+                bail!(
+                    "field guardrails[{index}].id: duplicate guardrail id {}",
+                    guardrail.id
+                );
+            }
+            if guardrail.name.trim().is_empty() {
+                bail!("field guardrails[{index}].name: cannot be empty");
+            }
+            if guardrail.keywords.is_empty() {
+                bail!("field guardrails[{index}].keywords: at least one keyword is required");
+            }
+            for (keyword_index, keyword) in guardrail.keywords.iter().enumerate() {
+                if keyword.trim().is_empty() {
+                    bail!("field guardrails[{index}].keywords[{keyword_index}]: cannot be empty");
+                }
+            }
+            for api_key_id in &guardrail.api_key_ids {
+                if !api_key_ids.contains(api_key_id.as_str()) {
+                    bail!(
+                        "field guardrails[{index}].api_key_ids: guardrail {} references unknown api key {}",
+                        guardrail.id,
+                        api_key_id
+                    );
+                }
+            }
+            for model in &guardrail.models {
+                if !model_names.contains(model.as_str()) {
+                    bail!(
+                        "field guardrails[{index}].models: guardrail {} references unknown model {}",
+                        guardrail.id,
+                        model
+                    );
+                }
+            }
+            for provider in &guardrail.providers {
+                if !provider_names.contains(provider.as_str()) {
+                    bail!(
+                        "field guardrails[{index}].providers: guardrail {} references unknown provider {}",
+                        guardrail.id,
+                        provider
+                    );
+                }
+            }
+            if !matches!(guardrail.stage, super::GuardrailStage::Request) {
+                bail!("field guardrails[{index}].stage: unsupported guardrail stage");
+            }
+            if !matches!(guardrail.effect, super::GuardrailEffect::Deny) {
+                bail!("field guardrails[{index}].effect: unsupported guardrail effect");
             }
         }
 
