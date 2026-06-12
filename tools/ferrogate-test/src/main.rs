@@ -1514,8 +1514,7 @@ scopes = ["admin.read", "admin.write"]
 }
 
 fn guardrail_gateway_config() -> String {
-    format!(
-        r#"
+    r#"
 listen = "0.0.0.0:8080"
 
 [cluster]
@@ -1569,7 +1568,7 @@ code = "guardrail_blocked"
 message = "blocked by guardrail"
 enabled = true
 "#
-    )
+    .to_string()
 }
 
 fn redis_counter_gateway_config(node_id: &str) -> String {
