@@ -568,7 +568,7 @@ fn run_auth_api(args: &AuthArgs) -> Result<()> {
         Ok(())
     })?;
     case.expect_json("GET", "/v1/tenants", &[], "", 200, |body| {
-        assert!(list_contains(&body, "id", "tenant-example"));
+        assert!(array_contains(&body, "tenants", "id", "tenant-example"));
         Ok(())
     })?;
     case.expect_json(
@@ -1323,6 +1323,12 @@ fn list_contains(body: &Value, field: &str, expected: &str) -> bool {
     body.get("data")
         .and_then(Value::as_array)
         .is_some_and(|items| items.iter().any(|item| item[field] == expected))
+}
+
+fn array_contains(body: &Value, array_field: &str, item_field: &str, expected: &str) -> bool {
+    body.get(array_field)
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item[item_field] == expected))
 }
 
 fn assert_secret_redacted(raw: &str) {
