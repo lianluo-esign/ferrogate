@@ -30,6 +30,7 @@ EXPECTED_ADMIN_METHODS = {
     "/admin/v1/tools": {"get"},
     "/admin/v1/mcp-servers": {"get"},
     "/admin/v1/tool-sessions/{session_id}": {"get"},
+    "/v1/mcp": {"post"},
     "/v1/mcp/tool/execute": {"post"},
     "/admin/v1/models": {"get"},
     "/admin/v1/api-keys": {"get", "post"},

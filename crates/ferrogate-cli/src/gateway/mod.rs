@@ -9,6 +9,7 @@ mod chat;
 mod dispatch;
 mod handlers;
 mod local;
+mod mcp_rpc;
 mod proxy;
 
 use anyhow::{Context, Result as AnyResult};

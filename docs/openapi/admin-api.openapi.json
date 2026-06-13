@@ -111,6 +111,43 @@
         }
       }
     },
+    "/v1/mcp": {
+      "post": {
+        "operationId": "mcpJsonRpc",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Native MCP JSON-RPC endpoint through FerroGate auth, policy, billing, and audit.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpJsonRpcRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "MCP JSON-RPC response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpJsonRpcResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/v1/mcp/tool/execute": {
       "post": {
         "operationId": "executeMcpTool",
@@ -4024,6 +4061,67 @@
           "limit": {
             "type": "integer",
             "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpJsonRpcRequest": {
+        "type": "object",
+        "required": [
+          "method"
+        ],
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "default": "2.0"
+          },
+          "id": {},
+          "method": {
+            "type": "string",
+            "enum": [
+              "initialize",
+              "ping",
+              "tools/list",
+              "tools/call"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "default": {}
+          }
+        },
+        "additionalProperties": true
+      },
+      "McpJsonRpcResponse": {
+        "type": "object",
+        "required": [
+          "jsonrpc"
+        ],
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "const": "2.0"
+          },
+          "id": {},
+          "result": {},
+          "error": {
+            "$ref": "#/components/schemas/McpJsonRpcError"
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpJsonRpcError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
           }
         },
         "additionalProperties": false

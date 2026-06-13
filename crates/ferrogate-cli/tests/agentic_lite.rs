@@ -200,7 +200,7 @@ fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
 
 #[test]
 fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
-    let (mcp_addr, mcp_handle) = spawn_mcp_server_with_tool(6, "search");
+    let (mcp_addr, mcp_handle) = spawn_mcp_server_with_tool(7, "search");
     let (provider_addr, provider_handle) = spawn_provider_upstream();
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
@@ -233,6 +233,51 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
         "",
     ));
     assert_eq!(tools["data"][0]["name"], "github-search");
+
+    let initialized = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ferrogate-test","version":"1.0.0"}}}"#,
+    ));
+    assert_eq!(initialized["jsonrpc"], "2.0");
+    assert_eq!(initialized["id"], 1);
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "ferrogate");
+
+    let mcp_tools = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+    ));
+    assert_eq!(mcp_tools["jsonrpc"], "2.0");
+    assert_eq!(mcp_tools["id"], 2);
+    assert_eq!(mcp_tools["result"]["tools"][0]["name"], "github-search");
+
+    let mcp_called = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"github-search","arguments":{"query":"ferrogate"}}}"#,
+    ));
+    assert_eq!(mcp_called["jsonrpc"], "2.0");
+    assert_eq!(mcp_called["id"], 3);
+    assert_eq!(
+        mcp_called["result"]["content"][0]["text"],
+        "ferrogate-result"
+    );
 
     let chat = http_request(
         &gateway_addr,
@@ -304,6 +349,25 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
             && event["tenant"]["api_key_id"] == "tool-client"
             && event["target"] == "tools"
             && event["outcome"] == "success"
+    }));
+    assert!(audit_events.iter().any(|event| {
+        event["action"] == "tool.list"
+            && event["target"] == "mcp"
+            && event["tenant"]["api_key_id"] == "tool-client"
+            && event["message"]
+                .as_str()
+                .unwrap()
+                .contains("native MCP endpoint")
+    }));
+    assert!(audit_events.iter().any(|event| {
+        event["action"] == "tool.execute"
+            && event["target"] == "mcp:github/tool:search"
+            && event["outcome"] == "success"
+            && event["tenant"]["api_key_id"] == "tool-client"
+            && event["message"]
+                .as_str()
+                .unwrap()
+                .contains("executed through native MCP endpoint")
     }));
     assert!(audit_events.iter().any(|event| {
         event["action"] == "tool.execute"

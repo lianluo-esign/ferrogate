@@ -87,6 +87,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/v1/mcp" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_mcp_rpc(session, ctx, headers, &method).await?;
+            return Ok(true);
+        }
+
         if path.starts_with("/v1/prompts/") && path.ends_with("/render") {
             let headers = req.headers.clone();
             let method = req.method.clone();

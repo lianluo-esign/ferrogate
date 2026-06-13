@@ -33,6 +33,7 @@ use crate::{
 };
 
 use super::body::read_request_body;
+use super::mcp_rpc;
 use super::{FerroGateway, ProxyContext};
 
 const SERVICE_NAME: &str = "ferrogate";
@@ -1340,6 +1341,77 @@ impl FerroGateway {
         .await
     }
 
+    pub(super) async fn handle_mcp_rpc(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+    ) -> PingoraResult<()> {
+        if *method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "MCP JSON-RPC endpoint requires POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let rpc: mcp_rpc::McpJsonRpcRequest = match serde_json::from_slice(&body) {
+            Ok(rpc) => rpc,
+            Err(error) => {
+                let response = mcp_rpc::error(None, -32700, format!("parse error: {error}"));
+                return write_json_response(session, StatusCode::OK, &response, &ctx.request_id)
+                    .await;
+            }
+        };
+        if rpc
+            .jsonrpc
+            .as_deref()
+            .is_some_and(|version| version != "2.0")
+        {
+            let response = mcp_rpc::error(rpc.id, -32600, "invalid JSON-RPC version");
+            return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
+        }
+
+        let required_scope = mcp_rpc::required_scope(&rpc.method);
+        let state = self.state.current();
+        let auth = match authenticate(&state, &headers, required_scope, &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let response = mcp_rpc::handle_request(&state, ctx, &auth, rpc).await;
+        write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+    }
+
     async fn handle_tool_execute_with_backend(
         &self,
         session: &mut Session,
@@ -1404,7 +1476,7 @@ impl FerroGateway {
             }
         };
         let mcp_audit_details = (backend == ToolExecuteBackend::Mcp)
-            .then(|| mcp_tool_audit_details(&request.name))
+            .then(|| mcp_rpc::tool_audit_details(&request.name))
             .flatten();
         let audit_target = request
             .session_id
@@ -1413,14 +1485,16 @@ impl FerroGateway {
                 mcp_audit_details
                     .as_ref()
                     .map(|(server_name, tool_name)| {
-                        mcp_tool_session_audit_target(session_id, server_name, tool_name)
+                        mcp_rpc::tool_session_mcp_audit_target(session_id, server_name, tool_name)
                     })
-                    .unwrap_or_else(|| tool_session_audit_target(session_id))
+                    .unwrap_or_else(|| mcp_rpc::tool_session_audit_target(session_id))
             })
             .unwrap_or_else(|| {
                 mcp_audit_details
                     .as_ref()
-                    .map(|(server_name, tool_name)| mcp_tool_audit_target(server_name, tool_name))
+                    .map(|(server_name, tool_name)| {
+                        mcp_rpc::tool_audit_target(server_name, tool_name)
+                    })
                     .unwrap_or_else(|| request.name.clone())
             });
 
@@ -1454,7 +1528,7 @@ impl FerroGateway {
                     "tool.execute",
                     audit_target,
                     "success",
-                    mcp_tool_audit_message(
+                    mcp_rpc::tool_audit_message(
                         mcp_audit_details.as_ref(),
                         &response.name,
                         "executed",
@@ -1470,7 +1544,7 @@ impl FerroGateway {
                     "tool.execute",
                     audit_target,
                     "error",
-                    mcp_tool_audit_failure_message(
+                    mcp_rpc::tool_audit_failure_message(
                         mcp_audit_details.as_ref(),
                         &request.name,
                         error.code(),
@@ -3448,61 +3522,6 @@ fn parse_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
         .split('&')
         .filter_map(|part| part.split_once('='))
         .find_map(|(name, value)| (name == key).then_some(value))
-}
-
-fn tool_session_audit_target(session_id: &str) -> String {
-    format!("tool_session:{session_id}")
-}
-
-fn mcp_tool_session_audit_target(session_id: &str, server_name: &str, tool_name: &str) -> String {
-    format!(
-        "{}/{}",
-        tool_session_audit_target(session_id),
-        mcp_tool_audit_target(server_name, tool_name)
-    )
-}
-
-fn mcp_tool_audit_details(name: &str) -> Option<(String, String)> {
-    let (server_name, tool_name) = name.split_once('-')?;
-    Some((server_name.into(), tool_name.into()))
-}
-
-fn mcp_tool_audit_target(server_name: &str, tool_name: &str) -> String {
-    format!("mcp:{server_name}/tool:{tool_name}")
-}
-
-fn mcp_tool_audit_message(
-    details: Option<&(String, String)>,
-    tool_name: &str,
-    action: &str,
-    latency_ms: Option<u64>,
-) -> String {
-    match details {
-        Some((server_name, upstream_tool_name)) => {
-            let latency = latency_ms
-                .map(|latency_ms| format!(" in {latency_ms}ms"))
-                .unwrap_or_default();
-            format!("MCP upstream mcp:{server_name} tool {upstream_tool_name} {action}{latency}")
-        }
-        None => match latency_ms {
-            Some(latency_ms) => format!("tool {tool_name} {action} in {latency_ms}ms"),
-            None => format!("tool {tool_name} {action}"),
-        },
-    }
-}
-
-fn mcp_tool_audit_failure_message(
-    details: Option<&(String, String)>,
-    tool_name: &str,
-    code: &str,
-    message: &str,
-) -> String {
-    match details {
-        Some((server_name, upstream_tool_name)) => format!(
-            "MCP upstream mcp:{server_name} tool {upstream_tool_name} failed: {code}: {message}"
-        ),
-        None => format!("tool {tool_name} failed: {code}: {message}"),
-    }
 }
 
 fn admin_audit_event_draft_for_action(

@@ -1350,6 +1350,18 @@ impl AppState {
         tools
     }
 
+    pub(crate) fn mcp_tools_for(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        api_key_id: Option<&str>,
+        route: Option<&str>,
+    ) -> Vec<RegisteredTool> {
+        self.tools_for(tenant, api_key_id, route)
+            .into_iter()
+            .filter(|tool| tool.extension_id.starts_with("mcp."))
+            .collect()
+    }
+
     pub(crate) fn all_tools(&self) -> Vec<RegisteredTool> {
         let mut tools = self.extension_registry.all_tools();
         tools.extend(self.mcp_registered_tools());
