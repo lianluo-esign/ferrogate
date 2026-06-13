@@ -1062,6 +1062,116 @@ impl FerroGateway {
             )
             .await;
         };
+        if !auth.can_use_model(&template.model) {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "prompt_template.render",
+                id,
+                "rejected",
+                format!(
+                    "API key is not allowed to render prompt template model {}",
+                    template.model
+                ),
+            ));
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "model_not_allowed",
+                format!("API key is not allowed to use model {}", template.model),
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let model = match state.resolve_model(&template.model) {
+            Ok(model) => model,
+            Err(ferrogate_providers::ModelRegistryError::ModelDisabled { .. }) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.render",
+                    id,
+                    "rejected",
+                    format!("model {} is disabled", template.model),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "model_disabled",
+                    format!("model {} is disabled", template.model),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            Err(_) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "prompt_template.render",
+                    id,
+                    "rejected",
+                    format!("unknown model {}", template.model),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "model_not_found",
+                    format!("unknown model {}", template.model),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if !state.can_tenant_use_model(
+            &template.model,
+            auth.organization_id.as_deref(),
+            auth.project_id.as_deref(),
+        ) {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "prompt_template.render",
+                id,
+                "rejected",
+                format!("model {} is not visible to this tenant", template.model),
+            ));
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "model_not_visible",
+                format!("model {} is not visible to this tenant", template.model),
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let routes = state.candidate_model_routes(&model, None);
+        if !routes
+            .iter()
+            .any(|route| auth.can_use_provider(&route.provider))
+        {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "prompt_template.render",
+                id,
+                "rejected",
+                format!(
+                    "API key is not allowed to use any provider for model {}",
+                    template.model
+                ),
+            ));
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "provider_not_allowed",
+                format!(
+                    "API key is not allowed to use any provider for model {}",
+                    template.model
+                ),
+                &ctx.request_id,
+            )
+            .await;
+        }
         if template.status != PromptTemplateStatus::Active {
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                 ctx,

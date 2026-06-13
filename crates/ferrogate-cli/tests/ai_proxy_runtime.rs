@@ -697,6 +697,12 @@ provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat"]
 
+[[models]]
+name = "other-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
 [[api_keys]]
 id = "prompt-client"
 name = "Prompt client"
@@ -705,6 +711,13 @@ scopes = ["chat.completions", "prompts.render", "admin.read"]
 allowed_models = ["prompt-chat"]
 organization_id = "org_prompt"
 project_id = "project_templates"
+
+[[api_keys]]
+id = "prompt-denied"
+name = "Prompt denied"
+key = "denied-secret"
+scopes = ["prompts.render"]
+allowed_models = ["other-chat"]
 
 [[api_keys]]
 id = "admin"
@@ -765,6 +778,24 @@ scopes = ["admin.read", "admin.write"]
     assert_eq!(rendered["temperature"], 0.2);
     assert_eq!(rendered["messages"][0]["content"], "Reply in brief mode.");
     assert_eq!(rendered["messages"][1]["content"], "Hello Ada");
+
+    let denied_render = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/prompts/support-reply/render",
+        &[
+            "Authorization: Bearer denied-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"variables":{"customer":"Ada"}}"#,
+    );
+    assert!(denied_render.contains("403 Forbidden"), "{denied_render}");
+    assert!(
+        denied_render.contains("model_not_allowed"),
+        "{denied_render}"
+    );
+    assert!(!denied_render.contains("Hello Ada"), "{denied_render}");
+    assert!(!denied_render.contains("denied-secret"), "{denied_render}");
 
     let chat = http_request(
         &gateway_addr,
