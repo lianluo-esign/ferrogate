@@ -433,7 +433,7 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
         "",
     );
     assert!(
-        metrics.contains("ferrogate_mcp_tool_calls_total 2"),
+        metrics.contains("ferrogate_mcp_tool_calls_total 3"),
         "{metrics}"
     );
 
