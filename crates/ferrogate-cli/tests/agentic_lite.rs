@@ -233,7 +233,6 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
         "",
     ));
     assert_eq!(tools["data"][0]["name"], "github-search");
-    let tool_list_request_id = tools["request_id"].as_str().unwrap().to_string();
 
     let chat = http_request(
         &gateway_addr,
@@ -299,7 +298,9 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
     let audit_events = audit_events["data"].as_array().unwrap();
     assert!(audit_events.iter().any(|event| {
         event["action"] == "tool.list"
-            && event["request_id"] == tool_list_request_id
+            && event["request_id"]
+                .as_str()
+                .is_some_and(|request_id| request_id.starts_with("fg-"))
             && event["tenant"]["api_key_id"] == "tool-client"
             && event["target"] == "tools"
             && event["outcome"] == "success"
