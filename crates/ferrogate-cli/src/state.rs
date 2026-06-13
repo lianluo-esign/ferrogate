@@ -735,6 +735,7 @@ pub(crate) struct AdminAuditEventDraft {
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
     pub(crate) actor_api_key_id: Option<String>,
+    pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) action: String,
     pub(crate) target: String,
     pub(crate) outcome: String,
@@ -2335,6 +2336,7 @@ impl AppState {
                 cluster_id: Some(self.cluster_identity.cluster_id.clone()),
                 node_id: Some(self.cluster_identity.node_id.clone()),
                 actor_api_key_id: event.actor_api_key_id,
+                tenant: event.tenant,
                 action: event.action,
                 target: event.target,
                 outcome: event.outcome,
@@ -2457,13 +2459,17 @@ impl AppState {
 
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
         let target = format!("tool_session:{session_id}");
+        let target_prefix = format!("{target}/");
         self.audit_events
             .lock()
             .map(|events| {
                 events
                     .list()
                     .into_iter()
-                    .filter(|event| event.action == "tool.execute" && event.target == target)
+                    .filter(|event| {
+                        event.action == "tool.execute"
+                            && (event.target == target || event.target.starts_with(&target_prefix))
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -4253,6 +4259,7 @@ mod tests {
                 request_id: format!("fg-{index}"),
                 trace_id: None,
                 actor_api_key_id: None,
+                tenant: ferrogate_core::TenantContext::default(),
                 action: "config.validate".into(),
                 target: "config".into(),
                 outcome: "accepted".into(),

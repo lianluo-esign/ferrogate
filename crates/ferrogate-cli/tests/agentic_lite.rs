@@ -233,6 +233,7 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
         "",
     ));
     assert_eq!(tools["data"][0]["name"], "github-search");
+    let tool_list_request_id = tools["request_id"].as_str().unwrap().to_string();
 
     let chat = http_request(
         &gateway_addr,
@@ -287,6 +288,58 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
     ));
     assert_eq!(policy_denied["error"]["code"], "tool_denied");
     assert_eq!(policy_denied["error"]["message"], "MCP search is blocked");
+
+    let audit_events = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let audit_events = audit_events["data"].as_array().unwrap();
+    assert!(audit_events.iter().any(|event| {
+        event["action"] == "tool.list"
+            && event["request_id"] == tool_list_request_id
+            && event["tenant"]["api_key_id"] == "tool-client"
+            && event["target"] == "tools"
+            && event["outcome"] == "success"
+    }));
+    assert!(audit_events.iter().any(|event| {
+        event["action"] == "tool.execute"
+            && event["target"] == "tool_session:mcp-session-1/mcp:github/tool:search"
+            && event["outcome"] == "success"
+            && event["tenant"]["organization_id"] == "org_demo"
+            && event["tenant"]["project_id"] == "project_gateway"
+            && event["tenant"]["api_key_id"] == "tool-client"
+            && event["message"]
+                .as_str()
+                .unwrap()
+                .contains("MCP upstream mcp:github tool search executed")
+    }));
+    assert!(audit_events.iter().any(|event| {
+        event["action"] == "tool.execute"
+            && event["target"] == "mcp:github/tool:search"
+            && event["outcome"] == "error"
+            && event["tenant"]["api_key_id"] == "blocked-client"
+            && event["message"]
+                .as_str()
+                .unwrap()
+                .contains("MCP upstream mcp:github tool search failed")
+    }));
+
+    let session_events = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tool-sessions/mcp-session-1",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let session_events = session_events["data"].as_array().unwrap();
+    assert_eq!(session_events.len(), 1);
+    assert_eq!(
+        session_events[0]["target"],
+        "tool_session:mcp-session-1/mcp:github/tool:search"
+    );
 
     let billing = response_json(http_request(
         &gateway_addr,

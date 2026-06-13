@@ -489,6 +489,7 @@ impl FerroGateway {
                     request_id: ctx.request_id.clone(),
                     trace_id: ctx.trace_id.clone(),
                     actor_api_key_id: auth.api_key_id.clone(),
+                    tenant: auth.tenant_context(),
                     action: "guardrail.deny".into(),
                     target: guardrail.rule_id.clone(),
                     outcome: "blocked".into(),

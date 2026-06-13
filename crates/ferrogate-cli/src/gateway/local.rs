@@ -37,7 +37,7 @@ use super::{FerroGateway, ProxyContext};
 
 const SERVICE_NAME: &str = "ferrogate";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolExecuteBackend {
     Extension,
     Mcp,
@@ -1274,11 +1274,23 @@ impl FerroGateway {
                 let route = query
                     .and_then(|query| parse_query_param(query, "route"))
                     .map(str::to_string);
-                let body = AdminList::new(state.tools_for(
+                let tools = state.tools_for(
                     &auth.tenant_context(),
                     auth.api_key_id.as_deref(),
                     route.as_deref(),
+                );
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "tool.list",
+                    route
+                        .as_deref()
+                        .map(|route| format!("route:{route}"))
+                        .unwrap_or_else(|| "tools".into()),
+                    "success",
+                    format!("listed {} tools", tools.len()),
                 ));
+                let body = AdminList::new(tools);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -1391,11 +1403,26 @@ impl FerroGateway {
                 .await;
             }
         };
+        let mcp_audit_details = (backend == ToolExecuteBackend::Mcp)
+            .then(|| mcp_tool_audit_details(&request.name))
+            .flatten();
         let audit_target = request
             .session_id
             .as_ref()
-            .map(|session_id| tool_session_audit_target(session_id))
-            .unwrap_or_else(|| request.name.clone());
+            .map(|session_id| {
+                mcp_audit_details
+                    .as_ref()
+                    .map(|(server_name, tool_name)| {
+                        mcp_tool_session_audit_target(session_id, server_name, tool_name)
+                    })
+                    .unwrap_or_else(|| tool_session_audit_target(session_id))
+            })
+            .unwrap_or_else(|| {
+                mcp_audit_details
+                    .as_ref()
+                    .map(|(server_name, tool_name)| mcp_tool_audit_target(server_name, tool_name))
+                    .unwrap_or_else(|| request.name.clone())
+            });
 
         let result = match backend {
             ToolExecuteBackend::Extension => {
@@ -1427,9 +1454,11 @@ impl FerroGateway {
                     "tool.execute",
                     audit_target,
                     "success",
-                    format!(
-                        "tool {} executed in {}ms",
-                        response.name, response.latency_ms
+                    mcp_tool_audit_message(
+                        mcp_audit_details.as_ref(),
+                        &response.name,
+                        "executed",
+                        Some(response.latency_ms),
                     ),
                 ));
                 write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
@@ -1441,11 +1470,11 @@ impl FerroGateway {
                     "tool.execute",
                     audit_target,
                     "error",
-                    format!(
-                        "tool {} failed: {}: {}",
-                        request.name,
+                    mcp_tool_audit_failure_message(
+                        mcp_audit_details.as_ref(),
+                        &request.name,
                         error.code(),
-                        error.message()
+                        error.message(),
                     ),
                 ));
                 write_json_error(
@@ -3425,6 +3454,57 @@ fn tool_session_audit_target(session_id: &str) -> String {
     format!("tool_session:{session_id}")
 }
 
+fn mcp_tool_session_audit_target(session_id: &str, server_name: &str, tool_name: &str) -> String {
+    format!(
+        "{}/{}",
+        tool_session_audit_target(session_id),
+        mcp_tool_audit_target(server_name, tool_name)
+    )
+}
+
+fn mcp_tool_audit_details(name: &str) -> Option<(String, String)> {
+    let (server_name, tool_name) = name.split_once('-')?;
+    Some((server_name.into(), tool_name.into()))
+}
+
+fn mcp_tool_audit_target(server_name: &str, tool_name: &str) -> String {
+    format!("mcp:{server_name}/tool:{tool_name}")
+}
+
+fn mcp_tool_audit_message(
+    details: Option<&(String, String)>,
+    tool_name: &str,
+    action: &str,
+    latency_ms: Option<u64>,
+) -> String {
+    match details {
+        Some((server_name, upstream_tool_name)) => {
+            let latency = latency_ms
+                .map(|latency_ms| format!(" in {latency_ms}ms"))
+                .unwrap_or_default();
+            format!("MCP upstream mcp:{server_name} tool {upstream_tool_name} {action}{latency}")
+        }
+        None => match latency_ms {
+            Some(latency_ms) => format!("tool {tool_name} {action} in {latency_ms}ms"),
+            None => format!("tool {tool_name} {action}"),
+        },
+    }
+}
+
+fn mcp_tool_audit_failure_message(
+    details: Option<&(String, String)>,
+    tool_name: &str,
+    code: &str,
+    message: &str,
+) -> String {
+    match details {
+        Some((server_name, upstream_tool_name)) => format!(
+            "MCP upstream mcp:{server_name} tool {upstream_tool_name} failed: {code}: {message}"
+        ),
+        None => format!("tool {tool_name} failed: {code}: {message}"),
+    }
+}
+
 fn admin_audit_event_draft_for_action(
     ctx: &ProxyContext,
     auth: &crate::auth::AuthContext,
@@ -3447,6 +3527,7 @@ fn admin_audit_event_draft_for_target(
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
         actor_api_key_id: auth.api_key_id.clone(),
+        tenant: auth.tenant_context(),
         action: action.into(),
         target: target.into(),
         outcome: outcome.into(),

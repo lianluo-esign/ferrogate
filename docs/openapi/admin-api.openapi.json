@@ -3487,6 +3487,9 @@
               "null"
             ]
           },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
           "action": {
             "type": "string"
           },
