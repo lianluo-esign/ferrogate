@@ -300,7 +300,7 @@ fn validates_optional_metering_export_boundary() {
     enabled.metering.export_endpoint = "http://127.0.0.1:8888/api/v1/events".into();
     enabled.metering.export_event_type = "ai.tokens".into();
     enabled.metering.export_source = "ferrogate-test".into();
-    enabled.metering.export_subject = MeteringExportSubject::OrganizationId;
+    enabled.metering.export_subject = MeteringExportSubject::Organization;
     enabled.validate().unwrap();
 }
 

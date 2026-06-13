@@ -527,10 +527,14 @@ pub(crate) enum MeteringExportProvider {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MeteringExportSubject {
     #[default]
-    ApiKeyId,
-    OrganizationId,
-    ProjectId,
-    UserId,
+    #[serde(rename = "api_key_id")]
+    ApiKey,
+    #[serde(rename = "organization_id")]
+    Organization,
+    #[serde(rename = "project_id")]
+    Project,
+    #[serde(rename = "user_id")]
+    User,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

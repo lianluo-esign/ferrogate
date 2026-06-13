@@ -231,10 +231,10 @@ fn metering_idempotency_key(event: &BillingEvent) -> String {
 fn metering_subject(event: &BillingEvent, subject: MeteringExportSubject) -> String {
     let tenant = &event.tenant;
     let configured = match subject {
-        MeteringExportSubject::ApiKeyId => tenant.api_key_id.as_deref(),
-        MeteringExportSubject::OrganizationId => tenant.organization_id.as_deref(),
-        MeteringExportSubject::ProjectId => tenant.project_id.as_deref(),
-        MeteringExportSubject::UserId => tenant.user_id.as_deref(),
+        MeteringExportSubject::ApiKey => tenant.api_key_id.as_deref(),
+        MeteringExportSubject::Organization => tenant.organization_id.as_deref(),
+        MeteringExportSubject::Project => tenant.project_id.as_deref(),
+        MeteringExportSubject::User => tenant.user_id.as_deref(),
     };
     configured
         .or(tenant.api_key_id.as_deref())
@@ -462,7 +462,7 @@ mod tests {
             &event,
             "ai.tokens",
             "ferrogate",
-            MeteringExportSubject::ApiKeyId,
+            MeteringExportSubject::ApiKey,
         ))
         .unwrap();
 
@@ -501,7 +501,7 @@ mod tests {
         };
 
         assert_eq!(
-            metering_subject(&event, MeteringExportSubject::ApiKeyId),
+            metering_subject(&event, MeteringExportSubject::ApiKey),
             "org_demo"
         );
         assert_eq!(metering_idempotency_key(&event), "ferrogate:req_123");
