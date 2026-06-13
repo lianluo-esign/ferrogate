@@ -252,6 +252,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/metering-export-status" {
+            let headers = req.headers.clone();
+            self.handle_admin_metering_export_status(session, ctx, &headers)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/usage-aggregates" {
             let headers = req.headers.clone();
             self.handle_admin_usage_aggregates(session, ctx, &headers)

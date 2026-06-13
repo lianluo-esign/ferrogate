@@ -232,16 +232,24 @@ impl Config {
     }
 
     fn validate_metering(&self) -> AnyResult<()> {
-        if self.metering.export_endpoint.trim().is_empty() {
-            bail!("field metering.export_endpoint: cannot be empty");
-        }
-        if !self.metering.export_endpoint.starts_with("http://")
-            && !self.metering.export_endpoint.starts_with("https://")
-        {
-            bail!("field metering.export_endpoint: must start with http:// or https://");
+        if self.metering.export_enabled {
+            if self.metering.export_endpoint.trim().is_empty() {
+                bail!("field metering.export_endpoint: cannot be empty");
+            }
+            if !self.metering.export_endpoint.starts_with("http://")
+                && !self.metering.export_endpoint.starts_with("https://")
+            {
+                bail!("field metering.export_endpoint: must start with http:// or https://");
+            }
         }
         if self.metering.export_timeout_secs == 0 {
             bail!("field metering.export_timeout_secs: must be greater than zero");
+        }
+        if self.metering.export_event_type.trim().is_empty() {
+            bail!("field metering.export_event_type: cannot be empty");
+        }
+        if self.metering.export_source.trim().is_empty() {
+            bail!("field metering.export_source: cannot be empty");
         }
         let has_token_env = self
             .metering

@@ -2902,6 +2902,31 @@ impl FerroGateway {
             .await
     }
 
+    pub(super) async fn handle_admin_metering_export_status(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList::new(state.metering_export_status());
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_admin_usage_aggregates(
         &self,
         session: &mut Session,

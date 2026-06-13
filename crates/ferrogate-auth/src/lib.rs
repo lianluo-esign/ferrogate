@@ -309,7 +309,7 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         }
         buffer.extend_from_slice(&chunk[..read]);
         if buffer.len() > MAX_REQUEST_BYTES {
-            return Err(anyhow!("request exceeds {} bytes", MAX_REQUEST_BYTES));
+            return Err(anyhow!("request exceeds {MAX_REQUEST_BYTES} bytes"));
         }
         if let Some(index) = find_header_end(&buffer) {
             break index;
@@ -349,7 +349,7 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         }
         buffer.extend_from_slice(&chunk[..read]);
         if buffer.len() > MAX_REQUEST_BYTES {
-            return Err(anyhow!("request exceeds {} bytes", MAX_REQUEST_BYTES));
+            return Err(anyhow!("request exceeds {MAX_REQUEST_BYTES} bytes"));
         }
     }
 

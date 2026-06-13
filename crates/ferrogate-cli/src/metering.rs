@@ -8,23 +8,41 @@ use anyhow::{bail, Context, Result as AnyResult};
 use http::{HeaderValue, StatusCode, Uri};
 use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use std::{
+    collections::VecDeque,
     io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
-    sync::{Arc, OnceLock},
-    time::Duration,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use ferrogate_billing::BillingEvent;
 use serde::Serialize;
 use tokio::task;
 
-use crate::config::MeteringConfig;
+use crate::config::{MeteringConfig, MeteringExportProvider, MeteringExportSubject};
 
 #[derive(Debug, Clone)]
 pub(crate) struct MeteringExporter {
     endpoint: String,
     bearer_token: String,
     timeout: Duration,
+    provider: MeteringExportProvider,
+    event_type: String,
+    source: String,
+    subject: MeteringExportSubject,
+    statuses: Arc<Mutex<VecDeque<MeteringExportStatus>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MeteringExportStatus {
+    pub(crate) request_id: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) provider: MeteringExportProvider,
+    pub(crate) endpoint: String,
+    pub(crate) success: bool,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+    pub(crate) occurred_at_unix: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,6 +50,35 @@ struct MeteringExportEnvelope<'a> {
     object: &'static str,
     idempotency_key: String,
     event: &'a BillingEvent,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenMeterCloudEvent<'a> {
+    specversion: &'static str,
+    id: String,
+    source: &'a str,
+    #[serde(rename = "type")]
+    event_type: &'a str,
+    subject: String,
+    data: OpenMeterUsageData<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenMeterUsageData<'a> {
+    request_id: &'a str,
+    trace_id: Option<&'a str>,
+    tenant: &'a ferrogate_core::TenantContext,
+    logical_model: &'a str,
+    provider: &'a str,
+    provider_model: &'a str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    usage_source: ferrogate_billing::BillingUsageSource,
+    status_code: u16,
+    cluster_id: Option<&'a str>,
+    node_id: Option<&'a str>,
+    occurred_at_unix: Option<u64>,
 }
 
 impl MeteringExporter {
@@ -55,39 +102,154 @@ impl MeteringExporter {
             endpoint: config.export_endpoint.clone(),
             bearer_token,
             timeout: Duration::from_secs(config.export_timeout_secs),
+            provider: config.export_provider,
+            event_type: config.export_event_type.trim().to_string(),
+            source: config.export_source.trim().to_string(),
+            subject: config.export_subject,
+            statuses: Arc::new(Mutex::new(VecDeque::new())),
         }))
     }
 
     pub(crate) fn export_event(&self, event: BillingEvent) {
         let exporter = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = exporter.export_event_async(&event).await {
-                tracing::warn!(
-                    request_id = %event.request_id,
-                    error = %error,
-                    "token metering export failed"
-                );
+            match exporter.export_event_async(&event).await {
+                Ok(()) => exporter.record_status(&event, true, "exported", None),
+                Err(error) => {
+                    let error = error.to_string();
+                    exporter.record_status(&event, false, "failed", Some(error.clone()));
+                    tracing::warn!(
+                        request_id = %event.request_id,
+                        error = %error,
+                        "token metering export failed"
+                    );
+                }
             }
         });
+    }
+
+    pub(crate) fn statuses(&self) -> Vec<MeteringExportStatus> {
+        self.statuses
+            .lock()
+            .map(|statuses| statuses.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     async fn export_event_async(&self, event: &BillingEvent) -> AnyResult<()> {
         let endpoint = self.endpoint.clone();
         let bearer_token = self.bearer_token.clone();
         let timeout = self.timeout;
+        let provider = self.provider;
+        let event_type = self.event_type.clone();
+        let source = self.source.clone();
+        let subject = self.subject;
         let event = event.clone();
         task::spawn_blocking(move || {
-            let body = serde_json::to_vec(&MeteringExportEnvelope {
-                object: "token_metering_event",
-                idempotency_key: format!("ferrogate:{}", event.request_id),
-                event: &event,
-            })
+            let body = match provider {
+                MeteringExportProvider::Legacy => serde_json::to_vec(&MeteringExportEnvelope {
+                    object: "token_metering_event",
+                    idempotency_key: metering_idempotency_key(&event),
+                    event: &event,
+                }),
+                MeteringExportProvider::Openmeter => {
+                    serde_json::to_vec(&openmeter_event(&event, &event_type, &source, subject))
+                }
+            }
             .context("failed to serialize metering event")?;
             post_json(&endpoint, &bearer_token, &body, timeout)
         })
         .await
         .context("metering export task failed")?
     }
+
+    fn record_status(
+        &self,
+        event: &BillingEvent,
+        success: bool,
+        status: &'static str,
+        error: Option<String>,
+    ) {
+        let Ok(mut statuses) = self.statuses.lock() else {
+            return;
+        };
+        statuses.push_back(MeteringExportStatus {
+            request_id: event.request_id.clone(),
+            trace_id: event.trace_id.clone(),
+            provider: self.provider,
+            endpoint: self.endpoint.clone(),
+            success,
+            status: status.into(),
+            error,
+            occurred_at_unix: now_unix_seconds(),
+        });
+        while statuses.len() > 128 {
+            statuses.pop_front();
+        }
+    }
+}
+
+fn openmeter_event<'a>(
+    event: &'a BillingEvent,
+    event_type: &'a str,
+    source: &'a str,
+    subject: MeteringExportSubject,
+) -> OpenMeterCloudEvent<'a> {
+    OpenMeterCloudEvent {
+        specversion: "1.0",
+        id: metering_idempotency_key(event),
+        source,
+        event_type,
+        subject: metering_subject(event, subject),
+        data: OpenMeterUsageData {
+            request_id: &event.request_id,
+            trace_id: event.trace_id.as_deref(),
+            tenant: &event.tenant,
+            logical_model: &event.logical_model,
+            provider: &event.provider,
+            provider_model: &event.provider_model,
+            prompt_tokens: event.usage.prompt_tokens,
+            completion_tokens: event.usage.completion_tokens,
+            total_tokens: event.usage.total_tokens,
+            usage_source: event.usage_source,
+            status_code: event.status_code,
+            cluster_id: event.cluster_id.as_deref(),
+            node_id: event.node_id.as_deref(),
+            occurred_at_unix: event.occurred_at_unix,
+        },
+    }
+}
+
+fn metering_idempotency_key(event: &BillingEvent) -> String {
+    event
+        .trace_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|trace_id| format!("ferrogate:{trace_id}:{}", event.request_id))
+        .unwrap_or_else(|| format!("ferrogate:{}", event.request_id))
+}
+
+fn metering_subject(event: &BillingEvent, subject: MeteringExportSubject) -> String {
+    let tenant = &event.tenant;
+    let configured = match subject {
+        MeteringExportSubject::ApiKeyId => tenant.api_key_id.as_deref(),
+        MeteringExportSubject::OrganizationId => tenant.organization_id.as_deref(),
+        MeteringExportSubject::ProjectId => tenant.project_id.as_deref(),
+        MeteringExportSubject::UserId => tenant.user_id.as_deref(),
+    };
+    configured
+        .or(tenant.api_key_id.as_deref())
+        .or(tenant.organization_id.as_deref())
+        .or(tenant.project_id.as_deref())
+        .or(tenant.user_id.as_deref())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 fn post_json(endpoint: &str, bearer_token: &str, body: &[u8], timeout: Duration) -> AnyResult<()> {
@@ -265,4 +427,83 @@ fn parse_target(raw: &str) -> AnyResult<Target> {
         authority,
         path_query,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ferrogate_billing::{BillingUsageSource, TokenUsage};
+
+    use super::*;
+
+    #[test]
+    fn openmeter_event_maps_billing_event_to_cloud_event() {
+        let event = BillingEvent {
+            request_id: "req_123".into(),
+            trace_id: Some("trace_456".into()),
+            cluster_id: Some("cluster-a".into()),
+            node_id: Some("node-a".into()),
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some("org_demo".into()),
+                team_id: None,
+                project_id: Some("project_gateway".into()),
+                user_id: None,
+                api_key_id: Some("client".into()),
+            },
+            logical_model: "fast-chat".into(),
+            provider: "openai".into(),
+            provider_model: "gpt-4o-mini".into(),
+            usage: TokenUsage::new(3, 5, 8),
+            usage_source: BillingUsageSource::ProviderUsage,
+            status_code: 200,
+            occurred_at_unix: Some(1_800_000_000),
+        };
+
+        let payload = serde_json::to_value(openmeter_event(
+            &event,
+            "ai.tokens",
+            "ferrogate",
+            MeteringExportSubject::ApiKeyId,
+        ))
+        .unwrap();
+
+        assert_eq!(payload["specversion"], "1.0");
+        assert_eq!(payload["id"], "ferrogate:trace_456:req_123");
+        assert_eq!(payload["source"], "ferrogate");
+        assert_eq!(payload["type"], "ai.tokens");
+        assert_eq!(payload["subject"], "client");
+        assert_eq!(payload["data"]["logical_model"], "fast-chat");
+        assert_eq!(payload["data"]["provider"], "openai");
+        assert_eq!(payload["data"]["provider_model"], "gpt-4o-mini");
+        assert_eq!(payload["data"]["prompt_tokens"], 3);
+        assert_eq!(payload["data"]["completion_tokens"], 5);
+        assert_eq!(payload["data"]["total_tokens"], 8);
+        assert_eq!(payload["data"]["tenant"]["organization_id"], "org_demo");
+    }
+
+    #[test]
+    fn metering_subject_falls_back_to_available_tenant_identity() {
+        let event = BillingEvent {
+            request_id: "req_123".into(),
+            trace_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some("org_demo".into()),
+                ..Default::default()
+            },
+            logical_model: "fast-chat".into(),
+            provider: "openai".into(),
+            provider_model: "gpt-4o-mini".into(),
+            usage: TokenUsage::new(0, 0, 0),
+            usage_source: BillingUsageSource::GatewayEstimate,
+            status_code: 200,
+            occurred_at_unix: None,
+        };
+
+        assert_eq!(
+            metering_subject(&event, MeteringExportSubject::ApiKeyId),
+            "org_demo"
+        );
+        assert_eq!(metering_idempotency_key(&event), "ferrogate:req_123");
+    }
 }

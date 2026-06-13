@@ -282,6 +282,10 @@ fn validates_optional_metering_export_boundary() {
         config.metering.export_endpoint,
         "https://api.token4ai.cloud/v1/metering/events"
     );
+    assert_eq!(
+        config.metering.export_provider,
+        MeteringExportProvider::Legacy
+    );
     config.validate().unwrap();
 
     let mut enabled = Config::default();
@@ -290,6 +294,13 @@ fn validates_optional_metering_export_boundary() {
     assert!(error.contains("metering.export_token_env"));
 
     enabled.metering.export_token_env = Some("FERROGATE_METERING_TOKEN".into());
+    enabled.validate().unwrap();
+
+    enabled.metering.export_provider = MeteringExportProvider::Openmeter;
+    enabled.metering.export_endpoint = "http://127.0.0.1:8888/api/v1/events".into();
+    enabled.metering.export_event_type = "ai.tokens".into();
+    enabled.metering.export_source = "ferrogate-test".into();
+    enabled.metering.export_subject = MeteringExportSubject::OrganizationId;
     enabled.validate().unwrap();
 }
 

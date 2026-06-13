@@ -262,7 +262,12 @@ access_log_error_rate_limit_per_sec = 100
 [metering]
 export_enabled = false
 export_endpoint = "https://api.token4ai.cloud/v1/metering/events"
+export_provider = "legacy"
 # export_token_env = "FERROGATE_METERING_TOKEN"
+export_timeout_secs = 3
+export_event_type = "ai.tokens"
+export_source = "ferrogate"
+export_subject = "api_key_id"
 
 [storage]
 request_log_retention_records = 10000
@@ -333,6 +338,27 @@ api_key_ids = ["dev"]
 models = ["mcp_tool:github-search"]
 providers = ["mcp:github"]
 message = "MCP search is blocked for this key"
+```
+
+For third-party usage billing, set `export_provider = "openmeter"` and point
+`export_endpoint` at an OpenMeter-compatible CloudEvents ingestion endpoint,
+for example `/api/v1/events`. FerroGate sends the request ID / trace ID
+idempotency key, tenant subject, logical model, provider, provider model,
+provider-reported or gateway-estimated token counts, and cluster/node
+dimensions after usage is known. Export failures are logged and retained under
+`GET /admin/v1/metering-export-status`; they do not fail an otherwise
+successful AI request.
+
+```toml
+[metering]
+export_enabled = true
+export_provider = "openmeter"
+export_endpoint = "https://openmeter.example.com/api/v1/events"
+export_token_env = "OPENMETER_TOKEN"
+export_timeout_secs = 3
+export_event_type = "ai.tokens"
+export_source = "ferrogate"
+export_subject = "api_key_id" # api_key_id, organization_id, project_id, or user_id
 ```
 
 The first cache mode is `exact_match`. FerroGate only caches non-streaming AI
@@ -620,6 +646,7 @@ DELETE /admin/v1/policies/{name}
 GET  /admin/v1/request-logs
 GET  /admin/v1/metering-events
 GET  /admin/v1/billing-events  # compatibility alias
+GET  /admin/v1/metering-export-status
 GET  /admin/v1/usage-aggregates
 GET  /admin/v1/audit-events
 POST /admin/v1/config/validate

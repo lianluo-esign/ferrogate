@@ -854,6 +854,34 @@
         "deprecated": true
       }
     },
+    "/admin/v1/metering-export-status": {
+      "get": {
+        "operationId": "listAdminMeteringExportStatus",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List recent external metering export outcomes.",
+        "description": "Shows recent non-blocking external billing export successes and failures. Gateway AI responses are not failed by export errors unless a future strict mode is added.",
+        "responses": {
+          "200": {
+            "description": "Recent metering export status list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeteringExportStatusList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/usage-aggregates": {
       "get": {
         "operationId": "listAdminUsageAggregates",
@@ -3364,6 +3392,59 @@
         },
         "additionalProperties": false
       },
+      "MeteringExportStatus": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "provider",
+          "endpoint",
+          "success",
+          "status",
+          "occurred_at_unix"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "openmeter"
+            ]
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "exported",
+              "failed"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurred_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "StoredAuditEvent": {
         "type": "object",
         "required": [
@@ -3522,6 +3603,9 @@
       },
       "UsageAggregateList": {
         "$ref": "#/components/schemas/AdminList_StoredUsageAggregate"
+      },
+      "MeteringExportStatusList": {
+        "$ref": "#/components/schemas/AdminList_MeteringExportStatus"
       },
       "AuditEventList": {
         "$ref": "#/components/schemas/PaginatedList_StoredAuditEvent"
@@ -3701,6 +3785,26 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/StoredUsageAggregate"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_MeteringExportStatus": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MeteringExportStatus"
             }
           }
         },

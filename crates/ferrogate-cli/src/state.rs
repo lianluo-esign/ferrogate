@@ -27,7 +27,7 @@ use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
     ToolExecutionResponse,
 };
-use crate::metering::MeteringExporter;
+use crate::metering::{MeteringExportStatus, MeteringExporter};
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
@@ -2258,6 +2258,13 @@ impl AppState {
             offset: pagination.offset,
             limit: pagination.limit,
         }
+    }
+
+    pub(crate) fn metering_export_status(&self) -> Vec<MeteringExportStatus> {
+        self.metering_exporter
+            .as_ref()
+            .map(|exporter| exporter.statuses())
+            .unwrap_or_default()
     }
 
     pub(crate) fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {

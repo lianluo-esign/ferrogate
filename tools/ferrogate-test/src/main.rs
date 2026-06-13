@@ -13,6 +13,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::mpsc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -613,7 +614,7 @@ fn run_auth_api(args: &AuthArgs) -> Result<()> {
 }
 
 fn run_gateway_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start(&args.ferrogate_bin, 3)?;
+    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 3)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));
@@ -736,6 +737,8 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         assert!(body.contains("ferrogate_request_logs_total"));
         Ok(())
     })?;
+    case.expect_openmeter_export()?;
+    case.wait_for_metering_export_status()?;
 
     println!("gateway-api scenario passed");
     Ok(())
@@ -751,6 +754,13 @@ struct LocalHarness {
     gateway_addr: String,
     gateway: Child,
     provider: Option<JoinHandle<Vec<String>>>,
+    billing: Option<MockBillingServer>,
+}
+
+struct MockBillingServer {
+    addr: String,
+    received: mpsc::Receiver<String>,
+    handle: Option<JoinHandle<()>>,
 }
 
 struct AuthHarness {
@@ -852,6 +862,20 @@ impl Drop for AuthHarness {
 
 impl LocalHarness {
     fn start(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
+        Self::start_inner(ferrogate_bin, expected_provider_requests, None)
+    }
+
+    fn start_with_billing(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
+        let billing = spawn_mock_billing_server(expected_provider_requests)
+            .context("start billing provider")?;
+        Self::start_inner(ferrogate_bin, expected_provider_requests, Some(billing))
+    }
+
+    fn start_inner(
+        ferrogate_bin: &Path,
+        expected_provider_requests: usize,
+        billing: Option<MockBillingServer>,
+    ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
                 "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
@@ -866,7 +890,7 @@ impl LocalHarness {
         let config_path = dir.path().join("ferrogate.toml");
         std::fs::write(
             &config_path,
-            local_gateway_config(&gateway_addr, &provider_addr),
+            local_gateway_config(&gateway_addr, &provider_addr, billing.as_ref()),
         )?;
 
         let gateway = Command::new(ferrogate_bin)
@@ -884,6 +908,7 @@ impl LocalHarness {
             gateway_addr,
             gateway,
             provider: Some(provider),
+            billing,
         };
         harness.wait_for_gateway()?;
         Ok(harness)
@@ -960,6 +985,71 @@ impl LocalHarness {
         }
         check(&response.body)
     }
+
+    fn expect_openmeter_export(&self) -> Result<()> {
+        let Some(billing) = &self.billing else {
+            bail!("billing provider mock is not configured");
+        };
+        let mut last = None;
+        let body = loop {
+            let request = billing
+                .received
+                .recv_timeout(Duration::from_secs(5))
+                .context("timed out waiting for OpenMeter export")?;
+            assert!(request.starts_with("POST /api/v1/events "));
+            assert!(request.contains("Authorization: Bearer test-metering-token"));
+            let payload = http_request_body(&request)?;
+            let body: Value = serde_json::from_str(payload)
+                .with_context(|| format!("failed to parse billing export payload: {payload}"))?;
+            let is_chat_usage = body["data"]["prompt_tokens"] == 1
+                && body["data"]["completion_tokens"] == 1
+                && body["data"]["total_tokens"] == 2;
+            if is_chat_usage {
+                break body;
+            }
+            last = Some(body);
+        };
+        assert_eq!(body["specversion"], "1.0");
+        assert_eq!(body["type"], "ai.tokens");
+        assert_eq!(body["source"], "ferrogate-test");
+        assert_eq!(body["subject"], "client");
+        assert!(body["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("ferrogate:")));
+        assert_eq!(body["data"]["logical_model"], "fast-chat");
+        assert_eq!(body["data"]["provider"], "openai");
+        assert_eq!(body["data"]["provider_model"], "gpt-4o-mini");
+        assert_eq!(body["data"]["prompt_tokens"], 1);
+        assert_eq!(body["data"]["completion_tokens"], 1);
+        assert_eq!(body["data"]["total_tokens"], 2);
+        assert_eq!(body["data"]["tenant"]["organization_id"], "org_demo");
+        assert_eq!(body["data"]["tenant"]["project_id"], "project_gateway");
+        drop(last);
+        Ok(())
+    }
+
+    fn wait_for_metering_export_status(&self) -> Result<()> {
+        let started = Instant::now();
+        let mut last = String::new();
+        while started.elapsed() < Duration::from_secs(5) {
+            let response = http_request_addr(
+                &self.gateway_addr,
+                "GET",
+                "/admin/v1/metering-export-status",
+                &[ADMIN_AUTH],
+                "",
+            )?;
+            if response.status == 200
+                && response.body.contains("openmeter")
+                && response.body.contains("exported")
+            {
+                return Ok(());
+            }
+            last = response.raw;
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!("timed out waiting for metering export status; last response: {last}")
+    }
 }
 
 impl Drop for LocalHarness {
@@ -969,10 +1059,35 @@ impl Drop for LocalHarness {
         if let Some(provider) = self.provider.take() {
             let _ = provider.join();
         }
+        if let Some(billing) = self.billing.as_mut() {
+            let _ = billing.handle.take().map(|handle| handle.join());
+        }
     }
 }
 
-fn local_gateway_config(gateway_addr: &str, provider_addr: &str) -> String {
+fn local_gateway_config(
+    gateway_addr: &str,
+    provider_addr: &str,
+    billing: Option<&MockBillingServer>,
+) -> String {
+    let metering = billing
+        .map(|billing| {
+            format!(
+                r#"
+[metering]
+export_enabled = true
+export_provider = "openmeter"
+export_endpoint = "http://{}/api/v1/events"
+export_token = "test-metering-token"
+export_timeout_secs = 3
+export_event_type = "ai.tokens"
+export_source = "ferrogate-test"
+export_subject = "api_key_id"
+"#,
+                billing.addr
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"
 listen = "{gateway_addr}"
@@ -985,6 +1100,7 @@ node_region = "local"
 node_zone = "local-a"
 state_backend = "local"
 counter_backend = "local"
+{metering}
 
 [[providers]]
 name = "openai"
@@ -1119,6 +1235,45 @@ fn spawn_local_provider_upstream(
     Ok((addr, handle))
 }
 
+fn spawn_mock_billing_server(expected_requests: usize) -> Result<MockBillingServer> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?.to_string();
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut received = 0;
+        let started = Instant::now();
+        while received < expected_requests && started.elapsed() < Duration::from_secs(10) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let body = r#"{"ok":true}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = tx.send(request);
+                    received += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    Ok(MockBillingServer {
+        addr,
+        received: rx,
+        handle: Some(handle),
+    })
+}
+
 fn read_http_request(stream: &mut TcpStream) -> Result<String> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut request = Vec::new();
@@ -1155,6 +1310,13 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String> {
         }
     }
     Ok(String::from_utf8_lossy(&request).to_string())
+}
+
+fn http_request_body(request: &str) -> Result<&str> {
+    request
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .ok_or_else(|| anyhow!("HTTP request body separator not found"))
 }
 
 fn list_contains(body: &Value, field: &str, expected: &str) -> bool {

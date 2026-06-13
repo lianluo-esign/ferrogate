@@ -497,6 +497,8 @@ pub(crate) struct TelemetryConfig {
 pub(crate) struct MeteringConfig {
     #[serde(default)]
     pub(crate) export_enabled: bool,
+    #[serde(default)]
+    pub(crate) export_provider: MeteringExportProvider,
     #[serde(default = "default_metering_export_endpoint")]
     pub(crate) export_endpoint: String,
     #[serde(default)]
@@ -505,6 +507,30 @@ pub(crate) struct MeteringConfig {
     pub(crate) export_token: Option<String>,
     #[serde(default = "default_metering_export_timeout_secs")]
     pub(crate) export_timeout_secs: u64,
+    #[serde(default = "default_metering_export_event_type")]
+    pub(crate) export_event_type: String,
+    #[serde(default = "default_metering_export_source")]
+    pub(crate) export_source: String,
+    #[serde(default)]
+    pub(crate) export_subject: MeteringExportSubject,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MeteringExportProvider {
+    #[default]
+    Legacy,
+    Openmeter,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MeteringExportSubject {
+    #[default]
+    ApiKeyId,
+    OrganizationId,
+    ProjectId,
+    UserId,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -751,6 +777,14 @@ fn default_metering_export_timeout_secs() -> u64 {
     3
 }
 
+fn default_metering_export_event_type() -> String {
+    "ai.tokens".to_string()
+}
+
+fn default_metering_export_source() -> String {
+    "ferrogate".to_string()
+}
+
 fn default_cache_ttl_secs() -> u64 {
     300
 }
@@ -796,10 +830,14 @@ impl Default for MeteringConfig {
     fn default() -> Self {
         Self {
             export_enabled: false,
+            export_provider: MeteringExportProvider::default(),
             export_endpoint: default_metering_export_endpoint(),
             export_token_env: None,
             export_token: None,
             export_timeout_secs: default_metering_export_timeout_secs(),
+            export_event_type: default_metering_export_event_type(),
+            export_source: default_metering_export_source(),
+            export_subject: MeteringExportSubject::default(),
         }
     }
 }
