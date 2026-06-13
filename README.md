@@ -733,13 +733,78 @@ repository.
 
 ## Contributing
 
-1. Keep changes small and reviewable.
-2. Follow the existing Rust module boundaries and Caddyfile adapter style.
-3. Run `./scripts/security-check.sh` before opening a PR.
-4. Update public product documentation when behavior, configuration,
-   operations, or architecture changes.
-5. Do not commit provider secrets, ACME tokens, private keys, or generated
-   certificates.
+FerroGate is built for human maintainers and AI coding agents working together.
+The best contributions are small, issue-linked slices that can be reviewed,
+tested, and explained from the operator's point of view.
+
+Good first contribution areas:
+
+- Provider adapters, model registry coverage, routing strategies, fallback, and
+  streaming correctness.
+- Policy, virtual API keys, rate limits, token budgets, metering, audit, and
+  request-log evidence.
+- MCP gateway behavior, Agentic Lite tools, OpenAI-compatible client
+  compatibility, and examples for agent frameworks.
+- Admin API, dashboard visibility, OpenAPI schema coverage, config validation,
+  reload behavior, and cluster operations.
+- Documentation that makes an implemented runtime path usable in production.
+
+Development workflow:
+
+1. Start from a GitHub issue. If the change does not clearly map to an issue,
+   open or identify one before writing code.
+2. Define the end-to-end proof before editing: operator input, gateway runtime
+   path, failure behavior, admin/log/metric evidence, and focused regression
+   tests.
+3. Read the existing code path first. Keep behavior in the owning crate:
+   `ferrogate-cli` for runtime and handlers, `ferrogate-config` for config
+   parsing, `ferrogate-providers` for provider quirks, `ferrogate-policy` for
+   policy decisions, `ferrogate-storage` for repository contracts,
+   `ferrogate-billing` for usage records, and `ferrogate-observability` for
+   metrics and spans.
+4. Keep the patch narrow. Prefer deletion, reuse, and typed validation over new
+   abstractions. Do not add dependencies unless they remove real complexity or
+   are required by the issue.
+5. For AI-agent-authored work, leave enough context for humans to review:
+   mention the issue, the files touched, the runtime path exercised, commands
+   run, and any known gaps. Do not submit broad, unverified rewrites.
+
+Verification expectations:
+
+- Documentation-only changes should at least pass `git diff --check`.
+- Rust changes should run focused tests for the touched path, then the relevant
+  workspace gate:
+
+  ```bash
+  cargo fmt --all --check
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace
+  ```
+
+- Config, OpenAPI, deployment, security, streaming, billing, or runtime reload
+  changes need the matching schema, E2E, or security check. The local security
+  gate is:
+
+  ```bash
+  ./scripts/security-check.sh
+  ```
+
+Pull request checklist:
+
+- Link the GitHub issue and state whether the PR closes it or implements one
+  bounded slice of a larger epic.
+- Describe the operator-visible behavior, not just the internal refactor.
+- Include exact verification commands and results.
+- Update README, OpenAPI, deployment docs, examples, or runbooks when behavior,
+  configuration, operations, or architecture changes.
+- Do not commit provider secrets, ACME tokens, private keys, generated
+  certificates, or local runtime state.
+
+For autonomous issue selection and AI-agent execution, follow
+[`docs/dynamic-workflow.md`](docs/dynamic-workflow.md). That workflow is the
+project contract for choosing the next issue, closing a narrow E2E slice,
+recording evidence, and updating GitHub without turning broad roadmap items into
+unreviewable rewrites.
 
 ## License
 

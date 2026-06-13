@@ -573,11 +573,50 @@ cargo install cargo-audit --version 0.22.1 --locked
 
 ## 贡献
 
-1. 保持变更小而可 review。
-2. 遵循现有 Rust 模块边界和 Caddyfile adapter 风格。
-3. 提 PR 前运行 `./scripts/security-check.sh`。
-4. 当行为、配置、运维或架构发生变化时，同步更新公开产品文档。
-5. 不要提交供应商密钥、ACME token、私钥或生成的证书。
+FerroGate 的协作模式默认面向人类维护者和 AI 编码代理共同开发。最好的贡献不是大而空的重写，而是可 review、可测试、可从运维视角解释的 issue-linked 小切片。
+
+适合参与的方向：
+
+- Provider adapter、模型注册表、路由策略、fallback 和 streaming 正确性。
+- Policy、虚拟 API key、rate limit、token budget、metering、audit 和 request log 证据。
+- MCP gateway、Agentic Lite tools、OpenAI-compatible client 兼容性，以及 agent framework 示例。
+- Admin API、dashboard 可见性、OpenAPI schema、配置校验、reload 行为和集群运维。
+- 让已经实现的 runtime 路径真正可在生产使用的文档、示例和 runbook。
+
+开发工作流：
+
+1. 从 GitHub issue 开始。如果变更不能明确对应到 issue，先创建或找到对应 issue，再写代码。
+2. 编辑前先定义 end-to-end 证明：operator input、gateway runtime path、failure behavior、admin/log/metric evidence，以及聚焦的回归测试。
+3. 先读现有代码路径。行为要放在正确 crate：`ferrogate-cli` 负责 runtime 和 handler，`ferrogate-config` 负责配置解析，`ferrogate-providers` 负责 provider 差异，`ferrogate-policy` 负责策略决策，`ferrogate-storage` 负责 repository contract，`ferrogate-billing` 负责 usage record，`ferrogate-observability` 负责 metrics 和 spans。
+4. 保持 patch 窄。优先删除、复用和 typed validation，不要为了“看起来完整”新增抽象。除非 issue 明确要求，或依赖能明显降低复杂度，否则不要新增 dependency。
+5. AI agent 产出的变更必须让人类能 review：说明 issue、改动文件、运行时路径、执行过的命令和已知缺口。不要提交宽泛且未验证的重写。
+
+验证要求：
+
+- 纯文档变更至少运行 `git diff --check`。
+- Rust 变更先跑触达路径的聚焦测试，再跑相关 workspace gate：
+
+  ```bash
+  cargo fmt --all --check
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace
+  ```
+
+- 配置、OpenAPI、部署、安全、streaming、billing 或 runtime reload 变更，需要补充对应 schema、E2E 或安全检查。本地安全 gate 是：
+
+  ```bash
+  ./scripts/security-check.sh
+  ```
+
+Pull request checklist：
+
+- 链接 GitHub issue，并说明 PR 是关闭该 issue，还是完成一个大 epic 的有界切片。
+- 描述 operator-visible behavior，不要只描述内部重构。
+- 写清楚验证命令和结果。
+- 当行为、配置、运维或架构发生变化时，同步更新 README、OpenAPI、部署文档、示例或 runbook。
+- 不要提交 provider secret、ACME token、私钥、生成的证书或本地 runtime state。
+
+AI agent 自主选 issue 和执行开发时，遵循 [`docs/dynamic-workflow.md`](docs/dynamic-workflow.md)。这是项目用于选择下一项工作、完成窄 end-to-end 切片、记录证据并更新 GitHub 的协作契约，不能把宽泛 roadmap item 变成不可 review 的大重写。
 
 ## License
 
