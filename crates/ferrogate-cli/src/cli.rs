@@ -70,10 +70,34 @@ pub(crate) struct HashKeyArgs {
     pub(crate) secret: String,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct AuthArgs {
+    #[command(subcommand)]
+    pub(crate) command: AuthCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AuthCommands {
+    /// Run the tenant and RBAC REST API service.
+    Serve(AuthServeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AuthServeArgs {
+    /// Address for the auth REST API service.
+    #[arg(long, env = "FERROGATE_AUTH_LISTEN", default_value = "127.0.0.1:8090")]
+    pub(crate) listen: String,
+    /// Optional YAML data file with tenants, API keys, roles, and bindings.
+    #[arg(long, env = "FERROGATE_AUTH_DATA")]
+    pub(crate) data: Option<PathBuf>,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
     /// Run the FerroGate Pingora gateway server.
     Run(RunArgs),
+    /// Run FerroGate side services.
+    Auth(AuthArgs),
     /// Validate configuration and print a summary.
     #[command(alias = "check")]
     Validate(ConfigArgs),

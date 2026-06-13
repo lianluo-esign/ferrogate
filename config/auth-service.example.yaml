@@ -1,0 +1,42 @@
+tenants:
+  - id: tenant-example
+    name: Example tenant
+    enabled: true
+    context:
+      organization_id: org-example
+      team_id: team-example
+      project_id: project-example
+      user_id: null
+      api_key_id: null
+api_keys:
+  - id: key-example
+    name: Example gateway key
+    secret: dev-secret
+    enabled: true
+    tenant:
+      organization_id: org-example
+      team_id: team-example
+      project_id: project-example
+      user_id: null
+      api_key_id: key-example
+    scopes:
+      - models.read
+      - chat.completions
+roles:
+  - id: role-chat-caller
+    name: Chat caller
+    permissions:
+      - action: chat.completions
+        resource: model:fast-chat
+bindings:
+  - id: binding-key-example-chat
+    role_id: role-chat-caller
+    tenant:
+      organization_id: org-example
+      team_id: team-example
+      project_id: project-example
+      user_id: null
+      api_key_id: key-example
+    subject:
+      type: api_key
+      api_key_id: key-example

@@ -21,7 +21,7 @@ LABEL org.opencontainers.image.vendor="Token4AI Cloud" \
       org.opencontainers.image.authors="jamesduan <https://x.com/JamesDuanL>" \
       cloud.token4ai.company="https://token4ai.cloud" \
       cloud.token4ai.author_x="https://x.com/JamesDuanL" \
-      cloud.token4ai.geo_seo="Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
+      cloud.token4ai.attribution="Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*

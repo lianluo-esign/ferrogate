@@ -31,13 +31,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::List => {
-            println!("local: admin-api, gateway-api, ci");
+            println!("local: admin-api, auth-api, gateway-api, ci");
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
         }
         Commands::Run(args) => run_docker_scenario(args.scenario, &args.image),
         Commands::RunAll(args) => {
             run_admin_api(&args.local)?;
+            run_auth_api(&args.auth)?;
             run_gateway_api(&args.local)?;
             if args.include_docker {
                 run_all_docker_scenarios(&args.image)?;
@@ -45,10 +46,12 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::AdminApi(args) => run_admin_api(&args),
+        Commands::AuthApi(args) => run_auth_api(&args),
         Commands::GatewayApi(args) => run_gateway_api(&args),
         Commands::Ci(args) => {
-            run_admin_api(&args)?;
-            run_gateway_api(&args)
+            run_admin_api(&args.local)?;
+            run_auth_api(&args.auth)?;
+            run_gateway_api(&args.local)
         }
     }
 }
@@ -70,7 +73,7 @@ fn print_attribution_banner() {
 #[command(name = "ferrogate-test")]
 #[command(author = "jamesduan <https://x.com/JamesDuanL>")]
 #[command(version)]
-#[command(about = "FerroGate end-to-end test harness for admin and gateway APIs")]
+#[command(about = "FerroGate end-to-end test harness for admin, auth, and gateway APIs")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -86,10 +89,12 @@ enum Commands {
     RunAll(RunAllArgs),
     /// Run Admin API coverage against a real local FerroGate process.
     AdminApi(LocalArgs),
+    /// Run auth service coverage against a real local ferrogate-auth process.
+    AuthApi(AuthArgs),
     /// Run gateway API coverage against a real local FerroGate process.
     GatewayApi(LocalArgs),
-    /// CI entrypoint: run deterministic local Admin API and gateway API E2E coverage.
-    Ci(LocalArgs),
+    /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
+    Ci(CiArgs),
 }
 
 #[derive(Debug, Args)]
@@ -105,6 +110,8 @@ struct DockerRunArgs {
 struct RunAllArgs {
     #[command(flatten)]
     local: LocalArgs,
+    #[command(flatten)]
+    auth: AuthArgs,
     /// Also run Docker-backed cluster, shared-state, and Redis scenarios.
     #[arg(long)]
     include_docker: bool,
@@ -122,6 +129,25 @@ struct LocalArgs {
         default_value = "target/debug/ferrogate"
     )]
     ferrogate_bin: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct AuthArgs {
+    /// Path to a built ferrogate-auth binary. Defaults to target/debug/ferrogate-auth.
+    #[arg(
+        long,
+        env = "FERROGATE_TEST_FERROGATE_AUTH_BIN",
+        default_value = "target/debug/ferrogate-auth"
+    )]
+    ferrogate_auth_bin: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct CiArgs {
+    #[command(flatten)]
+    local: LocalArgs,
+    #[command(flatten)]
+    auth: AuthArgs,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -528,6 +554,64 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_auth_api(args: &AuthArgs) -> Result<()> {
+    let case = AuthHarness::start(&args.ferrogate_auth_bin)?;
+
+    case.expect_json("GET", "/healthz", &[], "", 200, |body| {
+        assert_eq!(body["service"], "ferrogate-auth");
+        assert_eq!(body["status"], "ok");
+        Ok(())
+    })?;
+    case.expect_json("GET", "/v1/healthz", &[], "", 200, |body| {
+        assert_eq!(body["service"], "ferrogate-auth");
+        Ok(())
+    })?;
+    case.expect_json("GET", "/v1/tenants", &[], "", 200, |body| {
+        assert!(list_contains(&body, "id", "tenant-example"));
+        Ok(())
+    })?;
+    case.expect_json(
+        "POST",
+        "/v1/auth/resolve-api-key",
+        &[JSON_CONTENT],
+        r#"{"presented_key":"dev-secret"}"#,
+        200,
+        |body| {
+            assert_eq!(body["tenant"]["organization_id"], "org-example");
+            assert_eq!(body["subject"]["type"], "api_key");
+            assert_eq!(body["scopes"][0], "models.read");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/auth/authorize",
+        &[JSON_CONTENT],
+        r#"{"tenant":{"organization_id":"org-example","team_id":"team-example","project_id":"project-example","user_id":null,"api_key_id":"key-example"},"subject":{"type":"api_key","api_key_id":"key-example"},"action":"chat.completions","resource":"model:fast-chat"}"#,
+        200,
+        |body| {
+            assert_eq!(body["allowed"], true);
+            assert_eq!(body["reason"], "matched_rbac_binding");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/auth/authorize",
+        &[JSON_CONTENT],
+        r#"{"tenant":{"organization_id":"org-example","team_id":"team-example","project_id":"project-example","user_id":null,"api_key_id":"key-example"},"subject":{"type":"api_key","api_key_id":"key-example"},"action":"responses.create","resource":"model:fast-chat"}"#,
+        200,
+        |body| {
+            assert_eq!(body["allowed"], false);
+            assert_eq!(body["reason"], "no_matching_rbac_binding");
+            Ok(())
+        },
+    )?;
+
+    println!("auth-api scenario passed");
+    Ok(())
+}
+
 fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     let case = LocalHarness::start(&args.ferrogate_bin, 3)?;
 
@@ -667,6 +751,103 @@ struct LocalHarness {
     gateway_addr: String,
     gateway: Child,
     provider: Option<JoinHandle<Vec<String>>>,
+}
+
+struct AuthHarness {
+    _dir: tempfile::TempDir,
+    auth_addr: String,
+    auth: Child,
+}
+
+impl AuthHarness {
+    fn start(ferrogate_auth_bin: &Path) -> Result<Self> {
+        if !ferrogate_auth_bin.exists() {
+            bail!(
+                "ferrogate-auth binary does not exist at {}; run `cargo build -p ferrogate-auth` first or pass --ferrogate-auth-bin",
+                ferrogate_auth_bin.display()
+            );
+        }
+
+        let auth_addr = free_addr()?;
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("auth-service.yaml");
+        std::fs::write(&config_path, auth_service_config())?;
+
+        let auth = Command::new(ferrogate_auth_bin)
+            .args(["serve", "--listen"])
+            .arg(&auth_addr)
+            .args(["--data"])
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start {}", ferrogate_auth_bin.display()))?;
+
+        let mut harness = Self {
+            _dir: dir,
+            auth_addr,
+            auth,
+        };
+        harness.wait_for_auth()?;
+        Ok(harness)
+    }
+
+    fn wait_for_auth(&mut self) -> Result<()> {
+        let started = Instant::now();
+        let mut last = String::new();
+        while started.elapsed() < Duration::from_secs(20) {
+            if let Some(status) = self.auth.try_wait()? {
+                bail!("ferrogate-auth process exited before readiness check: {status}");
+            }
+            match http_request_addr(&self.auth_addr, "GET", "/healthz", &[], "") {
+                Ok(response) if response.status == 200 => return Ok(()),
+                Ok(response) => last = response.raw,
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!(
+            "timed out waiting for ferrogate-auth on {}; last response: {last}",
+            self.auth_addr
+        );
+    }
+
+    fn expect_json<F>(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[&str],
+        body: &str,
+        expected_status: u16,
+        check: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(Value) -> Result<()>,
+    {
+        let response = http_request_addr(&self.auth_addr, method, path, headers, body)?;
+        if response.status != expected_status {
+            bail!(
+                "{method} {path} expected status {expected_status}, got {}; raw: {}",
+                response.status,
+                response.raw
+            );
+        }
+        let body: Value = serde_json::from_str(&response.body).with_context(|| {
+            format!(
+                "failed to parse JSON body for {method} {path}: {}",
+                response.body
+            )
+        })?;
+        check(body)
+    }
+}
+
+impl Drop for AuthHarness {
+    fn drop(&mut self) {
+        let _ = self.auth.kill();
+        let _ = self.auth.wait();
+    }
 }
 
 impl LocalHarness {
@@ -843,6 +1024,54 @@ api_key_ids = ["client"]
 cache_enabled = false
 "#
     )
+}
+
+fn auth_service_config() -> String {
+    r#"
+tenants:
+  - id: tenant-example
+    name: Example tenant
+    enabled: true
+    context:
+      organization_id: org-example
+      team_id: team-example
+      project_id: project-example
+      user_id: null
+      api_key_id: null
+api_keys:
+  - id: key-example
+    name: Example gateway key
+    secret: dev-secret
+    enabled: true
+    tenant:
+      organization_id: org-example
+      team_id: team-example
+      project_id: project-example
+      user_id: null
+      api_key_id: key-example
+    scopes:
+      - models.read
+      - chat.completions
+roles:
+  - id: role-chat-caller
+    name: Chat caller
+    permissions:
+      - action: chat.completions
+        resource: model:fast-chat
+bindings:
+  - id: binding-key-example-chat
+    role_id: role-chat-caller
+    tenant:
+      organization_id: org-example
+      team_id: team-example
+      project_id: project-example
+      user_id: null
+      api_key_id: key-example
+    subject:
+      type: api_key
+      api_key_id: key-example
+"#
+    .to_string()
 }
 
 fn free_addr() -> Result<String> {

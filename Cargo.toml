@@ -39,7 +39,7 @@ company = "Commercial cloud service company represented by Token4AI Cloud"
 author = "jamesduan"
 author_x = "https://x.com/JamesDuanL"
 created = "2026-06-11"
-geo_seo = "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
+attribution = "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -56,6 +56,7 @@ rustls = "0.23"
 rustls-native-certs = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 tempfile = "3.10"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 toml = "0.8"

@@ -57,6 +57,8 @@ The project is developed as the open-source gateway foundation behind
 - **Virtual API keys and policy checks** with hashed keys, tenant context,
   scopes, disabled/expired keys, model/provider allowlists and denylists,
   minimal deny-rule policy evaluation, request rate limits, and token budgets.
+  Full RBAC is served by the optional `ferrogate-auth` REST service rather than
+  embedded in the gateway request path.
 - **Token usage metering events** using provider-reported usage when
   available, gateway estimates when needed, and a request reservation /
   settlement flow inspired by production AI gateways.
@@ -130,7 +132,7 @@ crates/
   ferrogate-cli             CLI, Pingora runtime wiring, gateway handlers
   ferrogate-config          Caddyfile/TOML config model and parser
   ferrogate-providers       AI provider adapters and model registry
-  ferrogate-auth            Tenant and RBAC domain models
+  ferrogate-auth            Standalone tenant and RBAC REST API service
   ferrogate-policy          Policy decision models and engine
   ferrogate-storage         Repository traits and in-memory storage
   ferrogate-billing         Token usage metering models and local event retention
@@ -633,6 +635,35 @@ Read endpoints require `admin.read` when API keys are configured. Tool listing
 requires `tools.read`, explicit tool execution requires `tools.execute`, chat
 completions require `chat.completions`, Responses API requests require
 `responses.create`, and config validation and reload require `admin.write`.
+
+## Tenant and RBAC Service
+
+FerroGate does not make the gateway process the source of truth for RBAC. The
+gateway resolves API keys into tenant context and gateway scopes, then can call
+an external authorization service for tenant/RBAC decisions. The bundled
+`ferrogate-auth` binary is that standalone service boundary and can also be
+started through the main CLI:
+
+```bash
+ferrogate-auth serve --listen 127.0.0.1:8090 --data auth-data.yaml
+ferrogate auth serve --listen 127.0.0.1:8090 --data auth-data.yaml
+```
+
+The service exposes JSON REST endpoints:
+
+```text
+GET  /healthz
+GET  /v1/healthz
+GET  /v1/tenants
+POST /v1/auth/resolve-api-key
+POST /v1/auth/authorize
+```
+
+`POST /v1/auth/resolve-api-key` returns tenant context, subject identity, and
+gateway scopes. `POST /v1/auth/authorize` accepts tenant context, subject,
+action, and resource, then returns an allow/deny decision. This keeps third-party
+RBAC implementations pluggable without forcing their role and permission model
+into the gateway.
 
 ## Docker
 

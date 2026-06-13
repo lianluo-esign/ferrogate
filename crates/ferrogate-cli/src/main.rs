@@ -25,7 +25,7 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::{
-    cli::{Cli, Commands},
+    cli::{AuthCommands, Cli, Commands},
     config::Config,
     gateway::serve,
     lifecycle::{
@@ -41,6 +41,18 @@ fn main() -> AnyResult<()> {
 
     match cli.command {
         Commands::Run(args) => serve(Config::load(&args.config)?, Some(args.config), args.upgrade),
+        Commands::Auth(args) => match args.command {
+            AuthCommands::Serve(args) => {
+                let data = match args.data {
+                    Some(path) => ferrogate_auth::AuthServiceData::load_yaml(path)?,
+                    None => ferrogate_auth::AuthServiceData::default(),
+                };
+                ferrogate_auth::serve(ferrogate_auth::AuthServiceConfig {
+                    listen: args.listen,
+                    data,
+                })
+            }
+        },
         Commands::Validate(args) => {
             let config = Config::load(&args.config)?;
             println!("{}", format_validate_report(&config));

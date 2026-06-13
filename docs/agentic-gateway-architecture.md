@@ -203,8 +203,10 @@ a **hosted control plane**. Notable features (verified):
 - **Conditional routing** on request metadata (`$eq/$ne/$in/$regex/$and/$or` over
   `metadata.*` / `params.*` / `url.pathname`).
 - **Hosted-only**: semantic caching, Model Catalog (virtual keys → org-level
-  credential store, `model="@provider-slug/model"`), org→workspace RBAC + metadata
-  schemas, analytics dashboard (21+ metrics), Prompt Engineering Studio, MCP Gateway.
+  credential store, `model="@provider-slug/model"`), org→workspace RBAC
+  management + metadata schemas, analytics dashboard (21+ metrics), Prompt
+  Engineering Studio, MCP Gateway. FerroGate integrates with RBAC over service
+  APIs instead of making the gateway own the RBAC source of truth.
 
 ### 4.1 Feature parity matrix
 
@@ -262,7 +264,7 @@ NEW   ferrogate-guardrails  Built-in guardrail/mutator hooks (PII, regex, json-s
 NEW   ferrogate-skills      Skill loader (SKILL.md progressive disclosure) — stretch
 ACT.  ferrogate-runtime     Agent runtime / agent loop (today: only reload state)
 ACT.  ferrogate-routing     Composable/conditional routing strategies (today: skeleton)
-ACT.  ferrogate-auth        MCP/tool auth + tenant governance (today: skeleton)
+ACT.  ferrogate-auth        Standalone tenant/RBAC REST service boundary
 GROW  ferrogate-providers   Canonical tool-calling model; async pooled dispatch
 GROW  ferrogate-core        Canonical tool types (ToolDef, ToolCall, ToolResult)
 GROW  ferrogate-billing     Per-tool-call + per-agent-turn cost accounting
@@ -437,10 +439,11 @@ free vs. Bifrost's manual `fasthttp` tuning).
 
 Mirror Portkey's line. **OSS FerroGate**: routing, plugin pipeline, guardrail hooks,
 simple caching, virtual keys, MCP host/client, tool calling, opt-in agent loop,
-Prometheus/OTLP emission. **Token4AI Cloud (hosted control plane)**: analytics
-dashboard, Prompt Engineering Studio, org→workspace RBAC + budgets governance UI,
-Model Catalog, MCP registry/discovery UI, semantic caching, and (if pursued) the
-hosted agent runtime + memory + sandbox.
+Prometheus/OTLP emission, and the standalone `ferrogate-auth` service boundary
+for tenant/RBAC decisions. **Token4AI Cloud (hosted control plane)**: analytics
+dashboard, Prompt Engineering Studio, org→workspace RBAC management + budgets
+governance UI, Model Catalog, MCP registry/discovery UI, semantic caching, and
+(if pursued) the hosted agent runtime + memory + sandbox.
 
 ---
 
