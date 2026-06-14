@@ -127,6 +127,7 @@ pub(super) async fn dispatch_provider_streaming_request(
 fn provider_http_client() -> AnyResult<Client> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     let result = CLIENT.get_or_init(|| {
+        ensure_provider_crypto_provider();
         Client::builder()
             .no_gzip()
             .no_brotli()
@@ -139,6 +140,10 @@ fn provider_http_client() -> AnyResult<Client> {
         Ok(client) => Ok(client.clone()),
         Err(error) => bail!("failed to initialize provider HTTP client: {error}"),
     }
+}
+
+fn ensure_provider_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn build_provider_request(
