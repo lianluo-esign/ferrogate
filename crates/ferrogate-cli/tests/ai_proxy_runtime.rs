@@ -373,6 +373,7 @@ enabled = false
     assert!(providers.contains("200 OK"));
     assert!(providers.contains("\"name\":\"openai\""));
     assert!(providers.contains("\"kind\":\"openai\""));
+    assert!(providers.contains("\"compatibility\":\"openai-compatible\""));
     assert!(providers.contains("\"has_api_key\":true"));
     assert!(!providers.contains("FERROGATE_PROVIDER_SECRET"));
     assert!(!providers.contains("provider-secret"));
@@ -1641,6 +1642,92 @@ allowed_models = ["router-chat"]
     assert!(provider_request.contains("x-title: FerroGate Test"));
     assert!(provider_request.contains(r#""model":"openai/gpt-4o-mini""#));
     assert!(!provider_request.contains("router-chat"));
+    assert!(!provider_request.contains("client-secret"));
+}
+
+#[test]
+fn shared_openai_compatible_provider_dispatch_uses_openai_compatible_path() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "deepseek"
+kind = "deepseek"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_DEEPSEEK_SECRET"
+
+[[models]]
+name = "deepseek-chat"
+provider = "deepseek"
+provider_model = "deepseek-chat"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["chat.completions"]
+allowed_models = ["deepseek-chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_DEEPSEEK_SECRET", "deepseek-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(chat.contains("200 OK"));
+    assert!(chat.contains("\"object\":\"chat.completion\""));
+    assert!(!chat.contains("deepseek-secret"));
+    assert!(!chat.contains("client-secret"));
+    assert!(!chat.contains("Bearer"));
+
+    let providers = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/providers",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(providers.contains("200 OK"), "{providers}");
+    assert!(providers.contains("\"name\":\"deepseek\""));
+    assert!(providers.contains("\"compatibility\":\"openai-compatible\""));
+
+    gateway.kill().ok();
+    gateway.wait().ok();
+    let requests = provider_handle.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    let provider_request = &requests[0];
+    assert!(provider_request.contains("POST /v1/chat/completions HTTP/1.1"));
+    assert!(provider_request.contains("authorization: Bearer deepseek-secret"));
+    assert!(provider_request.contains(r#""model":"deepseek-chat""#));
     assert!(!provider_request.contains("client-secret"));
 }
 

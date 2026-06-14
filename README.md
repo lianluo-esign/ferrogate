@@ -470,6 +470,20 @@ ai_gateway {
 }
 ```
 
+### OpenAI-Compatible Commercial and Open-Source Providers
+
+Commercial and open-source upstreams that expose a compatible OpenAI-style
+`/v1/chat/completions` or `/v1/responses` surface use the shared
+`openai-compatible` path. That includes direct OpenAI-compatible gateways,
+third-party proxy layers such as `newapi`, `sub2api`, and `CLIProxyAPI`, and
+mainstream open-source backends such as `DeepSeek`, `vLLM`, `llama.cpp`, `TGI`,
+and `Ollama-compatible` endpoints when they preserve the OpenAI request and
+response shapes.
+
+Use the explicit kind only when the upstream needs its own auth or endpoint
+shape. Otherwise keep the provider kind on the shared compatibility path and
+map the logical model to the actual upstream model name.
+
 ## Automatic HTTPS
 
 FerroGate supports manual TLS certificates, startup-time ACME issuance, and

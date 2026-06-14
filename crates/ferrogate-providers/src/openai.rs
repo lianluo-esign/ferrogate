@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use ferrogate_core::{ToolCall, ToolDef, ToolResult};
 
+use crate::types::is_openai_compatible_provider_kind;
 use crate::{
     AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderCatalogModel,
     ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHeader,
@@ -203,11 +204,12 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {
-    match kind {
-        "openai" | "openai-compatible" => Ok(()),
-        other => Err(AdapterError::UnsupportedProviderKind {
-            kind: other.to_string(),
-        }),
+    if is_openai_compatible_provider_kind(kind) {
+        Ok(())
+    } else {
+        Err(AdapterError::UnsupportedProviderKind {
+            kind: kind.trim().to_ascii_lowercase(),
+        })
     }
 }
 
@@ -491,6 +493,38 @@ mod tests {
                 kind: "anthropic".into()
             }
         );
+    }
+
+    #[test]
+    fn accepts_shared_openai_compatible_provider_kinds() {
+        let adapter = OpenAiCompatibleAdapter;
+        for kind in [
+            "openai",
+            "openai-compatible",
+            "deepseek",
+            "newapi",
+            "sub2api",
+            "cliproxyapi",
+            "vllm",
+            "llama.cpp",
+            "tgi",
+            "ollama-compatible",
+        ] {
+            let mut provider = provider(None);
+            provider.kind = kind.into();
+            let prepared = adapter
+                .prepare_chat_completions(
+                    provider,
+                    ChatCompletionPlan {
+                        logical_model: "fast-chat".into(),
+                        provider_model: "provider-chat".into(),
+                        stream: false,
+                        body: json!({"model": "fast-chat"}),
+                    },
+                )
+                .unwrap();
+            assert_eq!(prepared.body["model"], "provider-chat");
+        }
     }
 
     #[test]
