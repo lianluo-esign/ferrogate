@@ -809,7 +809,6 @@ struct GuardrailRuleRuntime {
 pub(crate) struct GuardrailMatch {
     pub(crate) rule_id: String,
     pub(crate) rule_name: String,
-    pub(crate) stage: GuardrailStage,
     pub(crate) effect: GuardrailEffect,
     pub(crate) keyword: String,
     pub(crate) code: String,
@@ -2231,7 +2230,6 @@ impl AppState {
             Some(GuardrailMatch {
                 rule_id: rule.id.clone(),
                 rule_name: rule.name.clone(),
-                stage: rule.stage,
                 effect: rule.effect,
                 keyword: matched_keyword,
                 code: rule.code.clone(),
@@ -3772,7 +3770,6 @@ mod tests {
 
         assert_eq!(matched.rule_id, "block-secret");
         assert_eq!(matched.rule_name, "Block secret");
-        assert_eq!(matched.stage, crate::config::GuardrailStage::Request);
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
         assert_eq!(matched.keyword, "secret");
         assert_eq!(matched.code, "guardrail_blocked");
@@ -3893,7 +3890,6 @@ mod tests {
             .expect("response guardrail should match");
 
         assert_eq!(matched.rule_id, "redact-secret");
-        assert_eq!(matched.stage, crate::config::GuardrailStage::Response);
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Redact);
         state.record_guardrail_match(&matched);
         let snapshot = state.prometheus_metrics_snapshot();
