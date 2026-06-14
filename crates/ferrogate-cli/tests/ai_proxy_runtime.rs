@@ -1678,6 +1678,12 @@ name = "Development key"
 key = "client-secret"
 scopes = ["chat.completions"]
 allowed_models = ["deepseek-chat"]
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
 "#
         ),
     )
@@ -1710,7 +1716,7 @@ allowed_models = ["deepseek-chat"]
         &["Authorization: Bearer admin-secret"],
         "",
     );
-    assert!(providers.contains("200 OK"));
+    assert!(providers.contains("200 OK"), "{providers}");
     assert!(providers.contains("\"name\":\"deepseek\""));
     assert!(providers.contains("\"compatibility\":\"openai-compatible\""));
 
