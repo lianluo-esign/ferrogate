@@ -1036,6 +1036,12 @@ struct AiRequestRejection {
     message: String,
 }
 
+type AiPlanResult<T> = Result<T, Box<AiRequestRejection>>;
+
+fn reject_ai_request(rejection: AiRequestRejection) -> Box<AiRequestRejection> {
+    Box::new(rejection)
+}
+
 struct AiProviderRequestInput<'a> {
     endpoint: AiEndpoint,
     provider: &'a Provider,
@@ -1053,50 +1059,52 @@ fn build_ai_ingress_plan(
     headers: &HeaderMap,
     endpoint: AiEndpoint,
     ctx: &ProxyContext,
-) -> Result<AiIngressPlan, AiRequestRejection> {
+) -> AiPlanResult<AiIngressPlan> {
     let auth =
         authenticate(state, headers, endpoint.scope(), &ctx.request_id).map_err(|error| {
-            AiRequestRejection {
+            reject_ai_request(AiRequestRejection {
                 tenant: TenantContext::default(),
                 logical_model: None,
                 status: error.status,
                 code: error.code,
                 message: error.message,
-            }
+            })
         })?;
     let tenant = auth.tenant_context();
 
     let gateway_config = requested_gateway_config_id(headers)
-        .map_err(|message| AiRequestRejection {
-            tenant: tenant.clone(),
-            logical_model: None,
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_gateway_config_header",
-            message,
+        .map_err(|message| {
+            reject_ai_request(AiRequestRejection {
+                tenant: tenant.clone(),
+                logical_model: None,
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_gateway_config_header",
+                message,
+            })
         })
         .and_then(|profile_id| {
             state
                 .resolve_gateway_config_profile(profile_id, auth.api_key_id.as_deref())
                 .map_err(|error| {
                     let (status, code, message) = gateway_config_error_response(error);
-                    AiRequestRejection {
+                    reject_ai_request(AiRequestRejection {
                         tenant: tenant.clone(),
                         logical_model: None,
                         status,
                         code,
                         message,
-                    }
+                    })
                 })
         })?;
 
     if state.is_draining() {
-        return Err(AiRequestRejection {
+        return Err(reject_ai_request(AiRequestRejection {
             tenant,
             logical_model: None,
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "node_draining",
             message: "gateway node is draining and is not accepting new AI requests".into(),
-        });
+        }));
     }
 
     Ok(AiIngressPlan {
@@ -1110,37 +1118,40 @@ fn build_ai_request_plan(
     ingress: AiIngressPlan,
     body: &[u8],
     endpoint: AiEndpoint,
-) -> Result<AiRequestPlan, AiRequestRejection> {
+) -> AiPlanResult<AiRequestPlan> {
     let AiIngressPlan {
         auth,
         gateway_config,
     } = ingress;
 
-    let body_json: serde_json::Value =
-        serde_json::from_slice(body).map_err(|error| AiRequestRejection {
+    let body_json: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
+        reject_ai_request(AiRequestRejection {
             tenant: auth.tenant_context(),
             logical_model: None,
             status: StatusCode::BAD_REQUEST,
             code: "invalid_json",
             message: format!("invalid JSON body: {error}"),
-        })?;
+        })
+    })?;
     let request: ChatCompletionRequest =
-        serde_json::from_value(body_json.clone()).map_err(|error| AiRequestRejection {
-            tenant: auth.tenant_context(),
-            logical_model: None,
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_request",
-            message: format!("{}: {error}", endpoint.invalid_request_label()),
+        serde_json::from_value(body_json.clone()).map_err(|error| {
+            reject_ai_request(AiRequestRejection {
+                tenant: auth.tenant_context(),
+                logical_model: None,
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_request",
+                message: format!("{}: {error}", endpoint.invalid_request_label()),
+            })
         })?;
 
     if !auth.can_use_model(&request.model) {
-        return Err(AiRequestRejection {
+        return Err(reject_ai_request(AiRequestRejection {
             tenant: auth.tenant_context(),
             logical_model: Some(request.model.clone()),
             status: StatusCode::FORBIDDEN,
             code: "model_not_allowed",
             message: format!("API key is not allowed to use model {}", request.model),
-        });
+        }));
     }
 
     let model = state.resolve_model(&request.model).map_err(|error| {
@@ -1154,13 +1165,13 @@ fn build_ai_request_plan(
                 format!("unknown model {}", request.model),
             ),
         };
-        AiRequestRejection {
+        reject_ai_request(AiRequestRejection {
             tenant: auth.tenant_context(),
             logical_model: Some(request.model.clone()),
             status: StatusCode::BAD_REQUEST,
             code,
             message,
-        }
+        })
     })?;
 
     if !state.can_tenant_use_model(
@@ -1168,13 +1179,13 @@ fn build_ai_request_plan(
         auth.organization_id.as_deref(),
         auth.project_id.as_deref(),
     ) {
-        return Err(AiRequestRejection {
+        return Err(reject_ai_request(AiRequestRejection {
             tenant: auth.tenant_context(),
             logical_model: Some(request.model.clone()),
             status: StatusCode::FORBIDDEN,
             code: "model_not_visible",
             message: format!("model {} is not visible to this tenant", request.model),
-        });
+        }));
     }
 
     let estimated_usage = estimate_chat_completion_usage(&body_json);
