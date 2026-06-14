@@ -152,6 +152,7 @@ impl Config {
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            observability: crate::config::ObservabilityConfig::default(),
             metering: crate::config::MeteringConfig::default(),
             cache: crate::config::CacheConfig::default(),
             storage: crate::config::StorageConfig::default(),
