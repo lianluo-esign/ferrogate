@@ -137,15 +137,15 @@ feature is not done.
 ## Verification
 
 Run the narrowest verification that proves the claim, then read the output.
-In this repository, the user has set a hard build/package contract: do not
-compile, clippy, test, or package FerroGate locally on this server. Rust
-compilation, workspace tests, Docker image builds, and package publication must
-run through GitHub Actions. The local machine is used for source edits,
-non-compiling validation, GitHub CI orchestration, pulling the exact GHCR image,
-and Docker runtime verification of that CI-built image.
+In this repository, prefer local proof when the environment can provide it
+quickly: build the FerroGate Docker image locally, run it in local Docker, then
+rebuild and run the repo-local `ferrogate-test` harness against that container.
+If the local build is too slow, Docker/network access fails, dependency fetches
+stall, or the machine cannot provide a credible runtime proof, fall back to
+GitHub Actions for compilation, image build, and E2E execution.
 
-For meaningful code changes, run only non-compiling local checks when they are
-relevant:
+For meaningful code changes, run the lightweight local checks when they are
+relevant before heavier runtime validation:
 
 ```bash
 cargo fmt --all -- --check
@@ -154,27 +154,36 @@ python3 scripts/check-openapi.py
 git diff --check
 ```
 
-Do not run these local compile/test commands on this server unless the user
-explicitly reverses the project contract:
+Local compile/test commands are allowed when they are the shortest credible
+path to proof:
 
 ```bash
+cargo build -p ferrogate-cli -p ferrogate-test --locked
+./target/debug/ferrogate-test ci
 cargo +1.88.0 clippy --workspace --all-targets --all-features -- -D warnings
 cargo +1.88.0 test --workspace --all-features
 cargo +1.88.0 test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- --nocapture
 ```
 
-After pushing code that changes Rust behavior or packaging, use GitHub Actions
-as the authoritative build signal. Wait for `rust-ci` and the GHCR image job,
-pull the exact image tag or digest that CI published, run that exact image in a
-local Docker container, and verify the relevant runtime behavior with
-`ferrogate-test` against the running container. Record the CI run URL, image
-reference, digest, Docker command, and `ferrogate-test` result in the related
-GitHub issue.
+For Docker-backed runtime changes, prefer this order:
+
+1. Build the local image and run it in Docker.
+2. Rebuild `ferrogate-test` locally.
+3. Run the narrowest matching `ferrogate-test` scenario against the local image
+   or running container.
+4. If local build/runtime validation is slow or blocked by environment/network
+   failure, fall back to GitHub Actions, wait for `rust-ci` and the GHCR image
+   job, pull the exact CI-published tag or digest, run that image locally, and
+   verify the relevant runtime behavior.
+
+Record the local Docker command, image reference or digest, `ferrogate-test`
+result, and any CI fallback URL in the related GitHub issue.
 
 For config parser, provider, policy, billing, storage, or streaming changes,
-add or update focused regression tests, but let GitHub CI compile and execute
-them. For security-sensitive changes, run security checks through CI or another
-approved non-local-build path.
+add or update focused regression tests and run the narrowest credible local
+coverage first when practical. For security-sensitive changes, run security
+checks through CI or another approved verification path if local tooling cannot
+prove the claim.
 
 Do not claim production readiness from unit tests alone when the change affects
 runtime wiring, live reload, TLS/ACME, provider streaming, or billing

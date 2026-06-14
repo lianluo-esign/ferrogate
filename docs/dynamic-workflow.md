@@ -60,9 +60,13 @@ continues.
      for meaningful Rust changes.
    - Run `cargo test --workspace --all-features` before final commit unless the
      change is documentation-only.
-   - After GitHub Actions publishes the image, pull the exact GHCR tag or
-     digest locally, run it in Docker, and use `ferrogate-test` against that
-     running container for the final runtime verification step.
+   - For Docker-backed runtime changes, first build a local FerroGate image,
+     run it in Docker, rebuild `ferrogate-test`, and run the narrowest matching
+     harness scenario against the local image.
+   - If local build/runtime validation is too slow or blocked by Docker,
+     dependency, or network failure, fall back to GitHub Actions: wait for the
+     CI image, pull the exact GHCR tag or digest locally, run it in Docker, and
+     use `ferrogate-test` against that image.
 
 6. Commit and push.
    - Commit every completed slice with the related issue in the subject when
@@ -110,8 +114,9 @@ A dynamic workflow cycle is done only when all of these are true:
 - The chosen slice has an issue reference.
 - The implementation has an operator-visible E2E path.
 - Tests and checks prove the claimed behavior.
-- The CI-built GHCR image was pulled locally, run in Docker, and verified with
-  `ferrogate-test`.
+- The Docker image path was verified locally with `ferrogate-test`, either from
+  a local image build or, when local build/runtime validation was blocked, from
+  the exact CI-built GHCR image.
 - The commit is pushed.
 - The related issue is closed or updated with exact remaining work.
 - The worktree is clean.
