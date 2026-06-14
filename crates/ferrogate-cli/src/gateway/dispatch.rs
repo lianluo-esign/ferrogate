@@ -173,7 +173,7 @@ fn provider_response_content_type(headers: &HeaderMap) -> String {
         .get(http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "application/json".to_string());
+        .unwrap_or_else(|| "application/json".to_string())
 }
 
 #[cfg(test)]
