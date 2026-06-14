@@ -7,7 +7,7 @@
 use http::{HeaderMap, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Deserialize;
-use std::io::Read;
+use std::io::{Error as IoError, Read};
 use tracing::{info, warn};
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
     config::{GuardrailEffect, GuardrailStage, Provider},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
-        write_streaming_response,
+        write_streaming_bytes_response, write_streaming_response,
     },
     state::{AppState, GatewayConfigResolveError, GatewayConfigUse, ToolInjectionContext},
 };
@@ -27,7 +27,9 @@ use ferrogate_storage::StoredRequestLog;
 
 use super::{
     body::read_request_body,
-    dispatch::{dispatch_provider_request, dispatch_provider_streaming_request},
+    dispatch::{
+        dispatch_provider_request, dispatch_provider_streaming_request, ProviderBodyReader,
+    },
     FerroGateway, ProxyContext,
 };
 
@@ -560,22 +562,29 @@ impl FerroGateway {
                     match dispatch_provider_streaming_request(prepared.clone(), dispatch_timeout)
                         .await
                     {
-                        Ok(mut response) => {
+                        Ok(response) => {
                             if response.status.is_client_error()
                                 || response.status.is_server_error()
                             {
-                                let mut body = response.initial_body;
-                                if let Err(error) = response.body.read_to_end(&mut body) {
-                                    write_json_error(
-                                        session,
-                                        StatusCode::BAD_GATEWAY,
-                                        "provider_dispatch_error",
-                                        format!("provider dispatch failed: {error}"),
-                                        &ctx.request_id,
-                                    )
-                                    .await?;
-                                    return Ok(());
-                                }
+                                let body = match read_provider_streaming_body(
+                                    response.initial_body,
+                                    response.body,
+                                )
+                                .await
+                                {
+                                    Ok(body) => body,
+                                    Err(error) => {
+                                        write_json_error(
+                                            session,
+                                            StatusCode::BAD_GATEWAY,
+                                            "provider_dispatch_error",
+                                            format!("provider dispatch failed: {error}"),
+                                            &ctx.request_id,
+                                        )
+                                        .await?;
+                                        return Ok(());
+                                    }
+                                };
                                 let retryable_status = state
                                     .is_provider_status_retryable(
                                         &provider.kind,
@@ -668,6 +677,163 @@ impl FerroGateway {
                             if let Some(reservation) = token_reservation.take() {
                                 reservation.settle();
                             }
+                            let record_bodies =
+                                auth.can_record_bodies(state.config.telemetry.log_bodies);
+                            if state.has_guardrail_candidate(
+                                GuardrailStage::Response,
+                                &policy_request.tenant,
+                                Some(&request.model),
+                                Some(&provider.name),
+                            ) {
+                                let mut final_body = match read_provider_streaming_body(
+                                    response.initial_body,
+                                    response.body,
+                                )
+                                .await
+                                {
+                                    Ok(body) => body,
+                                    Err(error) => {
+                                        write_json_error(
+                                            session,
+                                            StatusCode::BAD_GATEWAY,
+                                            "provider_dispatch_error",
+                                            format!("provider dispatch failed: {error}"),
+                                            &ctx.request_id,
+                                        )
+                                        .await?;
+                                        return Ok(());
+                                    }
+                                };
+                                let mut final_status = response.status;
+                                let mut final_content_type = response.content_type;
+                                let mut final_error_code = None;
+                                if let Some(guardrail) = state.match_guardrail(
+                                    GuardrailStage::Response,
+                                    &policy_request.tenant,
+                                    Some(&request.model),
+                                    Some(&provider.name),
+                                    &String::from_utf8_lossy(&final_body),
+                                ) {
+                                    state.record_guardrail_match(&guardrail);
+                                    match guardrail.effect {
+                                        GuardrailEffect::Deny => {
+                                            final_status = StatusCode::FORBIDDEN;
+                                            final_content_type = "application/json".into();
+                                            final_error_code = Some(guardrail.code.clone());
+                                            state.record_admin_audit_event(
+                                                crate::state::AdminAuditEventDraft {
+                                                    request_id: ctx.request_id.clone(),
+                                                    trace_id: ctx.trace_id.clone(),
+                                                    actor_api_key_id: auth.api_key_id.clone(),
+                                                    tenant: auth.tenant_context(),
+                                                    action: "guardrail.deny".into(),
+                                                    target: guardrail.rule_id.clone(),
+                                                    outcome: "blocked".into(),
+                                                    message: format!(
+                                                        "guardrail {} blocked streaming response for model {} provider {}",
+                                                        guardrail.rule_name, request.model, provider.name
+                                                    ),
+                                                },
+                                            );
+                                            final_body = serde_json::json!({
+                                                "error": {
+                                                    "message": guardrail.message,
+                                                    "type": "ferrogate_error",
+                                                    "code": guardrail.code,
+                                                    "request_id": ctx.request_id.as_str(),
+                                                }
+                                            })
+                                            .to_string()
+                                            .into_bytes();
+                                        }
+                                        GuardrailEffect::Redact => {
+                                            let redacted_body = guardrail
+                                                .redact_text(&String::from_utf8_lossy(&final_body));
+                                            state.record_admin_audit_event(
+                                                crate::state::AdminAuditEventDraft {
+                                                    request_id: ctx.request_id.clone(),
+                                                    trace_id: ctx.trace_id.clone(),
+                                                    actor_api_key_id: auth.api_key_id.clone(),
+                                                    tenant: auth.tenant_context(),
+                                                    action: "guardrail.redact".into(),
+                                                    target: guardrail.rule_id.clone(),
+                                                    outcome: "redacted".into(),
+                                                    message: format!(
+                                                        "guardrail {} redacted streaming response for model {} provider {}",
+                                                        guardrail.rule_name, request.model, provider.name
+                                                    ),
+                                                },
+                                            );
+                                            final_body = redacted_body.into_bytes();
+                                        }
+                                    }
+                                }
+                                state.record_request_log(StoredRequestLog {
+                                    request_id: ctx.request_id.clone(),
+                                    trace_id: ctx.trace_id.clone(),
+                                    cluster_id: None,
+                                    node_id: None,
+                                    tenant: policy_request.tenant.clone(),
+                                    route: policy_request.route.clone(),
+                                    provider: Some(provider.name.clone()),
+                                    logical_model: Some(request.model.clone()),
+                                    provider_model: Some(model_route.provider_model.clone()),
+                                    gateway_config_id: gateway_config
+                                        .as_ref()
+                                        .map(|profile| profile.id.clone()),
+                                    gateway_config_revision: gateway_config
+                                        .as_ref()
+                                        .map(|profile| profile.revision),
+                                    status_code: final_status.as_u16(),
+                                    error_code: final_error_code,
+                                    prompt_recorded: record_bodies,
+                                    response_recorded: record_bodies,
+                                    prompt_body: record_bodies.then(|| body_json.to_string()),
+                                    response_body: record_bodies.then(|| {
+                                        String::from_utf8_lossy(&final_body)
+                                            .chars()
+                                            .take(16 * 1024)
+                                            .collect()
+                                    }),
+                                    cache_status: None,
+                                    started_at_unix: None,
+                                    completed_at_unix: None,
+                                });
+                                return write_streaming_bytes_response(
+                                    session,
+                                    final_status,
+                                    &final_content_type,
+                                    final_body,
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
+                            state.record_request_log(StoredRequestLog {
+                                request_id: ctx.request_id.clone(),
+                                trace_id: ctx.trace_id.clone(),
+                                cluster_id: None,
+                                node_id: None,
+                                tenant: policy_request.tenant.clone(),
+                                route: policy_request.route.clone(),
+                                provider: Some(provider.name.clone()),
+                                logical_model: Some(request.model.clone()),
+                                provider_model: Some(model_route.provider_model.clone()),
+                                gateway_config_id: gateway_config
+                                    .as_ref()
+                                    .map(|profile| profile.id.clone()),
+                                gateway_config_revision: gateway_config
+                                    .as_ref()
+                                    .map(|profile| profile.revision),
+                                status_code: response.status.as_u16(),
+                                error_code: None,
+                                prompt_recorded: record_bodies,
+                                response_recorded: false,
+                                prompt_body: record_bodies.then(|| body_json.to_string()),
+                                response_body: None,
+                                cache_status: None,
+                                started_at_unix: None,
+                                completed_at_unix: None,
+                            });
                             return write_streaming_response(
                                 session,
                                 response.status,
@@ -903,6 +1069,8 @@ impl FerroGateway {
                                     .into_bytes();
                                 }
                                 GuardrailEffect::Redact => {
+                                    let redacted_body = guardrail
+                                        .redact_text(&String::from_utf8_lossy(&final_body));
                                     state.record_admin_audit_event(
                                         crate::state::AdminAuditEventDraft {
                                             request_id: ctx.request_id.clone(),
@@ -918,9 +1086,7 @@ impl FerroGateway {
                                             ),
                                         },
                                     );
-                                    final_body = String::from_utf8_lossy(&final_body)
-                                        .replace(&guardrail.keyword, "[REDACTED]")
-                                        .into_bytes();
+                                    final_body = redacted_body.into_bytes();
                                 }
                             }
                         }
@@ -1111,6 +1277,19 @@ fn reject_ai_request(rejection: AiRequestRejection) -> Box<AiRequestRejection> {
     Box::new(rejection)
 }
 
+async fn read_provider_streaming_body(
+    initial_body: Vec<u8>,
+    mut reader: ProviderBodyReader,
+) -> Result<Vec<u8>, IoError> {
+    tokio::task::spawn_blocking(move || {
+        let mut body = initial_body;
+        reader.read_to_end(&mut body)?;
+        Ok(body)
+    })
+    .await
+    .map_err(IoError::other)?
+}
+
 struct AiProviderRequestInput<'a> {
     endpoint: AiEndpoint,
     provider: &'a Provider,
@@ -1259,7 +1438,7 @@ fn build_ai_request_plan(
 
     let estimated_usage = estimate_chat_completion_usage(&body_json);
     let routes = state.candidate_model_routes(&model, Some(&estimated_usage));
-    let body_text = body_json.to_string();
+    let body_text = String::from_utf8_lossy(body).into_owned();
     Ok(AiRequestPlan {
         auth,
         gateway_config,

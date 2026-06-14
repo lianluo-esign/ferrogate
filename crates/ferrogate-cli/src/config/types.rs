@@ -421,6 +421,10 @@ pub(crate) struct GuardrailRule {
     pub(crate) providers: Vec<String>,
     #[serde(default)]
     pub(crate) keywords: Vec<String>,
+    #[serde(default)]
+    pub(crate) regex: Vec<String>,
+    #[serde(default)]
+    pub(crate) max_input_bytes: Option<usize>,
     #[serde(default = "default_guardrail_effect")]
     pub(crate) effect: GuardrailEffect,
     #[serde(default = "default_guardrail_code")]

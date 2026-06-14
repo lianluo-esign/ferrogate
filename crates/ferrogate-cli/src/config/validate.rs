@@ -874,13 +874,29 @@ impl Config {
             if guardrail.name.trim().is_empty() {
                 bail!("field guardrails[{index}].name: cannot be empty");
             }
-            if guardrail.keywords.is_empty() {
-                bail!("field guardrails[{index}].keywords: at least one keyword is required");
+            if guardrail.keywords.is_empty()
+                && guardrail.regex.is_empty()
+                && guardrail.max_input_bytes.is_none()
+            {
+                bail!(
+                    "field guardrails[{index}]: at least one keyword, regex, or max_input_bytes is required"
+                );
             }
             for (keyword_index, keyword) in guardrail.keywords.iter().enumerate() {
                 if keyword.trim().is_empty() {
                     bail!("field guardrails[{index}].keywords[{keyword_index}]: cannot be empty");
                 }
+            }
+            for (regex_index, pattern) in guardrail.regex.iter().enumerate() {
+                if pattern.trim().is_empty() {
+                    bail!("field guardrails[{index}].regex[{regex_index}]: cannot be empty");
+                }
+                regex::Regex::new(pattern).with_context(|| {
+                    format!("field guardrails[{index}].regex[{regex_index}]: invalid regex")
+                })?;
+            }
+            if guardrail.max_input_bytes == Some(0) {
+                bail!("field guardrails[{index}].max_input_bytes: must be greater than zero");
             }
             for api_key_id in &guardrail.api_key_ids {
                 if !api_key_ids.contains(api_key_id.as_str()) {
@@ -918,6 +934,13 @@ impl Config {
                 (super::GuardrailStage::Request, super::GuardrailEffect::Redact) => {
                     bail!("field guardrails[{index}].effect: request guardrails support deny only");
                 }
+            }
+            if guardrail.max_input_bytes.is_some()
+                && guardrail.stage != super::GuardrailStage::Request
+            {
+                bail!(
+                    "field guardrails[{index}].max_input_bytes: max input length guardrails apply to request stage only"
+                );
             }
         }
 

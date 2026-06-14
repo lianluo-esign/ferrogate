@@ -477,6 +477,29 @@ pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(
     session.write_response_body(None, true).await
 }
 
+pub(crate) async fn write_streaming_bytes_response(
+    session: &mut Session,
+    status: StatusCode,
+    content_type: &str,
+    body: Vec<u8>,
+    request_id: &str,
+) -> PingoraResult<()> {
+    let mut response = ResponseHeader::build(status, Some(4))?;
+    response.insert_header(header::CONTENT_TYPE, content_type)?;
+    response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
+    response.insert_header("x-ferrogate-runtime", "pingora")?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    if !body.is_empty() {
+        session
+            .write_response_body(Some(Bytes::from(body)), false)
+            .await?;
+    }
+    session.write_response_body(None, true).await
+}
+
 fn read_streaming_body_chunks<R: Read>(
     mut reader: R,
     sender: mpsc::Sender<std::io::Result<Bytes>>,

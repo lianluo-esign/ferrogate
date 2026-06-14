@@ -321,6 +321,8 @@ fn validates_guardrail_keyword_scope_and_effect() {
             models: vec!["fast-chat".into()],
             providers: vec!["openai".into()],
             keywords: vec!["secret".into()],
+            regex: vec![],
+            max_input_bytes: None,
             effect: GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),
@@ -348,6 +350,8 @@ fn validates_response_guardrail_redact_effect() {
             models: vec!["fast-chat".into()],
             providers: vec!["openai".into()],
             keywords: vec!["secret".into()],
+            regex: vec![],
+            max_input_bytes: None,
             effect: GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
@@ -356,6 +360,114 @@ fn validates_response_guardrail_redact_effect() {
     };
 
     config.validate().unwrap();
+}
+
+#[test]
+fn validates_guardrail_regex_and_max_input_bytes() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![
+            GuardrailRule {
+                id: "block-pattern".into(),
+                name: "Block pattern".into(),
+                enabled: true,
+                stage: GuardrailStage::Request,
+                organization_ids: vec![],
+                project_ids: vec![],
+                api_key_ids: vec!["key_dev".into()],
+                models: vec!["fast-chat".into()],
+                providers: vec!["openai".into()],
+                keywords: vec![],
+                regex: vec![r"ABC-[0-9]+".into()],
+                max_input_bytes: None,
+                effect: GuardrailEffect::Deny,
+                code: "guardrail_regex_blocked".into(),
+                message: "blocked by regex guardrail".into(),
+            },
+            GuardrailRule {
+                id: "max-input".into(),
+                name: "Max input".into(),
+                enabled: true,
+                stage: GuardrailStage::Request,
+                organization_ids: vec![],
+                project_ids: vec![],
+                api_key_ids: vec!["key_dev".into()],
+                models: vec!["fast-chat".into()],
+                providers: vec!["openai".into()],
+                keywords: vec![],
+                regex: vec![],
+                max_input_bytes: Some(1024),
+                effect: GuardrailEffect::Deny,
+                code: "guardrail_input_too_large".into(),
+                message: "input is too large".into(),
+            },
+        ],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_invalid_guardrail_regex() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![GuardrailRule {
+            id: "block-pattern".into(),
+            name: "Block pattern".into(),
+            enabled: true,
+            stage: GuardrailStage::Request,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["key_dev".into()],
+            models: vec!["fast-chat".into()],
+            providers: vec!["openai".into()],
+            keywords: vec![],
+            regex: vec!["[".into()],
+            max_input_bytes: None,
+            effect: GuardrailEffect::Deny,
+            code: "guardrail_regex_blocked".into(),
+            message: "blocked by regex guardrail".into(),
+        }],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("invalid regex"));
+}
+
+#[test]
+fn rejects_response_guardrail_max_input_bytes() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![GuardrailRule {
+            id: "response-max-input".into(),
+            name: "Response max input".into(),
+            enabled: true,
+            stage: GuardrailStage::Response,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["key_dev".into()],
+            models: vec!["fast-chat".into()],
+            providers: vec!["openai".into()],
+            keywords: vec![],
+            regex: vec![],
+            max_input_bytes: Some(1024),
+            effect: GuardrailEffect::Deny,
+            code: "guardrail_input_too_large".into(),
+            message: "input is too large".into(),
+        }],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("max input length guardrails apply to request stage only"));
 }
 
 #[test]
@@ -375,6 +487,8 @@ fn rejects_request_guardrail_redact_effect() {
             models: vec!["fast-chat".into()],
             providers: vec!["openai".into()],
             keywords: vec!["secret".into()],
+            regex: vec![],
+            max_input_bytes: None,
             effect: GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
@@ -402,6 +516,8 @@ fn rejects_guardrail_with_unknown_model() {
             models: vec!["missing-model".into()],
             providers: vec!["openai".into()],
             keywords: vec!["secret".into()],
+            regex: vec![],
+            max_input_bytes: None,
             effect: GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),

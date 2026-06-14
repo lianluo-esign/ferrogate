@@ -154,6 +154,7 @@ struct CiArgs {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DockerScenario {
     ClusterDrain,
+    GuardrailComplete,
     GuardrailRequestDeny,
     GuardrailResponseRedact,
     SharedApiKey,
@@ -166,6 +167,7 @@ impl DockerScenario {
     fn names() -> &'static [&'static str] {
         &[
             "cluster-drain",
+            "guardrail-complete",
             "guardrail-request-deny",
             "guardrail-response-redact",
             "shared-api-key",
@@ -179,6 +181,7 @@ impl DockerScenario {
 fn run_docker_scenario(scenario: DockerScenario, image: &str) -> Result<()> {
     match scenario {
         DockerScenario::ClusterDrain => run_cluster_drain(image),
+        DockerScenario::GuardrailComplete => run_guardrail_complete(image),
         DockerScenario::GuardrailRequestDeny => run_guardrail_request_deny(image),
         DockerScenario::GuardrailResponseRedact => run_guardrail_response_redact(image),
         DockerScenario::SharedApiKey => run_shared_api_key(image),
@@ -1750,6 +1753,153 @@ fn run_guardrail_response_redact(image: &str) -> Result<()> {
     Ok(())
 }
 
+fn run_guardrail_complete(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
+    start_guardrail_complete_provider()?;
+    wait_for_provider()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("guardrail-complete.toml");
+    std::fs::write(&config_path, guardrail_complete_gateway_config())?;
+    start_gateway(
+        image,
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_path,
+        None,
+    )?;
+
+    wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"ticket ABC-123"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "guardrail_regex_blocked");
+            Ok(())
+        },
+    )
+    .context("request regex deny guardrail")?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"this input is deliberately long enough to trip the max input bytes guardrail"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "guardrail_input_too_large");
+            Ok(())
+        },
+    )
+    .context("request max input bytes guardrail")?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"deny"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "guardrail_response_blocked");
+            assert!(!body.to_string().contains("deny-output"));
+            Ok(())
+        },
+    )
+    .context("response deny guardrail")?;
+    expect_text(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","stream":true,"messages":[{"role":"user","content":"stream"}]}"#,
+        200,
+        |body| {
+            assert!(body.contains("[REDACTED]"));
+            assert!(!body.contains("stream-secret"));
+            Ok(())
+        },
+    )
+    .context("streaming response redact guardrail")?;
+
+    let provider_log = Command::new("docker")
+        .args(["logs", PROVIDER_CONTAINER])
+        .output()
+        .context("failed to inspect provider logs")?;
+    let provider_log = String::from_utf8_lossy(&provider_log.stdout);
+    assert_eq!(
+        provider_log.matches("POST /v1/chat/completions").count(),
+        2,
+        "request regex and length guardrails should block before provider dispatch"
+    );
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "action", "guardrail.deny"));
+            assert!(list_contains(&body, "action", "guardrail.redact"));
+            assert!(!body.to_string().contains("deny-output"));
+            assert!(!body.to_string().contains("stream-secret"));
+            Ok(())
+        },
+    )
+    .context("guardrail audit event evidence")?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            let raw = body.to_string();
+            assert!(raw.contains("[REDACTED]"));
+            assert!(!raw.contains("deny-output"));
+            assert!(!raw.contains("stream-secret"));
+            Ok(())
+        },
+    )
+    .context("guardrail request log evidence")?;
+    expect_text(
+        GATEWAY_A_PORT,
+        "GET",
+        "/metrics",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert!(body.contains("ferrogate_guardrail_matches_total 4"));
+            assert!(body.contains("ferrogate_guardrail_denials_total 3"));
+            assert!(body.contains("ferrogate_guardrail_redactions_total 1"));
+            Ok(())
+        },
+    )
+    .context("guardrail metrics evidence")?;
+
+    println!("guardrail-complete scenario passed");
+    Ok(())
+}
+
 fn run_shared_api_key(image: &str) -> Result<()> {
     let _cleanup = setup_environment(image)?;
     start_provider()?;
@@ -2271,6 +2421,113 @@ enabled = true
     .to_string()
 }
 
+fn guardrail_complete_gateway_config() -> String {
+    r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "e2e-node-a"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "local"
+
+[telemetry]
+log_bodies = true
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read", "chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+log_bodies = true
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[guardrails]]
+id = "block-ticket-regex"
+name = "Block ticket regex"
+stage = "request"
+organization_ids = ["org_demo"]
+project_ids = ["project_gateway"]
+api_key_ids = ["client"]
+models = ["fast-chat"]
+providers = ["openai"]
+regex = ["ABC-[0-9]+"]
+effect = "deny"
+code = "guardrail_regex_blocked"
+message = "blocked by regex guardrail"
+enabled = true
+
+[[guardrails]]
+id = "limit-request-size"
+name = "Limit request size"
+stage = "request"
+organization_ids = ["org_demo"]
+project_ids = ["project_gateway"]
+api_key_ids = ["client"]
+models = ["fast-chat"]
+providers = ["openai"]
+max_input_bytes = 120
+effect = "deny"
+code = "guardrail_input_too_large"
+message = "input is too large"
+enabled = true
+
+[[guardrails]]
+id = "block-provider-output"
+name = "Block provider output"
+stage = "response"
+organization_ids = ["org_demo"]
+project_ids = ["project_gateway"]
+api_key_ids = ["client"]
+models = ["fast-chat"]
+providers = ["openai"]
+keywords = ["deny-output"]
+effect = "deny"
+code = "guardrail_response_blocked"
+message = "response blocked by guardrail"
+enabled = true
+
+[[guardrails]]
+id = "redact-stream-output"
+name = "Redact stream output"
+stage = "response"
+organization_ids = ["org_demo"]
+project_ids = ["project_gateway"]
+api_key_ids = ["client"]
+models = ["fast-chat"]
+providers = ["openai"]
+regex = ["stream-secret"]
+effect = "redact"
+code = "guardrail_stream_redacted"
+message = "stream redacted by guardrail"
+enabled = true
+"#
+    .to_string()
+}
+
 fn redis_counter_gateway_config(node_id: &str) -> String {
     format!(
         r#"
@@ -2372,6 +2629,64 @@ ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
         NETWORK_NAME,
         "-e",
         &format!("FERROGATE_E2E_PROVIDER_CONTENT={content}"),
+        &provider_image,
+        "python",
+        "-u",
+        "-c",
+        command,
+    ])
+}
+
+fn start_guardrail_complete_provider() -> Result<()> {
+    let provider_image =
+        env::var("FERROGATE_E2E_PROVIDER_IMAGE").unwrap_or_else(|_| "python:3.11-slim".into());
+    let command = r#"
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+
+def json_body(content):
+    return json.dumps({
+        "id": "chatcmpl_e2e",
+        "object": "chat.completion",
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "usage": {"total_tokens": 1},
+    }).encode()
+
+STREAM_BODY = b'data: {"choices":[{"delta":{"content":"stream-secret"}}]}\n\ndata: [DONE]\n\n'
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        print(self.requestline, flush=True)
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode() if length else ""
+        if '"stream":true' in raw or '"stream": true' in raw:
+            body = STREAM_BODY
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        content = "deny-output" if "deny" in raw else "ok"
+        body = json_body(content)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
+"#;
+    docker([
+        "run",
+        "-d",
+        "--name",
+        PROVIDER_CONTAINER,
+        "--network",
+        NETWORK_NAME,
         &provider_image,
         "python",
         "-u",

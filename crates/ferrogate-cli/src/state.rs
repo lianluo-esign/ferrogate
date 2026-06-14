@@ -56,6 +56,7 @@ use ferrogate_storage::{
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
 use redis::Commands;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -801,6 +802,8 @@ struct GuardrailRuleRuntime {
     models: Vec<String>,
     providers: Vec<String>,
     keywords: Vec<String>,
+    regex: Vec<Regex>,
+    max_input_bytes: Option<usize>,
     code: String,
     message: String,
 }
@@ -810,9 +813,20 @@ pub(crate) struct GuardrailMatch {
     pub(crate) rule_id: String,
     pub(crate) rule_name: String,
     pub(crate) effect: GuardrailEffect,
-    pub(crate) keyword: String,
+    pub(crate) matched_text: String,
+    redaction_regex: Option<Regex>,
     pub(crate) code: String,
     pub(crate) message: String,
+}
+
+impl GuardrailMatch {
+    pub(crate) fn redact_text(&self, text: &str) -> String {
+        if let Some(regex) = &self.redaction_regex {
+            regex.replace_all(text, "[REDACTED]").into_owned()
+        } else {
+            text.replace(&self.matched_text, "[REDACTED]")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1340,6 +1354,14 @@ impl AppState {
                 models: rule.models.clone(),
                 providers: rule.providers.clone(),
                 keywords: rule.keywords.clone(),
+                regex: rule
+                    .regex
+                    .iter()
+                    .map(|pattern| {
+                        Regex::new(pattern).expect("config validation must reject invalid regex")
+                    })
+                    .collect(),
+                max_input_bytes: rule.max_input_bytes,
                 code: rule.code.clone(),
                 message: rule.message.clone(),
             })
@@ -2222,19 +2244,55 @@ impl AppState {
             if !allows_optional_scope(&rule.providers, provider) {
                 return None;
             }
-            let matched_keyword = rule
-                .keywords
-                .iter()
-                .find(|keyword| body_text.contains(keyword.as_str()))?
-                .clone();
+            let matched = if let Some(max_input_bytes) = rule.max_input_bytes {
+                if body_text.len() > max_input_bytes {
+                    Some(("length".to_string(), None))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            .or_else(|| {
+                rule.keywords
+                    .iter()
+                    .find(|keyword| body_text.contains(keyword.as_str()))
+                    .map(|keyword| (keyword.clone(), None))
+            })
+            .or_else(|| {
+                rule.regex.iter().find_map(|regex| {
+                    regex
+                        .find(body_text)
+                        .map(|matched| (matched.as_str().to_string(), Some(regex.clone())))
+                })
+            })?;
             Some(GuardrailMatch {
                 rule_id: rule.id.clone(),
                 rule_name: rule.name.clone(),
                 effect: rule.effect,
-                keyword: matched_keyword,
+                matched_text: matched.0,
+                redaction_regex: matched.1,
                 code: rule.code.clone(),
                 message: rule.message.clone(),
             })
+        })
+    }
+
+    pub(crate) fn has_guardrail_candidate(
+        &self,
+        stage: GuardrailStage,
+        tenant: &ferrogate_core::TenantContext,
+        model: Option<&str>,
+        provider: Option<&str>,
+    ) -> bool {
+        self.guardrail_rules.iter().any(|rule| {
+            rule.enabled
+                && rule.stage == stage
+                && allows_optional_scope(&rule.organization_ids, tenant.organization_id.as_deref())
+                && allows_optional_scope(&rule.project_ids, tenant.project_id.as_deref())
+                && allows_optional_scope(&rule.api_key_ids, tenant.api_key_id.as_deref())
+                && allows_optional_scope(&rule.models, model)
+                && allows_optional_scope(&rule.providers, provider)
         })
     }
 
@@ -3744,6 +3802,8 @@ mod tests {
                 models: vec!["fast-chat".into()],
                 providers: vec!["openai".into()],
                 keywords: vec!["secret".into()],
+                regex: vec![],
+                max_input_bytes: None,
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_blocked".into(),
                 message: "blocked by guardrail".into(),
@@ -3771,7 +3831,7 @@ mod tests {
         assert_eq!(matched.rule_id, "block-secret");
         assert_eq!(matched.rule_name, "Block secret");
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
-        assert_eq!(matched.keyword, "secret");
+        assert_eq!(matched.matched_text, "secret");
         assert_eq!(matched.code, "guardrail_blocked");
         assert_eq!(matched.message, "blocked by guardrail");
     }
@@ -3814,6 +3874,8 @@ mod tests {
                 models: vec![],
                 providers: vec![],
                 keywords: vec!["secret".into()],
+                regex: vec![],
+                max_input_bytes: None,
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_blocked".into(),
                 message: "blocked by guardrail".into(),
@@ -3871,6 +3933,8 @@ mod tests {
                 models: vec!["fast-chat".into()],
                 providers: vec!["openai".into()],
                 keywords: vec!["secret".into()],
+                regex: vec![],
+                max_input_bytes: None,
                 effect: crate::config::GuardrailEffect::Redact,
                 code: "guardrail_redacted".into(),
                 message: "redacted by guardrail".into(),
@@ -3896,6 +3960,111 @@ mod tests {
         assert_eq!(snapshot.guardrail_match_total, 1);
         assert_eq!(snapshot.guardrail_denial_total, 0);
         assert_eq!(snapshot.guardrail_redaction_total, 1);
+    }
+
+    #[test]
+    fn matches_regex_and_redacts_with_compiled_pattern() {
+        let config = Config {
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: None,
+                output_price_per_1m: None,
+                enabled: true,
+                cache_enabled: None,
+            }],
+            guardrails: vec![crate::config::GuardrailRule {
+                id: "redact-token".into(),
+                name: "Redact token".into(),
+                enabled: true,
+                stage: crate::config::GuardrailStage::Response,
+                organization_ids: vec![],
+                project_ids: vec![],
+                api_key_ids: vec![],
+                models: vec!["fast-chat".into()],
+                providers: vec!["openai".into()],
+                keywords: vec![],
+                regex: vec![r"token-[0-9]+".into()],
+                max_input_bytes: None,
+                effect: crate::config::GuardrailEffect::Redact,
+                code: "guardrail_redacted".into(),
+                message: "redacted by guardrail".into(),
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        let matched = state
+            .match_guardrail(
+                crate::config::GuardrailStage::Response,
+                &ferrogate_core::TenantContext::default(),
+                Some("fast-chat"),
+                Some("openai"),
+                "provider returned token-123 and token-456",
+            )
+            .expect("regex guardrail should match");
+
+        assert_eq!(matched.rule_id, "redact-token");
+        assert_eq!(matched.matched_text, "token-123");
+        assert_eq!(
+            matched.redact_text("provider returned token-123 and token-456"),
+            "provider returned [REDACTED] and [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn matches_request_max_input_bytes() {
+        let config = Config {
+            guardrails: vec![crate::config::GuardrailRule {
+                id: "max-input".into(),
+                name: "Max input".into(),
+                enabled: true,
+                stage: crate::config::GuardrailStage::Request,
+                organization_ids: vec![],
+                project_ids: vec![],
+                api_key_ids: vec![],
+                models: vec![],
+                providers: vec![],
+                keywords: vec![],
+                regex: vec![],
+                max_input_bytes: Some(8),
+                effect: crate::config::GuardrailEffect::Deny,
+                code: "guardrail_input_too_large".into(),
+                message: "input is too large".into(),
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        let matched = state
+            .match_guardrail(
+                crate::config::GuardrailStage::Request,
+                &ferrogate_core::TenantContext::default(),
+                None,
+                None,
+                "012345678",
+            )
+            .expect("length guardrail should match");
+
+        assert_eq!(matched.rule_id, "max-input");
+        assert_eq!(matched.matched_text, "length");
+        assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
     }
 
     #[test]
