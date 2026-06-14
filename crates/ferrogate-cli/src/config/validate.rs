@@ -909,11 +909,15 @@ impl Config {
                     );
                 }
             }
-            if !matches!(guardrail.stage, super::GuardrailStage::Request) {
-                bail!("field guardrails[{index}].stage: unsupported guardrail stage");
-            }
-            if !matches!(guardrail.effect, super::GuardrailEffect::Deny) {
-                bail!("field guardrails[{index}].effect: unsupported guardrail effect");
+            match (guardrail.stage, guardrail.effect) {
+                (super::GuardrailStage::Request, super::GuardrailEffect::Deny)
+                | (
+                    super::GuardrailStage::Response,
+                    super::GuardrailEffect::Deny | super::GuardrailEffect::Redact,
+                ) => {}
+                (super::GuardrailStage::Request, super::GuardrailEffect::Redact) => {
+                    bail!("field guardrails[{index}].effect: request guardrails support deny only");
+                }
             }
         }
 

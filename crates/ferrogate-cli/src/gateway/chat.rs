@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::{
     auth::{authenticate, AuthContext},
-    config::Provider,
+    config::{GuardrailEffect, GuardrailStage, Provider},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         write_streaming_response,
@@ -281,12 +281,14 @@ impl FerroGateway {
                 upstream: Some(provider.name.clone()),
                 tenant: auth.tenant_context(),
             };
-            if let Some(guardrail) = state.match_request_guardrail(
+            if let Some(guardrail) = state.match_guardrail(
+                GuardrailStage::Request,
                 &policy_request.tenant,
                 Some(&request.model),
                 Some(&provider.name),
                 &body_text,
             ) {
+                state.record_guardrail_match(&guardrail);
                 self.record_ai_error_log(
                     endpoint,
                     ctx,
@@ -307,8 +309,8 @@ impl FerroGateway {
                     target: guardrail.rule_id.clone(),
                     outcome: "blocked".into(),
                     message: format!(
-                        "guardrail {} blocked model {} provider {} via keyword {}",
-                        guardrail.rule_name, request.model, provider.name, guardrail.keyword
+                        "guardrail {} blocked request for model {} provider {}",
+                        guardrail.rule_name, request.model, provider.name
                     ),
                 });
                 write_json_error(
@@ -857,6 +859,71 @@ impl FerroGateway {
                         if let Some(reservation) = token_reservation.take() {
                             reservation.settle();
                         }
+                        let mut final_status = response.status;
+                        let mut final_body = response.body;
+                        let mut final_content_type = response.content_type;
+                        let mut final_error_code = None;
+                        if let Some(guardrail) = state.match_guardrail(
+                            GuardrailStage::Response,
+                            &policy_request.tenant,
+                            Some(&request.model),
+                            Some(&provider.name),
+                            &String::from_utf8_lossy(&final_body),
+                        ) {
+                            state.record_guardrail_match(&guardrail);
+                            match guardrail.effect {
+                                GuardrailEffect::Deny => {
+                                    final_status = StatusCode::FORBIDDEN;
+                                    final_content_type = "application/json".into();
+                                    final_error_code = Some(guardrail.code.clone());
+                                    state.record_admin_audit_event(
+                                        crate::state::AdminAuditEventDraft {
+                                            request_id: ctx.request_id.clone(),
+                                            trace_id: ctx.trace_id.clone(),
+                                            actor_api_key_id: auth.api_key_id.clone(),
+                                            tenant: auth.tenant_context(),
+                                            action: "guardrail.deny".into(),
+                                            target: guardrail.rule_id.clone(),
+                                            outcome: "blocked".into(),
+                                            message: format!(
+                                                "guardrail {} blocked response for model {} provider {}",
+                                                guardrail.rule_name, request.model, provider.name
+                                            ),
+                                        },
+                                    );
+                                    final_body = serde_json::json!({
+                                        "error": {
+                                            "message": guardrail.message,
+                                            "type": "ferrogate_error",
+                                            "code": guardrail.code,
+                                            "request_id": ctx.request_id.as_str(),
+                                        }
+                                    })
+                                    .to_string()
+                                    .into_bytes();
+                                }
+                                GuardrailEffect::Redact => {
+                                    state.record_admin_audit_event(
+                                        crate::state::AdminAuditEventDraft {
+                                            request_id: ctx.request_id.clone(),
+                                            trace_id: ctx.trace_id.clone(),
+                                            actor_api_key_id: auth.api_key_id.clone(),
+                                            tenant: auth.tenant_context(),
+                                            action: "guardrail.redact".into(),
+                                            target: guardrail.rule_id.clone(),
+                                            outcome: "redacted".into(),
+                                            message: format!(
+                                                "guardrail {} redacted response for model {} provider {}",
+                                                guardrail.rule_name, request.model, provider.name
+                                            ),
+                                        },
+                                    );
+                                    final_body = String::from_utf8_lossy(&final_body)
+                                        .replace(&guardrail.keyword, "[REDACTED]")
+                                        .into_bytes();
+                                }
+                            }
+                        }
                         let record_bodies =
                             auth.can_record_bodies(state.config.telemetry.log_bodies);
                         state.record_request_log(StoredRequestLog {
@@ -875,13 +942,13 @@ impl FerroGateway {
                             gateway_config_revision: gateway_config
                                 .as_ref()
                                 .map(|profile| profile.revision),
-                            status_code: response.status.as_u16(),
-                            error_code: None,
+                            status_code: final_status.as_u16(),
+                            error_code: final_error_code,
                             prompt_recorded: record_bodies,
                             response_recorded: record_bodies,
                             prompt_body: record_bodies.then(|| body_json.to_string()),
                             response_body: record_bodies.then(|| {
-                                String::from_utf8_lossy(&response.body)
+                                String::from_utf8_lossy(&final_body)
                                     .chars()
                                     .take(16 * 1024)
                                     .collect()
@@ -891,21 +958,23 @@ impl FerroGateway {
                             completed_at_unix: None,
                         });
                         if let Some(cache_key) = cache_key {
-                            state.store_ai_response_cache(
-                                cache_key,
-                                crate::state::AiCachedResponse {
-                                    status_code: response.status.as_u16(),
-                                    content_type: response.content_type.clone(),
-                                    body: response.body.clone(),
-                                },
-                            );
+                            if final_status.is_success() {
+                                state.store_ai_response_cache(
+                                    cache_key,
+                                    crate::state::AiCachedResponse {
+                                        status_code: final_status.as_u16(),
+                                        content_type: final_content_type.clone(),
+                                        body: final_body.clone(),
+                                    },
+                                );
+                            }
                         }
 
                         return write_raw_response(
                             session,
-                            response.status,
-                            &response.content_type,
-                            response.body.into(),
+                            final_status,
+                            &final_content_type,
+                            final_body.into(),
                             &ctx.request_id,
                         )
                         .await;

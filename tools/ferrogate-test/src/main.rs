@@ -155,6 +155,7 @@ struct CiArgs {
 enum DockerScenario {
     ClusterDrain,
     GuardrailRequestDeny,
+    GuardrailResponseRedact,
     SharedApiKey,
     SharedStateStale,
     SharedStateStartupUnavailable,
@@ -166,6 +167,7 @@ impl DockerScenario {
         &[
             "cluster-drain",
             "guardrail-request-deny",
+            "guardrail-response-redact",
             "shared-api-key",
             "shared-state-stale",
             "shared-state-startup-unavailable",
@@ -178,6 +180,7 @@ fn run_docker_scenario(scenario: DockerScenario, image: &str) -> Result<()> {
     match scenario {
         DockerScenario::ClusterDrain => run_cluster_drain(image),
         DockerScenario::GuardrailRequestDeny => run_guardrail_request_deny(image),
+        DockerScenario::GuardrailResponseRedact => run_guardrail_response_redact(image),
         DockerScenario::SharedApiKey => run_shared_api_key(image),
         DockerScenario::SharedStateStale => run_shared_state_stale(image),
         DockerScenario::SharedStateStartupUnavailable => {
@@ -1655,6 +1658,98 @@ fn run_guardrail_request_deny(image: &str) -> Result<()> {
     Ok(())
 }
 
+fn run_guardrail_response_redact(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
+    start_provider_with_content("contains secret from provider")?;
+    wait_for_provider()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("guardrail-response.toml");
+    std::fs::write(&config_path, guardrail_response_gateway_config())?;
+    start_gateway(
+        image,
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_path,
+        None,
+    )?;
+
+    wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        200,
+        |body| {
+            assert_eq!(
+                body["choices"][0]["message"]["content"],
+                "contains [REDACTED] from provider"
+            );
+            assert!(!body.to_string().contains("contains secret from provider"));
+            Ok(())
+        },
+    )?;
+
+    let provider_log = Command::new("docker")
+        .args(["logs", PROVIDER_CONTAINER])
+        .output()
+        .context("failed to inspect provider logs")?;
+    let provider_log = String::from_utf8_lossy(&provider_log.stdout);
+    assert!(
+        provider_log.contains("POST /v1/chat/completions"),
+        "provider should receive dispatch before response guardrail redacts output"
+    );
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "action", "guardrail.redact"));
+            assert!(!body.to_string().contains("contains secret from provider"));
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/request-logs",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            let raw = body.to_string();
+            assert!(raw.contains("[REDACTED]"));
+            assert!(!raw.contains("contains secret from provider"));
+            Ok(())
+        },
+    )?;
+    expect_text(
+        GATEWAY_A_PORT,
+        "GET",
+        "/metrics",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert!(body.contains("ferrogate_guardrail_matches_total 1"));
+            assert!(body.contains("ferrogate_guardrail_redactions_total 1"));
+            Ok(())
+        },
+    )?;
+
+    println!("guardrail-response-redact scenario passed");
+    Ok(())
+}
+
 fn run_shared_api_key(image: &str) -> Result<()> {
     let _cleanup = setup_environment(image)?;
     start_provider()?;
@@ -2114,6 +2209,68 @@ enabled = true
     .to_string()
 }
 
+fn guardrail_response_gateway_config() -> String {
+    r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "e2e-node-a"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "local"
+
+[telemetry]
+log_bodies = true
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read", "chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+log_bodies = true
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[guardrails]]
+id = "redact-provider-output"
+name = "Redact provider output"
+stage = "response"
+organization_ids = ["org_demo"]
+project_ids = ["project_gateway"]
+api_key_ids = ["client"]
+models = ["fast-chat"]
+providers = ["openai"]
+keywords = ["secret"]
+effect = "redact"
+code = "guardrail_redacted"
+message = "response redacted by guardrail"
+enabled = true
+"#
+    .to_string()
+}
+
 fn redis_counter_gateway_config(node_id: &str) -> String {
     format!(
         r#"
@@ -2170,12 +2327,24 @@ scopes = ["admin.read", "admin.write"]
 }
 
 fn start_provider() -> Result<()> {
+    start_provider_with_content("ok")
+}
+
+fn start_provider_with_content(content: &str) -> Result<()> {
     let provider_image =
         env::var("FERROGATE_E2E_PROVIDER_IMAGE").unwrap_or_else(|_| "python:3.11-slim".into());
     let command = r#"
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
 
-BODY = b'{"id":"chatcmpl_e2e","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"total_tokens":1}}'
+CONTENT = os.environ.get("FERROGATE_E2E_PROVIDER_CONTENT", "ok")
+BODY = json.dumps({
+    "id": "chatcmpl_e2e",
+    "object": "chat.completion",
+    "choices": [{"message": {"role": "assistant", "content": CONTENT}}],
+    "usage": {"total_tokens": 1},
+}).encode()
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -2201,6 +2370,8 @@ ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()
         PROVIDER_CONTAINER,
         "--network",
         NETWORK_NAME,
+        "-e",
+        &format!("FERROGATE_E2E_PROVIDER_CONTENT={content}"),
         &provider_image,
         "python",
         "-u",
@@ -2346,6 +2517,29 @@ where
         )
     })?;
     check(body)
+}
+
+fn expect_text<F>(
+    host_port: u16,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+    expected_status: u16,
+    check: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<()>,
+{
+    let response = http_request(host_port, method, path, headers, body)?;
+    if response.status != expected_status {
+        bail!(
+            "{method} {path} expected status {expected_status}, got {}; raw: {}",
+            response.status,
+            response.raw
+        );
+    }
+    check(&response.body)
 }
 
 struct HttpResponse {

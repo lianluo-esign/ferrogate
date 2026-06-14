@@ -20,8 +20,9 @@ use std::{
 use crate::acme::{AcmeRenewalStatus, SharedAcmeRenewalState};
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config,
-    GatewayConfigProfile, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate,
-    PromptTemplateStatus, Provider, RouteRule, StorageConfig, Upstream,
+    GatewayConfigProfile, GuardrailEffect, GuardrailStage, HeaderMutation, Model,
+    PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus, Provider, RouteRule,
+    StorageConfig, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -792,6 +793,8 @@ struct GuardrailRuleRuntime {
     id: String,
     name: String,
     enabled: bool,
+    stage: GuardrailStage,
+    effect: GuardrailEffect,
     organization_ids: Vec<String>,
     project_ids: Vec<String>,
     api_key_ids: Vec<String>,
@@ -806,6 +809,8 @@ struct GuardrailRuleRuntime {
 pub(crate) struct GuardrailMatch {
     pub(crate) rule_id: String,
     pub(crate) rule_name: String,
+    pub(crate) stage: GuardrailStage,
+    pub(crate) effect: GuardrailEffect,
     pub(crate) keyword: String,
     pub(crate) code: String,
     pub(crate) message: String,
@@ -832,6 +837,9 @@ struct GatewayMetricsAccumulator {
     request_status_totals: BTreeMap<u16, u64>,
     cache_hits_total: u64,
     cache_misses_total: u64,
+    guardrail_match_total: u64,
+    guardrail_denial_total: u64,
+    guardrail_redaction_total: u64,
     billing_event_total: u64,
     token_totals: TokenMetricTotals,
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
@@ -1077,6 +1085,18 @@ impl GatewayMetricsAccumulator {
         self.cache_misses_total = self.cache_misses_total.saturating_add(1);
     }
 
+    fn record_guardrail_match(&mut self, effect: GuardrailEffect) {
+        self.guardrail_match_total = self.guardrail_match_total.saturating_add(1);
+        match effect {
+            GuardrailEffect::Deny => {
+                self.guardrail_denial_total = self.guardrail_denial_total.saturating_add(1);
+            }
+            GuardrailEffect::Redact => {
+                self.guardrail_redaction_total = self.guardrail_redaction_total.saturating_add(1);
+            }
+        }
+    }
+
     fn record_tool_call(&mut self, _tool_name: &str, latency_ms: u64) {
         self.tool_call_total = self.tool_call_total.saturating_add(1);
         self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
@@ -1097,6 +1117,9 @@ impl GatewayMetricsAccumulator {
                 .collect(),
             cache_hits_total: self.cache_hits_total,
             cache_misses_total: self.cache_misses_total,
+            guardrail_match_total: self.guardrail_match_total,
+            guardrail_denial_total: self.guardrail_denial_total,
+            guardrail_redaction_total: self.guardrail_redaction_total,
             billing_event_total: self.billing_event_total,
             tool_call_total: self.tool_call_total,
             tool_latency_ms_total: self.tool_latency_ms_total,
@@ -1310,6 +1333,8 @@ impl AppState {
                 id: rule.id.clone(),
                 name: rule.name.clone(),
                 enabled: rule.enabled,
+                stage: rule.stage,
+                effect: rule.effect,
                 organization_ids: rule.organization_ids.clone(),
                 project_ids: rule.project_ids.clone(),
                 api_key_ids: rule.api_key_ids.clone(),
@@ -2168,8 +2193,9 @@ impl AppState {
         self.policy_engine.evaluate(request, model, provider)
     }
 
-    pub(crate) fn match_request_guardrail(
+    pub(crate) fn match_guardrail(
         &self,
+        stage: GuardrailStage,
         tenant: &ferrogate_core::TenantContext,
         model: Option<&str>,
         provider: Option<&str>,
@@ -2177,6 +2203,9 @@ impl AppState {
     ) -> Option<GuardrailMatch> {
         self.guardrail_rules.iter().find_map(|rule| {
             if !rule.enabled {
+                return None;
+            }
+            if rule.stage != stage {
                 return None;
             }
             if !allows_optional_scope(&rule.organization_ids, tenant.organization_id.as_deref()) {
@@ -2202,11 +2231,19 @@ impl AppState {
             Some(GuardrailMatch {
                 rule_id: rule.id.clone(),
                 rule_name: rule.name.clone(),
+                stage: rule.stage,
+                effect: rule.effect,
                 keyword: matched_keyword,
                 code: rule.code.clone(),
                 message: rule.message.clone(),
             })
         })
+    }
+
+    pub(crate) fn record_guardrail_match(&self, guardrail: &GuardrailMatch) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_guardrail_match(guardrail.effect);
+        }
     }
 
     pub(crate) fn record_billing_event(
@@ -2449,6 +2486,9 @@ impl AppState {
                 request_status_totals: Vec::new(),
                 cache_hits_total: 0,
                 cache_misses_total: 0,
+                guardrail_match_total: 0,
+                guardrail_denial_total: 0,
+                guardrail_redaction_total: 0,
                 billing_event_total: 0,
                 tool_call_total: 0,
                 tool_latency_ms_total: 0,
@@ -3721,7 +3761,8 @@ mod tests {
         };
 
         let matched = state
-            .match_request_guardrail(
+            .match_guardrail(
+                crate::config::GuardrailStage::Request,
                 &tenant,
                 Some("fast-chat"),
                 Some("openai"),
@@ -3731,6 +3772,8 @@ mod tests {
 
         assert_eq!(matched.rule_id, "block-secret");
         assert_eq!(matched.rule_name, "Block secret");
+        assert_eq!(matched.stage, crate::config::GuardrailStage::Request);
+        assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
         assert_eq!(matched.keyword, "secret");
         assert_eq!(matched.code, "guardrail_blocked");
         assert_eq!(matched.message, "blocked by guardrail");
@@ -3783,13 +3826,80 @@ mod tests {
         let state = AppState::new(config);
 
         assert!(state
-            .match_request_guardrail(
+            .match_guardrail(
+                crate::config::GuardrailStage::Request,
                 &ferrogate_core::TenantContext::default(),
                 Some("fast-chat"),
                 Some("openai"),
                 "contains secret"
             )
             .is_none());
+    }
+
+    #[test]
+    fn matches_response_guardrail_with_redact_effect() {
+        let config = Config {
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: None,
+                output_price_per_1m: None,
+                enabled: true,
+                cache_enabled: None,
+            }],
+            guardrails: vec![crate::config::GuardrailRule {
+                id: "redact-secret".into(),
+                name: "Redact secret".into(),
+                enabled: true,
+                stage: crate::config::GuardrailStage::Response,
+                organization_ids: vec![],
+                project_ids: vec![],
+                api_key_ids: vec![],
+                models: vec!["fast-chat".into()],
+                providers: vec!["openai".into()],
+                keywords: vec!["secret".into()],
+                effect: crate::config::GuardrailEffect::Redact,
+                code: "guardrail_redacted".into(),
+                message: "redacted by guardrail".into(),
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        let matched = state
+            .match_guardrail(
+                crate::config::GuardrailStage::Response,
+                &ferrogate_core::TenantContext::default(),
+                Some("fast-chat"),
+                Some("openai"),
+                "provider returned secret",
+            )
+            .expect("response guardrail should match");
+
+        assert_eq!(matched.rule_id, "redact-secret");
+        assert_eq!(matched.stage, crate::config::GuardrailStage::Response);
+        assert_eq!(matched.effect, crate::config::GuardrailEffect::Redact);
+        state.record_guardrail_match(&matched);
+        let snapshot = state.prometheus_metrics_snapshot();
+        assert_eq!(snapshot.guardrail_match_total, 1);
+        assert_eq!(snapshot.guardrail_denial_total, 0);
+        assert_eq!(snapshot.guardrail_redaction_total, 1);
     }
 
     #[test]

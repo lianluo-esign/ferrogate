@@ -345,6 +345,9 @@ pub struct GatewayMetricsSnapshot {
     pub request_status_totals: Vec<RequestStatusMetric>,
     pub cache_hits_total: u64,
     pub cache_misses_total: u64,
+    pub guardrail_match_total: u64,
+    pub guardrail_denial_total: u64,
+    pub guardrail_redaction_total: u64,
     pub billing_event_total: u64,
     pub tool_call_total: u64,
     pub tool_latency_ms_total: u64,
@@ -465,6 +468,39 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_ai_cache_requests_total{{status=\"miss\"}} {}\n",
         snapshot.cache_misses_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_matches_total",
+        "Total configured guardrail rule matches.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_guardrail_matches_total {}\n",
+        snapshot.guardrail_match_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_denials_total",
+        "Total guardrail matches that blocked a request or response.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_guardrail_denials_total {}\n",
+        snapshot.guardrail_denial_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_redactions_total",
+        "Total guardrail matches that redacted response content.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_guardrail_redactions_total {}\n",
+        snapshot.guardrail_redaction_total
     ));
 
     push_help(
@@ -699,6 +735,24 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "AI response cache misses.",
             snapshot.cache_misses_total as f64,
             vec![OtlpAttribute::new("status", "miss")],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.matches",
+            "Total configured guardrail rule matches.",
+            snapshot.guardrail_match_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.denials",
+            "Total guardrail matches that blocked a request or response.",
+            snapshot.guardrail_denial_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.redactions",
+            "Total guardrail matches that redacted response content.",
+            snapshot.guardrail_redaction_total as f64,
+            vec![],
         ),
         sum_metric_json(
             "ferrogate.tokens",
@@ -1066,6 +1120,9 @@ mod tests {
             ],
             cache_hits_total: 1,
             cache_misses_total: 1,
+            guardrail_match_total: 2,
+            guardrail_denial_total: 1,
+            guardrail_redaction_total: 1,
             billing_event_total: 1,
             tool_call_total: 2,
             tool_latency_ms_total: 17,
@@ -1088,6 +1145,9 @@ mod tests {
         assert!(text.contains("ferrogate_request_errors_total 1"));
         assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"hit\"} 1"));
         assert!(text.contains("ferrogate_ai_cache_requests_total{status=\"miss\"} 1"));
+        assert!(text.contains("ferrogate_guardrail_matches_total 2"));
+        assert!(text.contains("ferrogate_guardrail_denials_total 1"));
+        assert!(text.contains("ferrogate_guardrail_redactions_total 1"));
         assert!(text.contains("ferrogate_mcp_tool_calls_total 2"));
         assert!(text.contains("ferrogate_mcp_tool_latency_ms_total 17"));
         assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));

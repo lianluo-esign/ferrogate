@@ -332,6 +332,61 @@ fn validates_guardrail_keyword_scope_and_effect() {
 }
 
 #[test]
+fn validates_response_guardrail_redact_effect() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![GuardrailRule {
+            id: "redact-secret".into(),
+            name: "Redact secret".into(),
+            enabled: true,
+            stage: GuardrailStage::Response,
+            organization_ids: vec!["org_demo".into()],
+            project_ids: vec!["project_demo".into()],
+            api_key_ids: vec!["key_dev".into()],
+            models: vec!["fast-chat".into()],
+            providers: vec!["openai".into()],
+            keywords: vec!["secret".into()],
+            effect: GuardrailEffect::Redact,
+            code: "guardrail_redacted".into(),
+            message: "redacted by guardrail".into(),
+        }],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_request_guardrail_redact_effect() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![GuardrailRule {
+            id: "redact-secret".into(),
+            name: "Redact secret".into(),
+            enabled: true,
+            stage: GuardrailStage::Request,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["key_dev".into()],
+            models: vec!["fast-chat".into()],
+            providers: vec!["openai".into()],
+            keywords: vec!["secret".into()],
+            effect: GuardrailEffect::Redact,
+            code: "guardrail_redacted".into(),
+            message: "redacted by guardrail".into(),
+        }],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("request guardrails support deny only"));
+}
+
+#[test]
 fn rejects_guardrail_with_unknown_model() {
     let config = Config {
         providers: vec![provider()],

@@ -434,6 +434,7 @@ pub(crate) struct GuardrailRule {
 pub(crate) enum GuardrailStage {
     #[default]
     Request,
+    Response,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -441,6 +442,7 @@ pub(crate) enum GuardrailStage {
 pub(crate) enum GuardrailEffect {
     #[default]
     Deny,
+    Redact,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
