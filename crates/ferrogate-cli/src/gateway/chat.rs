@@ -11,13 +11,13 @@ use std::io::Read;
 use tracing::{info, warn};
 
 use crate::{
-    auth::authenticate,
+    auth::{authenticate, AuthContext},
     config::Provider,
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         write_streaming_response,
     },
-    state::{AppState, GatewayConfigResolveError, ToolInjectionContext},
+    state::{AppState, GatewayConfigResolveError, GatewayConfigUse, ToolInjectionContext},
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
@@ -99,100 +99,31 @@ impl FerroGateway {
         endpoint: AiEndpoint,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let auth = match authenticate(&state, &headers, endpoint.scope(), &ctx.request_id) {
-            Ok(auth) => auth,
-            Err(error) => {
+        let ingress_plan = match build_ai_ingress_plan(&state, &headers, endpoint, ctx) {
+            Ok(plan) => plan,
+            Err(rejection) => {
                 self.record_ai_error_log(
                     endpoint,
                     ctx,
                     AiErrorLog {
-                        tenant: TenantContext::default(),
-                        logical_model: None,
+                        tenant: rejection.tenant,
+                        logical_model: rejection.logical_model.as_deref(),
                         provider: None,
-                        status: error.status,
-                        error_code: error.code,
+                        status: rejection.status,
+                        error_code: rejection.code,
                     },
                 );
                 write_json_error(
                     session,
-                    error.status,
-                    error.code,
-                    error.message,
+                    rejection.status,
+                    rejection.code,
+                    rejection.message,
                     &ctx.request_id,
                 )
                 .await?;
                 return Ok(());
             }
         };
-        let gateway_config = match requested_gateway_config_id(&headers) {
-            Ok(profile_id) => {
-                match state.resolve_gateway_config_profile(profile_id, auth.api_key_id.as_deref()) {
-                    Ok(profile) => profile,
-                    Err(error) => {
-                        let (status, code, message) = gateway_config_error_response(error);
-                        self.record_ai_error_log(
-                            endpoint,
-                            ctx,
-                            AiErrorLog {
-                                tenant: auth.tenant_context(),
-                                logical_model: None,
-                                provider: None,
-                                status,
-                                error_code: code,
-                            },
-                        );
-                        write_json_error(session, status, code, message, &ctx.request_id).await?;
-                        return Ok(());
-                    }
-                }
-            }
-            Err(message) => {
-                self.record_ai_error_log(
-                    endpoint,
-                    ctx,
-                    AiErrorLog {
-                        tenant: auth.tenant_context(),
-                        logical_model: None,
-                        provider: None,
-                        status: StatusCode::BAD_REQUEST,
-                        error_code: "invalid_gateway_config_header",
-                    },
-                );
-                write_json_error(
-                    session,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_gateway_config_header",
-                    message,
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-
-        if state.is_draining() {
-            self.record_ai_error_log(
-                endpoint,
-                ctx,
-                AiErrorLog {
-                    tenant: auth.tenant_context(),
-                    logical_model: None,
-                    provider: None,
-                    status: StatusCode::SERVICE_UNAVAILABLE,
-                    error_code: "node_draining",
-                },
-            );
-            write_json_error(
-                session,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "node_draining",
-                "gateway node is draining and is not accepting new AI requests",
-                &ctx.request_id,
-            )
-            .await?;
-            return Ok(());
-        }
-
         let body = match read_request_body(session, 1024 * 1024).await? {
             Ok(body) => body,
             Err(limit) => {
@@ -200,7 +131,7 @@ impl FerroGateway {
                     endpoint,
                     ctx,
                     AiErrorLog {
-                        tenant: auth.tenant_context(),
+                        tenant: ingress_plan.auth.tenant_context(),
                         logical_model: None,
                         provider: None,
                         status: StatusCode::PAYLOAD_TOO_LARGE,
@@ -221,162 +152,44 @@ impl FerroGateway {
                 return Ok(());
             }
         };
-        let body_json: serde_json::Value = match serde_json::from_slice(&body) {
-            Ok(request) => request,
-            Err(error) => {
+        let request_plan = match build_ai_request_plan(&state, ingress_plan, &body, endpoint) {
+            Ok(plan) => plan,
+            Err(rejection) => {
                 self.record_ai_error_log(
                     endpoint,
                     ctx,
                     AiErrorLog {
-                        tenant: auth.tenant_context(),
-                        logical_model: None,
+                        tenant: rejection.tenant,
+                        logical_model: rejection.logical_model.as_deref(),
                         provider: None,
-                        status: StatusCode::BAD_REQUEST,
-                        error_code: "invalid_json",
+                        status: rejection.status,
+                        error_code: rejection.code,
                     },
                 );
                 write_json_error(
                     session,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_json",
-                    format!("invalid JSON body: {error}"),
+                    rejection.status,
+                    rejection.code,
+                    rejection.message,
                     &ctx.request_id,
                 )
                 .await?;
                 return Ok(());
             }
         };
-        let request: ChatCompletionRequest = match serde_json::from_value(body_json.clone()) {
-            Ok(request) => request,
-            Err(error) => {
-                self.record_ai_error_log(
-                    endpoint,
-                    ctx,
-                    AiErrorLog {
-                        tenant: auth.tenant_context(),
-                        logical_model: None,
-                        provider: None,
-                        status: StatusCode::BAD_REQUEST,
-                        error_code: "invalid_request",
-                    },
-                );
-                write_json_error(
-                    session,
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request",
-                    format!("{}: {error}", endpoint.invalid_request_label()),
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-
-        if !auth.can_use_model(&request.model) {
-            self.record_ai_error_log(
-                endpoint,
-                ctx,
-                AiErrorLog {
-                    tenant: auth.tenant_context(),
-                    logical_model: Some(&request.model),
-                    provider: None,
-                    status: StatusCode::FORBIDDEN,
-                    error_code: "model_not_allowed",
-                },
-            );
-            write_json_error(
-                session,
-                StatusCode::FORBIDDEN,
-                "model_not_allowed",
-                format!("API key is not allowed to use model {}", request.model),
-                &ctx.request_id,
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let model = match state.resolve_model(&request.model) {
-            Ok(model) => model,
-            Err(ModelRegistryError::ModelDisabled { .. }) => {
-                self.record_ai_error_log(
-                    endpoint,
-                    ctx,
-                    AiErrorLog {
-                        tenant: auth.tenant_context(),
-                        logical_model: Some(&request.model),
-                        provider: None,
-                        status: StatusCode::BAD_REQUEST,
-                        error_code: "model_disabled",
-                    },
-                );
-                write_json_error(
-                    session,
-                    StatusCode::BAD_REQUEST,
-                    "model_disabled",
-                    format!("model {} is disabled", request.model),
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
-            }
-            Err(_) => {
-                self.record_ai_error_log(
-                    endpoint,
-                    ctx,
-                    AiErrorLog {
-                        tenant: auth.tenant_context(),
-                        logical_model: Some(&request.model),
-                        provider: None,
-                        status: StatusCode::BAD_REQUEST,
-                        error_code: "model_not_found",
-                    },
-                );
-                write_json_error(
-                    session,
-                    StatusCode::BAD_REQUEST,
-                    "model_not_found",
-                    format!("unknown model {}", request.model),
-                    &ctx.request_id,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-
-        if !state.can_tenant_use_model(
-            &request.model,
-            auth.organization_id.as_deref(),
-            auth.project_id.as_deref(),
-        ) {
-            self.record_ai_error_log(
-                endpoint,
-                ctx,
-                AiErrorLog {
-                    tenant: auth.tenant_context(),
-                    logical_model: Some(&request.model),
-                    provider: None,
-                    status: StatusCode::FORBIDDEN,
-                    error_code: "model_not_visible",
-                },
-            );
-            write_json_error(
-                session,
-                StatusCode::FORBIDDEN,
-                "model_not_visible",
-                format!("model {} is not visible to this tenant", request.model),
-                &ctx.request_id,
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let estimated_usage = estimate_chat_completion_usage(&body_json);
-        let routes = state.candidate_model_routes(&model, Some(&estimated_usage));
+        let AiRequestPlan {
+            auth,
+            gateway_config,
+            request,
+            body_json,
+            estimated_usage,
+            routes,
+            body_text,
+        } = request_plan;
         let route_count = routes.len();
         let dispatch_timeout = state.provider_dispatch_timeout();
         let max_dispatch_retries = state.provider_dispatch_max_retries();
         let provider_response_body_max_bytes = state.provider_response_body_max_bytes();
-        let body_text = body_json.to_string();
         let mut token_reservation = None;
 
         'routes: for (candidate_index, model_route) in routes.iter().enumerate() {
@@ -1197,6 +1010,32 @@ struct AiErrorLog<'a> {
     error_code: &'a str,
 }
 
+#[derive(Debug)]
+struct AiRequestPlan {
+    auth: AuthContext,
+    gateway_config: Option<GatewayConfigUse>,
+    request: ChatCompletionRequest,
+    body_json: serde_json::Value,
+    estimated_usage: BillingTokenUsage,
+    routes: Vec<ModelRoute>,
+    body_text: String,
+}
+
+#[derive(Debug)]
+struct AiIngressPlan {
+    auth: AuthContext,
+    gateway_config: Option<GatewayConfigUse>,
+}
+
+#[derive(Debug)]
+struct AiRequestRejection {
+    tenant: TenantContext,
+    logical_model: Option<String>,
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
 struct AiProviderRequestInput<'a> {
     endpoint: AiEndpoint,
     provider: &'a Provider,
@@ -1207,6 +1046,149 @@ struct AiProviderRequestInput<'a> {
     logical_model: String,
     stream: bool,
     body: serde_json::Value,
+}
+
+fn build_ai_ingress_plan(
+    state: &AppState,
+    headers: &HeaderMap,
+    endpoint: AiEndpoint,
+    ctx: &ProxyContext,
+) -> Result<AiIngressPlan, AiRequestRejection> {
+    let auth =
+        authenticate(state, headers, endpoint.scope(), &ctx.request_id).map_err(|error| {
+            AiRequestRejection {
+                tenant: TenantContext::default(),
+                logical_model: None,
+                status: error.status,
+                code: error.code,
+                message: error.message,
+            }
+        })?;
+    let tenant = auth.tenant_context();
+
+    let gateway_config = requested_gateway_config_id(headers)
+        .map_err(|message| AiRequestRejection {
+            tenant: tenant.clone(),
+            logical_model: None,
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_gateway_config_header",
+            message,
+        })
+        .and_then(|profile_id| {
+            state
+                .resolve_gateway_config_profile(profile_id, auth.api_key_id.as_deref())
+                .map_err(|error| {
+                    let (status, code, message) = gateway_config_error_response(error);
+                    AiRequestRejection {
+                        tenant: tenant.clone(),
+                        logical_model: None,
+                        status,
+                        code,
+                        message,
+                    }
+                })
+        })?;
+
+    if state.is_draining() {
+        return Err(AiRequestRejection {
+            tenant,
+            logical_model: None,
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "node_draining",
+            message: "gateway node is draining and is not accepting new AI requests".into(),
+        });
+    }
+
+    Ok(AiIngressPlan {
+        auth,
+        gateway_config,
+    })
+}
+
+fn build_ai_request_plan(
+    state: &AppState,
+    ingress: AiIngressPlan,
+    body: &[u8],
+    endpoint: AiEndpoint,
+) -> Result<AiRequestPlan, AiRequestRejection> {
+    let AiIngressPlan {
+        auth,
+        gateway_config,
+    } = ingress;
+
+    let body_json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|error| AiRequestRejection {
+            tenant: auth.tenant_context(),
+            logical_model: None,
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_json",
+            message: format!("invalid JSON body: {error}"),
+        })?;
+    let request: ChatCompletionRequest =
+        serde_json::from_value(body_json.clone()).map_err(|error| AiRequestRejection {
+            tenant: auth.tenant_context(),
+            logical_model: None,
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_request",
+            message: format!("{}: {error}", endpoint.invalid_request_label()),
+        })?;
+
+    if !auth.can_use_model(&request.model) {
+        return Err(AiRequestRejection {
+            tenant: auth.tenant_context(),
+            logical_model: Some(request.model.clone()),
+            status: StatusCode::FORBIDDEN,
+            code: "model_not_allowed",
+            message: format!("API key is not allowed to use model {}", request.model),
+        });
+    }
+
+    let model = state.resolve_model(&request.model).map_err(|error| {
+        let (code, message) = match error {
+            ModelRegistryError::ModelDisabled { .. } => (
+                "model_disabled",
+                format!("model {} is disabled", request.model),
+            ),
+            _ => (
+                "model_not_found",
+                format!("unknown model {}", request.model),
+            ),
+        };
+        AiRequestRejection {
+            tenant: auth.tenant_context(),
+            logical_model: Some(request.model.clone()),
+            status: StatusCode::BAD_REQUEST,
+            code,
+            message,
+        }
+    })?;
+
+    if !state.can_tenant_use_model(
+        &request.model,
+        auth.organization_id.as_deref(),
+        auth.project_id.as_deref(),
+    ) {
+        return Err(AiRequestRejection {
+            tenant: auth.tenant_context(),
+            logical_model: Some(request.model.clone()),
+            status: StatusCode::FORBIDDEN,
+            code: "model_not_visible",
+            message: format!("model {} is not visible to this tenant", request.model),
+        });
+    }
+
+    let estimated_usage = estimate_chat_completion_usage(&body_json);
+    let routes = state.candidate_model_routes(&model, Some(&estimated_usage));
+    let body_text = body_json.to_string();
+    Ok(AiRequestPlan {
+        auth,
+        gateway_config,
+        request,
+        body_json,
+        estimated_usage,
+        routes,
+        body_text,
+    })
 }
 
 struct AiProviderAttemptPlan<'a> {
@@ -1456,6 +1438,7 @@ fn requested_choice_count(body: &serde_json::Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ApiKey, Config, GatewayConfigProfile, Model, Provider};
     use std::time::Duration;
 
     #[test]
@@ -1520,6 +1503,67 @@ mod tests {
         assert_eq!(decision, ProviderAttemptDecision::ReturnError);
     }
 
+    #[test]
+    fn ai_ingress_plan_rejects_missing_api_key_before_body_planning() {
+        let state = AppState::new(ai_plan_config());
+        let headers = HeaderMap::new();
+        let ctx = proxy_context();
+
+        let rejection =
+            build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx).unwrap_err();
+
+        assert_eq!(rejection.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(rejection.code, "missing_api_key");
+        assert_eq!(rejection.logical_model, None);
+    }
+
+    #[test]
+    fn ai_request_plan_resolves_gateway_config_model_and_routes() {
+        let state = AppState::new(ai_plan_config());
+        let headers = ai_plan_headers(Some("profile-fast"));
+        let ctx = proxy_context();
+        let ingress =
+            build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx).unwrap();
+        let body = br#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}],"stream":true}"#;
+
+        let plan =
+            build_ai_request_plan(&state, ingress, body, AiEndpoint::ChatCompletions).unwrap();
+
+        assert_eq!(plan.auth.api_key_id.as_deref(), Some("key_dev"));
+        assert_eq!(
+            plan.gateway_config
+                .as_ref()
+                .map(|profile| profile.id.as_str()),
+            Some("profile-fast")
+        );
+        assert_eq!(plan.request.model, "fast-chat");
+        assert!(plan.request.stream);
+        assert_eq!(plan.routes.len(), 1);
+        assert_eq!(plan.routes[0].provider, "openai");
+        assert_eq!(plan.routes[0].provider_model, "gpt-test");
+        assert!(plan.estimated_usage.total_tokens > 0);
+        assert!(plan.body_text.contains("\"fast-chat\""));
+    }
+
+    #[test]
+    fn ai_request_plan_rejects_model_outside_tenant_visibility() {
+        let mut config = ai_plan_config();
+        config.models[0].visible_project_ids = vec!["project-other".into()];
+        let state = AppState::new(config);
+        let headers = ai_plan_headers(None);
+        let ctx = proxy_context();
+        let ingress =
+            build_ai_ingress_plan(&state, &headers, AiEndpoint::ChatCompletions, &ctx).unwrap();
+        let body = br#"{"model":"fast-chat","messages":[]}"#;
+
+        let rejection =
+            build_ai_request_plan(&state, ingress, body, AiEndpoint::ChatCompletions).unwrap_err();
+
+        assert_eq!(rejection.status, StatusCode::FORBIDDEN);
+        assert_eq!(rejection.code, "model_not_visible");
+        assert_eq!(rejection.logical_model.as_deref(), Some("fast-chat"));
+    }
+
     fn provider_attempt_plan(
         candidate_index: usize,
         route_count: usize,
@@ -1541,6 +1585,89 @@ mod tests {
             dispatch_timeout: Duration::from_secs(2),
             max_dispatch_retries,
             stream: false,
+        }
+    }
+
+    fn ai_plan_config() -> Config {
+        Config {
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:9999/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-test".into(),
+                routing_strategy: ferrogate_providers::RoutingStrategy::Priority,
+                fallbacks: Vec::new(),
+                visible_organization_ids: Vec::new(),
+                visible_project_ids: vec!["project_gateway".into()],
+                capabilities: vec!["chat".into(), "streaming".into()],
+                context_window: Some(8192),
+                input_price_per_1m: None,
+                output_price_per_1m: None,
+                enabled: true,
+                cache_enabled: None,
+            }],
+            api_keys: vec![ApiKey {
+                id: "key_dev".into(),
+                name: "Development key".into(),
+                key_env: None,
+                key: Some("secret".into()),
+                key_hash: None,
+                enabled: true,
+                scopes: vec!["chat.completions".into(), "responses.create".into()],
+                allowed_models: Vec::new(),
+                denied_models: Vec::new(),
+                allowed_providers: Vec::new(),
+                denied_providers: Vec::new(),
+                organization_id: Some("org_demo".into()),
+                team_id: None,
+                project_id: Some("project_gateway".into()),
+                user_id: None,
+                monthly_token_budget: Some(1024),
+                request_limit_per_minute: None,
+                expires_at_unix: None,
+                log_bodies: Some(true),
+                cache_enabled: None,
+            }],
+            gateway_configs: vec![GatewayConfigProfile {
+                id: "profile-fast".into(),
+                name: "Fast profile".into(),
+                revision: 7,
+                enabled: true,
+                api_key_ids: vec!["key_dev".into()],
+                cache_enabled: Some(true),
+            }],
+            ..Config::default()
+        }
+    }
+
+    fn ai_plan_headers(profile_id: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer secret"),
+        );
+        if let Some(profile_id) = profile_id {
+            headers.insert(
+                GATEWAY_CONFIG_HEADER,
+                http::HeaderValue::from_str(profile_id).unwrap(),
+            );
+        }
+        headers
+    }
+
+    fn proxy_context() -> ProxyContext {
+        ProxyContext {
+            request_id: "fg-test".into(),
+            trace_id: Some("trace-test".into()),
+            ..ProxyContext::default()
         }
     }
 }
