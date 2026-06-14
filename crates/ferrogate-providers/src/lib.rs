@@ -29,7 +29,7 @@ pub use openai::OpenAiCompatibleAdapter;
 pub use openrouter::OpenRouterAdapter;
 pub use registry::ProviderAdapterRegistry;
 pub use types::{
-    AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderCatalogModel,
-    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHeader,
-    ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
+    provider_compatibility_kind, AdapterError, ChatCompletionPlan, ProviderAdapter,
+    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
+    ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
 };

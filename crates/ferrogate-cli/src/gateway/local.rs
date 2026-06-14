@@ -32,6 +32,7 @@ use crate::{
     },
     state::AdminAuditEventDraft,
 };
+use ferrogate_providers::provider_compatibility_kind;
 
 use super::body::read_request_body;
 use super::dispatch::dispatch_provider_catalog_request;
@@ -2134,6 +2135,7 @@ impl FerroGateway {
                         .map(|provider| AdminProvider {
                             name: provider.name.clone(),
                             kind: provider.kind.clone(),
+                            compatibility: provider_compatibility_kind(&provider.kind),
                             base_url: provider.base_url.clone(),
                             has_api_key: provider.api_key_env.is_some(),
                             enabled: provider.enabled,

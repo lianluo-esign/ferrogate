@@ -322,6 +322,17 @@ ai_gateway {
 }
 ```
 
+### OpenAI 兼容的商业与开源提供方
+
+只要上游暴露的是兼容 OpenAI 的 `/v1/chat/completions` 或 `/v1/responses`
+接口，就走共享的 `openai-compatible` 路径。这里包括直接的
+OpenAI-compatible upstream、`newapi`、`sub2api`、`CLIProxyAPI` 这类第三方
+网关/代理，以及 `DeepSeek`、`vLLM`、`llama.cpp`、`TGI`、`Ollama-compatible`
+这类主流开源后端，只要它们保持 OpenAI 请求和响应形状。
+
+只有当上游需要独立的鉴权、路由或请求形状时，才应该新增一等 kind。
+否则就保留共享兼容路径，把逻辑模型映射到实际上游模型名。
+
 ## 自动 HTTPS
 
 FerroGate 支持手动 TLS 证书和启动时 ACME 证书签发。

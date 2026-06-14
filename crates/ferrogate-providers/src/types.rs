@@ -140,6 +140,38 @@ pub struct ProviderCatalogModel {
     pub capabilities: Vec<String>,
 }
 
+pub fn is_openai_compatible_provider_kind(kind: &str) -> bool {
+    matches!(
+        normalize_kind(kind).as_str(),
+        "openai"
+            | "openai-compatible"
+            | "deepseek"
+            | "newapi"
+            | "sub2api"
+            | "cliproxyapi"
+            | "cli-proxy-api"
+            | "vllm"
+            | "llama.cpp"
+            | "llama-cpp"
+            | "llamacpp"
+            | "tgi"
+            | "ollama"
+            | "ollama-compatible"
+    )
+}
+
+pub fn provider_compatibility_kind(kind: &str) -> &'static str {
+    if is_openai_compatible_provider_kind(kind) {
+        "openai-compatible"
+    } else {
+        "dedicated"
+    }
+}
+
+fn normalize_kind(kind: &str) -> String {
+    kind.trim().to_ascii_lowercase()
+}
+
 pub trait ProviderAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
 

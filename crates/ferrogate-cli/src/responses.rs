@@ -108,6 +108,7 @@ impl<T> AdminList<T> {
 pub(crate) struct AdminProvider {
     pub(crate) name: String,
     pub(crate) kind: String,
+    pub(crate) compatibility: &'static str,
     pub(crate) base_url: String,
     pub(crate) has_api_key: bool,
     pub(crate) enabled: bool,

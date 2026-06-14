@@ -7,6 +7,7 @@
 use ferrogate_core::{ToolCall, ToolDef, ToolResult};
 use serde_json::Value;
 
+use crate::types::is_openai_compatible_provider_kind;
 use crate::{
     AdapterError, AnthropicAdapter, AzureOpenAiAdapter, ChatCompletionPlan, GeminiAdapter,
     GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderCatalogModel,
@@ -27,7 +28,7 @@ pub struct ProviderAdapterRegistry {
 impl ProviderAdapterRegistry {
     pub fn adapter_for(&self, kind: &str) -> Result<&dyn ProviderAdapter, AdapterError> {
         match normalize_kind(kind).as_str() {
-            "openai" | "openai-compatible" => Ok(&self.openai_compatible),
+            kind if is_openai_compatible_provider_kind(kind) => Ok(&self.openai_compatible),
             "anthropic" => Ok(&self.anthropic),
             "gemini" => Ok(&self.gemini),
             "grok" | "xai" => Ok(&self.grok),
@@ -149,6 +150,18 @@ mod tests {
 
         assert_eq!(
             registry.adapter_for("openai").unwrap().kind(),
+            "openai-compatible"
+        );
+        assert_eq!(
+            registry.adapter_for("deepseek").unwrap().kind(),
+            "openai-compatible"
+        );
+        assert_eq!(
+            registry.adapter_for("vllm").unwrap().kind(),
+            "openai-compatible"
+        );
+        assert_eq!(
+            registry.adapter_for("ollama-compatible").unwrap().kind(),
             "openai-compatible"
         );
         assert_eq!(
