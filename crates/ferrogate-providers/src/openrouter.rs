@@ -5,9 +5,9 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use crate::{
-    AdapterError, ChatCompletionPlan, OpenAiCompatibleAdapter, ProviderAdapter, ProviderConfig,
-    ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan,
-    SecretValue,
+    AdapterError, ChatCompletionPlan, OpenAiCompatibleAdapter, ProviderAdapter,
+    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
+    ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -48,6 +48,22 @@ impl ProviderAdapter for OpenRouterAdapter {
             .prepare_responses(provider, request)?;
         prepared.headers.extend(headers);
         Ok(prepared)
+    }
+
+    fn prepare_model_catalog(
+        &self,
+        mut provider: ProviderConfig,
+    ) -> Result<ProviderCatalogRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        let headers = openrouter_headers(&provider);
+        provider.kind = "openai-compatible".into();
+        let mut prepared = self.openai_compatible.prepare_model_catalog(provider)?;
+        prepared.headers.extend(headers);
+        Ok(prepared)
+    }
+
+    fn parse_model_catalog(&self, body: &[u8]) -> Result<Vec<ProviderCatalogModel>, AdapterError> {
+        self.openai_compatible.parse_model_catalog(body)
     }
 
     fn normalize_error_response(

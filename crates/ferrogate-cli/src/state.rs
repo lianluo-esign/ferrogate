@@ -1637,14 +1637,7 @@ impl AppState {
             .provider_adapters
             .inject_tools(&provider.kind, body, &tools)?;
         self.provider_adapters.prepare_chat_completions(
-            ProviderConfig {
-                name: provider.name.clone(),
-                kind: provider.kind.clone(),
-                base_url: provider.base_url.clone(),
-                api_key: provider.api_key_value(),
-                openrouter_http_referer: provider.openrouter_http_referer.clone(),
-                openrouter_x_title: provider.openrouter_x_title.clone(),
-            },
+            self.provider_config(provider),
             ChatCompletionPlan {
                 logical_model,
                 provider_model: model_route.provider_model.clone(),
@@ -1663,14 +1656,7 @@ impl AppState {
         body: serde_json::Value,
     ) -> Result<ProviderHttpRequest, AdapterError> {
         self.provider_adapters.prepare_responses(
-            ProviderConfig {
-                name: provider.name.clone(),
-                kind: provider.kind.clone(),
-                base_url: provider.base_url.clone(),
-                api_key: provider.api_key_value(),
-                openrouter_http_referer: provider.openrouter_http_referer.clone(),
-                openrouter_x_title: provider.openrouter_x_title.clone(),
-            },
+            self.provider_config(provider),
             ResponsesPlan {
                 logical_model,
                 provider_model: model_route.provider_model.clone(),
@@ -1678,6 +1664,34 @@ impl AppState {
                 body,
             },
         )
+    }
+
+    pub(crate) fn provider_config(&self, provider: &Provider) -> ProviderConfig {
+        ProviderConfig {
+            name: provider.name.clone(),
+            kind: provider.kind.clone(),
+            base_url: provider.base_url.clone(),
+            api_key: provider.api_key_value(),
+            openrouter_http_referer: provider.openrouter_http_referer.clone(),
+            openrouter_x_title: provider.openrouter_x_title.clone(),
+        }
+    }
+
+    pub(crate) fn prepare_model_catalog(
+        &self,
+        provider: &Provider,
+    ) -> Result<ferrogate_providers::ProviderCatalogRequest, AdapterError> {
+        self.provider_adapters
+            .prepare_model_catalog(self.provider_config(provider))
+    }
+
+    pub(crate) fn parse_model_catalog(
+        &self,
+        provider_kind: &str,
+        body: &[u8],
+    ) -> Result<Vec<ferrogate_providers::ProviderCatalogModel>, AdapterError> {
+        self.provider_adapters
+            .parse_model_catalog(provider_kind, body)
     }
 
     pub(crate) fn ai_cache_enabled(

@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 use ferrogate_core::{ToolCall, ToolDef, ToolResult};
 
 use crate::{
-    AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
+    AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderCatalogModel,
+    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHeader,
+    ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -57,6 +58,22 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
             stream: request.stream,
             headers: provider_headers(provider.api_key),
         })
+    }
+
+    fn prepare_model_catalog(
+        &self,
+        provider: ProviderConfig,
+    ) -> Result<ProviderCatalogRequest, AdapterError> {
+        validate_kind(&provider.kind)?;
+        Ok(ProviderCatalogRequest {
+            provider: provider.name,
+            endpoint: models_endpoint(&provider.base_url),
+            headers: provider_headers(provider.api_key),
+        })
+    }
+
+    fn parse_model_catalog(&self, body: &[u8]) -> Result<Vec<ProviderCatalogModel>, AdapterError> {
+        parse_openai_model_catalog(body)
     }
 
     fn normalize_error_response(
@@ -230,6 +247,71 @@ fn responses_endpoint(base_url: &str) -> String {
     format!("{}/responses", base_url.trim_end_matches('/'))
 }
 
+fn models_endpoint(base_url: &str) -> String {
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+fn parse_openai_model_catalog(body: &[u8]) -> Result<Vec<ProviderCatalogModel>, AdapterError> {
+    let value =
+        serde_json::from_slice::<Value>(body).map_err(|error| AdapterError::InvalidRequest {
+            message: format!("provider model catalog must be JSON: {error}"),
+        })?;
+    let data = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+        AdapterError::InvalidRequest {
+            message: "provider model catalog must include a data array".into(),
+        }
+    })?;
+
+    data.iter()
+        .map(|model| {
+            let id = model
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| AdapterError::InvalidRequest {
+                    message: "provider model catalog entry missing id".into(),
+                })?
+                .to_string();
+            Ok(ProviderCatalogModel {
+                id,
+                owned_by: model
+                    .get("owned_by")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                created: model.get("created").and_then(Value::as_u64),
+                context_window: model
+                    .get("context_length")
+                    .or_else(|| model.get("context_window"))
+                    .and_then(Value::as_u64),
+                capabilities: catalog_capabilities(model),
+            })
+        })
+        .collect()
+}
+
+fn catalog_capabilities(model: &Value) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    for key in [
+        "capabilities",
+        "supported_modalities",
+        "input_modalities",
+        "output_modalities",
+    ] {
+        if let Some(values) = model.get(key).and_then(Value::as_array) {
+            capabilities.extend(
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned),
+            );
+        }
+    }
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
 fn fallback_error_message(parsed: Option<&Value>, body: &[u8]) -> Option<String> {
     parsed
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
@@ -327,6 +409,39 @@ mod tests {
             .iter()
             .any(|header| header.value.expose_secret() == "Bearer provider-secret"));
         assert!(!format!("{prepared:?}").contains("provider-secret"));
+    }
+
+    #[test]
+    fn prepares_model_catalog_request_without_leaking_secret_debug_output() {
+        let adapter = OpenAiCompatibleAdapter;
+        let prepared = adapter
+            .prepare_model_catalog(provider(Some("provider-secret")))
+            .unwrap();
+
+        assert_eq!(prepared.provider, "openai");
+        assert_eq!(prepared.endpoint, "https://api.openai.example/v1/models");
+        assert!(prepared
+            .headers
+            .iter()
+            .any(|header| header.value.expose_secret() == "Bearer provider-secret"));
+        assert!(!format!("{prepared:?}").contains("provider-secret"));
+    }
+
+    #[test]
+    fn parses_openai_model_catalog_candidates() {
+        let adapter = OpenAiCompatibleAdapter;
+        let models = adapter
+            .parse_model_catalog(
+                br#"{"object":"list","data":[{"id":"gpt-4o-mini","owned_by":"openai","created":1715367049,"context_window":128000,"capabilities":["chat","tools"]}]}"#,
+            )
+            .unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-4o-mini");
+        assert_eq!(models[0].owned_by.as_deref(), Some("openai"));
+        assert_eq!(models[0].created, Some(1715367049));
+        assert_eq!(models[0].context_window, Some(128000));
+        assert_eq!(models[0].capabilities, vec!["chat", "tools"]);
     }
 
     #[test]

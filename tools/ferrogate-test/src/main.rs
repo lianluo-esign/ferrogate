@@ -195,7 +195,7 @@ fn run_all_docker_scenarios(image: &str) -> Result<()> {
 }
 
 fn run_admin_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start(&args.ferrogate_bin, 3)?;
+    let case = LocalHarness::start(&args.ferrogate_bin, 4)?;
 
     case.expect_json("GET", "/healthz", &[], "", 200, |body| {
         assert_eq!(body["status"], "ok");
@@ -238,6 +238,28 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert!(body["data"].is_array());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/provider-models?provider=openai",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["data"][0]["provider"], "openai");
+            assert_eq!(body["data"][0]["status"], "ok");
+            assert!(array_contains(
+                &body["data"][0],
+                "models",
+                "id",
+                "provider-chat"
+            ));
+            let raw = body.to_string();
+            assert_secret_redacted(&raw);
+            assert!(!raw.contains("FERROGATE_PROVIDER_SECRET"));
+            assert!(!raw.contains("provider-secret"));
             Ok(())
         },
     )?;
@@ -1294,7 +1316,9 @@ fn spawn_local_provider_upstream(
                         Ok(request) => request,
                         Err(_) => continue,
                     };
-                    let body = if request.contains("POST /v1/responses ") {
+                    let body = if request.contains("GET /v1/models ") {
+                        r#"{"object":"list","data":[{"id":"provider-chat","owned_by":"ferrogate-test","created":1781417600,"context_window":8192,"capabilities":["chat","tools"]}]}"#
+                    } else if request.contains("POST /v1/responses ") {
                         r#"{"id":"resp_ferrogate_test","object":"response","output_text":"ok","usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}"#
                     } else {
                         r#"{"id":"chatcmpl_ferrogate_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#

@@ -173,6 +173,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/provider-models" {
+            let headers = req.headers.clone();
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_provider_models(session, ctx, &headers, query.as_deref())
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/observability" {
             let headers = req.headers.clone();
             self.handle_admin_observability(session, ctx, &headers)

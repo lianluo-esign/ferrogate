@@ -81,11 +81,42 @@ impl fmt::Debug for ProviderHttpRequest {
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub struct ProviderCatalogRequest {
+    pub provider: String,
+    pub endpoint: String,
+    pub headers: Vec<ProviderHeader>,
+}
+
+impl fmt::Debug for ProviderCatalogRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogRequest")
+            .field("provider", &self.provider)
+            .field("endpoint", &self.endpoint)
+            .field("headers", &self.headers)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {
     UnsupportedProviderKind { kind: String },
     InvalidRequest { message: String },
 }
+
+impl fmt::Display for AdapterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedProviderKind { kind } => {
+                write!(formatter, "unsupported provider kind {kind}")
+            }
+            Self::InvalidRequest { message } => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for AdapterError {}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderUsage {
@@ -98,6 +129,15 @@ pub struct ProviderUsage {
 pub struct ProviderErrorResponse {
     pub status: u16,
     pub body: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderCatalogModel {
+    pub id: String,
+    pub owned_by: Option<String>,
+    pub created: Option<u64>,
+    pub context_window: Option<u64>,
+    pub capabilities: Vec<String>,
 }
 
 pub trait ProviderAdapter: Send + Sync {
@@ -114,6 +154,21 @@ pub trait ProviderAdapter: Send + Sync {
         _provider: ProviderConfig,
         _request: ResponsesPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
+        Err(AdapterError::UnsupportedProviderKind {
+            kind: self.kind().to_string(),
+        })
+    }
+
+    fn prepare_model_catalog(
+        &self,
+        _provider: ProviderConfig,
+    ) -> Result<ProviderCatalogRequest, AdapterError> {
+        Err(AdapterError::UnsupportedProviderKind {
+            kind: self.kind().to_string(),
+        })
+    }
+
+    fn parse_model_catalog(&self, _body: &[u8]) -> Result<Vec<ProviderCatalogModel>, AdapterError> {
         Err(AdapterError::UnsupportedProviderKind {
             kind: self.kind().to_string(),
         })

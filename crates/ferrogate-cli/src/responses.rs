@@ -114,6 +114,26 @@ pub(crate) struct AdminProvider {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminProviderModelCatalog {
+    pub(crate) provider: String,
+    pub(crate) kind: String,
+    pub(crate) base_url: String,
+    pub(crate) enabled: bool,
+    pub(crate) status: String,
+    pub(crate) models: Vec<AdminProviderModelCandidate>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminProviderModelCandidate {
+    pub(crate) id: String,
+    pub(crate) owned_by: Option<String>,
+    pub(crate) created: Option<u64>,
+    pub(crate) context_window: Option<u64>,
+    pub(crate) capabilities: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AdminGatewayConfigProfile {
     pub(crate) id: String,
     pub(crate) name: String,

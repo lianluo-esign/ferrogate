@@ -9,8 +9,9 @@ use serde_json::Value;
 
 use crate::{
     AdapterError, AnthropicAdapter, AzureOpenAiAdapter, ChatCompletionPlan, GeminiAdapter,
-    GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderConfig,
-    ProviderErrorResponse, ProviderHttpRequest, ProviderUsage, ResponsesPlan,
+    GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderCatalogModel,
+    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHttpRequest,
+    ProviderUsage, ResponsesPlan,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -54,6 +55,22 @@ impl ProviderAdapterRegistry {
     ) -> Result<ProviderHttpRequest, AdapterError> {
         self.adapter_for(&provider.kind)?
             .prepare_responses(provider, request)
+    }
+
+    pub fn prepare_model_catalog(
+        &self,
+        provider: ProviderConfig,
+    ) -> Result<ProviderCatalogRequest, AdapterError> {
+        self.adapter_for(&provider.kind)?
+            .prepare_model_catalog(provider)
+    }
+
+    pub fn parse_model_catalog(
+        &self,
+        provider_kind: &str,
+        body: &[u8],
+    ) -> Result<Vec<ProviderCatalogModel>, AdapterError> {
+        self.adapter_for(provider_kind)?.parse_model_catalog(body)
     }
 
     pub fn normalize_error_response(

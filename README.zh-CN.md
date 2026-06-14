@@ -30,7 +30,7 @@ FerroGate 是一个基于 Cloudflare Pingora 构建的开源 Rust API 网关和 
 - **虚拟 API Key 与策略检查**：支持哈希 Key、租户上下文、Scope、禁用或过期 Key、模型和供应商白名单/黑名单、最小化 deny-rule 策略评估、请求频率限制和 Token 预算。
 - **Token 用量与计费事件**：优先使用供应商返回的 usage；缺失时由网关估算；并提供面向生产 AI 网关的请求预留与结算流程。
 - **可观测性**：包括结构化请求日志、计费事件、可配置 in-memory retention、用量聚合、供应商健康、缓存指标、MCP 工具指标、Prometheus 指标、请求/Trace ID 传播，以及 OTLP/HTTP metrics/logs/traces 导出。
-- **Admin API 与 Dashboard**：查看网关状态、供应商、模型、API Key、租户、策略、请求日志、计费事件、用量聚合、审计事件、供应商健康状态、扩展、工具、MCP server、配置验证、进程内 reload 和节点 drain/readiness。
+- **Admin API 与 Dashboard**：查看网关状态、供应商、只读上游模型目录发现、已配置模型、API Key、租户、策略、请求日志、计费事件、用量聚合、审计事件、供应商健康状态、扩展、工具、MCP server、配置验证、进程内 reload 和节点 drain/readiness。
 - **集群运维**：支持多节点部署的节点身份、共享文件控制面状态、Redis 请求/Token 计数器、状态、readiness 和 drain 语义。
 - **自动 HTTPS**：支持手动 TLS、ACME HTTP-01、内置 Cloudflare provider 的 ACME DNS-01、续期调度，以及需要监听器级 TLS reload 时的 graceful-upgrade handoff。ACME provider 凭据从 FerroGate 配置文件读取，不依赖环境变量或 Python 脚本。
 - **供应链与安全门禁**：包含格式化、clippy、锁定元数据、高置信度密钥扫描、cargo-deny、cargo-audit 和 GitHub Actions。
@@ -460,6 +460,7 @@ POST /v1/responses
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
+GET  /admin/v1/provider-models
 GET  /admin/v1/extensions
 GET  /admin/v1/tools
 GET  /admin/v1/mcp-servers
@@ -489,6 +490,11 @@ DELETE /admin/v1/drain
 GET  /metrics
 GET  /admin
 ```
+
+`GET /admin/v1/provider-models` 是只读的上游模型目录发现接口。它支持
+`?provider=<name>` 过滤，返回供应商模型候选和尽力而为的能力元数据，不暴露供应商
+API Key 或环境变量名，也不会自动修改已配置的 `[[models]]`。导入模型必须由操作员显式
+审核并应用。
 
 配置了 API Key 时，读端点需要 `admin.read`。工具列表需要 `tools.read`，显式工具执行需要 `tools.execute`，Chat Completions 需要 `chat.completions`，Responses API 请求需要 `responses.create`，配置验证和 reload 需要 `admin.write`。
 

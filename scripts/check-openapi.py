@@ -26,6 +26,7 @@ EXPECTED_ADMIN_METHODS = {
     "/admin/v1/status": {"get"},
     "/admin/v1/providers": {"get"},
     "/admin/v1/provider-health": {"get"},
+    "/admin/v1/provider-models": {"get"},
     "/admin/v1/extensions": {"get"},
     "/admin/v1/tools": {"get"},
     "/admin/v1/mcp-servers": {"get"},

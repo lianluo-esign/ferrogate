@@ -15,7 +15,7 @@ use crate::{
     auth::authenticate,
     config::{
         config_snapshot_id, ApiKey, Config, PolicyRule, PromptTemplate, PromptTemplateStatus,
-        PromptTemplateTarget, PromptTemplateVersion, PromptTemplateVersionStatus,
+        PromptTemplateTarget, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
     },
     extensions::ToolExecutionRequest,
     responses::{
@@ -26,15 +26,19 @@ use crate::{
         AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile, AdminList,
         AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
         AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse, AdminProvider,
-        AdminStatus, AdminTenantRef, HealthResponse, OpenAiModel, OpenAiModelList,
-        PromptTemplateRenderRequest, ReadinessResponse,
+        AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus, AdminTenantRef,
+        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
+        ReadinessResponse,
     },
     state::AdminAuditEventDraft,
 };
 
 use super::body::read_request_body;
+use super::dispatch::dispatch_provider_catalog_request;
 use super::mcp_rpc;
 use super::{FerroGateway, ProxyContext};
+
+const PROVIDER_CATALOG_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 const SERVICE_NAME: &str = "ferrogate";
 
@@ -2151,6 +2155,131 @@ impl FerroGateway {
         }
     }
 
+    pub(super) async fn handle_admin_provider_models(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let provider_filter = query_provider_filter(query);
+                let providers = state
+                    .config
+                    .providers
+                    .iter()
+                    .filter(|provider| {
+                        provider_filter
+                            .as_deref()
+                            .is_none_or(|name| provider.name == name)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut catalogs = Vec::new();
+                for provider in &providers {
+                    if !provider.enabled {
+                        catalogs.push(AdminProviderModelCatalog {
+                            provider: provider.name.clone(),
+                            kind: provider.kind.clone(),
+                            base_url: provider.base_url.clone(),
+                            enabled: false,
+                            status: "disabled".into(),
+                            models: Vec::new(),
+                            error: None,
+                        });
+                        continue;
+                    }
+
+                    let catalog = match state.prepare_model_catalog(provider) {
+                        Ok(request) => {
+                            match dispatch_provider_catalog_request(
+                                request,
+                                state.provider_dispatch_timeout(),
+                                PROVIDER_CATALOG_BODY_MAX_BYTES,
+                            )
+                            .await
+                            {
+                                Ok(response) if response.status.is_success() => {
+                                    match state.parse_model_catalog(&provider.kind, &response.body)
+                                    {
+                                        Ok(models) => AdminProviderModelCatalog {
+                                            provider: provider.name.clone(),
+                                            kind: provider.kind.clone(),
+                                            base_url: provider.base_url.clone(),
+                                            enabled: true,
+                                            status: "ok".into(),
+                                            models: models
+                                                .into_iter()
+                                                .map(|model| AdminProviderModelCandidate {
+                                                    id: model.id,
+                                                    owned_by: model.owned_by,
+                                                    created: model.created,
+                                                    context_window: model.context_window,
+                                                    capabilities: model.capabilities,
+                                                })
+                                                .collect(),
+                                            error: None,
+                                        },
+                                        Err(error) => provider_catalog_error(provider, error),
+                                    }
+                                }
+                                Ok(response) => AdminProviderModelCatalog {
+                                    provider: provider.name.clone(),
+                                    kind: provider.kind.clone(),
+                                    base_url: provider.base_url.clone(),
+                                    enabled: true,
+                                    status: "error".into(),
+                                    models: Vec::new(),
+                                    error: Some(format!(
+                                        "provider catalog returned HTTP {}",
+                                        response.status.as_u16()
+                                    )),
+                                },
+                                Err(error) => AdminProviderModelCatalog {
+                                    provider: provider.name.clone(),
+                                    kind: provider.kind.clone(),
+                                    base_url: provider.base_url.clone(),
+                                    enabled: true,
+                                    status: "error".into(),
+                                    models: Vec::new(),
+                                    error: Some(error.to_string()),
+                                },
+                            }
+                        }
+                        Err(error) => provider_catalog_error(provider, error),
+                    };
+                    catalogs.push(catalog);
+                }
+
+                if provider_filter.is_some() && catalogs.is_empty() {
+                    write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "provider_not_found",
+                        "provider was not found",
+                        &ctx.request_id,
+                    )
+                    .await
+                } else {
+                    let body = AdminList::new(catalogs);
+                    write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                }
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_admin_provider_health(
         &self,
         session: &mut Session,
@@ -3140,6 +3269,30 @@ fn admin_prompt_template(template: &PromptTemplate) -> AdminPromptTemplate {
         variables: template.variables.clone(),
         active_revision: active_prompt_template_version(template).map(|version| version.revision),
         versions: template.versions.clone(),
+    }
+}
+
+fn query_provider_filter(query: Option<&str>) -> Option<String> {
+    query.and_then(|query| {
+        query.split('&').find_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            (key == "provider" && !value.trim().is_empty()).then(|| value.to_string())
+        })
+    })
+}
+
+fn provider_catalog_error(
+    provider: &Provider,
+    error: impl std::fmt::Display,
+) -> AdminProviderModelCatalog {
+    AdminProviderModelCatalog {
+        provider: provider.name.clone(),
+        kind: provider.kind.clone(),
+        base_url: provider.base_url.clone(),
+        enabled: provider.enabled,
+        status: "error".into(),
+        models: Vec::new(),
+        error: Some(error.to_string()),
     }
 }
 

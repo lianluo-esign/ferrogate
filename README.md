@@ -66,10 +66,11 @@ The project is developed as the open-source gateway foundation behind
   configurable in-memory retention, usage aggregates, provider health, cache
   metrics, MCP tool metrics, Prometheus metrics, request/trace ID propagation,
   and OTLP/HTTP metrics/logs/traces export.
-- **Admin API and dashboard** for gateway status, providers, models, API keys,
-  tenants, policies, request logs, metering events, usage aggregates, audit
-  events, gateway config profiles, provider health, extensions, tools, MCP
-  servers, config validation, process-local reload, and node drain/readiness.
+- **Admin API and dashboard** for gateway status, providers, read-only upstream
+  provider model catalog discovery, configured models, API keys, tenants,
+  policies, request logs, metering events, usage aggregates, audit events,
+  gateway config profiles, provider health, extensions, tools, MCP servers,
+  config validation, process-local reload, and node drain/readiness.
 - **Cluster operations** for multi-node deployments with node identity, shared
   file control-plane state, Redis-backed request and token counters, status,
   readiness, and drain semantics.
@@ -629,6 +630,7 @@ POST /v1/responses
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
+GET  /admin/v1/provider-models
 GET  /admin/v1/extensions
 GET  /admin/v1/tools
 GET  /admin/v1/mcp-servers
@@ -664,6 +666,12 @@ DELETE /admin/v1/drain
 GET  /metrics
 GET  /admin
 ```
+
+`GET /admin/v1/provider-models` is a read-only upstream catalog discovery
+surface. It can be filtered with `?provider=<name>` and returns provider model
+candidates plus best-effort capability metadata without exposing provider API
+keys or environment variable names. It never mutates the configured
+`[[models]]` list; operators must explicitly review and apply any import.
 
 Read endpoints require `admin.read` when API keys are configured. Tool listing
 requires `tools.read`, explicit tool execution requires `tools.execute`, chat

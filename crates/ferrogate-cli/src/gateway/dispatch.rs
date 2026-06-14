@@ -14,12 +14,18 @@ use std::{
     time::Duration,
 };
 
-use ferrogate_providers::ProviderHttpRequest;
+use ferrogate_providers::{ProviderCatalogRequest, ProviderHttpRequest};
 
 #[derive(Debug, Clone)]
 pub(super) struct ProviderHttpResponse {
     pub(super) status: StatusCode,
     pub(super) content_type: String,
+    pub(super) body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ProviderCatalogHttpResponse {
+    pub(super) status: StatusCode,
     pub(super) body: Vec<u8>,
 }
 
@@ -124,6 +130,38 @@ pub(super) async fn dispatch_provider_streaming_request(
     })
 }
 
+pub(super) async fn dispatch_provider_catalog_request(
+    request: ProviderCatalogRequest,
+    timeout: Duration,
+    max_body_bytes: usize,
+) -> AnyResult<ProviderCatalogHttpResponse> {
+    let response = build_provider_get_request(&request, timeout)?
+        .send()
+        .await
+        .context("provider model catalog request failed")?;
+    let status = response.status();
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_body_bytes as u64 {
+            bail!(
+                "provider_catalog_body_too_large: provider model catalog exceeds {max_body_bytes} bytes"
+            );
+        }
+    }
+    let body = response
+        .bytes()
+        .await
+        .context("failed to read provider model catalog response body")?;
+    if body.len() > max_body_bytes {
+        bail!(
+            "provider_catalog_body_too_large: provider model catalog exceeds {max_body_bytes} bytes"
+        );
+    }
+    Ok(ProviderCatalogHttpResponse {
+        status,
+        body: body.to_vec(),
+    })
+}
+
 fn provider_http_client() -> AnyResult<Client> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     let result = CLIENT.get_or_init(|| {
@@ -151,26 +189,47 @@ fn build_provider_request(
     timeout: Duration,
     body: Vec<u8>,
 ) -> AnyResult<reqwest::RequestBuilder> {
-    let endpoint = reqwest::Url::parse(&request.endpoint)
-        .with_context(|| format!("invalid provider endpoint {}", request.endpoint))?;
-    match endpoint.scheme() {
-        "http" | "https" => {}
-        other => bail!("provider dispatch supports http and https endpoints only, got {other}"),
-    }
-    let mut headers = HeaderMap::new();
-    for header in &request.headers {
-        let name = HeaderName::from_bytes(header.name.as_bytes())
-            .with_context(|| format!("invalid provider header name {}", header.name))?;
-        let value = HeaderValue::from_str(header.value.expose_secret())
-            .with_context(|| format!("invalid provider header value for {}", header.name))?;
-        headers.insert(name, value);
-    }
+    let endpoint = parse_provider_endpoint(&request.endpoint)?;
+    let headers = provider_headers(&request.headers)?;
 
     Ok(provider_http_client()?
         .post(endpoint)
         .headers(headers)
         .timeout(timeout)
         .body(body))
+}
+
+fn build_provider_get_request(
+    request: &ProviderCatalogRequest,
+    timeout: Duration,
+) -> AnyResult<reqwest::RequestBuilder> {
+    let endpoint = parse_provider_endpoint(&request.endpoint)?;
+    let headers = provider_headers(&request.headers)?;
+    Ok(provider_http_client()?
+        .get(endpoint)
+        .headers(headers)
+        .timeout(timeout))
+}
+
+fn parse_provider_endpoint(endpoint: &str) -> AnyResult<reqwest::Url> {
+    let endpoint = reqwest::Url::parse(endpoint)
+        .with_context(|| format!("invalid provider endpoint {endpoint}"))?;
+    match endpoint.scheme() {
+        "http" | "https" => Ok(endpoint),
+        other => bail!("provider dispatch supports http and https endpoints only, got {other}"),
+    }
+}
+
+fn provider_headers(headers: &[ferrogate_providers::ProviderHeader]) -> AnyResult<HeaderMap> {
+    let mut output = HeaderMap::new();
+    for header in headers {
+        let name = HeaderName::from_bytes(header.name.as_bytes())
+            .with_context(|| format!("invalid provider header name {}", header.name))?;
+        let value = HeaderValue::from_str(header.value.expose_secret())
+            .with_context(|| format!("invalid provider header value for {}", header.name))?;
+        output.insert(name, value);
+    }
+    Ok(output)
 }
 
 fn provider_response_content_type(headers: &HeaderMap) -> String {
