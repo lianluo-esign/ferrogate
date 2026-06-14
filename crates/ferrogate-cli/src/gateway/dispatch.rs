@@ -9,7 +9,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use reqwest::Client;
 use std::{
-    io::{Error as IoError, ErrorKind, Read},
+    io::{Error as IoError, Read},
     sync::OnceLock,
     time::Duration,
 };
@@ -56,7 +56,7 @@ impl Read for ProviderBodyReader {
             let chunk = self
                 .runtime
                 .block_on(self.response.chunk())
-                .map_err(|error| IoError::new(ErrorKind::Other, error))?;
+                .map_err(IoError::other)?;
             match chunk {
                 Some(chunk) if chunk.is_empty() => continue,
                 Some(chunk) => self.pending = Some(chunk),
