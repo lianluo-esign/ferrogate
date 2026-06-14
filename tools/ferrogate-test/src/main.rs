@@ -211,6 +211,8 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert_eq!(body["auth_required"], true);
         assert_eq!(body["cluster"]["ready"], true);
         assert_eq!(body["cluster"]["draining"], false);
+        assert_eq!(body["observability"][0]["provider"], "vector");
+        assert_eq!(body["observability"][0]["endpoint_source"], "observability");
         Ok(())
     })?;
     case.expect_json("GET", "/admin/status", &[ADMIN_AUTH], "", 200, |body| {
@@ -236,6 +238,23 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert!(body["data"].is_array());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/observability",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["data"][0]["provider"], "vector");
+            assert_eq!(body["data"][0]["enabled"], true);
+            assert_eq!(body["data"][0]["protocol"], "otlp_http_json");
+            assert_eq!(body["data"][0]["prometheus_metrics_path"], "/metrics");
+            assert!(body["data"][0]["endpoint"]
+                .as_str()
+                .is_some_and(|endpoint| endpoint.starts_with("http://127.0.0.1:")));
             Ok(())
         },
     )?;
@@ -516,6 +535,7 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert!(body.contains("ferrogate_request_logs_total"));
         Ok(())
     })?;
+    case.expect_vector_otlp_export()?;
 
     case.expect_json(
         "DELETE",
@@ -755,9 +775,16 @@ struct LocalHarness {
     gateway: Child,
     provider: Option<JoinHandle<Vec<String>>>,
     billing: Option<MockBillingServer>,
+    observability: Option<MockOtlpServer>,
 }
 
 struct MockBillingServer {
+    addr: String,
+    received: mpsc::Receiver<String>,
+    handle: Option<JoinHandle<()>>,
+}
+
+struct MockOtlpServer {
     addr: String,
     received: mpsc::Receiver<String>,
     handle: Option<JoinHandle<()>>,
@@ -886,11 +913,18 @@ impl LocalHarness {
         let gateway_addr = free_addr()?;
         let (provider_addr, provider) =
             spawn_local_provider_upstream(expected_provider_requests).context("start provider")?;
+        let observability =
+            spawn_mock_otlp_server(1).context("start observability provider mock")?;
         let dir = tempfile::tempdir()?;
         let config_path = dir.path().join("ferrogate.toml");
         std::fs::write(
             &config_path,
-            local_gateway_config(&gateway_addr, &provider_addr, billing.as_ref()),
+            local_gateway_config(
+                &gateway_addr,
+                &provider_addr,
+                billing.as_ref(),
+                Some(&observability),
+            ),
         )?;
 
         let gateway = Command::new(ferrogate_bin)
@@ -909,6 +943,7 @@ impl LocalHarness {
             gateway,
             provider: Some(provider),
             billing,
+            observability: Some(observability),
         };
         harness.wait_for_gateway()?;
         Ok(harness)
@@ -1050,6 +1085,31 @@ impl LocalHarness {
         }
         bail!("timed out waiting for metering export status; last response: {last}")
     }
+
+    fn expect_vector_otlp_export(&self) -> Result<()> {
+        let Some(observability) = &self.observability else {
+            bail!("observability provider mock is not configured");
+        };
+        let request = observability
+            .received
+            .recv_timeout(Duration::from_secs(12))
+            .context("timed out waiting for Vector-compatible OTLP export")?;
+        assert!(request.starts_with("POST /v1/metrics "));
+        assert!(request.contains("Content-Type: application/json"));
+        let payload = http_request_body(&request)?;
+        let body: Value = serde_json::from_str(payload)
+            .with_context(|| format!("failed to parse OTLP export payload: {payload}"))?;
+        assert_eq!(
+            body["resourceMetrics"][0]["resource"]["attributes"][0]["value"]["stringValue"],
+            "ferrogate-test"
+        );
+        assert!(body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+            .as_array()
+            .is_some_and(|metrics| metrics
+                .iter()
+                .any(|metric| metric["name"] == "ferrogate.request_logs")));
+        Ok(())
+    }
 }
 
 impl Drop for LocalHarness {
@@ -1062,6 +1122,9 @@ impl Drop for LocalHarness {
         if let Some(billing) = self.billing.as_mut() {
             let _ = billing.handle.take().map(|handle| handle.join());
         }
+        if let Some(observability) = self.observability.as_mut() {
+            let _ = observability.handle.take().map(|handle| handle.join());
+        }
     }
 }
 
@@ -1069,6 +1132,7 @@ fn local_gateway_config(
     gateway_addr: &str,
     provider_addr: &str,
     billing: Option<&MockBillingServer>,
+    observability: Option<&MockOtlpServer>,
 ) -> String {
     let metering = billing
         .map(|billing| {
@@ -1088,6 +1152,21 @@ export_subject = "api_key_id"
             )
         })
         .unwrap_or_default();
+    let observability = observability
+        .map(|observability| {
+            format!(
+                r#"
+[observability]
+enabled = true
+provider = "vector"
+otlp_endpoint = "http://{}"
+prometheus_metrics_path = "/metrics"
+export_timeout_secs = 3
+"#,
+                observability.addr
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"
 listen = "{gateway_addr}"
@@ -1101,6 +1180,10 @@ node_zone = "local-a"
 state_backend = "local"
 counter_backend = "local"
 {metering}
+{observability}
+
+[telemetry]
+service_name = "ferrogate-test"
 
 [[providers]]
 name = "openai"
@@ -1268,6 +1351,45 @@ fn spawn_mock_billing_server(expected_requests: usize) -> Result<MockBillingServ
         }
     });
     Ok(MockBillingServer {
+        addr,
+        received: rx,
+        handle: Some(handle),
+    })
+}
+
+fn spawn_mock_otlp_server(expected_requests: usize) -> Result<MockOtlpServer> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?.to_string();
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut received = 0;
+        let started = Instant::now();
+        while received < expected_requests && started.elapsed() < Duration::from_secs(10) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let body = r#"{"ok":true}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = tx.send(request);
+                    received += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    Ok(MockOtlpServer {
         addr,
         received: rx,
         handle: Some(handle),

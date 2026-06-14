@@ -24,17 +24,17 @@ use tracing::{debug, warn};
 use crate::state::AppState;
 
 const OTLP_EXPORT_INTERVAL: Duration = Duration::from_secs(5);
-const OTLP_HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) fn start_otlp_background_sender(state: AppState) -> Option<JoinHandle<()>> {
     let endpoint = state.otlp_endpoint()?;
+    let timeout = Duration::from_secs(state.otlp_timeout_secs());
 
     Some(thread::spawn(move || {
         debug!(endpoint = %endpoint, "OTLP background sender started");
         let mut exported_request_logs = 0;
         loop {
             if let Err(error) =
-                export_otlp_once_since(&state, &endpoint, &mut exported_request_logs)
+                export_otlp_once_since(&state, &endpoint, timeout, &mut exported_request_logs)
             {
                 warn!(error = ?error, "OTLP export failed");
             }
@@ -45,21 +45,28 @@ pub(crate) fn start_otlp_background_sender(state: AppState) -> Option<JoinHandle
 
 #[cfg(test)]
 pub(crate) fn export_otlp_once(state: &AppState, endpoint: &str) -> AnyResult<()> {
+    let timeout = Duration::from_secs(state.otlp_timeout_secs());
     let snapshot = state.prometheus_metrics_snapshot();
-    dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?)?;
+    dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?, timeout)?;
 
     let request_logs = state.request_logs();
     if !request_logs.is_empty() {
-        dispatch_otlp_request(&build_otlp_logs_request(
-            endpoint,
-            &snapshot.service_name,
-            &request_logs_as_otlp_logs(&request_logs),
-        )?)?;
-        dispatch_otlp_request(&build_otlp_traces_request(
-            endpoint,
-            &snapshot.service_name,
-            &request_logs_as_otlp_spans(&request_logs),
-        )?)?;
+        dispatch_otlp_request(
+            &build_otlp_logs_request(
+                endpoint,
+                &snapshot.service_name,
+                &request_logs_as_otlp_logs(&request_logs),
+            )?,
+            timeout,
+        )?;
+        dispatch_otlp_request(
+            &build_otlp_traces_request(
+                endpoint,
+                &snapshot.service_name,
+                &request_logs_as_otlp_spans(&request_logs),
+            )?,
+            timeout,
+        )?;
     }
 
     Ok(())
@@ -68,10 +75,11 @@ pub(crate) fn export_otlp_once(state: &AppState, endpoint: &str) -> AnyResult<()
 fn export_otlp_once_since(
     state: &AppState,
     endpoint: &str,
+    timeout: Duration,
     exported_request_logs: &mut usize,
 ) -> AnyResult<()> {
     let snapshot = state.prometheus_metrics_snapshot();
-    dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?)?;
+    dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?, timeout)?;
 
     let request_logs = state.request_logs();
     let new_logs = request_logs
@@ -79,16 +87,22 @@ fn export_otlp_once_since(
         .unwrap_or_default()
         .to_vec();
     if !new_logs.is_empty() {
-        dispatch_otlp_request(&build_otlp_logs_request(
-            endpoint,
-            &snapshot.service_name,
-            &request_logs_as_otlp_logs(&new_logs),
-        )?)?;
-        dispatch_otlp_request(&build_otlp_traces_request(
-            endpoint,
-            &snapshot.service_name,
-            &request_logs_as_otlp_spans(&new_logs),
-        )?)?;
+        dispatch_otlp_request(
+            &build_otlp_logs_request(
+                endpoint,
+                &snapshot.service_name,
+                &request_logs_as_otlp_logs(&new_logs),
+            )?,
+            timeout,
+        )?;
+        dispatch_otlp_request(
+            &build_otlp_traces_request(
+                endpoint,
+                &snapshot.service_name,
+                &request_logs_as_otlp_spans(&new_logs),
+            )?,
+            timeout,
+        )?;
         *exported_request_logs = request_logs.len();
     }
 
@@ -207,12 +221,12 @@ fn push_optional_attribute(
     }
 }
 
-fn dispatch_otlp_request(request: &OtlpHttpRequest) -> AnyResult<()> {
+fn dispatch_otlp_request(request: &OtlpHttpRequest, timeout: Duration) -> AnyResult<()> {
     let target = parse_otlp_target(&request.url)?;
     let mut stream = TcpStream::connect((target.host.as_str(), target.port))
         .with_context(|| format!("failed to connect OTLP collector {}", target.authority))?;
-    stream.set_read_timeout(Some(OTLP_HTTP_TIMEOUT))?;
-    stream.set_write_timeout(Some(OTLP_HTTP_TIMEOUT))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
 
     match target.scheme {
         OtlpScheme::Http => send_otlp_http_request(&mut stream, &target, request),

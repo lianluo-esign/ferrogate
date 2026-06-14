@@ -31,6 +31,14 @@ The runtime contract maps directly to FerroGate behavior:
 - provider, client, and admin secrets are read from environment variables, not
   from the ConfigMap.
 
+Vector observability examples live under `deploy/vector/`:
+
+- `vector.yaml` receives FerroGate OTLP HTTP/gRPC logs, metrics, and traces,
+  and also scrapes `/metrics` through Vector's Prometheus scrape source.
+- `ferrogate-observability.yaml` shows the equivalent FerroGate
+  observability settings for enabling Vector without making Vector a required
+  runtime dependency or billing provider.
+
 ACME storage is mounted at `/var/lib/ferrogate/acme`. The example keeps ACME
 disabled in `ferrogate.toml`; enable it only after mounting durable storage and
 setting real domains, email, and DNS provider credentials.

@@ -49,6 +49,7 @@ pub(crate) struct AdminStatus<'a> {
     pub(crate) tools: usize,
     pub(crate) auth_required: bool,
     pub(crate) cluster: crate::state::ClusterStatus,
+    pub(crate) observability: Vec<crate::state::ObservabilityStatus>,
     pub(crate) acme: Option<AdminAcmeStatus>,
 }
 

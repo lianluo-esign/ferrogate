@@ -173,6 +173,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/observability" {
+            let headers = req.headers.clone();
+            self.handle_admin_observability(session, ctx, &headers)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/extensions" {
             let headers = req.headers.clone();
             self.handle_admin_extensions(session, ctx, &headers).await?;

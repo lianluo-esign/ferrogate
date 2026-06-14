@@ -43,6 +43,13 @@ config_poll_interval_secs = 7
 service_name = "ferrogate-dev"
 otlp_endpoint = "http://127.0.0.1:4318"
 
+[observability]
+enabled = true
+provider = "vector"
+otlp_endpoint = "http://vector:4318"
+prometheus_metrics_path = "/metrics"
+export_timeout_secs = 4
+
 [cache]
 enabled = true
 mode = "exact_match"
@@ -151,6 +158,14 @@ timeout_ms = 30000
         config.telemetry.otlp_endpoint.as_deref(),
         Some("http://127.0.0.1:4318")
     );
+    assert!(config.observability.enabled);
+    assert_eq!(config.observability.provider, ObservabilityProvider::Vector);
+    assert_eq!(
+        config.observability.otlp_endpoint.as_deref(),
+        Some("http://vector:4318")
+    );
+    assert_eq!(config.observability.prometheus_metrics_path, "/metrics");
+    assert_eq!(config.observability.export_timeout_secs, 4);
     assert_eq!(
         config
             .reliability

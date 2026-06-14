@@ -175,6 +175,7 @@ impl FerroGateway {
                     tools: state.all_tools().len(),
                     auth_required: state.auth_required(),
                     cluster: state.cluster_status(),
+                    observability: state.observability_status(),
                     acme: state.acme_renewal_status().map(|status| AdminAcmeStatus {
                         enabled: status.enabled,
                         domains: status.domains,
@@ -192,6 +193,31 @@ impl FerroGateway {
                     }),
                 };
                 write_json_response(session, StatusCode::OK, &status, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_observability(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList::new(state.observability_status());
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
                 write_json_error(

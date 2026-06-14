@@ -1,0 +1,30 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-11
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+sources:
+  ferrogate_otlp:
+    type: opentelemetry
+    grpc:
+      address: 0.0.0.0:4317
+    http:
+      address: 0.0.0.0:4318
+
+  ferrogate_prometheus:
+    type: prometheus_scrape
+    endpoints:
+      - http://ferrogate:8080/metrics
+    scrape_interval_secs: 15
+
+sinks:
+  console:
+    type: console
+    inputs:
+      - ferrogate_otlp.logs
+      - ferrogate_otlp.metrics
+      - ferrogate_otlp.traces
+      - ferrogate_prometheus
+    encoding:
+      codec: json

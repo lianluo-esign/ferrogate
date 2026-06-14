@@ -67,6 +67,10 @@ Future work should push toward:
   `ferrogate-observability` owns metrics/spans/exporter contracts.
 - Preserve Pingora runtime invariants. Do not casually add blocking work,
   hidden global state, or allocation-heavy logic in request hot paths.
+- Keep the system architecture highly modular and extensible. New capabilities
+  must enter through explicit traits, repository contracts, provider adapters,
+  or narrow service boundaries instead of hardwiring one vendor, protocol,
+  product decision, or deployment topology into the gateway core.
 - Keep provider behavior adapter-local. Do not leak one provider's quirks into
   the core gateway model unless the abstraction genuinely belongs there.
 - Treat streaming as a correctness surface, not a formatting detail. SSE,

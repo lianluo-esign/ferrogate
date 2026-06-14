@@ -37,6 +37,7 @@ impl Config {
         self.validate_extensions()?;
         self.validate_tls()?;
         self.validate_telemetry()?;
+        self.validate_observability()?;
         self.validate_metering()?;
         self.validate_cache()?;
         self.validate_storage()?;
@@ -227,6 +228,43 @@ impl Config {
             if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
                 bail!("field telemetry.otlp_endpoint: must start with http:// or https://");
             }
+        }
+        Ok(())
+    }
+
+    fn validate_observability(&self) -> AnyResult<()> {
+        if self.observability.prometheus_metrics_path.trim().is_empty() {
+            bail!("field observability.prometheus_metrics_path: cannot be empty");
+        }
+        if !self.observability.prometheus_metrics_path.starts_with('/')
+            || self.observability.prometheus_metrics_path.trim() == "/"
+        {
+            bail!("field observability.prometheus_metrics_path: must be an absolute HTTP path");
+        }
+        if self.observability.export_timeout_secs == 0 {
+            bail!("field observability.export_timeout_secs: must be greater than zero");
+        }
+        if !self.observability.enabled {
+            return Ok(());
+        }
+        if matches!(
+            self.observability.provider,
+            super::ObservabilityProvider::None
+        ) {
+            bail!("field observability.provider: cannot be none when observability is enabled");
+        }
+        let endpoint = self
+            .observability
+            .otlp_endpoint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "field observability.otlp_endpoint: required when observability is enabled"
+                )
+            })?;
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            bail!("field observability.otlp_endpoint: must start with http:// or https://");
         }
         Ok(())
     }

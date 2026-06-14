@@ -39,6 +39,13 @@ fn config_model_supports_serde_roundtrip() {
             otlp_endpoint: Some("http://127.0.0.1:4318".into()),
             ..TelemetryConfig::default()
         },
+        observability: ObservabilityConfig {
+            enabled: true,
+            provider: ObservabilityProvider::Vector,
+            otlp_endpoint: Some("http://vector:4318".into()),
+            prometheus_metrics_path: "/metrics".into(),
+            export_timeout_secs: 4,
+        },
         reliability: ReliabilityConfig {
             provider_circuit_breaker_failure_threshold: Some(2),
             provider_circuit_breaker_cooldown_secs: Some(30),
@@ -102,6 +109,15 @@ fn config_model_supports_serde_roundtrip() {
         decoded.telemetry.otlp_endpoint.as_deref(),
         Some("http://127.0.0.1:4318")
     );
+    assert_eq!(
+        decoded.observability.provider,
+        ObservabilityProvider::Vector
+    );
+    assert_eq!(
+        decoded.observability.otlp_endpoint.as_deref(),
+        Some("http://vector:4318")
+    );
+    assert_eq!(decoded.observability.export_timeout_secs, 4);
     assert_eq!(
         decoded
             .reliability

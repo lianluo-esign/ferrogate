@@ -302,6 +302,33 @@
         }
       }
     },
+    "/admin/v1/observability": {
+      "get": {
+        "operationId": "listAdminObservability",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List configured observability exporters and health counters.",
+        "responses": {
+          "200": {
+            "description": "Observability exporter status list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservabilityStatusList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/extensions": {
       "get": {
         "operationId": "listAdminExtensions",
@@ -2051,7 +2078,8 @@
           "active_extensions",
           "tools",
           "auth_required",
-          "cluster"
+          "cluster",
+          "observability"
         ],
         "properties": {
           "service": {
@@ -2121,6 +2149,12 @@
           },
           "cluster": {
             "$ref": "#/components/schemas/ClusterStatus"
+          },
+          "observability": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObservabilityStatus"
+            }
           },
           "acme": {
             "anyOf": [
@@ -2410,6 +2444,86 @@
               }
             ],
             "description": "Cluster-wide provider observations when a shared aggregation backend is configured. Null means this node only has local observations."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ObservabilityStatus": {
+        "type": "object",
+        "required": [
+          "provider",
+          "enabled",
+          "active",
+          "endpoint",
+          "endpoint_source",
+          "protocol",
+          "signals",
+          "prometheus_metrics_path",
+          "export_timeout_secs",
+          "health",
+          "last_export_error",
+          "queue_backpressure_events",
+          "dropped_events"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "vector",
+              "otlp",
+              "none"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "endpoint_source": {
+            "type": "string",
+            "enum": [
+              "observability",
+              "telemetry_legacy",
+              "none"
+            ]
+          },
+          "protocol": {
+            "type": "string",
+            "const": "otlp_http_json"
+          },
+          "signals": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "prometheus_metrics_path": {
+            "type": "string"
+          },
+          "export_timeout_secs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "health": {
+            "type": "string"
+          },
+          "last_export_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queue_backpressure_events": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dropped_events": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -3620,6 +3734,9 @@
       "ProviderHealthList": {
         "$ref": "#/components/schemas/AdminList_ProviderHealthCheck"
       },
+      "ObservabilityStatusList": {
+        "$ref": "#/components/schemas/AdminList_ObservabilityStatus"
+      },
       "AdminExtensionList": {
         "$ref": "#/components/schemas/AdminList_AdminExtension"
       },
@@ -3685,6 +3802,26 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ProviderHealthCheck"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_ObservabilityStatus": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObservabilityStatus"
             }
           }
         },

@@ -625,6 +625,23 @@ pub(crate) struct ClusterStatus {
     pub(crate) accepting_new_requests: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ObservabilityStatus {
+    pub(crate) provider: String,
+    pub(crate) enabled: bool,
+    pub(crate) active: bool,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) endpoint_source: &'static str,
+    pub(crate) protocol: &'static str,
+    pub(crate) signals: Vec<&'static str>,
+    pub(crate) prometheus_metrics_path: String,
+    pub(crate) export_timeout_secs: u64,
+    pub(crate) health: &'static str,
+    pub(crate) last_export_error: Option<String>,
+    pub(crate) queue_backpressure_events: u64,
+    pub(crate) dropped_events: u64,
+}
+
 impl ClusterIdentity {
     fn from_config(config: &Config) -> Self {
         Self {
@@ -2414,8 +2431,70 @@ impl AppState {
     }
 
     pub(crate) fn otlp_endpoint(&self) -> Option<String> {
-        self.config
+        self.observability_otlp_endpoint().or_else(|| {
+            self.config
+                .telemetry
+                .otlp_endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.trim().to_string())
+                .filter(|endpoint| !endpoint.is_empty())
+        })
+    }
+
+    pub(crate) fn otlp_timeout_secs(&self) -> u64 {
+        self.config.observability.export_timeout_secs
+    }
+
+    pub(crate) fn observability_status(&self) -> Vec<ObservabilityStatus> {
+        let explicit_endpoint = self.observability_otlp_endpoint();
+        let legacy_endpoint = self
+            .config
             .telemetry
+            .otlp_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.trim().to_string())
+            .filter(|endpoint| !endpoint.is_empty());
+        let endpoint = explicit_endpoint
+            .clone()
+            .or_else(|| legacy_endpoint.clone());
+        let enabled = self.config.observability.enabled || legacy_endpoint.is_some();
+        let endpoint_source = if explicit_endpoint.is_some() {
+            "observability"
+        } else if legacy_endpoint.is_some() {
+            "telemetry_legacy"
+        } else {
+            "none"
+        };
+        let provider = if self.config.observability.enabled {
+            format!("{:?}", self.config.observability.provider).to_ascii_lowercase()
+        } else if legacy_endpoint.is_some() {
+            "otlp".to_string()
+        } else {
+            "none".to_string()
+        };
+        vec![ObservabilityStatus {
+            provider,
+            enabled,
+            active: endpoint.is_some(),
+            endpoint,
+            endpoint_source,
+            protocol: "otlp_http_json",
+            signals: vec!["metrics", "logs", "traces"],
+            prometheus_metrics_path: self.config.observability.prometheus_metrics_path.clone(),
+            export_timeout_secs: self.config.observability.export_timeout_secs,
+            health: if enabled { "configured" } else { "disabled" },
+            last_export_error: None,
+            queue_backpressure_events: 0,
+            dropped_events: 0,
+        }]
+    }
+
+    fn observability_otlp_endpoint(&self) -> Option<String> {
+        if !self.config.observability.enabled {
+            return None;
+        }
+        self.config
+            .observability
             .otlp_endpoint
             .as_ref()
             .map(|endpoint| endpoint.trim().to_string())

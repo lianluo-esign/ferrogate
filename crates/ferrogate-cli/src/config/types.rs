@@ -41,6 +41,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
+    pub(crate) observability: ObservabilityConfig,
+    #[serde(default)]
     pub(crate) metering: MeteringConfig,
     #[serde(default)]
     pub(crate) cache: CacheConfig,
@@ -494,6 +496,29 @@ pub(crate) struct TelemetryConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ObservabilityConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) provider: ObservabilityProvider,
+    #[serde(default)]
+    pub(crate) otlp_endpoint: Option<String>,
+    #[serde(default = "default_observability_prometheus_metrics_path")]
+    pub(crate) prometheus_metrics_path: String,
+    #[serde(default = "default_observability_export_timeout_secs")]
+    pub(crate) export_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ObservabilityProvider {
+    #[default]
+    Vector,
+    Otlp,
+    None,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct MeteringConfig {
     #[serde(default)]
     pub(crate) export_enabled: bool,
@@ -789,6 +814,14 @@ fn default_metering_export_source() -> String {
     "ferrogate".to_string()
 }
 
+fn default_observability_prometheus_metrics_path() -> String {
+    "/metrics".to_string()
+}
+
+fn default_observability_export_timeout_secs() -> u64 {
+    3
+}
+
 fn default_cache_ttl_secs() -> u64 {
     300
 }
@@ -826,6 +859,18 @@ impl Default for TelemetryConfig {
             access_log_sample_rate: default_access_log_sample_rate(),
             access_log_error_rate_limit_per_sec: default_access_log_error_rate_limit_per_sec(),
             otlp_endpoint: None,
+        }
+    }
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: ObservabilityProvider::Vector,
+            otlp_endpoint: None,
+            prometheus_metrics_path: default_observability_prometheus_metrics_path(),
+            export_timeout_secs: default_observability_export_timeout_secs(),
         }
     }
 }
@@ -904,6 +949,7 @@ impl Default for Config {
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            observability: ObservabilityConfig::default(),
             metering: MeteringConfig::default(),
             cache: CacheConfig::default(),
             storage: StorageConfig::default(),

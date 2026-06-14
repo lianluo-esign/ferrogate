@@ -28,8 +28,9 @@ pub(crate) use self::types::{
     ExtensionConfig, ExtensionKind, ExtensionPermissions, GatewayConfigProfile, GuardrailEffect,
     GuardrailRule, GuardrailStage, HeaderMatcher, HeaderMutation, McpAuthType, McpHeaderConfig,
     McpServerConfig, McpTlsConfig, McpTransport, MeteringConfig, MeteringExportProvider,
-    MeteringExportSubject, Model, ModelFallback, PolicyRule, PromptTemplate, PromptTemplateMessage,
-    PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVariable, PromptTemplateVersion,
-    PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule, StorageConfig,
-    TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    MeteringExportSubject, Model, ModelFallback, ObservabilityConfig, ObservabilityProvider,
+    PolicyRule, PromptTemplate, PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget,
+    PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
+    ReliabilityConfig, RouteRule, StorageConfig, TelemetryConfig, TlsAcmeConfig, TlsConfig,
+    Upstream,
 };

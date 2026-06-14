@@ -788,6 +788,36 @@ fn rejects_invalid_otlp_endpoint_with_field_name() {
 }
 
 #[test]
+fn rejects_enabled_observability_without_otlp_endpoint() {
+    let config = Config {
+        observability: ObservabilityConfig {
+            enabled: true,
+            provider: ObservabilityProvider::Vector,
+            otlp_endpoint: None,
+            ..ObservabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field observability.otlp_endpoint"));
+}
+
+#[test]
+fn rejects_invalid_observability_metrics_path() {
+    let config = Config {
+        observability: ObservabilityConfig {
+            prometheus_metrics_path: "metrics".into(),
+            ..ObservabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field observability.prometheus_metrics_path"));
+}
+
+#[test]
 fn rejects_incomplete_provider_circuit_breaker_config() {
     let config = Config {
         reliability: ReliabilityConfig {
