@@ -7,6 +7,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Caddyfile-compatible intermediate configuration model.
+///
+/// This crate owns parse-time shape only; `ferrogate-cli::Config` is the runtime
+/// truth after normalization.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub listen: String,

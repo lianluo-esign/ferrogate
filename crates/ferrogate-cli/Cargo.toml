@@ -42,6 +42,7 @@ http.workspace = true
 instant-acme.workspace = true
 pingora.workspace = true
 redis.workspace = true
+reqwest.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true

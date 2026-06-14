@@ -720,42 +720,24 @@ impl FerroGateway {
                 }
             };
 
-            match endpoint {
-                AiEndpoint::ChatCompletions => info!(
-                    request_id = %ctx.request_id,
-                    api_key_id = ?auth.api_key_id,
-                    organization_id = ?auth.organization_id,
-                    project_id = ?auth.project_id,
-                    monthly_token_budget = ?auth.monthly_token_budget,
-                    request_limit_per_minute = ?auth.request_limit_per_minute,
-                    logical_model = %request.model,
-                    provider = %provider.name,
-                    provider_model = %model_route.provider_model,
-                    candidate_index,
-                    fallback_count = route_count.saturating_sub(1),
-                    provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
-                    provider_dispatch_max_retries = max_dispatch_retries,
-                    stream = request.stream,
-                    "chat completion route planned"
-                ),
-                AiEndpoint::Responses => info!(
-                    request_id = %ctx.request_id,
-                    api_key_id = ?auth.api_key_id,
-                    organization_id = ?auth.organization_id,
-                    project_id = ?auth.project_id,
-                    monthly_token_budget = ?auth.monthly_token_budget,
-                    request_limit_per_minute = ?auth.request_limit_per_minute,
-                    logical_model = %request.model,
-                    provider = %provider.name,
-                    provider_model = %model_route.provider_model,
-                    candidate_index,
-                    fallback_count = route_count.saturating_sub(1),
-                    provider_dispatch_timeout_secs = dispatch_timeout.as_secs(),
-                    provider_dispatch_max_retries = max_dispatch_retries,
-                    stream = request.stream,
-                    "responses route planned"
-                ),
-            }
+            let attempt_plan = AiProviderAttemptPlan {
+                endpoint,
+                request_id: &ctx.request_id,
+                api_key_id: auth.api_key_id.as_deref(),
+                organization_id: auth.organization_id.as_deref(),
+                project_id: auth.project_id.as_deref(),
+                monthly_token_budget: auth.monthly_token_budget,
+                request_limit_per_minute: auth.request_limit_per_minute,
+                logical_model: &request.model,
+                provider: &provider.name,
+                provider_model: &model_route.provider_model,
+                candidate_index,
+                route_count,
+                dispatch_timeout,
+                max_dispatch_retries,
+                stream: request.stream,
+            };
+            attempt_plan.log_planned_route();
 
             if request.stream {
                 let mut attempt = 0;
@@ -788,33 +770,38 @@ impl FerroGateway {
                                 if retryable_status {
                                     state.record_provider_failure(&provider.name);
                                 }
-                                if retryable_status && attempt < max_dispatch_retries {
-                                    warn!(
-                                        request_id = %ctx.request_id,
-                                        logical_model = %request.model,
-                                        provider = %provider.name,
-                                        provider_model = %model_route.provider_model,
-                                        provider_status = response.status.as_u16(),
-                                        attempt,
-                                        max_retries = max_dispatch_retries,
-                                        "streaming provider returned retryable status; retrying provider"
-                                    );
-                                    attempt += 1;
-                                    continue;
-                                }
-                                if retryable_status
-                                    && has_next_candidate(candidate_index, route_count)
-                                {
-                                    warn!(
-                                        request_id = %ctx.request_id,
-                                        logical_model = %request.model,
-                                        provider = %provider.name,
-                                        provider_model = %model_route.provider_model,
-                                        provider_status = response.status.as_u16(),
-                                        candidate_index,
-                                        "streaming provider returned server error; trying fallback route"
-                                    );
-                                    continue 'routes;
+                                match ProviderAttemptDecision::from_retryable_status(
+                                    retryable_status,
+                                    attempt,
+                                    &attempt_plan,
+                                ) {
+                                    ProviderAttemptDecision::RetryProvider => {
+                                        warn!(
+                                            request_id = %ctx.request_id,
+                                            logical_model = %request.model,
+                                            provider = %provider.name,
+                                            provider_model = %model_route.provider_model,
+                                            provider_status = response.status.as_u16(),
+                                            attempt,
+                                            max_retries = max_dispatch_retries,
+                                            "streaming provider returned retryable status; retrying provider"
+                                        );
+                                        attempt += 1;
+                                        continue;
+                                    }
+                                    ProviderAttemptDecision::TryFallbackRoute => {
+                                        warn!(
+                                            request_id = %ctx.request_id,
+                                            logical_model = %request.model,
+                                            provider = %provider.name,
+                                            provider_model = %model_route.provider_model,
+                                            provider_status = response.status.as_u16(),
+                                            candidate_index,
+                                            "streaming provider returned server error; trying fallback route"
+                                        );
+                                        continue 'routes;
+                                    }
+                                    ProviderAttemptDecision::ReturnError => {}
                                 }
                                 let normalized = match state.normalize_provider_error(
                                     &provider.kind,
@@ -878,31 +865,37 @@ impl FerroGateway {
                         }
                         Err(error) => {
                             state.record_provider_failure(&provider.name);
-                            if attempt < max_dispatch_retries {
-                                warn!(
-                                    request_id = %ctx.request_id,
-                                    logical_model = %request.model,
-                                    provider = %provider.name,
-                                    provider_model = %model_route.provider_model,
-                                    attempt,
-                                    max_retries = max_dispatch_retries,
-                                    error = %error,
-                                    "streaming provider dispatch failed; retrying provider"
-                                );
-                                attempt += 1;
-                                continue;
-                            }
-                            if has_next_candidate(candidate_index, route_count) {
-                                warn!(
-                                    request_id = %ctx.request_id,
-                                    logical_model = %request.model,
-                                    provider = %provider.name,
-                                    provider_model = %model_route.provider_model,
-                                    candidate_index,
-                                    error = %error,
-                                    "streaming provider dispatch failed; trying fallback route"
-                                );
-                                continue 'routes;
+                            match ProviderAttemptDecision::from_dispatch_error(
+                                attempt,
+                                &attempt_plan,
+                            ) {
+                                ProviderAttemptDecision::RetryProvider => {
+                                    warn!(
+                                        request_id = %ctx.request_id,
+                                        logical_model = %request.model,
+                                        provider = %provider.name,
+                                        provider_model = %model_route.provider_model,
+                                        attempt,
+                                        max_retries = max_dispatch_retries,
+                                        error = %error,
+                                        "streaming provider dispatch failed; retrying provider"
+                                    );
+                                    attempt += 1;
+                                    continue;
+                                }
+                                ProviderAttemptDecision::TryFallbackRoute => {
+                                    warn!(
+                                        request_id = %ctx.request_id,
+                                        logical_model = %request.model,
+                                        provider = %provider.name,
+                                        provider_model = %model_route.provider_model,
+                                        candidate_index,
+                                        error = %error,
+                                        "streaming provider dispatch failed; trying fallback route"
+                                    );
+                                    continue 'routes;
+                                }
+                                ProviderAttemptDecision::ReturnError => {}
                             }
                             write_json_error(
                                 session,
@@ -938,32 +931,38 @@ impl FerroGateway {
                             if retryable_status {
                                 state.record_provider_failure(&provider.name);
                             }
-                            if retryable_status && attempt < max_dispatch_retries {
-                                warn!(
-                                    request_id = %ctx.request_id,
-                                    logical_model = %request.model,
-                                    provider = %provider.name,
-                                    provider_model = %model_route.provider_model,
-                                    provider_status = response.status.as_u16(),
-                                    attempt,
-                                    max_retries = max_dispatch_retries,
-                                    "provider returned retryable status; retrying provider"
-                                );
-                                attempt += 1;
-                                continue;
-                            }
-                            if retryable_status && has_next_candidate(candidate_index, route_count)
-                            {
-                                warn!(
-                                    request_id = %ctx.request_id,
-                                    logical_model = %request.model,
-                                    provider = %provider.name,
-                                    provider_model = %model_route.provider_model,
-                                    provider_status = response.status.as_u16(),
-                                    candidate_index,
-                                    "provider returned server error; trying fallback route"
-                                );
-                                continue 'routes;
+                            match ProviderAttemptDecision::from_retryable_status(
+                                retryable_status,
+                                attempt,
+                                &attempt_plan,
+                            ) {
+                                ProviderAttemptDecision::RetryProvider => {
+                                    warn!(
+                                        request_id = %ctx.request_id,
+                                        logical_model = %request.model,
+                                        provider = %provider.name,
+                                        provider_model = %model_route.provider_model,
+                                        provider_status = response.status.as_u16(),
+                                        attempt,
+                                        max_retries = max_dispatch_retries,
+                                        "provider returned retryable status; retrying provider"
+                                    );
+                                    attempt += 1;
+                                    continue;
+                                }
+                                ProviderAttemptDecision::TryFallbackRoute => {
+                                    warn!(
+                                        request_id = %ctx.request_id,
+                                        logical_model = %request.model,
+                                        provider = %provider.name,
+                                        provider_model = %model_route.provider_model,
+                                        provider_status = response.status.as_u16(),
+                                        candidate_index,
+                                        "provider returned server error; trying fallback route"
+                                    );
+                                    continue 'routes;
+                                }
+                                ProviderAttemptDecision::ReturnError => {}
                             }
                             let normalized = match state.normalize_provider_error(
                                 &provider.kind,
@@ -1100,31 +1099,34 @@ impl FerroGateway {
                     }
                     Err(error) => {
                         state.record_provider_failure(&provider.name);
-                        if attempt < max_dispatch_retries {
-                            warn!(
-                                request_id = %ctx.request_id,
-                                logical_model = %request.model,
-                                provider = %provider.name,
-                                provider_model = %model_route.provider_model,
-                                attempt,
-                                max_retries = max_dispatch_retries,
-                                error = %error,
-                                "provider dispatch failed; retrying provider"
-                            );
-                            attempt += 1;
-                            continue;
-                        }
-                        if has_next_candidate(candidate_index, route_count) {
-                            warn!(
-                                request_id = %ctx.request_id,
-                                logical_model = %request.model,
-                                provider = %provider.name,
-                                provider_model = %model_route.provider_model,
-                                candidate_index,
-                                error = %error,
-                                "provider dispatch failed; trying fallback route"
-                            );
-                            continue 'routes;
+                        match ProviderAttemptDecision::from_dispatch_error(attempt, &attempt_plan) {
+                            ProviderAttemptDecision::RetryProvider => {
+                                warn!(
+                                    request_id = %ctx.request_id,
+                                    logical_model = %request.model,
+                                    provider = %provider.name,
+                                    provider_model = %model_route.provider_model,
+                                    attempt,
+                                    max_retries = max_dispatch_retries,
+                                    error = %error,
+                                    "provider dispatch failed; retrying provider"
+                                );
+                                attempt += 1;
+                                continue;
+                            }
+                            ProviderAttemptDecision::TryFallbackRoute => {
+                                warn!(
+                                    request_id = %ctx.request_id,
+                                    logical_model = %request.model,
+                                    provider = %provider.name,
+                                    provider_model = %model_route.provider_model,
+                                    candidate_index,
+                                    error = %error,
+                                    "provider dispatch failed; trying fallback route"
+                                );
+                                continue 'routes;
+                            }
+                            ProviderAttemptDecision::ReturnError => {}
                         }
                         self.record_ai_error_log(
                             endpoint,
@@ -1205,6 +1207,106 @@ struct AiProviderRequestInput<'a> {
     logical_model: String,
     stream: bool,
     body: serde_json::Value,
+}
+
+struct AiProviderAttemptPlan<'a> {
+    endpoint: AiEndpoint,
+    request_id: &'a str,
+    api_key_id: Option<&'a str>,
+    organization_id: Option<&'a str>,
+    project_id: Option<&'a str>,
+    monthly_token_budget: Option<u64>,
+    request_limit_per_minute: Option<u64>,
+    logical_model: &'a str,
+    provider: &'a str,
+    provider_model: &'a str,
+    candidate_index: usize,
+    route_count: usize,
+    dispatch_timeout: std::time::Duration,
+    max_dispatch_retries: u32,
+    stream: bool,
+}
+
+impl AiProviderAttemptPlan<'_> {
+    fn fallback_count(&self) -> usize {
+        self.route_count.saturating_sub(1)
+    }
+
+    fn has_next_candidate(&self) -> bool {
+        has_next_candidate(self.candidate_index, self.route_count)
+    }
+
+    fn log_planned_route(&self) {
+        match self.endpoint {
+            AiEndpoint::ChatCompletions => info!(
+                request_id = %self.request_id,
+                api_key_id = ?self.api_key_id,
+                organization_id = ?self.organization_id,
+                project_id = ?self.project_id,
+                monthly_token_budget = ?self.monthly_token_budget,
+                request_limit_per_minute = ?self.request_limit_per_minute,
+                logical_model = %self.logical_model,
+                provider = %self.provider,
+                provider_model = %self.provider_model,
+                candidate_index = self.candidate_index,
+                fallback_count = self.fallback_count(),
+                provider_dispatch_timeout_secs = self.dispatch_timeout.as_secs(),
+                provider_dispatch_max_retries = self.max_dispatch_retries,
+                stream = self.stream,
+                "chat completion route planned"
+            ),
+            AiEndpoint::Responses => info!(
+                request_id = %self.request_id,
+                api_key_id = ?self.api_key_id,
+                organization_id = ?self.organization_id,
+                project_id = ?self.project_id,
+                monthly_token_budget = ?self.monthly_token_budget,
+                request_limit_per_minute = ?self.request_limit_per_minute,
+                logical_model = %self.logical_model,
+                provider = %self.provider,
+                provider_model = %self.provider_model,
+                candidate_index = self.candidate_index,
+                fallback_count = self.fallback_count(),
+                provider_dispatch_timeout_secs = self.dispatch_timeout.as_secs(),
+                provider_dispatch_max_retries = self.max_dispatch_retries,
+                stream = self.stream,
+                "responses route planned"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderAttemptDecision {
+    RetryProvider,
+    TryFallbackRoute,
+    ReturnError,
+}
+
+impl ProviderAttemptDecision {
+    fn from_retryable_status(
+        retryable_status: bool,
+        attempt: u32,
+        plan: &AiProviderAttemptPlan<'_>,
+    ) -> Self {
+        if retryable_status && attempt < plan.max_dispatch_retries {
+            Self::RetryProvider
+        } else if retryable_status && plan.has_next_candidate() {
+            Self::TryFallbackRoute
+        } else {
+            Self::ReturnError
+        }
+    }
+
+    fn from_dispatch_error(attempt: u32, plan: &AiProviderAttemptPlan<'_>) -> Self {
+        if attempt < plan.max_dispatch_retries {
+            Self::RetryProvider
+        } else if plan.has_next_candidate() {
+            Self::TryFallbackRoute
+        } else {
+            Self::ReturnError
+        }
+    }
 }
 
 fn has_next_candidate(candidate_index: usize, route_count: usize) -> bool {
@@ -1354,6 +1456,7 @@ fn requested_choice_count(body: &serde_json::Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn estimates_prompt_and_requested_completion_tokens() {
@@ -1388,5 +1491,56 @@ mod tests {
             DEFAULT_COMPLETION_TOKEN_RESERVATION
         );
         assert_eq!(usage.total_tokens, DEFAULT_COMPLETION_TOKEN_RESERVATION);
+    }
+
+    #[test]
+    fn provider_attempt_retries_before_fallback_for_retryable_status() {
+        let plan = provider_attempt_plan(0, 2, 1);
+
+        let decision = ProviderAttemptDecision::from_retryable_status(true, 0, &plan);
+
+        assert_eq!(decision, ProviderAttemptDecision::RetryProvider);
+    }
+
+    #[test]
+    fn provider_attempt_falls_back_after_retries_are_exhausted() {
+        let plan = provider_attempt_plan(0, 2, 1);
+
+        let decision = ProviderAttemptDecision::from_retryable_status(true, 1, &plan);
+
+        assert_eq!(decision, ProviderAttemptDecision::TryFallbackRoute);
+    }
+
+    #[test]
+    fn provider_attempt_returns_error_when_no_fallback_remains() {
+        let plan = provider_attempt_plan(1, 2, 1);
+
+        let decision = ProviderAttemptDecision::from_dispatch_error(1, &plan);
+
+        assert_eq!(decision, ProviderAttemptDecision::ReturnError);
+    }
+
+    fn provider_attempt_plan(
+        candidate_index: usize,
+        route_count: usize,
+        max_dispatch_retries: u32,
+    ) -> AiProviderAttemptPlan<'static> {
+        AiProviderAttemptPlan {
+            endpoint: AiEndpoint::ChatCompletions,
+            request_id: "fg-test",
+            api_key_id: Some("key_dev"),
+            organization_id: Some("org_demo"),
+            project_id: Some("project_gateway"),
+            monthly_token_budget: Some(1024),
+            request_limit_per_minute: Some(60),
+            logical_model: "fast-chat",
+            provider: "openai",
+            provider_model: "gpt-test",
+            candidate_index,
+            route_count,
+            dispatch_timeout: Duration::from_secs(2),
+            max_dispatch_retries,
+            stream: false,
+        }
     }
 }

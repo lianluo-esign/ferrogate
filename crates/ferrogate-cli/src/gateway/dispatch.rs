@@ -5,17 +5,16 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use anyhow::{bail, Context, Result as AnyResult};
-use http::{StatusCode, Uri};
-use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use bytes::Bytes;
+use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use reqwest::Client;
 use std::{
-    io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
-    sync::{Arc, OnceLock},
+    io::{Error as IoError, ErrorKind, Read},
+    sync::OnceLock,
     time::Duration,
 };
 
 use ferrogate_providers::ProviderHttpRequest;
-use tokio::task;
 
 #[derive(Debug, Clone)]
 pub(super) struct ProviderHttpResponse {
@@ -31,16 +30,38 @@ pub(super) struct ProviderStreamingResponse {
     pub(super) body: ProviderBodyReader,
 }
 
-pub(super) enum ProviderBodyReader {
-    Http(TcpStream),
-    Https(Box<StreamOwned<ClientConnection, TcpStream>>),
+pub(super) struct ProviderBodyReader {
+    runtime: tokio::runtime::Handle,
+    response: reqwest::Response,
+    pending: Option<Bytes>,
 }
 
 impl Read for ProviderBodyReader {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Http(stream) => stream.read(buffer),
-            Self::Https(stream) => stream.read(buffer),
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            if let Some(mut pending) = self.pending.take() {
+                let read = pending.len().min(buffer.len());
+                buffer[..read].copy_from_slice(&pending[..read]);
+                if read < pending.len() {
+                    let _ = pending.split_to(read);
+                    self.pending = Some(pending);
+                }
+                return Ok(read);
+            }
+
+            let chunk = self
+                .runtime
+                .block_on(self.response.chunk())
+                .map_err(|error| IoError::new(ErrorKind::Other, error))?;
+            match chunk {
+                Some(chunk) if chunk.is_empty() => continue,
+                Some(chunk) => self.pending = Some(chunk),
+                None => return Ok(0),
+            }
         }
     }
 }
@@ -50,321 +71,109 @@ pub(super) async fn dispatch_provider_request(
     timeout: Duration,
     max_body_bytes: usize,
 ) -> AnyResult<ProviderHttpResponse> {
-    task::spawn_blocking(move || {
-        dispatch_provider_request_blocking(&request, timeout, max_body_bytes)
+    let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
+    let response = build_provider_request(&request, timeout, body)?
+        .send()
+        .await
+        .context("provider request failed")?;
+    let status = response.status();
+    let content_type = provider_response_content_type(response.headers());
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_body_bytes as u64 {
+            bail!(
+                "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
+            );
+        }
+    }
+    let body = response
+        .bytes()
+        .await
+        .context("failed to read provider response body")?;
+    if body.len() > max_body_bytes {
+        bail!(
+            "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
+        );
+    }
+    Ok(ProviderHttpResponse {
+        status,
+        content_type,
+        body: body.to_vec(),
     })
-    .await
-    .context("provider dispatch task failed")?
 }
 
 pub(super) async fn dispatch_provider_streaming_request(
     request: ProviderHttpRequest,
     timeout: Duration,
 ) -> AnyResult<ProviderStreamingResponse> {
-    task::spawn_blocking(move || dispatch_provider_streaming_request_blocking(&request, timeout))
+    let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
+    let response = build_provider_request(&request, timeout, body)?
+        .send()
         .await
-        .context("provider streaming dispatch task failed")?
-}
-
-fn dispatch_provider_request_blocking(
-    request: &ProviderHttpRequest,
-    timeout: Duration,
-    max_body_bytes: usize,
-) -> AnyResult<ProviderHttpResponse> {
-    let target = parse_provider_target(&request.endpoint)?;
-    let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
-    let mut stream = connect_provider(&target, timeout)?;
-
-    match target.scheme {
-        ProviderScheme::Http => {
-            send_provider_http_request(&mut stream, &target, request, &body, max_body_bytes)
-        }
-        ProviderScheme::Https => {
-            let server_name = ServerName::try_from(target.host.clone())
-                .with_context(|| format!("invalid provider TLS server name {}", target.host))?;
-            let connection = ClientConnection::new(tls_client_config()?, server_name)
-                .context("failed to initialize provider TLS client")?;
-            let mut tls_stream = StreamOwned::new(connection, stream);
-            send_provider_http_request(&mut tls_stream, &target, request, &body, max_body_bytes)
-        }
-    }
-}
-
-fn dispatch_provider_streaming_request_blocking(
-    request: &ProviderHttpRequest,
-    timeout: Duration,
-) -> AnyResult<ProviderStreamingResponse> {
-    let target = parse_provider_target(&request.endpoint)?;
-    let body = serde_json::to_vec(&request.body).context("failed to serialize provider body")?;
-    let mut stream = connect_provider(&target, timeout)?;
-
-    match target.scheme {
-        ProviderScheme::Http => {
-            write_provider_http_request(&mut stream, &target, request, &body)?;
-            let (status, content_type, initial_body) = read_provider_response_head(&mut stream)?;
-            Ok(ProviderStreamingResponse {
-                status,
-                content_type,
-                initial_body,
-                body: ProviderBodyReader::Http(stream),
-            })
-        }
-        ProviderScheme::Https => {
-            let server_name = ServerName::try_from(target.host.clone())
-                .with_context(|| format!("invalid provider TLS server name {}", target.host))?;
-            let connection = ClientConnection::new(tls_client_config()?, server_name)
-                .context("failed to initialize provider TLS client")?;
-            let mut tls_stream = StreamOwned::new(connection, stream);
-            write_provider_http_request(&mut tls_stream, &target, request, &body)?;
-            let (status, content_type, initial_body) =
-                read_provider_response_head(&mut tls_stream)?;
-            Ok(ProviderStreamingResponse {
-                status,
-                content_type,
-                initial_body,
-                body: ProviderBodyReader::Https(Box::new(tls_stream)),
-            })
-        }
-    }
-}
-
-fn connect_provider(target: &ProviderTarget, timeout: Duration) -> AnyResult<TcpStream> {
-    let address = (target.host.as_str(), target.port)
-        .to_socket_addrs()
-        .with_context(|| format!("failed to resolve provider {}", target.authority))?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("provider {} resolved no addresses", target.authority))?;
-    let stream = TcpStream::connect_timeout(&address, timeout)
-        .with_context(|| format!("failed to connect provider {}", target.authority))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    Ok(stream)
-}
-
-fn send_provider_http_request<S: Read + Write>(
-    stream: &mut S,
-    target: &ProviderTarget,
-    request: &ProviderHttpRequest,
-    body: &[u8],
-    max_body_bytes: usize,
-) -> AnyResult<ProviderHttpResponse> {
-    write_provider_http_request(stream, target, request, body)?;
-    let (status, content_type, initial_body) = read_provider_response_head(stream)?;
-    let body = read_provider_response_body(stream, initial_body, max_body_bytes)?;
-    Ok(ProviderHttpResponse {
+        .context("provider streaming request failed")?;
+    let status = response.status();
+    let content_type = provider_response_content_type(response.headers());
+    Ok(ProviderStreamingResponse {
         status,
         content_type,
-        body,
+        initial_body: Vec::new(),
+        body: ProviderBodyReader {
+            runtime: tokio::runtime::Handle::current(),
+            response,
+            pending: None,
+        },
     })
 }
 
-fn write_provider_http_request<S: Write>(
-    stream: &mut S,
-    target: &ProviderTarget,
+fn provider_http_client() -> AnyResult<Client> {
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    let result = CLIENT.get_or_init(|| {
+        Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_zstd()
+            .no_deflate()
+            .build()
+            .map_err(|error| error.to_string())
+    });
+    match result {
+        Ok(client) => Ok(client.clone()),
+        Err(error) => bail!("failed to initialize provider HTTP client: {error}"),
+    }
+}
+
+fn build_provider_request(
     request: &ProviderHttpRequest,
-    body: &[u8],
-) -> AnyResult<()> {
-    write!(
-        stream,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-        target.path_query,
-        target.authority,
-        body.len()
-    )?;
-    for header in &request.headers {
-        write!(
-            stream,
-            "{}: {}\r\n",
-            header.name,
-            header.value.expose_secret()
-        )?;
-    }
-    stream.write_all(b"\r\n")?;
-    stream.write_all(body)?;
-    stream.flush()?;
-    Ok(())
-}
-
-fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
-    static TLS_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    if let Some(config) = TLS_CLIENT_CONFIG.get() {
-        return Ok(Arc::clone(config));
-    }
-
-    let config = build_tls_client_config()?;
-    let _ = TLS_CLIENT_CONFIG.set(Arc::clone(&config));
-    Ok(TLS_CLIENT_CONFIG.get().map(Arc::clone).unwrap_or(config))
-}
-
-fn build_tls_client_config() -> AnyResult<Arc<ClientConfig>> {
-    let mut roots = RootCertStore::empty();
-    let native_certs = rustls_native_certs::load_native_certs();
-    if !native_certs.errors.is_empty() {
-        anyhow::bail!(
-            "failed to load platform native certificates: {:?}",
-            native_certs.errors
-        );
-    }
-    for cert in native_certs.certs {
-        roots
-            .add(cert)
-            .context("failed to add platform native certificate")?;
-    }
-
-    Ok(Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    ))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderScheme {
-    Http,
-    Https,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProviderTarget {
-    scheme: ProviderScheme,
-    host: String,
-    port: u16,
-    authority: String,
-    path_query: String,
-}
-
-fn parse_provider_target(raw: &str) -> AnyResult<ProviderTarget> {
-    let uri: Uri = raw
-        .parse()
-        .with_context(|| format!("invalid provider endpoint {raw}"))?;
-    let scheme = uri
-        .scheme_str()
-        .ok_or_else(|| anyhow::anyhow!("provider endpoint must include scheme"))?;
-    let scheme = match scheme {
-        "http" => ProviderScheme::Http,
-        "https" => ProviderScheme::Https,
+    timeout: Duration,
+    body: Vec<u8>,
+) -> AnyResult<reqwest::RequestBuilder> {
+    let endpoint = reqwest::Url::parse(&request.endpoint)
+        .with_context(|| format!("invalid provider endpoint {}", request.endpoint))?;
+    match endpoint.scheme() {
+        "http" | "https" => {}
         other => bail!("provider dispatch supports http and https endpoints only, got {other}"),
-    };
-    let authority = uri
-        .authority()
-        .ok_or_else(|| anyhow::anyhow!("provider endpoint must include authority"))?;
-    let host = authority.host().to_string();
-    let default_port = match scheme {
-        ProviderScheme::Http => 80,
-        ProviderScheme::Https => 443,
-    };
-    let port = authority.port_u16().unwrap_or(default_port);
-    let authority = if port == default_port {
-        host.clone()
-    } else {
-        format!("{host}:{port}")
-    };
-    let path_query = uri
-        .path_and_query()
-        .map(|value| value.as_str().to_string())
-        .unwrap_or_else(|| "/".to_string());
-    Ok(ProviderTarget {
-        scheme,
-        host,
-        port,
-        authority,
-        path_query,
-    })
-}
-
-#[cfg(test)]
-fn parse_provider_response(raw: &[u8]) -> AnyResult<ProviderHttpResponse> {
-    let split = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| anyhow::anyhow!("provider response missing header terminator"))?;
-    let header_bytes = &raw[..split];
-    let body = raw[split + 4..].to_vec();
-    let (status, content_type) = parse_provider_response_head(header_bytes)?;
-    Ok(ProviderHttpResponse {
-        status,
-        content_type,
-        body,
-    })
-}
-
-fn read_provider_response_head<S: Read>(
-    stream: &mut S,
-) -> AnyResult<(StatusCode, String, Vec<u8>)> {
-    let mut raw = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    let split = loop {
-        let read = stream
-            .read(&mut buffer)
-            .context("failed to read provider response head")?;
-        if read == 0 {
-            bail!("provider response missing header terminator");
-        }
-        raw.extend_from_slice(&buffer[..read]);
-        if raw.len() > 64 * 1024 {
-            bail!("provider response headers exceed 64KiB");
-        }
-        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-            break split;
-        }
-    };
-
-    let header_bytes = &raw[..split];
-    let initial_body = raw[split + 4..].to_vec();
-    let (status, content_type) = parse_provider_response_head(header_bytes)?;
-    Ok((status, content_type, initial_body))
-}
-
-fn read_provider_response_body<S: Read>(
-    stream: &mut S,
-    mut body: Vec<u8>,
-    max_body_bytes: usize,
-) -> AnyResult<Vec<u8>> {
-    if body.len() > max_body_bytes {
-        bail!(
-            "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
-        );
+    }
+    let mut headers = HeaderMap::new();
+    for header in &request.headers {
+        let name = HeaderName::from_bytes(header.name.as_bytes())
+            .with_context(|| format!("invalid provider header name {}", header.name))?;
+        let value = HeaderValue::from_str(header.value.expose_secret())
+            .with_context(|| format!("invalid provider header value for {}", header.name))?;
+        headers.insert(name, value);
     }
 
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = stream
-            .read(&mut buffer)
-            .context("failed to read provider response body")?;
-        if read == 0 {
-            return Ok(body);
-        }
-        if body.len() + read > max_body_bytes {
-            bail!(
-                "provider_response_body_too_large: provider response body exceeds {max_body_bytes} bytes"
-            );
-        }
-        body.extend_from_slice(&buffer[..read]);
-    }
+    Ok(provider_http_client()?
+        .post(endpoint)
+        .headers(headers)
+        .timeout(timeout)
+        .body(body))
 }
 
-fn parse_provider_response_head(header_bytes: &[u8]) -> AnyResult<(StatusCode, String)> {
-    let headers = String::from_utf8_lossy(header_bytes);
-    let mut lines = headers.lines();
-    let status_line = lines
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("provider response missing status line"))?;
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("provider response missing status code"))?
-        .parse::<u16>()
-        .context("provider response has invalid status code")?;
-    let content_type = lines
-        .find_map(|line| {
-            line.split_once(':').and_then(|(name, value)| {
-                name.eq_ignore_ascii_case("content-type")
-                    .then(|| value.trim().to_string())
-            })
-        })
+fn provider_response_content_type(headers: &HeaderMap) -> String {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
         .unwrap_or_else(|| "application/json".to_string());
-    let status = StatusCode::from_u16(status_code).context("provider returned invalid status")?;
-    Ok((status, content_type))
 }
 
 #[cfg(test)]
@@ -373,106 +182,32 @@ mod tests {
     use ferrogate_providers::ProviderHttpRequest;
     use serde_json::json;
     use std::{
+        io::{Read, Write},
         net::TcpListener,
         thread,
         time::{Duration, Instant},
     };
 
-    #[test]
-    fn parses_http_provider_target() {
-        let target =
-            parse_provider_target("http://127.0.0.1:9000/v1/chat/completions?trace=1").unwrap();
+    #[tokio::test]
+    async fn rejects_unsupported_provider_target_scheme() {
+        let request = ProviderHttpRequest {
+            provider: "openai".into(),
+            endpoint: "ftp://api.example.test/v1".into(),
+            body: json!({"model": "gpt-test", "messages": []}),
+            stream: false,
+            headers: vec![],
+        };
 
-        assert_eq!(target.host, "127.0.0.1");
-        assert_eq!(target.port, 9000);
-        assert_eq!(target.authority, "127.0.0.1:9000");
-        assert_eq!(target.path_query, "/v1/chat/completions?trace=1");
-        assert_eq!(target.scheme, ProviderScheme::Http);
-    }
-
-    #[test]
-    fn parses_default_port_and_root_provider_target() {
-        let target = parse_provider_target("http://api.example.test").unwrap();
-
-        assert_eq!(target.host, "api.example.test");
-        assert_eq!(target.port, 80);
-        assert_eq!(target.authority, "api.example.test");
-        assert_eq!(target.path_query, "/");
-        assert_eq!(target.scheme, ProviderScheme::Http);
-    }
-
-    #[test]
-    fn parses_https_provider_target() {
-        let target = parse_provider_target("https://api.example.test/v1/chat/completions").unwrap();
-
-        assert_eq!(target.host, "api.example.test");
-        assert_eq!(target.port, 443);
-        assert_eq!(target.authority, "api.example.test");
-        assert_eq!(target.path_query, "/v1/chat/completions");
-        assert_eq!(target.scheme, ProviderScheme::Https);
-    }
-
-    #[test]
-    fn parses_https_provider_target_with_custom_port() {
-        let target =
-            parse_provider_target("https://api.example.test:9443/v1/chat/completions").unwrap();
-
-        assert_eq!(target.host, "api.example.test");
-        assert_eq!(target.port, 9443);
-        assert_eq!(target.authority, "api.example.test:9443");
-        assert_eq!(target.path_query, "/v1/chat/completions");
-        assert_eq!(target.scheme, ProviderScheme::Https);
-    }
-
-    #[test]
-    fn rejects_unsupported_provider_target_scheme() {
-        let error = parse_provider_target("ftp://api.example.test/v1")
+        let error = dispatch_provider_request(request, Duration::from_millis(50), 16 * 1024)
+            .await
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("supports http and https endpoints only"));
     }
 
-    #[test]
-    fn parses_provider_response_status_content_type_and_body() {
-        let response =
-            parse_provider_response(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")
-                .unwrap();
-
-        assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(response.content_type, "application/json");
-        assert_eq!(response.body, b"{}");
-    }
-
-    #[test]
-    fn defaults_provider_response_content_type() {
-        let response =
-            parse_provider_response(b"HTTP/1.1 429 Too Many Requests\r\n\r\nrate").unwrap();
-
-        assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.content_type, "application/json");
-        assert_eq!(response.body, b"rate");
-    }
-
-    #[test]
-    fn rejects_malformed_provider_responses() {
-        let missing_header_end = parse_provider_response(b"HTTP/1.1 200 OK").unwrap_err();
-        assert!(missing_header_end
-            .to_string()
-            .contains("missing header terminator"));
-
-        let missing_status = parse_provider_response(b"HTTP/1.1\r\n\r\n{}").unwrap_err();
-        assert!(missing_status.to_string().contains("missing status code"));
-
-        let invalid_status = parse_provider_response(b"HTTP/1.1 nope OK\r\n\r\n{}").unwrap_err();
-        assert!(invalid_status.to_string().contains("invalid status code"));
-
-        let out_of_range = parse_provider_response(b"HTTP/1.1 1000 OK\r\n\r\n{}").unwrap_err();
-        assert!(out_of_range.to_string().contains("invalid status"));
-    }
-
-    #[test]
-    fn provider_dispatch_respects_read_timeout() {
+    #[tokio::test]
+    async fn provider_dispatch_respects_read_timeout() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -488,12 +223,44 @@ mod tests {
         };
 
         let started = Instant::now();
-        let error =
-            dispatch_provider_request_blocking(&request, Duration::from_millis(50), 16 * 1024)
-                .unwrap_err();
+        let error = dispatch_provider_request(request, Duration::from_millis(50), 16 * 1024)
+            .await
+            .unwrap_err();
 
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(!error.to_string().is_empty());
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_dispatch_reads_chunked_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let request = ProviderHttpRequest {
+            provider: "openai".into(),
+            endpoint: format!("http://{addr}/v1/chat/completions"),
+            body: json!({"model": "gpt-test", "messages": []}),
+            stream: false,
+            headers: vec![],
+        };
+
+        let response = dispatch_provider_request(request, Duration::from_secs(1), 16 * 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.content_type, "application/json");
+        assert_eq!(response.body, b"{}");
         handle.join().unwrap();
     }
 }

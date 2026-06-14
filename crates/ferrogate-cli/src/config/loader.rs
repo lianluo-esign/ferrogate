@@ -57,6 +57,7 @@ impl Config {
         Ok(config)
     }
 
+    /// Map the Caddyfile intermediate model into the runtime config shape.
     fn from_gateway_config(config: GatewayConfig) -> Self {
         Self {
             listen: config.listen,

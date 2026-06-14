@@ -66,6 +66,36 @@ struct SharedFileControlPlane {
     path: PathBuf,
 }
 
+#[derive(Debug)]
+struct RuntimeRepositories {
+    request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
+    audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
+    usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
+}
+
+impl RuntimeRepositories {
+    fn in_memory(storage: &StorageConfig) -> Self {
+        Self {
+            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                storage.request_log_retention_records,
+            )),
+            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                storage.audit_event_retention_records,
+            )),
+            usage_aggregates: Mutex::new(InMemoryRepository::new()),
+        }
+    }
+
+    fn apply_storage_config(&self, storage: &StorageConfig) {
+        if let Ok(mut logs) = self.request_logs.lock() {
+            logs.set_retention_limit(storage.request_log_retention_records);
+        }
+        if let Ok(mut events) = self.audit_events.lock() {
+            events.set_retention_limit(storage.audit_event_retention_records);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct SharedFileSnapshot {
     version: u32,
@@ -564,9 +594,7 @@ pub(crate) struct AppState {
     cluster_counters: Arc<ClusterCounterBackend>,
     metering_events: Arc<InMemoryBillingEventSink>,
     metering_exporter: Option<Arc<MeteringExporter>>,
-    request_logs: Arc<Mutex<InMemoryAppendRepository<StoredRequestLog>>>,
-    audit_events: Arc<Mutex<InMemoryAppendRepository<StoredAuditEvent>>>,
-    usage_aggregates: Arc<Mutex<InMemoryRepository<StoredUsageAggregate>>>,
+    repositories: Arc<RuntimeRepositories>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
     mcp_manager: Arc<McpManager>,
@@ -1331,13 +1359,7 @@ impl AppState {
                 storage.billing_event_retention_records,
             )),
             metering_exporter,
-            request_logs: Arc::new(Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                storage.request_log_retention_records,
-            ))),
-            audit_events: Arc::new(Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                storage.audit_event_retention_records,
-            ))),
-            usage_aggregates: Arc::new(Mutex::new(InMemoryRepository::new())),
+            repositories: Arc::new(RuntimeRepositories::in_memory(&storage)),
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
@@ -1491,9 +1513,7 @@ impl AppState {
         ));
         next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
         next.metering_events = Arc::clone(&self.metering_events);
-        next.request_logs = Arc::clone(&self.request_logs);
-        next.audit_events = Arc::clone(&self.audit_events);
-        next.usage_aggregates = Arc::clone(&self.usage_aggregates);
+        next.repositories = Arc::clone(&self.repositories);
         next.metrics = Arc::clone(&self.metrics);
         next.response_cache = Arc::clone(&self.response_cache);
         next.mcp_manager = Arc::clone(&self.mcp_manager);
@@ -1509,12 +1529,7 @@ impl AppState {
         let _ = self
             .metering_events
             .set_retention_limit(storage.billing_event_retention_records);
-        if let Ok(mut logs) = self.request_logs.lock() {
-            logs.set_retention_limit(storage.request_log_retention_records);
-        }
-        if let Ok(mut events) = self.audit_events.lock() {
-            events.set_retention_limit(storage.audit_event_retention_records);
-        }
+        self.repositories.apply_storage_config(storage);
     }
 
     pub(crate) fn next_request_id(&self) -> String {
@@ -2096,7 +2111,8 @@ impl AppState {
     }
 
     pub(crate) fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
-        self.usage_aggregates
+        self.repositories
+            .usage_aggregates
             .lock()
             .map(|aggregates| {
                 aggregates
@@ -2298,7 +2314,8 @@ impl AppState {
     }
 
     pub(crate) fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
-        self.usage_aggregates
+        self.repositories
+            .usage_aggregates
             .lock()
             .map(|aggregates| aggregates.list())
             .unwrap_or_default()
@@ -2312,7 +2329,7 @@ impl AppState {
         usage: &BillingTokenUsage,
     ) {
         let id = usage_aggregate_id(tenant, logical_model, provider);
-        let Ok(mut aggregates) = self.usage_aggregates.lock() else {
+        let Ok(mut aggregates) = self.repositories.usage_aggregates.lock() else {
             return;
         };
 
@@ -2338,7 +2355,7 @@ impl AppState {
         if let Ok(mut metrics) = self.provider_routing_metrics.lock() {
             metrics.record_request_log(&log);
         }
-        if let Ok(mut logs) = self.request_logs.lock() {
+        if let Ok(mut logs) = self.repositories.request_logs.lock() {
             logs.append(log);
         }
     }
@@ -2356,7 +2373,7 @@ impl AppState {
     }
 
     pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) {
-        if let Ok(mut events) = self.audit_events.lock() {
+        if let Ok(mut events) = self.repositories.audit_events.lock() {
             let id = format!("audit-{}", events.list().len() + 1);
             events.append(StoredAuditEvent {
                 id,
@@ -2502,7 +2519,8 @@ impl AppState {
     }
 
     pub(crate) fn request_logs(&self) -> Vec<StoredRequestLog> {
-        self.request_logs
+        self.repositories
+            .request_logs
             .lock()
             .map(|logs| logs.list())
             .unwrap_or_default()
@@ -2512,7 +2530,8 @@ impl AppState {
         &self,
         pagination: AdminPagination,
     ) -> AdminPage<StoredRequestLog> {
-        self.request_logs
+        self.repositories
+            .request_logs
             .lock()
             .map(|logs| AdminPage {
                 data: logs.list_paginated(pagination.offset, pagination.limit),
@@ -2532,7 +2551,8 @@ impl AppState {
         &self,
         pagination: AdminPagination,
     ) -> AdminPage<StoredAuditEvent> {
-        self.audit_events
+        self.repositories
+            .audit_events
             .lock()
             .map(|events| AdminPage {
                 data: events.list_paginated(pagination.offset, pagination.limit),
@@ -2551,7 +2571,8 @@ impl AppState {
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
         let target = format!("tool_session:{session_id}");
         let target_prefix = format!("{target}/");
-        self.audit_events
+        self.repositories
+            .audit_events
             .lock()
             .map(|events| {
                 events

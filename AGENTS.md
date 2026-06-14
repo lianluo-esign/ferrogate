@@ -90,6 +90,19 @@ Future work should push toward:
   lock behavior with tests first.
 - Delete dead code before adding new layers.
 
+## First-Principles Engineering
+
+- Start from the original requirement and the problem's real constraint, not
+  from habit, precedent, templates, or framework-shaped defaults.
+- Do not assume the user already knows exactly what they need. If the motive,
+  goal, or success condition is unclear, stop and clarify before implementing.
+- When the goal is clear but the requested path is not the shortest credible
+  path, say so directly and recommend the simpler path.
+- When something breaks, pursue the root cause. Do not paper over symptoms
+  with narrow patches that leave the failure mode intact.
+- Output only what changes decisions: the bug, constraint, tradeoff, evidence,
+  next action, or remaining risk. Cut everything else.
+
 ## Dynamic Workflow
 
 When the user asks to continue development without naming a specific issue, use
