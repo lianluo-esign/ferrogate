@@ -5,11 +5,12 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use anyhow::{bail, Context, Result as AnyResult};
+use ferrogate_billing::BillingEvent;
 use ferrogate_observability::{
     build_otlp_logs_request, build_otlp_metrics_request, build_otlp_traces_request, OtlpAttribute,
     OtlpHttpRequest, OtlpLogRecord, OtlpSpanRecord,
 };
-use ferrogate_storage::StoredRequestLog;
+use ferrogate_storage::{StoredAuditEvent, StoredRequestLog};
 use http::{StatusCode, Uri};
 use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use std::{
@@ -32,11 +33,22 @@ pub(crate) fn start_otlp_background_sender(state: AppState) -> Option<JoinHandle
     Some(thread::spawn(move || {
         debug!(endpoint = %endpoint, "OTLP background sender started");
         let mut exported_request_logs = 0;
+        let mut exported_audit_events = 0;
+        let mut exported_billing_events = 0;
         loop {
-            if let Err(error) =
-                export_otlp_once_since(&state, &endpoint, timeout, &mut exported_request_logs)
-            {
-                warn!(error = ?error, "OTLP export failed");
+            match export_otlp_once_since(
+                &state,
+                &endpoint,
+                timeout,
+                &mut exported_request_logs,
+                &mut exported_audit_events,
+                &mut exported_billing_events,
+            ) {
+                Ok(()) => state.record_observability_export_success(),
+                Err(error) => {
+                    state.record_observability_export_error(error.to_string());
+                    warn!(error = ?error, "OTLP export failed");
+                }
             }
             thread::sleep(OTLP_EXPORT_INTERVAL);
         }
@@ -50,15 +62,16 @@ pub(crate) fn export_otlp_once(state: &AppState, endpoint: &str) -> AnyResult<()
     dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?, timeout)?;
 
     let request_logs = state.request_logs();
-    if !request_logs.is_empty() {
+    let audit_events = state.audit_events();
+    let billing_events = state.metering_events();
+    let log_records = runtime_events_as_otlp_logs(&request_logs, &audit_events, &billing_events);
+    if !log_records.is_empty() {
         dispatch_otlp_request(
-            &build_otlp_logs_request(
-                endpoint,
-                &snapshot.service_name,
-                &request_logs_as_otlp_logs(&request_logs),
-            )?,
+            &build_otlp_logs_request(endpoint, &snapshot.service_name, &log_records)?,
             timeout,
         )?;
+    }
+    if !request_logs.is_empty() {
         dispatch_otlp_request(
             &build_otlp_traces_request(
                 endpoint,
@@ -77,6 +90,8 @@ fn export_otlp_once_since(
     endpoint: &str,
     timeout: Duration,
     exported_request_logs: &mut usize,
+    exported_audit_events: &mut usize,
+    exported_billing_events: &mut usize,
 ) -> AnyResult<()> {
     let snapshot = state.prometheus_metrics_snapshot();
     dispatch_otlp_request(&build_otlp_metrics_request(endpoint, &snapshot)?, timeout)?;
@@ -86,15 +101,27 @@ fn export_otlp_once_since(
         .get(*exported_request_logs..)
         .unwrap_or_default()
         .to_vec();
-    if !new_logs.is_empty() {
+    let audit_events = state.audit_events();
+    let new_audit_events = audit_events
+        .get(*exported_audit_events..)
+        .unwrap_or_default()
+        .to_vec();
+    let billing_events = state.metering_events();
+    let new_billing_events = billing_events
+        .get(*exported_billing_events..)
+        .unwrap_or_default()
+        .to_vec();
+    let log_records =
+        runtime_events_as_otlp_logs(&new_logs, &new_audit_events, &new_billing_events);
+    if !log_records.is_empty() {
         dispatch_otlp_request(
-            &build_otlp_logs_request(
-                endpoint,
-                &snapshot.service_name,
-                &request_logs_as_otlp_logs(&new_logs),
-            )?,
+            &build_otlp_logs_request(endpoint, &snapshot.service_name, &log_records)?,
             timeout,
         )?;
+        *exported_audit_events = audit_events.len();
+        *exported_billing_events = billing_events.len();
+    }
+    if !new_logs.is_empty() {
         dispatch_otlp_request(
             &build_otlp_traces_request(
                 endpoint,
@@ -107,6 +134,23 @@ fn export_otlp_once_since(
     }
 
     Ok(())
+}
+
+fn runtime_events_as_otlp_logs(
+    request_logs: &[StoredRequestLog],
+    audit_events: &[StoredAuditEvent],
+    billing_events: &[BillingEvent],
+) -> Vec<OtlpLogRecord> {
+    let mut records = Vec::with_capacity(
+        request_logs
+            .len()
+            .saturating_add(audit_events.len())
+            .saturating_add(billing_events.len()),
+    );
+    records.extend(request_logs_as_otlp_logs(request_logs));
+    records.extend(audit_events_as_otlp_logs(audit_events));
+    records.extend(billing_events_as_otlp_logs(billing_events));
+    records
 }
 
 fn request_logs_as_otlp_logs(logs: &[StoredRequestLog]) -> Vec<OtlpLogRecord> {
@@ -139,6 +183,55 @@ fn request_logs_as_otlp_logs(logs: &[StoredRequestLog]) -> Vec<OtlpLogRecord> {
         .collect()
 }
 
+fn audit_events_as_otlp_logs(events: &[StoredAuditEvent]) -> Vec<OtlpLogRecord> {
+    events
+        .iter()
+        .map(|event| OtlpLogRecord {
+            trace_id: Some(stable_trace_id(
+                event.trace_id.as_deref().unwrap_or(&event.request_id),
+            )),
+            span_id: Some(stable_span_id(&event.id)),
+            severity_text: if event.outcome == "success" {
+                "INFO"
+            } else {
+                "WARN"
+            }
+            .to_string(),
+            body: format!("audit event: {}", event.action),
+            time_unix_nano: unix_seconds_to_nanos(
+                event.occurred_at_unix.unwrap_or_else(now_unix_seconds),
+            ),
+            attributes: audit_event_attributes(event),
+        })
+        .collect()
+}
+
+fn billing_events_as_otlp_logs(events: &[BillingEvent]) -> Vec<OtlpLogRecord> {
+    events
+        .iter()
+        .map(|event| OtlpLogRecord {
+            trace_id: Some(stable_trace_id(
+                event.trace_id.as_deref().unwrap_or(&event.request_id),
+            )),
+            span_id: Some(stable_span_id(&format!(
+                "{}:{}:{}",
+                event.request_id, event.logical_model, event.provider
+            ))),
+            severity_text: if event.status_code >= 400 {
+                "WARN"
+            } else {
+                "INFO"
+            }
+            .to_string(),
+            body: "billing event observed".to_string(),
+            time_unix_nano: unix_seconds_to_nanos(
+                event.occurred_at_unix.unwrap_or_else(now_unix_seconds),
+            ),
+            attributes: billing_event_attributes(event),
+        })
+        .collect()
+}
+
 fn request_logs_as_otlp_spans(logs: &[StoredRequestLog]) -> Vec<OtlpSpanRecord> {
     logs.iter()
         .map(|log| {
@@ -159,6 +252,7 @@ fn request_logs_as_otlp_spans(logs: &[StoredRequestLog]) -> Vec<OtlpSpanRecord> 
 
 fn request_log_attributes(log: &StoredRequestLog) -> Vec<OtlpAttribute> {
     let mut attributes = vec![
+        OtlpAttribute::new("event_family", "request"),
         OtlpAttribute::new("request_id", log.request_id.as_str()),
         OtlpAttribute::new("status_code", log.status_code.to_string()),
         OtlpAttribute::new("prompt_recorded", log.prompt_recorded.to_string()),
@@ -208,6 +302,78 @@ fn request_log_attributes(log: &StoredRequestLog) -> Vec<OtlpAttribute> {
     }
     push_optional_attribute(&mut attributes, "error_code", log.error_code.as_deref());
 
+    attributes
+}
+
+fn audit_event_attributes(event: &StoredAuditEvent) -> Vec<OtlpAttribute> {
+    let mut attributes = vec![
+        OtlpAttribute::new("event_family", "audit"),
+        OtlpAttribute::new("request_id", event.request_id.as_str()),
+        OtlpAttribute::new("audit_action", event.action.as_str()),
+        OtlpAttribute::new("audit_target", event.target.as_str()),
+        OtlpAttribute::new("audit_outcome", event.outcome.as_str()),
+        OtlpAttribute::new("audit_message", event.message.as_str()),
+    ];
+    push_optional_attribute(&mut attributes, "trace_id", event.trace_id.as_deref());
+    push_optional_attribute(&mut attributes, "cluster_id", event.cluster_id.as_deref());
+    push_optional_attribute(&mut attributes, "node_id", event.node_id.as_deref());
+    push_optional_attribute(
+        &mut attributes,
+        "api_key_id",
+        event.actor_api_key_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "organization_id",
+        event.tenant.organization_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "project_id",
+        event.tenant.project_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "tenant_api_key_id",
+        event.tenant.api_key_id.as_deref(),
+    );
+    attributes
+}
+
+fn billing_event_attributes(event: &BillingEvent) -> Vec<OtlpAttribute> {
+    let mut attributes = vec![
+        OtlpAttribute::new("event_family", "billing_event_observed"),
+        OtlpAttribute::new("request_id", event.request_id.as_str()),
+        OtlpAttribute::new("status_code", event.status_code.to_string()),
+        OtlpAttribute::new("logical_model", event.logical_model.as_str()),
+        OtlpAttribute::new("provider", event.provider.as_str()),
+        OtlpAttribute::new("provider_model", event.provider_model.as_str()),
+        OtlpAttribute::new("prompt_tokens", event.usage.prompt_tokens.to_string()),
+        OtlpAttribute::new(
+            "completion_tokens",
+            event.usage.completion_tokens.to_string(),
+        ),
+        OtlpAttribute::new("total_tokens", event.usage.total_tokens.to_string()),
+        OtlpAttribute::new("usage_source", format!("{:?}", event.usage_source)),
+    ];
+    push_optional_attribute(&mut attributes, "trace_id", event.trace_id.as_deref());
+    push_optional_attribute(&mut attributes, "cluster_id", event.cluster_id.as_deref());
+    push_optional_attribute(&mut attributes, "node_id", event.node_id.as_deref());
+    push_optional_attribute(
+        &mut attributes,
+        "organization_id",
+        event.tenant.organization_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "project_id",
+        event.tenant.project_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "api_key_id",
+        event.tenant.api_key_id.as_deref(),
+    );
     attributes
 }
 
@@ -467,6 +633,41 @@ mod tests {
             started_at_unix: Some(1),
             completed_at_unix: Some(2),
         });
+        state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            actor_api_key_id: Some("key".into()),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            action: "policy.deny".into(),
+            target: "policy:block-secret".into(),
+            outcome: "error".into(),
+            message: "policy denied request".into(),
+        });
+        state
+            .record_estimated_billing_event(
+                &ferrogate_core::RequestContext {
+                    request_id: "fg-1".into(),
+                    trace_id: Some("fg-1".into()),
+                    tenant: TenantContext {
+                        organization_id: Some("org".into()),
+                        project_id: Some("project".into()),
+                        api_key_id: Some("key".into()),
+                        ..TenantContext::default()
+                    },
+                    ..ferrogate_core::RequestContext::default()
+                },
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &ferrogate_billing::TokenUsage::new(1, 2, 3),
+                200,
+            )
+            .unwrap();
 
         export_otlp_once(&state, &endpoint).unwrap();
         server.join().unwrap();
@@ -476,6 +677,12 @@ mod tests {
         assert!(bodies.contains("resourceLogs"));
         assert!(bodies.contains("resourceSpans"));
         assert!(bodies.contains("ferrogate.gateway.request"));
+        assert!(bodies.contains("event_family"));
+        assert!(bodies.contains("request"));
+        assert!(bodies.contains("audit"));
+        assert!(bodies.contains("billing_event_observed"));
+        assert!(bodies.contains("policy.deny"));
+        assert!(bodies.contains("total_tokens"));
         assert!(bodies.contains("fast-chat"));
         assert!(!bodies.contains("client-secret prompt"));
         assert!(!bodies.contains("provider-secret response"));

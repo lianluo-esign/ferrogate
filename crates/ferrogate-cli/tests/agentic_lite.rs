@@ -202,12 +202,13 @@ fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
 fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
     let (mcp_addr, mcp_handle) = spawn_mcp_server_with_tool(7, "search");
     let (provider_addr, provider_handle) = spawn_provider_upstream();
+    let (otlp_addr, otlp_handle) = spawn_otlp_collector();
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
     std::fs::write(
         &config,
-        p3_mcp_config(&gateway_addr, &mcp_addr, &provider_addr),
+        p3_mcp_config(&gateway_addr, &mcp_addr, &provider_addr, &otlp_addr),
     )
     .unwrap();
 
@@ -437,6 +438,16 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
         "{metrics}"
     );
 
+    thread::sleep(Duration::from_secs(6));
+    let observability = wait_for_observability_ok(&gateway_addr);
+    assert_eq!(observability["data"][0]["provider"], "vector");
+    assert_eq!(observability["data"][0]["health"], "ok");
+    assert!(observability["data"][0]["last_success_at_unix"].is_number());
+    assert_eq!(
+        observability["data"][0]["last_export_error"],
+        serde_json::Value::Null
+    );
+
     gateway.kill().unwrap();
     gateway.wait().unwrap();
     let provider_request = provider_handle.join().unwrap();
@@ -458,6 +469,26 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
         .any(|request| request.contains("\"tools/call\"")));
     assert!(requests.iter().any(|request| request.contains("\"ping\"")));
     assert!(!requests.join("\n").contains("tool-secret"));
+
+    let otlp_requests = otlp_handle.join().unwrap();
+    let otlp_raw = otlp_requests.join("\n---otlp-request---\n");
+    assert!(otlp_raw.contains("POST /v1/metrics "), "{otlp_raw}");
+    assert!(otlp_raw.contains("POST /v1/logs "), "{otlp_raw}");
+    assert!(otlp_raw.contains("POST /v1/traces "), "{otlp_raw}");
+    assert!(otlp_raw.contains("\"event_family\""), "{otlp_raw}");
+    assert!(otlp_raw.contains("\"request\""), "{otlp_raw}");
+    assert!(otlp_raw.contains("\"audit\""), "{otlp_raw}");
+    assert!(
+        otlp_raw.contains("\"billing_event_observed\""),
+        "{otlp_raw}"
+    );
+    assert!(otlp_raw.contains("tool.execute"), "{otlp_raw}");
+    assert!(otlp_raw.contains("mcp:github/tool:search"), "{otlp_raw}");
+    assert!(otlp_raw.contains("mcp_tool:github-search"), "{otlp_raw}");
+    assert!(otlp_raw.contains("MCP search is blocked"), "{otlp_raw}");
+    assert!(otlp_raw.contains("tool-client"), "{otlp_raw}");
+    assert!(!otlp_raw.contains("tool-secret"), "{otlp_raw}");
+    assert!(!otlp_raw.contains("upstream-mcp-secret"), "{otlp_raw}");
 }
 
 #[test]
@@ -681,10 +712,22 @@ timeout_ms = 3000
     )
 }
 
-fn p3_mcp_config(gateway_addr: &str, mcp_addr: &str, provider_addr: &str) -> String {
+fn p3_mcp_config(
+    gateway_addr: &str,
+    mcp_addr: &str,
+    provider_addr: &str,
+    otlp_addr: &str,
+) -> String {
     format!(
         r#"
 listen = "{gateway_addr}"
+
+[observability]
+enabled = true
+provider = "vector"
+otlp_endpoint = "http://{otlp_addr}"
+prometheus_metrics_path = "/metrics"
+export_timeout_secs = 3
 
 [[providers]]
 name = "openai"
@@ -779,6 +822,58 @@ fn response_json(response: String) -> serde_json::Value {
         .map(|(_, body)| body)
         .unwrap_or(&response);
     serde_json::from_str(body).unwrap_or_else(|error| panic!("invalid JSON: {error}; {response}"))
+}
+
+fn wait_for_observability_ok(gateway_addr: &str) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    let mut last = serde_json::Value::Null;
+    while std::time::Instant::now() < deadline {
+        let body = response_json(http_request(
+            gateway_addr,
+            "GET",
+            "/admin/v1/observability",
+            &["Authorization: Bearer admin-secret"],
+            "",
+        ));
+        if body["data"][0]["health"] == "ok" {
+            return body;
+        }
+        last = body;
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("observability exporter did not become ok: {last}");
+}
+
+fn spawn_otlp_collector() -> (String, JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = read_http_request(&mut stream);
+                    requests.push(request);
+                    let body = r#"{"ok":true}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("OTLP mock accept failed: {error}"),
+            }
+        }
+        requests
+    });
+    (addr, handle)
 }
 
 fn spawn_mcp_server(count: usize) -> (String, JoinHandle<Vec<String>>) {

@@ -598,6 +598,7 @@ pub(crate) struct AppState {
     metering_exporter: Option<Arc<MeteringExporter>>,
     repositories: Arc<RuntimeRepositories>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
+    observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
     mcp_manager: Arc<McpManager>,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
@@ -667,9 +668,18 @@ pub(crate) struct ObservabilityStatus {
     pub(crate) prometheus_metrics_path: String,
     pub(crate) export_timeout_secs: u64,
     pub(crate) health: &'static str,
+    pub(crate) last_success_at_unix: Option<u64>,
     pub(crate) last_export_error: Option<String>,
     pub(crate) queue_backpressure_events: u64,
     pub(crate) dropped_events: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ObservabilityExportRuntime {
+    last_success_at_unix: Option<u64>,
+    last_export_error: Option<String>,
+    queue_backpressure_events: u64,
+    dropped_events: u64,
 }
 
 impl ClusterIdentity {
@@ -1407,6 +1417,7 @@ impl AppState {
             metering_exporter,
             repositories: Arc::new(RuntimeRepositories::in_memory(&storage)),
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
+            observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
@@ -2572,6 +2583,19 @@ impl AppState {
         self.config.observability.export_timeout_secs
     }
 
+    pub(crate) fn record_observability_export_success(&self) {
+        if let Ok(mut status) = self.observability_export.lock() {
+            status.last_success_at_unix = now_unix_seconds();
+            status.last_export_error = None;
+        }
+    }
+
+    pub(crate) fn record_observability_export_error(&self, error: impl ToString) {
+        if let Ok(mut status) = self.observability_export.lock() {
+            status.last_export_error = Some(error.to_string());
+        }
+    }
+
     pub(crate) fn observability_status(&self) -> Vec<ObservabilityStatus> {
         let explicit_endpoint = self.observability_otlp_endpoint();
         let legacy_endpoint = self
@@ -2599,6 +2623,20 @@ impl AppState {
         } else {
             "none".to_string()
         };
+        let export = self
+            .observability_export
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default();
+        let health = if !enabled {
+            "disabled"
+        } else if export.last_export_error.is_some() {
+            "degraded"
+        } else if export.last_success_at_unix.is_some() {
+            "ok"
+        } else {
+            "configured"
+        };
         vec![ObservabilityStatus {
             provider,
             enabled,
@@ -2609,10 +2647,11 @@ impl AppState {
             signals: vec!["metrics", "logs", "traces"],
             prometheus_metrics_path: self.config.observability.prometheus_metrics_path.clone(),
             export_timeout_secs: self.config.observability.export_timeout_secs,
-            health: if enabled { "configured" } else { "disabled" },
-            last_export_error: None,
-            queue_backpressure_events: 0,
-            dropped_events: 0,
+            health,
+            last_success_at_unix: export.last_success_at_unix,
+            last_export_error: export.last_export_error,
+            queue_backpressure_events: export.queue_backpressure_events,
+            dropped_events: export.dropped_events,
         }]
     }
 
@@ -2634,6 +2673,18 @@ impl AppState {
             .lock()
             .map(|logs| logs.list())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn audit_events(&self) -> Vec<StoredAuditEvent> {
+        self.repositories
+            .audit_events
+            .lock()
+            .map(|events| events.list())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn metering_events(&self) -> Vec<BillingEvent> {
+        self.metering_events.list()
     }
 
     pub(crate) fn request_logs_page(

@@ -2599,6 +2599,7 @@
           "prometheus_metrics_path",
           "export_timeout_secs",
           "health",
+          "last_success_at_unix",
           "last_export_error",
           "queue_backpressure_events",
           "dropped_events"
@@ -2648,6 +2649,13 @@
           },
           "health": {
             "type": "string"
+          },
+          "last_success_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           },
           "last_export_error": {
             "type": [

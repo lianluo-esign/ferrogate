@@ -563,6 +563,7 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert!(body.contains("ferrogate_request_logs_total"));
         Ok(())
     })?;
+    thread::sleep(Duration::from_secs(6));
     case.expect_vector_otlp_export()?;
 
     case.expect_json(
@@ -942,7 +943,7 @@ impl LocalHarness {
         let (provider_addr, provider) =
             spawn_local_provider_upstream(expected_provider_requests).context("start provider")?;
         let observability =
-            spawn_mock_otlp_server(1).context("start observability provider mock")?;
+            spawn_mock_otlp_server().context("start observability provider mock")?;
         let dir = tempfile::tempdir()?;
         let config_path = dir.path().join("ferrogate.toml");
         std::fs::write(
@@ -1118,24 +1119,61 @@ impl LocalHarness {
         let Some(observability) = &self.observability else {
             bail!("observability provider mock is not configured");
         };
-        let request = observability
-            .received
-            .recv_timeout(Duration::from_secs(12))
-            .context("timed out waiting for Vector-compatible OTLP export")?;
-        assert!(request.starts_with("POST /v1/metrics "));
-        assert!(request.contains("Content-Type: application/json"));
-        let payload = http_request_body(&request)?;
-        let body: Value = serde_json::from_str(payload)
-            .with_context(|| format!("failed to parse OTLP export payload: {payload}"))?;
-        assert_eq!(
-            body["resourceMetrics"][0]["resource"]["attributes"][0]["value"]["stringValue"],
-            "ferrogate-test"
-        );
-        assert!(body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
-            .as_array()
-            .is_some_and(|metrics| metrics
+        let mut requests = Vec::new();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(12) {
+            let request = observability
+                .received
+                .recv_timeout(Duration::from_millis(500))
+                .context("timed out waiting for Vector-compatible OTLP export")?;
+            requests.push(request);
+            if requests
                 .iter()
-                .any(|metric| metric["name"] == "ferrogate.request_logs")));
+                .any(|request| request.starts_with("POST /v1/metrics "))
+                && requests
+                    .iter()
+                    .any(|request| request.starts_with("POST /v1/logs "))
+                && requests
+                    .iter()
+                    .any(|request| request.starts_with("POST /v1/traces "))
+            {
+                break;
+            }
+        }
+        let raw = requests.join("\n---otlp-request---\n");
+        assert!(raw.contains("Content-Type: application/json"));
+        assert!(
+            raw.contains("POST /v1/metrics "),
+            "missing OTLP metrics request: {raw}"
+        );
+        assert!(
+            raw.contains("POST /v1/logs "),
+            "missing OTLP logs request: {raw}"
+        );
+        assert!(
+            raw.contains("POST /v1/traces "),
+            "missing OTLP traces request: {raw}"
+        );
+        assert!(raw.contains("\"service.name\""));
+        assert!(raw.contains("ferrogate-test"));
+        assert!(raw.contains("ferrogate.request_logs"));
+        assert!(raw.contains("ferrogate.billing_events"));
+        assert!(raw.contains("ferrogate.gateway.request"));
+        assert!(raw.contains("\"event_family\""));
+        assert!(raw.contains("\"request\""));
+        assert!(raw.contains("\"audit\""));
+        assert!(raw.contains("\"billing_event_observed\""));
+        assert!(raw.contains("\"audit_action\""));
+        assert!(raw.contains("api_key.upsert"));
+        assert!(raw.contains("logical_model"));
+        assert!(raw.contains("fast-chat"));
+        assert!(raw.contains("provider"));
+        assert!(raw.contains("openai"));
+        assert!(raw.contains("api_key_id"));
+        assert!(raw.contains("test-client"));
+        assert_secret_redacted(&raw);
+        assert!(!raw.contains("provider-secret"));
+        assert!(!raw.contains("test-secret"));
         Ok(())
     }
 }
@@ -1387,15 +1425,14 @@ fn spawn_mock_billing_server(expected_requests: usize) -> Result<MockBillingServ
     })
 }
 
-fn spawn_mock_otlp_server(expected_requests: usize) -> Result<MockOtlpServer> {
+fn spawn_mock_otlp_server() -> Result<MockOtlpServer> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?.to_string();
     let (tx, rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let mut received = 0;
         let started = Instant::now();
-        while received < expected_requests && started.elapsed() < Duration::from_secs(10) {
+        while started.elapsed() < Duration::from_secs(15) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let request = match read_http_request(&mut stream) {
@@ -1410,7 +1447,6 @@ fn spawn_mock_otlp_server(expected_requests: usize) -> Result<MockOtlpServer> {
                         body
                     );
                     let _ = tx.send(request);
-                    received += 1;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
