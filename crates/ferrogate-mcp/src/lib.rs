@@ -20,7 +20,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result as AnyResult};
-use ferrogate_core::ToolDef;
+use ferrogate_core::{ApprovalPolicy, ToolDef};
 use http::Uri;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -69,6 +69,8 @@ pub struct McpServerConfig {
     pub tools_to_execute: Vec<String>,
     #[serde(default)]
     pub tools_to_auto_execute: Vec<String>,
+    #[serde(default)]
+    pub approval_policy: ApprovalPolicy,
     #[serde(default)]
     pub tool_include: Vec<String>,
     #[serde(default)]
@@ -145,6 +147,7 @@ pub struct McpTool {
     pub description: Option<String>,
     pub input_schema: Value,
     pub auto_execute: bool,
+    pub approval_policy: ApprovalPolicy,
 }
 
 impl McpTool {
@@ -364,6 +367,7 @@ impl McpSession {
                         &self.config.tools_to_auto_execute,
                         &remote_name,
                     ),
+                    approval_policy: self.config.approval_policy,
                 }
             })
             .collect();

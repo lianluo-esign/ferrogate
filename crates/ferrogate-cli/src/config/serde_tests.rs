@@ -85,6 +85,7 @@ fn config_model_supports_serde_roundtrip() {
             enabled: true,
             source: "builtin".into(),
             order: 10,
+            approval_policy: ferrogate_core::ApprovalPolicy::Never,
             permissions: ExtensionPermissions {
                 tools: vec!["tool.echo".into()],
                 network: vec![],

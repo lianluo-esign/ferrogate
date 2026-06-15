@@ -18,6 +18,10 @@ use std::{
 };
 
 use crate::acme::{AcmeRenewalStatus, SharedAcmeRenewalState};
+use crate::approval::{
+    ApprovalDecisionError, ApprovalRegistry, ApprovalStatus, ApprovalWaitError,
+    ToolApprovalDecisionRequest, ToolApprovalDraft, ToolApprovalRecord,
+};
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config,
     GatewayConfigProfile, GuardrailEffect, GuardrailStage, HeaderMutation, Model,
@@ -601,6 +605,7 @@ pub(crate) struct AppState {
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
     mcp_manager: Arc<McpManager>,
+    approvals: ApprovalRegistry,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
     guardrail_rules: Arc<Vec<GuardrailRuleRuntime>>,
@@ -1398,7 +1403,7 @@ impl AppState {
         Self {
             cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
             cluster_sync: Arc::new(cluster_sync),
-            config: Arc::new(config),
+            config: Arc::new(config.clone()),
             providers: Arc::new(providers),
             upstreams: Arc::new(upstreams),
             runtime_routes: Arc::new(runtime_routes),
@@ -1420,6 +1425,7 @@ impl AppState {
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
+            approvals: ApprovalRegistry::new(),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
             guardrail_rules: Arc::new(guardrail_rules),
@@ -1464,6 +1470,98 @@ impl AppState {
         tools
     }
 
+    pub(crate) fn tool_by_name(&self, name: &str) -> Option<RegisteredTool> {
+        self.all_tools().into_iter().find(|tool| tool.name == name)
+    }
+
+    pub(crate) fn tool_approvals(&self) -> Vec<ToolApprovalRecord> {
+        self.approvals.list()
+    }
+
+    pub(crate) fn tool_approval(&self, id: &str) -> Option<ToolApprovalRecord> {
+        self.approvals.get(id)
+    }
+
+    pub(crate) fn create_tool_approval(
+        &self,
+        request: &ToolExecutionRequest,
+        request_id: &str,
+        trace_id: Option<String>,
+        tenant: ferrogate_core::TenantContext,
+        actor_api_key_id: Option<String>,
+        server_name: Option<String>,
+        approval_policy: ferrogate_core::ApprovalPolicy,
+        can_log_bodies: bool,
+    ) -> ToolApprovalRecord {
+        self.approvals.create_pending(ToolApprovalDraft {
+            request_id: request_id.to_string(),
+            trace_id,
+            tenant,
+            actor_api_key_id,
+            tool_name: request.name.clone(),
+            server_name,
+            route: request.route.clone(),
+            approval_policy,
+            approval_timeout_secs: self.config.reliability.tool_approval_timeout_secs,
+            config_snapshot: config_snapshot_id(&self.config),
+            arguments: request.arguments.clone(),
+            can_log_bodies,
+        })
+    }
+
+    pub(crate) async fn wait_for_tool_approval(
+        &self,
+        approval: &ToolApprovalRecord,
+    ) -> Result<ToolApprovalRecord, ToolExecutionError> {
+        let timeout = Duration::from_secs(approval.approval_timeout_secs.max(1));
+        match self
+            .approvals
+            .wait_for_resolution(&approval.id, timeout)
+            .await
+        {
+            Ok(record) if record.status == ApprovalStatus::Approved => Ok(record),
+            Ok(record) => Err(ToolExecutionError::Denied(format!(
+                "tool approval {} ended with status {:?}",
+                record.id, record.status
+            ))),
+            Err(ApprovalWaitError::NotFound(message)) => Err(ToolExecutionError::Denied(message)),
+        }
+    }
+
+    pub(crate) fn approve_tool_approval(
+        &self,
+        id: &str,
+        payload: ToolApprovalDecisionRequest,
+        reviewer_api_key_id: Option<String>,
+    ) -> Result<ToolApprovalRecord, ApprovalDecisionError> {
+        let fingerprint = payload
+            .fingerprint
+            .as_deref()
+            .unwrap_or_default()
+            .to_string();
+        self.approvals
+            .approve(id, &fingerprint, reviewer_api_key_id, payload.reason)
+    }
+
+    pub(crate) fn deny_tool_approval(
+        &self,
+        id: &str,
+        payload: ToolApprovalDecisionRequest,
+        reviewer_api_key_id: Option<String>,
+    ) -> Result<ToolApprovalRecord, ApprovalDecisionError> {
+        self.approvals.deny(id, reviewer_api_key_id, payload.reason)
+    }
+
+    pub(crate) fn expire_tool_approval(
+        &self,
+        id: &str,
+        payload: ToolApprovalDecisionRequest,
+        reviewer_api_key_id: Option<String>,
+    ) -> Result<ToolApprovalRecord, ApprovalDecisionError> {
+        self.approvals
+            .expire(id, reviewer_api_key_id, payload.reason)
+    }
+
     pub(crate) fn mcp_statuses(&self) -> Vec<McpServerStatus> {
         self.mcp_manager.statuses()
     }
@@ -1481,6 +1579,7 @@ impl AppState {
                 description: tool.description,
                 input_schema: tool.input_schema,
                 extension_id: format!("mcp.{}", tool.server_name),
+                approval_policy: tool.approval_policy,
                 tenant_allowlist: Vec::new(),
                 api_key_allowlist: Vec::new(),
                 route_allowlist: Vec::new(),
@@ -1575,6 +1674,7 @@ impl AppState {
         next.response_cache = Arc::clone(&self.response_cache);
         next.mcp_manager = Arc::clone(&self.mcp_manager);
         next.mcp_manager.reconfigure(&next.config.mcp_servers);
+        next.approvals = self.approvals.clone();
         next.request_ids = Arc::clone(&self.request_ids);
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();

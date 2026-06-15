@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub(crate) use ferrogate_core::ApprovalPolicy;
 pub(crate) use ferrogate_mcp::{
     McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
@@ -468,6 +469,8 @@ pub(crate) struct ExtensionConfig {
     #[serde(default = "default_extension_order")]
     pub(crate) order: u32,
     #[serde(default)]
+    pub(crate) approval_policy: ApprovalPolicy,
+    #[serde(default)]
     pub(crate) permissions: ExtensionPermissions,
     #[serde(default)]
     pub(crate) config: BTreeMap<String, toml::Value>,
@@ -611,7 +614,7 @@ pub(crate) struct StorageConfig {
     pub(crate) admin_list_max_limit: usize,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ReliabilityConfig {
     #[serde(default)]
     pub(crate) provider_circuit_breaker_failure_threshold: Option<u32>,
@@ -623,6 +626,8 @@ pub(crate) struct ReliabilityConfig {
     pub(crate) provider_dispatch_max_retries: Option<u32>,
     #[serde(default)]
     pub(crate) provider_response_body_max_bytes: Option<usize>,
+    #[serde(default = "default_tool_approval_timeout_secs")]
+    pub(crate) tool_approval_timeout_secs: u64,
     #[serde(default)]
     pub(crate) graceful_shutdown_grace_period_secs: Option<u64>,
     #[serde(default)]
@@ -836,6 +841,10 @@ fn default_cache_max_records() -> usize {
     1_000
 }
 
+fn default_tool_approval_timeout_secs() -> u64 {
+    30
+}
+
 fn default_request_log_retention_records() -> usize {
     10_000
 }
@@ -916,6 +925,24 @@ impl Default for StorageConfig {
             billing_event_retention_records: default_billing_event_retention_records(),
             admin_list_default_limit: default_admin_list_limit(),
             admin_list_max_limit: default_admin_list_max_limit(),
+        }
+    }
+}
+
+impl Default for ReliabilityConfig {
+    fn default() -> Self {
+        Self {
+            provider_circuit_breaker_failure_threshold: None,
+            provider_circuit_breaker_cooldown_secs: None,
+            provider_dispatch_timeout_secs: None,
+            provider_dispatch_max_retries: None,
+            provider_response_body_max_bytes: None,
+            tool_approval_timeout_secs: default_tool_approval_timeout_secs(),
+            graceful_shutdown_grace_period_secs: None,
+            graceful_shutdown_timeout_secs: None,
+            graceful_upgrade_pid_file: None,
+            graceful_upgrade_sock: None,
+            graceful_upgrade_sock_retries: None,
         }
     }
 }

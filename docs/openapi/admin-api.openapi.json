@@ -424,6 +424,228 @@
         }
       }
     },
+    "/admin/v1/tool-approvals": {
+      "get": {
+        "operationId": "listAdminToolApprovals",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List human-in-the-loop tool approval records.",
+        "responses": {
+          "200": {
+            "description": "Tool approval list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolApprovalList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/tool-approvals/{approval_id}": {
+      "parameters": [
+        {
+          "name": "approval_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Tool approval id."
+        }
+      ],
+      "get": {
+        "operationId": "getAdminToolApproval",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Inspect a tool approval record without exposing raw arguments.",
+        "responses": {
+          "200": {
+            "description": "Tool approval record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolApprovalRecord"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/tool-approvals/{approval_id}/approve": {
+      "parameters": [
+        {
+          "name": "approval_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Tool approval id."
+        }
+      ],
+      "post": {
+        "operationId": "approveAdminToolApproval",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Approve a pending tool call if its immutable action fingerprint still matches.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ToolApprovalDecisionRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Approved tool approval record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolApprovalRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/tool-approvals/{approval_id}/deny": {
+      "parameters": [
+        {
+          "name": "approval_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Tool approval id."
+        }
+      ],
+      "post": {
+        "operationId": "denyAdminToolApproval",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Deny a pending tool approval and fail the waiting call closed.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ToolApprovalDecisionRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Denied tool approval record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolApprovalRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/tool-approvals/{approval_id}/expire": {
+      "parameters": [
+        {
+          "name": "approval_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Tool approval id."
+        }
+      ],
+      "post": {
+        "operationId": "expireAdminToolApproval",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Expire a pending tool approval and fail the waiting call closed.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ToolApprovalDecisionRequest"
+        },
+        "responses": {
+          "200": {
+            "description": "Expired tool approval record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolApprovalRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
     "/admin/v1/mcp-servers": {
       "get": {
         "operationId": "listAdminMcpServers",
@@ -1756,6 +1978,25 @@
           }
         }
       },
+      "ToolApprovalDecisionRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ToolApprovalDecisionRequest"
+            },
+            "examples": {
+              "approveWithFingerprint": {
+                "summary": "Approve the exact pending action.",
+                "value": {
+                  "fingerprint": "0123456789abcdef",
+                  "reason": "reviewed by operator"
+                }
+              }
+            }
+          }
+        }
+      },
       "AdminGatewayConfigMutation": {
         "required": true,
         "content": {
@@ -2730,6 +2971,7 @@
           "description",
           "input_schema",
           "extension_id",
+          "approval_policy",
           "tenant_allowlist",
           "api_key_allowlist",
           "route_allowlist"
@@ -2750,6 +2992,13 @@
           "extension_id": {
             "type": "string"
           },
+          "approval_policy": {
+            "type": "string",
+            "enum": [
+              "never",
+              "always"
+            ]
+          },
           "tenant_allowlist": {
             "$ref": "#/components/schemas/StringList"
           },
@@ -2758,6 +3007,151 @@
           },
           "route_allowlist": {
             "$ref": "#/components/schemas/StringList"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ToolApprovalDecisionRequest": {
+        "type": "object",
+        "properties": {
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for approve; must match the pending immutable action fingerprint."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ToolApprovalRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "request_id",
+          "trace_id",
+          "tenant",
+          "actor_api_key_id",
+          "tool_name",
+          "server_name",
+          "route",
+          "approval_policy",
+          "approval_timeout_secs",
+          "fingerprint",
+          "arguments_summary",
+          "risk_reason",
+          "status",
+          "reviewer_api_key_id",
+          "reviewer_authority",
+          "terminal_reason",
+          "requested_at_unix",
+          "expires_at_unix",
+          "decided_at_unix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "actor_api_key_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "server_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "approval_policy": {
+            "type": "string",
+            "enum": [
+              "never",
+              "always"
+            ]
+          },
+          "approval_timeout_secs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "arguments_summary": {
+            "type": "string"
+          },
+          "risk_reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "denied",
+              "expired"
+            ]
+          },
+          "reviewer_api_key_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewer_authority": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expires_at_unix": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "decided_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -3892,6 +4286,9 @@
       "AdminToolList": {
         "$ref": "#/components/schemas/AdminList_AdminTool"
       },
+      "ToolApprovalList": {
+        "$ref": "#/components/schemas/AdminList_ToolApprovalRecord"
+      },
       "AdminModelList": {
         "$ref": "#/components/schemas/AdminList_Model"
       },
@@ -4032,6 +4429,47 @@
             "items": {
               "$ref": "#/components/schemas/AdminTool"
             }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_ToolApprovalRecord": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolApprovalRecord"
+            }
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         },
         "additionalProperties": false

@@ -199,6 +199,247 @@ fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
 }
 
 #[test]
+fn tool_approvals_bind_fingerprint_and_fail_closed() {
+    let (mcp_addr, mcp_handle) = spawn_mcp_server(4);
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, approval_mcp_config(&gateway_addr, &mcp_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let unauthorized = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tool-approvals/approval-missing/approve",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"fingerprint":"wrong"}"#,
+    ));
+    assert_eq!(unauthorized["error"]["code"], "scope_denied");
+
+    let gateway_for_call = gateway_addr.clone();
+    let execution = thread::spawn(move || {
+        response_json(http_request(
+            &gateway_for_call,
+            "POST",
+            "/v1/tools/execute",
+            &[
+                "Authorization: Bearer tool-secret",
+                "Content-Type: application/json",
+            ],
+            r#"{"name":"github.search","arguments":{"query":"ferrogate"}}"#,
+        ))
+    });
+
+    let pending = wait_for_pending_approval(&gateway_addr, &[]);
+    assert_eq!(pending["tool_name"], "github.search");
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(pending["actor_api_key_id"], "tool-client");
+    assert_eq!(pending["reviewer_api_key_id"], serde_json::Value::Null);
+    assert!(pending["fingerprint"].as_str().unwrap().len() >= 16);
+    assert!(!pending.to_string().contains("ferrogate"));
+    assert!(pending.to_string().contains("[REDACTED]"));
+
+    let mismatch = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!(
+            "/admin/v1/tool-approvals/{}/approve",
+            pending["id"].as_str().unwrap()
+        ),
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"fingerprint":"changed-arguments"}"#,
+    ));
+    assert_eq!(
+        mismatch["error"]["code"],
+        "tool_approval_fingerprint_mismatch"
+    );
+    let denied_execution = execution.join().unwrap();
+    assert_eq!(denied_execution["error"]["code"], "tool_denied");
+
+    let gateway_for_call = gateway_addr.clone();
+    let approved_execution = thread::spawn(move || {
+        response_json(http_request(
+            &gateway_for_call,
+            "POST",
+            "/v1/tools/execute",
+            &[
+                "Authorization: Bearer tool-secret",
+                "Content-Type: application/json",
+            ],
+            r#"{"name":"github.search","arguments":{"query":"ferrogate"}}"#,
+        ))
+    });
+    let pending = wait_for_pending_approval(&gateway_addr, &[pending["id"].as_str().unwrap()]);
+    let approved = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!(
+            "/admin/v1/tool-approvals/{}/approve",
+            pending["id"].as_str().unwrap()
+        ),
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"fingerprint":"{}","reason":"operator approved"}}"#,
+            pending["fingerprint"].as_str().unwrap()
+        ),
+    ));
+    assert_eq!(approved["status"], "approved");
+    assert_eq!(approved["reviewer_api_key_id"], "admin");
+    let executed = approved_execution.join().unwrap();
+    assert_eq!(
+        executed["content"]["content"][0]["text"],
+        "ferrogate-result"
+    );
+
+    let gateway_for_call = gateway_addr.clone();
+    let denied_call = thread::spawn(move || {
+        response_json(http_request(
+            &gateway_for_call,
+            "POST",
+            "/v1/tools/execute",
+            &[
+                "Authorization: Bearer tool-secret",
+                "Content-Type: application/json",
+            ],
+            r#"{"name":"github.search","arguments":{"query":"deny-me"}}"#,
+        ))
+    });
+    let pending = wait_for_pending_approval(&gateway_addr, &[approved["id"].as_str().unwrap()]);
+    let denied = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!(
+            "/admin/v1/tool-approvals/{}/deny",
+            pending["id"].as_str().unwrap()
+        ),
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"reason":"operator denied"}"#,
+    ));
+    assert_eq!(denied["status"], "denied");
+    assert_eq!(denied_call.join().unwrap()["error"]["code"], "tool_denied");
+    let denied_reuse = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!(
+            "/admin/v1/tool-approvals/{}/approve",
+            pending["id"].as_str().unwrap()
+        ),
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"fingerprint":"{}"}}"#,
+            pending["fingerprint"].as_str().unwrap()
+        ),
+    ));
+    assert_eq!(denied_reuse["error"]["code"], "tool_approval_terminal");
+
+    let seen_ids = approval_ids(&gateway_addr);
+    let gateway_for_call = gateway_addr.clone();
+    let expired_by_admin_call = thread::spawn(move || {
+        response_json(http_request(
+            &gateway_for_call,
+            "POST",
+            "/v1/tools/execute",
+            &[
+                "Authorization: Bearer tool-secret",
+                "Content-Type: application/json",
+            ],
+            r#"{"name":"github.search","arguments":{"query":"admin-expire"}}"#,
+        ))
+    });
+    let exclude = seen_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let pending = wait_for_pending_approval(&gateway_addr, &exclude);
+    let admin_expired = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!(
+            "/admin/v1/tool-approvals/{}/expire",
+            pending["id"].as_str().unwrap()
+        ),
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"reason":"operator expired"}"#,
+    ));
+    assert_eq!(admin_expired["status"], "expired");
+    assert_eq!(
+        expired_by_admin_call.join().unwrap()["error"]["code"],
+        "tool_denied"
+    );
+
+    let expired = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/tools/execute",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"name":"github.search","arguments":{"query":"expire"}}"#,
+    ));
+    assert_eq!(expired["error"]["code"], "tool_denied");
+    let approvals = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tool-approvals",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert!(approvals["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|approval| approval["status"] == "expired"));
+
+    let audit_events = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events?limit=200",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    let events = audit_events["data"].as_array().unwrap();
+    for action in [
+        "tool.approval_requested",
+        "tool.approval_granted",
+        "tool.approval_denied",
+        "tool.approval_expired",
+        "tool.execute",
+    ] {
+        assert!(
+            events.iter().any(|event| event["action"] == action),
+            "missing audit action {action}: {audit_events}"
+        );
+    }
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let requests = mcp_handle.join().unwrap();
+    let tool_calls = requests
+        .iter()
+        .filter(|request| request.contains("\"tools/call\""))
+        .count();
+    assert_eq!(tool_calls, 1);
+}
+
+#[test]
 fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
     let (mcp_addr, mcp_handle) = spawn_mcp_server_with_tool(7, "search");
     let (provider_addr, provider_handle) = spawn_provider_upstream();
@@ -712,6 +953,47 @@ timeout_ms = 3000
     )
 }
 
+fn approval_mcp_config(gateway_addr: &str, mcp_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[reliability]
+tool_approval_timeout_secs = 1
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "tool-client"
+name = "Tool client"
+key = "tool-secret"
+scopes = ["tools.read", "tools.execute"]
+
+[[extensions]]
+id = "mcp.http"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+approval_policy = "always"
+
+[extensions.permissions]
+tools = ["github.search"]
+network = ["127.0.0.1"]
+filesystem = false
+shell = false
+
+[extensions.config]
+endpoint = "http://{mcp_addr}/mcp"
+timeout_ms = 3000
+"#
+    )
+}
+
 fn p3_mcp_config(
     gateway_addr: &str,
     mcp_addr: &str,
@@ -842,6 +1124,46 @@ fn wait_for_observability_ok(gateway_addr: &str) -> serde_json::Value {
         thread::sleep(Duration::from_millis(250));
     }
     panic!("observability exporter did not become ok: {last}");
+}
+
+fn wait_for_pending_approval(gateway_addr: &str, exclude_ids: &[&str]) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut last = serde_json::Value::Null;
+    while std::time::Instant::now() < deadline {
+        let body = response_json(http_request(
+            gateway_addr,
+            "GET",
+            "/admin/v1/tool-approvals",
+            &["Authorization: Bearer admin-secret"],
+            "",
+        ));
+        if let Some(approval) = body["data"].as_array().unwrap().iter().find(|approval| {
+            approval["status"] == "pending"
+                && approval["id"]
+                    .as_str()
+                    .is_some_and(|id| !exclude_ids.contains(&id))
+        }) {
+            return approval.clone();
+        }
+        last = body;
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("tool approval did not become pending: {last}");
+}
+
+fn approval_ids(gateway_addr: &str) -> Vec<String> {
+    response_json(http_request(
+        gateway_addr,
+        "GET",
+        "/admin/v1/tool-approvals",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ))["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|approval| approval["id"].as_str().map(ToOwned::to_owned))
+        .collect()
 }
 
 fn spawn_otlp_collector() -> (String, JoinHandle<Vec<String>>) {

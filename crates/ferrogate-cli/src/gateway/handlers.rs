@@ -200,6 +200,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/tool-approvals" || path.starts_with("/admin/v1/tool-approvals/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_tool_approvals(session, ctx, &headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/mcp-servers" {
             let headers = req.headers.clone();
             self.handle_admin_mcp_servers(session, ctx, &headers)

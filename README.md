@@ -647,6 +647,11 @@ GET  /admin/v1/provider-health
 GET  /admin/v1/provider-models
 GET  /admin/v1/extensions
 GET  /admin/v1/tools
+GET  /admin/v1/tool-approvals
+GET  /admin/v1/tool-approvals/{approval_id}
+POST /admin/v1/tool-approvals/{approval_id}/approve
+POST /admin/v1/tool-approvals/{approval_id}/deny
+POST /admin/v1/tool-approvals/{approval_id}/expire
 GET  /admin/v1/mcp-servers
 GET  /admin/v1/tool-sessions/{session_id}
 GET  /admin/v1/models

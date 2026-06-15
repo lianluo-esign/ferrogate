@@ -4,6 +4,7 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
+use crate::approval::ApprovalStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -173,6 +174,90 @@ async fn tools_call(
         .as_ref()
         .map(|(server_name, tool_name)| tool_audit_target(server_name, tool_name))
         .unwrap_or_else(|| request.name.clone());
+    let Some(tool) = state.tool_by_name(&request.name) else {
+        state.record_admin_audit_event(audit_event(
+            ctx,
+            auth,
+            "tool.execute",
+            audit_target,
+            "error",
+            tool_audit_failure_message(None, name, "tool_not_found", "tool is not registered"),
+        ));
+        return error(
+            id,
+            -32601,
+            format!("tool {} is not registered", request.name),
+        );
+    };
+
+    if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
+        let approval = state.create_tool_approval(
+            &request,
+            &ctx.request_id,
+            ctx.trace_id.clone(),
+            auth.tenant_context(),
+            auth.api_key_id.clone(),
+            audit_details
+                .as_ref()
+                .map(|(server, _)| server.clone())
+                .or_else(|| Some(tool.extension_id.clone())),
+            tool.approval_policy,
+            auth.can_record_bodies(state.config.telemetry.log_bodies),
+        );
+        state.record_admin_audit_event(audit_event(
+            ctx,
+            auth,
+            "tool.approval_requested",
+            format!("tool_approval:{}", approval.id),
+            "pending",
+            format!(
+                "approval {} fingerprint={} tool={} expires_at_unix={}",
+                approval.id, approval.fingerprint, approval.tool_name, approval.expires_at_unix
+            ),
+        ));
+        match state.wait_for_tool_approval(&approval).await {
+            Ok(resolved) => {
+                state.record_admin_audit_event(audit_event(
+                    ctx,
+                    auth,
+                    "tool.approval_granted",
+                    format!("tool_approval:{}", resolved.id),
+                    "approved",
+                    format!(
+                        "approval {} fingerprint={} tool={} granted before execution",
+                        resolved.id, resolved.fingerprint, resolved.tool_name
+                    ),
+                ));
+            }
+            Err(error_response) => {
+                let latest = state.tool_approval(&approval.id).unwrap_or(approval);
+                let action = match latest.status {
+                    ApprovalStatus::Denied => "tool.approval_denied",
+                    ApprovalStatus::Expired => "tool.approval_expired",
+                    _ => "tool.approval_rejected",
+                };
+                state.record_admin_audit_event(audit_event(
+                    ctx,
+                    auth,
+                    action,
+                    format!("tool_approval:{}", latest.id),
+                    "rejected",
+                    format!(
+                        "approval {} fingerprint={} tool={} ended before execution: {}",
+                        latest.id,
+                        latest.fingerprint,
+                        latest.tool_name,
+                        error_response.message()
+                    ),
+                ));
+                return error(
+                    id,
+                    mcp_error_code(error_response.code()),
+                    error_response.message(),
+                );
+            }
+        }
+    }
     match state
         .execute_mcp_tool(request, ctx.request_id.clone(), auth.tenant_context())
         .await

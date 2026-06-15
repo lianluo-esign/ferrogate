@@ -1484,6 +1484,7 @@ fn extension(id: &str, kind: ExtensionKind, order: u32) -> ExtensionConfig {
         enabled: true,
         source: "builtin".into(),
         order,
+        approval_policy: ferrogate_core::ApprovalPolicy::Never,
         permissions: ExtensionPermissions {
             tools: vec![id.into()],
             network: vec![],
@@ -1505,6 +1506,7 @@ fn mcp_server() -> McpServerConfig {
         headers: vec![],
         tools_to_execute: vec!["search".into()],
         tools_to_auto_execute: vec![],
+        approval_policy: ferrogate_core::ApprovalPolicy::Never,
         tool_include: vec![],
         tool_regex: vec![],
         tls: McpTlsConfig::default(),

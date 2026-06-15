@@ -303,6 +303,29 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
     })?;
     case.expect_json(
         "GET",
+        "/admin/v1/tool-approvals",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "list");
+            assert_eq!(body["total"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/tool-approvals/approval-missing/approve",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"fingerprint":"missing"}"#,
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], "tool_approval_not_found");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
         "/admin/v1/mcp-servers",
         &[ADMIN_AUTH],
         "",

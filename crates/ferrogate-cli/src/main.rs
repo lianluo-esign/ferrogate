@@ -5,6 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 mod acme;
+mod approval;
 mod auth;
 mod cli;
 mod config;

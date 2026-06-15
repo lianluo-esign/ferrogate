@@ -12,6 +12,7 @@ use pingora::{proxy::Session, Result as PingoraResult};
 use std::collections::BTreeMap;
 
 use crate::{
+    approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
     auth::authenticate,
     config::{
         config_snapshot_id, ApiKey, Config, PolicyRule, PromptTemplate, PromptTemplateStatus,
@@ -1529,6 +1530,102 @@ impl FerroGateway {
                     .unwrap_or_else(|| request.name.clone())
             });
 
+        let Some(tool) = state.tool_by_name(&request.name) else {
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "tool.execute",
+                audit_target,
+                "error",
+                mcp_rpc::tool_audit_failure_message(
+                    mcp_audit_details.as_ref(),
+                    &request.name,
+                    "tool_not_found",
+                    "tool is not registered",
+                ),
+            ));
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "tool_not_found",
+                format!("tool {} is not registered", request.name),
+                &ctx.request_id,
+            )
+            .await;
+        };
+
+        if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
+            let approval = state.create_tool_approval(
+                &request,
+                &ctx.request_id,
+                ctx.trace_id.clone(),
+                auth.tenant_context(),
+                auth.api_key_id.clone(),
+                mcp_audit_details
+                    .as_ref()
+                    .map(|(server, _)| server.clone())
+                    .or_else(|| Some(tool.extension_id.clone())),
+                tool.approval_policy,
+                auth.can_record_bodies(state.config.telemetry.log_bodies),
+            );
+            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                ctx,
+                &auth,
+                "tool.approval_requested",
+                format!("tool_approval:{}", approval.id),
+                "pending",
+                format!(
+                    "approval {} fingerprint={} tool={} expires_at_unix={}",
+                    approval.id, approval.fingerprint, approval.tool_name, approval.expires_at_unix
+                ),
+            ));
+            match state.wait_for_tool_approval(&approval).await {
+                Ok(resolved) => {
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "tool.approval_granted",
+                        format!("tool_approval:{}", resolved.id),
+                        "approved",
+                        format!(
+                            "approval {} fingerprint={} tool={} granted before execution",
+                            resolved.id, resolved.fingerprint, resolved.tool_name
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    let latest = state.tool_approval(&approval.id).unwrap_or(approval);
+                    let action = match latest.status {
+                        ApprovalStatus::Denied => "tool.approval_denied",
+                        ApprovalStatus::Expired => "tool.approval_expired",
+                        _ => "tool.approval_rejected",
+                    };
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        action,
+                        format!("tool_approval:{}", latest.id),
+                        "rejected",
+                        format!(
+                            "approval {} fingerprint={} tool={} ended before execution: {}",
+                            latest.id,
+                            latest.fingerprint,
+                            latest.tool_name,
+                            error.message()
+                        ),
+                    ));
+                    return write_json_error(
+                        session,
+                        error.status(),
+                        error.code(),
+                        error.message(),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            }
+        }
+
         let result = match backend {
             ToolExecuteBackend::Extension => {
                 state
@@ -2350,6 +2447,242 @@ impl FerroGateway {
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_tool_approvals(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        if path == "/admin/v1/tool-approvals" {
+            if *method != Method::GET {
+                return write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "tool approvals collection supports GET",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            return match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Ok(_) => {
+                    let approvals = state.tool_approvals();
+                    let total = approvals.len();
+                    write_json_response(
+                        session,
+                        StatusCode::OK,
+                        &AdminList::paginated(approvals, total, 0, total),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            };
+        }
+
+        let Some(rest) = path.strip_prefix("/admin/v1/tool-approvals/") else {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "tool approval endpoint not found",
+                &ctx.request_id,
+            )
+            .await;
+        };
+        let (id, action) = rest
+            .split_once('/')
+            .map_or((rest, None), |(id, action)| (id, Some(action)));
+        if id.is_empty() {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_tool_approval",
+                "tool approval id is required",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        match (method.clone(), action) {
+            (Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => match state.tool_approval(id) {
+                        Some(approval) => {
+                            write_json_response(session, StatusCode::OK, &approval, &ctx.request_id)
+                                .await
+                        }
+                        None => {
+                            write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "tool_approval_not_found",
+                                format!("tool approval {id} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
+                    },
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (Method::POST, Some("approve" | "deny" | "expire")) => {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let body = match read_request_body(session, 16 * 1024).await? {
+                    Ok(body) => body,
+                    Err(limit) => {
+                        return write_json_error_and_close(
+                            session,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "payload_too_large",
+                            format!(
+                                "request body exceeds maximum size of {} bytes",
+                                limit.max_bytes
+                            ),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let payload = match serde_json::from_slice::<ToolApprovalDecisionRequest>(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_json",
+                            format!("invalid approval decision JSON: {error}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let result = match action {
+                    Some("approve") => {
+                        state.approve_tool_approval(id, payload, auth.api_key_id.clone())
+                    }
+                    Some("deny") => state.deny_tool_approval(id, payload, auth.api_key_id.clone()),
+                    Some("expire") => {
+                        state.expire_tool_approval(id, payload, auth.api_key_id.clone())
+                    }
+                    _ => unreachable!("approval action match is constrained above"),
+                };
+                match result {
+                    Ok(record) => {
+                        let (audit_action, audit_outcome) = match action {
+                            Some("approve") => ("tool.approval_granted", "approved"),
+                            Some("deny") => ("tool.approval_denied", "denied"),
+                            Some("expire") => ("tool.approval_expired", "expired"),
+                            _ => unreachable!("approval action match is constrained above"),
+                        };
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            audit_action,
+                            format!("tool_approval:{id}"),
+                            audit_outcome,
+                            format!(
+                                "approval {} fingerprint={} tool={}",
+                                record.id, record.fingerprint, record.tool_name
+                            ),
+                        ));
+                        write_json_response(session, StatusCode::OK, &record, &ctx.request_id).await
+                    }
+                    Err(ApprovalDecisionError::NotFound(message)) => {
+                        write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "tool_approval_not_found",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(ApprovalDecisionError::FingerprintMismatch {
+                        id,
+                        expected,
+                        provided,
+                    }) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "tool.approval_denied",
+                            format!("tool_approval:{id}"),
+                            "rejected",
+                            format!(
+                                "approval fingerprint mismatch expected={expected} provided={provided}"
+                            ),
+                        ));
+                        write_json_error(
+                            session,
+                            StatusCode::CONFLICT,
+                            "tool_approval_fingerprint_mismatch",
+                            "approval fingerprint does not match pending tool action",
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(ApprovalDecisionError::Terminal(record)) => {
+                        write_json_error(
+                            session,
+                            StatusCode::CONFLICT,
+                            "tool_approval_terminal",
+                            format!(
+                                "tool approval {} is already terminal with status {:?}",
+                                record.id, record.status
+                            ),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "tool approval endpoint supports GET, POST approve, and POST deny",
                     &ctx.request_id,
                 )
                 .await

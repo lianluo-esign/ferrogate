@@ -346,6 +346,7 @@ impl Config {
         let cooldown = self.reliability.provider_circuit_breaker_cooldown_secs;
         let dispatch_timeout = self.reliability.provider_dispatch_timeout_secs;
         let provider_body_max_bytes = self.reliability.provider_response_body_max_bytes;
+        let approval_timeout = self.reliability.tool_approval_timeout_secs;
         let shutdown_grace_period = self.reliability.graceful_shutdown_grace_period_secs;
         let shutdown_timeout = self.reliability.graceful_shutdown_timeout_secs;
         let graceful_upgrade_pid_file = self.reliability.graceful_upgrade_pid_file.as_deref();
@@ -372,6 +373,9 @@ impl Config {
         }
         if provider_body_max_bytes == Some(0) {
             bail!("field reliability.provider_response_body_max_bytes: must be greater than zero");
+        }
+        if approval_timeout == 0 {
+            bail!("field reliability.tool_approval_timeout_secs: must be greater than zero");
         }
         if shutdown_grace_period == Some(0) {
             bail!(
@@ -989,6 +993,7 @@ impl Config {
                 "permissions.network",
                 &extension.permissions.network,
             )?;
+            let _ = extension.approval_policy;
             validate_builtin_extension_shape(index, extension)?;
         }
 
@@ -1004,6 +1009,7 @@ impl Config {
                     server.name
                 );
             }
+            let _ = server.approval_policy;
             ferrogate_mcp::validate_mcp_server_config(server)
                 .map_err(|error| anyhow::anyhow!("field mcp_servers[{index}]: {error}"))?;
         }

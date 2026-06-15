@@ -9,6 +9,15 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Approval policy attached to a tool or MCP binding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    #[default]
+    Never,
+    Always,
+}
+
 /// Request identity that can be passed across runtime, auth, routing, and logs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestContext {

@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result as AnyResult};
-use ferrogate_core::{TenantContext, ToolDef};
+use ferrogate_core::{ApprovalPolicy, TenantContext, ToolDef};
 use http::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -38,6 +38,7 @@ pub(crate) struct RegisteredTool {
     pub(crate) description: Option<String>,
     pub(crate) input_schema: Value,
     pub(crate) extension_id: String,
+    pub(crate) approval_policy: ApprovalPolicy,
     pub(crate) tenant_allowlist: Vec<String>,
     pub(crate) api_key_allowlist: Vec<String>,
     pub(crate) route_allowlist: Vec<String>,
@@ -461,6 +462,7 @@ fn build_tool_provider(extension: &ExtensionConfig) -> AnyResult<ToolProvider> {
 #[derive(Debug, Clone)]
 struct ToolProviderConfig {
     extension_id: String,
+    approval_policy: ApprovalPolicy,
     allowed_tools: HashSet<String>,
     tenant_allowlist: Vec<String>,
     api_key_allowlist: Vec<String>,
@@ -471,6 +473,7 @@ impl ToolProviderConfig {
     fn from_extension(extension: &ExtensionConfig) -> Self {
         Self {
             extension_id: extension.id.clone(),
+            approval_policy: extension.approval_policy,
             allowed_tools: extension.permissions.tools.iter().cloned().collect(),
             tenant_allowlist: string_list(&extension.config, "tenant_allowlist"),
             api_key_allowlist: string_list(&extension.config, "api_key_allowlist"),
@@ -490,6 +493,7 @@ impl ToolProviderConfig {
             description: def.description,
             input_schema: def.input_schema,
             extension_id: self.extension_id.clone(),
+            approval_policy: self.approval_policy,
             tenant_allowlist: self.tenant_allowlist.clone(),
             api_key_allowlist: self.api_key_allowlist.clone(),
             route_allowlist: self.route_allowlist.clone(),
@@ -948,6 +952,7 @@ mod tests {
             enabled: true,
             source: "builtin".into(),
             order: 10,
+            approval_policy: ferrogate_core::ApprovalPolicy::Never,
             permissions: ExtensionPermissions {
                 tools: vec!["*".into()],
                 network: vec![],
