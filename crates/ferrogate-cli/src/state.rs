@@ -62,6 +62,7 @@ use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 use redis::Commands;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
@@ -605,6 +606,7 @@ pub(crate) struct AppState {
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
     mcp_manager: Arc<McpManager>,
+    mcp_dispatch_permits: Arc<Semaphore>,
     approvals: ApprovalRegistry,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
@@ -1425,6 +1427,9 @@ impl AppState {
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
+            mcp_dispatch_permits: Arc::new(Semaphore::new(
+                config.reliability.mcp_dispatch_max_concurrency,
+            )),
             approvals: ApprovalRegistry::new(),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
@@ -1471,7 +1476,11 @@ impl AppState {
     }
 
     pub(crate) fn tool_by_name(&self, name: &str) -> Option<RegisteredTool> {
-        self.all_tools().into_iter().find(|tool| tool.name == name)
+        self.extension_registry
+            .all_tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .or_else(|| self.mcp_registered_tool_by_name(name))
     }
 
     pub(crate) fn tool_approvals(&self) -> Vec<ToolApprovalRecord> {
@@ -1587,6 +1596,21 @@ impl AppState {
             .collect()
     }
 
+    fn mcp_registered_tool_by_name(&self, name: &str) -> Option<RegisteredTool> {
+        self.mcp_manager
+            .tool_by_name(name)
+            .map(|tool| RegisteredTool {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+                extension_id: format!("mcp.{}", tool.server_name),
+                approval_policy: tool.approval_policy,
+                tenant_allowlist: Vec::new(),
+                api_key_allowlist: Vec::new(),
+                route_allowlist: Vec::new(),
+            })
+    }
+
     pub(crate) async fn execute_tool(
         &self,
         request: ToolExecutionRequest,
@@ -1628,14 +1652,51 @@ impl AppState {
         }
 
         let started = std::time::Instant::now();
-        let result = self
-            .mcp_manager
-            .execute_tool(McpToolExecutionRequest {
-                name: request.name.clone(),
-                arguments: request.arguments.clone(),
-            })
-            .map_err(tool_error_from_mcp)?;
+        let mcp_manager = Arc::clone(&self.mcp_manager);
+        let dispatch_timeout = self.mcp_dispatch_timeout();
+        let dispatch_permit = Arc::clone(&self.mcp_dispatch_permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                ToolExecutionError::Failed("MCP dispatch permit pool is unavailable".into())
+            })?;
+        let mcp_request = McpToolExecutionRequest {
+            name: request.name.clone(),
+            arguments: request.arguments.clone(),
+        };
+        let result = match tokio::time::timeout(
+            dispatch_timeout,
+            tokio::task::spawn_blocking(move || {
+                let _permit = dispatch_permit;
+                mcp_manager.execute_tool(mcp_request)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result.map_err(tool_error_from_mcp),
+            Ok(Err(error)) => Err(ToolExecutionError::Failed(format!(
+                "MCP dispatch task failed: {error}"
+            ))),
+            Err(_) => Err(ToolExecutionError::Failed(format!(
+                "MCP tool {} timed out after {} seconds",
+                request.name,
+                dispatch_timeout.as_secs()
+            ))),
+        };
         let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.record_tool_billing_event(
+                    &request_id,
+                    &tenant,
+                    &request.name,
+                    latency_ms,
+                    502,
+                );
+                return Err(error);
+            }
+        };
         self.record_tool_billing_event(
             &request_id,
             &tenant,
@@ -2145,6 +2206,10 @@ impl AppState {
                 .provider_dispatch_timeout_secs
                 .unwrap_or(10),
         )
+    }
+
+    pub(crate) fn mcp_dispatch_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.reliability.mcp_dispatch_timeout_secs)
     }
 
     pub(crate) fn provider_dispatch_max_retries(&self) -> u32 {

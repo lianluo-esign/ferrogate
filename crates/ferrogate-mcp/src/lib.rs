@@ -208,7 +208,7 @@ pub struct McpManager {
 
 #[derive(Debug, Default)]
 struct McpManagerState {
-    sessions: HashMap<String, McpSession>,
+    sessions: HashMap<String, Arc<Mutex<McpSession>>>,
 }
 
 #[derive(Debug)]
@@ -241,7 +241,7 @@ impl McpManager {
         for config in configs {
             let mut session = McpSession::new(config.clone());
             session.connect_or_record_error();
-            sessions.insert(config.name.clone(), session);
+            sessions.insert(config.name.clone(), Arc::new(Mutex::new(session)));
         }
         if let Ok(mut inner) = self.inner.lock() {
             inner.sessions = sessions;
@@ -251,7 +251,13 @@ impl McpManager {
     pub fn statuses(&self) -> Vec<McpServerStatus> {
         self.inner
             .lock()
-            .map(|inner| inner.sessions.values().map(McpSession::status).collect())
+            .map(|inner| {
+                inner
+                    .sessions
+                    .values()
+                    .filter_map(|session| session.try_lock().ok().map(|session| session.status()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -262,15 +268,33 @@ impl McpManager {
                 inner
                     .sessions
                     .values()
-                    .flat_map(|session| session.tools.clone())
+                    .filter_map(|session| {
+                        session.try_lock().ok().map(|session| session.tools.clone())
+                    })
+                    .flatten()
                     .collect()
             })
             .unwrap_or_default()
     }
 
+    pub fn tool_by_name(&self, name: &str) -> Option<McpTool> {
+        self.inner.lock().ok().and_then(|inner| {
+            inner.sessions.values().find_map(|session| {
+                session.lock().ok().and_then(|session| {
+                    session.tools.iter().find(|tool| tool.name == name).cloned()
+                })
+            })
+        })
+    }
+
     pub fn health_check_and_reconnect(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            for session in inner.sessions.values_mut() {
+        let sessions = self
+            .inner
+            .lock()
+            .map(|inner| inner.sessions.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for session in sessions {
+            if let Ok(mut session) = session.try_lock() {
                 session.health_check_and_reconnect();
             }
         }
@@ -280,17 +304,22 @@ impl McpManager {
         &self,
         request: McpToolExecutionRequest,
     ) -> Result<McpToolExecutionResult, McpExecutionError> {
-        let mut inner = self.inner.lock().map_err(|_| {
-            McpExecutionError::Unavailable("MCP manager lock is unavailable".into())
-        })?;
         let (server_name, remote_name) = namespaced_tool_parts(&request.name).ok_or_else(|| {
             McpExecutionError::NotFound(format!(
                 "MCP tool {} must use serverName-toolName namespace",
                 request.name
             ))
         })?;
-        let session = inner.sessions.get_mut(server_name).ok_or_else(|| {
-            McpExecutionError::NotFound(format!("MCP server {server_name} is not configured"))
+        let session = {
+            let inner = self.inner.lock().map_err(|_| {
+                McpExecutionError::Unavailable("MCP manager lock is unavailable".into())
+            })?;
+            inner.sessions.get(server_name).cloned().ok_or_else(|| {
+                McpExecutionError::NotFound(format!("MCP server {server_name} is not configured"))
+            })?
+        };
+        let mut session = session.lock().map_err(|_| {
+            McpExecutionError::Unavailable(format!("MCP server {server_name} lock is unavailable"))
         })?;
         session.execute(remote_name, request.arguments)
     }
@@ -926,6 +955,7 @@ mod tests {
             headers: Vec::new(),
             tools_to_execute: Vec::new(),
             tools_to_auto_execute: Vec::new(),
+            approval_policy: ApprovalPolicy::Never,
             tool_include: Vec::new(),
             tool_regex: Vec::new(),
             tls: McpTlsConfig::default(),
@@ -953,6 +983,7 @@ mod tests {
             headers: Vec::new(),
             tools_to_execute: vec!["search".into()],
             tools_to_auto_execute: vec!["search".into()],
+            approval_policy: ApprovalPolicy::Never,
             tool_include: vec!["sea*".into()],
             tool_regex: Vec::new(),
             tls: McpTlsConfig::default(),
@@ -988,5 +1019,62 @@ mod tests {
         assert_eq!(tools[0].name, "search");
         assert_eq!(tools[0].description.as_deref(), Some("Search repos"));
         assert_eq!(tools[0].input_schema["type"], "object");
+    }
+
+    #[test]
+    fn manager_status_and_tools_skip_busy_sessions() {
+        let manager = McpManager::default();
+        let busy = Arc::new(Mutex::new(McpSession::new(test_config("busy"))));
+        let ready = Arc::new(Mutex::new(McpSession::new(test_config("ready"))));
+        {
+            let mut ready_session = ready.lock().unwrap();
+            ready_session.connected = true;
+            ready_session.tools = vec![McpTool {
+                name: "ready-search".into(),
+                server_name: "ready".into(),
+                remote_name: "search".into(),
+                description: Some("Search".into()),
+                input_schema: json!({"type": "object"}),
+                auto_execute: false,
+                approval_policy: ApprovalPolicy::Never,
+            }];
+        }
+        {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.sessions.insert("busy".into(), Arc::clone(&busy));
+            inner.sessions.insert("ready".into(), Arc::clone(&ready));
+        }
+        let _busy_guard = busy.lock().unwrap();
+
+        let tools = manager.tools();
+        let statuses = manager.statuses();
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "ready-search");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "ready");
+    }
+
+    fn test_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            transport: McpTransport::StreamableHttp,
+            url: Some("http://127.0.0.1/mcp".into()),
+            command: None,
+            args: Vec::new(),
+            auth_type: McpAuthType::None,
+            headers: Vec::new(),
+            tools_to_execute: vec!["search".into()],
+            tools_to_auto_execute: Vec::new(),
+            approval_policy: ApprovalPolicy::Never,
+            tool_include: Vec::new(),
+            tool_regex: Vec::new(),
+            tls: McpTlsConfig::default(),
+            timeout_ms: 1000,
+            health_ping_interval_secs: 10,
+            max_reconnect_attempts: 5,
+            min_reconnect_backoff_secs: 1,
+            max_reconnect_backoff_secs: 30,
+        }
     }
 }

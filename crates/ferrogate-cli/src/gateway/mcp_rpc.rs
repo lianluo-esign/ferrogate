@@ -175,19 +175,26 @@ async fn tools_call(
         .map(|(server_name, tool_name)| tool_audit_target(server_name, tool_name))
         .unwrap_or_else(|| request.name.clone());
     let Some(tool) = state.tool_by_name(&request.name) else {
+        let (code, message) = if audit_details.is_some() {
+            (
+                "tool_denied",
+                format!("MCP tool {} is not allowlisted for execution", request.name),
+            )
+        } else {
+            (
+                "tool_not_found",
+                format!("tool {} is not registered", request.name),
+            )
+        };
         state.record_admin_audit_event(audit_event(
             ctx,
             auth,
             "tool.execute",
             audit_target,
             "error",
-            tool_audit_failure_message(None, name, "tool_not_found", "tool is not registered"),
+            tool_audit_failure_message(audit_details.as_ref(), name, code, &message),
         ));
-        return error(
-            id,
-            -32601,
-            format!("tool {} is not registered", request.name),
-        );
+        return error(id, mcp_error_code(code), message);
     };
 
     if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {

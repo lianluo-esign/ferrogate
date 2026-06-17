@@ -775,6 +775,57 @@ fn p3_mcp_gateway_connects_to_stdio_server() {
 }
 
 #[test]
+fn p3_mcp_gateway_times_out_slow_tool_dispatch_and_records_billing() {
+    let (mcp_addr, mcp_handle) = spawn_slow_mcp_server();
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, p3_slow_mcp_config(&gateway_addr, &mcp_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let failed = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp/tool/execute",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"name":"github-search","arguments":{"query":"ferrogate"}}"#,
+    ));
+    assert_eq!(failed["error"]["code"], "tool_execution_failed");
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("timed out after 1 seconds"),
+        "{failed}"
+    );
+
+    let billing = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/billing-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert!(billing["data"].as_array().unwrap().iter().any(|event| {
+        event["provider"] == "mcp"
+            && event["logical_model"] == "mcp_tool:github-search"
+            && event["status_code"] == 502
+    }));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let requests = mcp_handle.join().unwrap();
+    assert!(requests
+        .iter()
+        .any(|request| request.contains("\"tools/call\"")));
+}
+
+#[test]
 fn agentic_lite_non_blocking_hook_failures_are_admin_visible() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
@@ -1098,6 +1149,40 @@ timeout_ms = 3000
     )
 }
 
+fn p3_slow_mcp_config(gateway_addr: &str, mcp_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[reliability]
+mcp_dispatch_timeout_secs = 1
+mcp_dispatch_max_concurrency = 2
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
+id = "tool-client"
+name = "Tool client"
+key = "tool-secret"
+scopes = ["tools.execute"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[mcp_servers]]
+name = "github"
+transport = "streamable_http"
+url = "http://{mcp_addr}/mcp"
+tools_to_execute = ["search"]
+tool_include = ["search"]
+timeout_ms = 5000
+"#
+    )
+}
+
 fn response_json(response: String) -> serde_json::Value {
     let body = response
         .split_once("\r\n\r\n")
@@ -1252,6 +1337,45 @@ fn spawn_mcp_server_with_tool(
                 body
             )
             .unwrap();
+        }
+        requests
+    });
+    (addr, handle)
+}
+
+fn spawn_slow_mcp_server() -> (String, JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while std::time::Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("slow MCP mock accept failed: {error}"),
+            };
+            let request = read_http_request(&mut stream);
+            let body = if request.contains("\"initialize\"") {
+                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"mock-mcp","version":"1.0.0"}}}"#
+            } else if request.contains("\"tools/list\"") {
+                r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search GitHub","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}]}}"#
+            } else {
+                thread::sleep(Duration::from_secs(2));
+                r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"late-result"}]}}"#
+            };
+            requests.push(request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .ok();
         }
         requests
     });

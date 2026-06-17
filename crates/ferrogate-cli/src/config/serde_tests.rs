@@ -51,6 +51,8 @@ fn config_model_supports_serde_roundtrip() {
             provider_circuit_breaker_cooldown_secs: Some(30),
             provider_dispatch_timeout_secs: Some(5),
             provider_dispatch_max_retries: Some(1),
+            mcp_dispatch_timeout_secs: 7,
+            mcp_dispatch_max_concurrency: 4,
             graceful_shutdown_grace_period_secs: Some(3),
             graceful_shutdown_timeout_secs: Some(15),
             graceful_upgrade_pid_file: Some("/tmp/ferrogate.pid".into()),
@@ -127,6 +129,8 @@ fn config_model_supports_serde_roundtrip() {
     );
     assert_eq!(decoded.reliability.provider_dispatch_timeout_secs, Some(5));
     assert_eq!(decoded.reliability.provider_dispatch_max_retries, Some(1));
+    assert_eq!(decoded.reliability.mcp_dispatch_timeout_secs, 7);
+    assert_eq!(decoded.reliability.mcp_dispatch_max_concurrency, 4);
     assert_eq!(
         decoded.reliability.graceful_shutdown_grace_period_secs,
         Some(3)

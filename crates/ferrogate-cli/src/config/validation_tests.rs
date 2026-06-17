@@ -1033,6 +1033,31 @@ fn rejects_zero_provider_dispatch_timeout() {
 }
 
 #[test]
+fn rejects_invalid_mcp_dispatch_limits() {
+    let config = Config {
+        reliability: ReliabilityConfig {
+            mcp_dispatch_timeout_secs: 0,
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.mcp_dispatch_timeout_secs"));
+
+    let config = Config {
+        reliability: ReliabilityConfig {
+            mcp_dispatch_max_concurrency: 0,
+            ..ReliabilityConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field reliability.mcp_dispatch_max_concurrency"));
+}
+
+#[test]
 fn rejects_zero_provider_response_body_max_bytes() {
     let config = Config {
         reliability: ReliabilityConfig {

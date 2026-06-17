@@ -289,6 +289,8 @@ provider_circuit_breaker_cooldown_secs = 30
 provider_dispatch_timeout_secs = 10
 provider_dispatch_max_retries = 1
 provider_response_body_max_bytes = 16777216
+mcp_dispatch_timeout_secs = 30
+mcp_dispatch_max_concurrency = 32
 graceful_shutdown_grace_period_secs = 3
 graceful_shutdown_timeout_secs = 15
 
@@ -402,6 +404,13 @@ is deny-by-default: every server must declare `tools_to_execute`, and
 `POST /v1/mcp/tool/execute` still runs through gateway auth, policy, billing,
 and observability. Policy targets use `models = ["mcp_tool:github-search"]` and
 `providers = ["mcp:github"]`.
+
+MCP tool execution is isolated from the async request path: FerroGate dispatches
+upstream MCP calls through a blocking pool, limits concurrent MCP dispatches
+with `reliability.mcp_dispatch_max_concurrency`, and fails closed after
+`reliability.mcp_dispatch_timeout_secs`. A slow or stuck MCP server does not
+hold the global MCP manager lock or block status/tool listing for other MCP
+servers.
 
 MCP clients can also connect directly to FerroGate's native JSON-RPC endpoint at
 `POST /v1/mcp` using the same FerroGate API key. The first implementation

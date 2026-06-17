@@ -628,6 +628,10 @@ pub(crate) struct ReliabilityConfig {
     pub(crate) provider_response_body_max_bytes: Option<usize>,
     #[serde(default = "default_tool_approval_timeout_secs")]
     pub(crate) tool_approval_timeout_secs: u64,
+    #[serde(default = "default_mcp_dispatch_timeout_secs")]
+    pub(crate) mcp_dispatch_timeout_secs: u64,
+    #[serde(default = "default_mcp_dispatch_max_concurrency")]
+    pub(crate) mcp_dispatch_max_concurrency: usize,
     #[serde(default)]
     pub(crate) graceful_shutdown_grace_period_secs: Option<u64>,
     #[serde(default)]
@@ -845,6 +849,14 @@ fn default_tool_approval_timeout_secs() -> u64 {
     30
 }
 
+fn default_mcp_dispatch_timeout_secs() -> u64 {
+    30
+}
+
+fn default_mcp_dispatch_max_concurrency() -> usize {
+    32
+}
+
 fn default_request_log_retention_records() -> usize {
     10_000
 }
@@ -938,6 +950,8 @@ impl Default for ReliabilityConfig {
             provider_dispatch_max_retries: None,
             provider_response_body_max_bytes: None,
             tool_approval_timeout_secs: default_tool_approval_timeout_secs(),
+            mcp_dispatch_timeout_secs: default_mcp_dispatch_timeout_secs(),
+            mcp_dispatch_max_concurrency: default_mcp_dispatch_max_concurrency(),
             graceful_shutdown_grace_period_secs: None,
             graceful_shutdown_timeout_secs: None,
             graceful_upgrade_pid_file: None,

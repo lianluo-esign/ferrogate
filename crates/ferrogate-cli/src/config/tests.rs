@@ -61,6 +61,8 @@ provider_circuit_breaker_failure_threshold = 2
 provider_circuit_breaker_cooldown_secs = 30
 provider_dispatch_timeout_secs = 5
 provider_dispatch_max_retries = 1
+mcp_dispatch_timeout_secs = 7
+mcp_dispatch_max_concurrency = 4
 graceful_shutdown_grace_period_secs = 3
 graceful_shutdown_timeout_secs = 15
 graceful_upgrade_pid_file = "/tmp/ferrogate.pid"
@@ -178,6 +180,8 @@ timeout_ms = 30000
     );
     assert_eq!(config.reliability.provider_dispatch_timeout_secs, Some(5));
     assert_eq!(config.reliability.provider_dispatch_max_retries, Some(1));
+    assert_eq!(config.reliability.mcp_dispatch_timeout_secs, 7);
+    assert_eq!(config.reliability.mcp_dispatch_max_concurrency, 4);
     assert_eq!(
         config.reliability.graceful_shutdown_grace_period_secs,
         Some(3)

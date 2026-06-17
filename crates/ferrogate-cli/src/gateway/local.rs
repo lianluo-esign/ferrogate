@@ -1531,6 +1531,20 @@ impl FerroGateway {
             });
 
         let Some(tool) = state.tool_by_name(&request.name) else {
+            let (status, code, message) =
+                if backend == ToolExecuteBackend::Mcp && mcp_audit_details.is_some() {
+                    (
+                        StatusCode::FORBIDDEN,
+                        "tool_denied",
+                        format!("MCP tool {} is not allowlisted for execution", request.name),
+                    )
+                } else {
+                    (
+                        StatusCode::NOT_FOUND,
+                        "tool_not_found",
+                        format!("tool {} is not registered", request.name),
+                    )
+                };
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                 ctx,
                 &auth,
@@ -1540,18 +1554,11 @@ impl FerroGateway {
                 mcp_rpc::tool_audit_failure_message(
                     mcp_audit_details.as_ref(),
                     &request.name,
-                    "tool_not_found",
-                    "tool is not registered",
+                    code,
+                    &message,
                 ),
             ));
-            return write_json_error(
-                session,
-                StatusCode::NOT_FOUND,
-                "tool_not_found",
-                format!("tool {} is not registered", request.name),
-                &ctx.request_id,
-            )
-            .await;
+            return write_json_error(session, status, code, message, &ctx.request_id).await;
         };
 
         if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
