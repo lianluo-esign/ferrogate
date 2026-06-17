@@ -31,7 +31,7 @@ use crate::{
         HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
         ReadinessResponse,
     },
-    state::AdminAuditEventDraft,
+    state::{AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord},
 };
 use ferrogate_providers::provider_compatibility_kind;
 
@@ -1796,6 +1796,41 @@ impl FerroGateway {
                 let page = state.request_logs_page(state.admin_pagination(query));
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_request_log_export(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let records =
+                    state.request_log_export_records(RequestLogExportFilter::from_query(query));
+                let body = render_request_log_export_jsonl(&records);
+                write_raw_response(
+                    session,
+                    StatusCode::OK,
+                    "application/x-ndjson; charset=utf-8",
+                    Bytes::from(body),
+                    &ctx.request_id,
+                )
+                .await
             }
             Err(error) => {
                 write_json_error(
@@ -4047,6 +4082,17 @@ fn parse_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
         .split('&')
         .filter_map(|part| part.split_once('='))
         .find_map(|(name, value)| (name == key).then_some(value))
+}
+
+fn render_request_log_export_jsonl(records: &[RequestLogExportRecord]) -> String {
+    let mut output = String::new();
+    for record in records {
+        if let Ok(line) = serde_json::to_string(record) {
+            output.push_str(&line);
+            output.push('\n');
+        }
+    }
+    output
 }
 
 fn admin_audit_event_draft_for_action(

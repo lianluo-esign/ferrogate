@@ -128,6 +128,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/request-log-exports" {
+            let headers = req.headers.clone();
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_request_log_export(session, ctx, &headers, query.as_deref())
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/audit-events" {
             let headers = req.headers.clone();
             let query = req.uri.query().map(str::to_string);

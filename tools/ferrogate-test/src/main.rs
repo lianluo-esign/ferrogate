@@ -700,7 +700,7 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/v1/chat/completions",
         &[CLIENT_AUTH, JSON_CONTENT],
-        r#"{"model":"fast-chat","messages":[{"role":"user","content":"gateway coverage"}]}"#,
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"gateway coverage client-secret"}]}"#,
         200,
         |body| {
             assert_eq!(body["object"], "chat.completion");
@@ -802,6 +802,40 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert!(raw.contains("openai.chat.completions"));
             assert!(raw.contains("openai.responses"));
             assert_secret_redacted(&raw);
+            Ok(())
+        },
+    )?;
+    case.expect_text(
+        "GET",
+        "/admin/v1/request-log-exports?organization_id=org_demo&project_id=project_gateway&model=fast-chat&provider=openai&status=200&limit=10",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let records = parse_jsonl(body)?;
+            assert!(!records.is_empty());
+            let chat = records
+                .iter()
+                .find(|record| record["route"] == "openai.chat.completions")
+                .context("missing chat completion export record")?;
+            assert_eq!(chat["object"], "request_log_export");
+            assert_eq!(chat["tenant"]["organization_id"], "org_demo");
+            assert_eq!(chat["tenant"]["project_id"], "project_gateway");
+            assert_eq!(chat["logical_model"], "fast-chat");
+            assert_eq!(chat["provider"], "openai");
+            assert_eq!(chat["provider_model"], "gpt-4o-mini");
+            assert_eq!(chat["status_code"], 200);
+            assert_eq!(chat["usage"]["total_tokens"], 2);
+            assert_eq!(chat["prompt_recorded"], true);
+            assert_eq!(chat["response_recorded"], true);
+            assert!(chat["prompt_body"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("[REDACTED]")));
+            assert!(records
+                .iter()
+                .any(|record| record["route"] == "openai.responses"));
+            assert_secret_redacted(body);
+            assert!(!body.contains("provider-secret"));
             Ok(())
         },
     )?;
@@ -1426,6 +1460,7 @@ counter_backend = "local"
 
 [telemetry]
 service_name = "ferrogate-test"
+log_bodies = true
 
 [reliability]
 mcp_dispatch_timeout_secs = 1
@@ -1472,6 +1507,7 @@ scopes = ["models.read", "chat.completions", "responses.create", "admin.read", "
 allowed_models = ["fast-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
+log_bodies = true
 
 [[api_keys]]
 id = "admin"
@@ -1861,6 +1897,16 @@ fn http_request_body(request: &str) -> Result<&str> {
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .ok_or_else(|| anyhow!("HTTP request body separator not found"))
+}
+
+fn parse_jsonl(body: &str) -> Result<Vec<Value>> {
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .with_context(|| format!("failed to parse JSONL line: {line}"))
+        })
+        .collect()
 }
 
 fn list_contains(body: &Value, field: &str, expected: &str) -> bool {

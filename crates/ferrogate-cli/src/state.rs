@@ -846,6 +846,146 @@ impl GuardrailMatch {
     }
 }
 
+impl RequestLogExportFilter {
+    const DEFAULT_LIMIT: usize = 100;
+    const MAX_LIMIT: usize = 1_000;
+
+    pub(crate) fn from_query(query: Option<&str>) -> Self {
+        let mut filter = Self {
+            organization_id: None,
+            project_id: None,
+            logical_model: None,
+            provider: None,
+            status: None,
+            since_unix: None,
+            until_unix: None,
+            limit: Self::DEFAULT_LIMIT,
+        };
+        let Some(query) = query else {
+            return filter;
+        };
+        for (name, value) in query_pairs(query) {
+            match name.as_str() {
+                "organization_id" | "tenant" => filter.organization_id = non_empty(value),
+                "project_id" | "project" => filter.project_id = non_empty(value),
+                "model" | "logical_model" => filter.logical_model = non_empty(value),
+                "provider" => filter.provider = non_empty(value),
+                "status" | "status_code" => {
+                    filter.status = value
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|status| (100..=599).contains(status))
+                }
+                "since" | "since_unix" => filter.since_unix = value.parse::<u64>().ok(),
+                "until" | "until_unix" => filter.until_unix = value.parse::<u64>().ok(),
+                "limit" => {
+                    filter.limit = value
+                        .parse::<usize>()
+                        .ok()
+                        .map(|limit| limit.clamp(1, Self::MAX_LIMIT))
+                        .unwrap_or(filter.limit)
+                }
+                _ => {}
+            }
+        }
+        filter
+    }
+
+    fn matches(&self, log: &StoredRequestLog) -> bool {
+        if self
+            .organization_id
+            .as_ref()
+            .is_some_and(|expected| log.tenant.organization_id.as_ref() != Some(expected))
+        {
+            return false;
+        }
+        if self
+            .project_id
+            .as_ref()
+            .is_some_and(|expected| log.tenant.project_id.as_ref() != Some(expected))
+        {
+            return false;
+        }
+        if self
+            .logical_model
+            .as_ref()
+            .is_some_and(|expected| log.logical_model.as_ref() != Some(expected))
+        {
+            return false;
+        }
+        if self
+            .provider
+            .as_ref()
+            .is_some_and(|expected| log.provider.as_ref() != Some(expected))
+        {
+            return false;
+        }
+        if self
+            .status
+            .is_some_and(|expected| log.status_code != expected)
+        {
+            return false;
+        }
+        if self.since_unix.is_some_and(|since| {
+            log.completed_at_unix
+                .or(log.started_at_unix)
+                .is_some_and(|timestamp| timestamp < since)
+        }) {
+            return false;
+        }
+        if self.until_unix.is_some_and(|until| {
+            log.started_at_unix
+                .or(log.completed_at_unix)
+                .is_some_and(|timestamp| timestamp > until)
+        }) {
+            return false;
+        }
+        true
+    }
+}
+
+impl RequestLogExportRecord {
+    fn from_log(log: StoredRequestLog, usage: Option<BillingTokenUsage>) -> Self {
+        let latency_ms = log
+            .started_at_unix
+            .zip(log.completed_at_unix)
+            .and_then(|(started, completed)| completed.checked_sub(started))
+            .map(|seconds| seconds.saturating_mul(1_000));
+        Self {
+            object: "request_log_export",
+            request_id: log.request_id,
+            trace_id: log.trace_id,
+            tenant: log.tenant,
+            route: log.route,
+            logical_model: log.logical_model,
+            provider: log.provider,
+            provider_model: log.provider_model,
+            status_code: log.status_code,
+            error_code: log.error_code,
+            usage,
+            latency_ms,
+            prompt_recorded: log.prompt_recorded,
+            response_recorded: log.response_recorded,
+            prompt_body: log.prompt_recorded.then_some(log.prompt_body).flatten(),
+            response_body: log.response_recorded.then_some(log.response_body).flatten(),
+            started_at_unix: log.started_at_unix,
+            completed_at_unix: log.completed_at_unix,
+        }
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn query_pairs(query: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    query.split('&').filter_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        Some((name.to_string(), value.to_string()))
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AdminPagination {
     pub(crate) offset: usize,
@@ -858,6 +998,40 @@ pub(crate) struct AdminPage<T> {
     pub(crate) total: usize,
     pub(crate) offset: usize,
     pub(crate) limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequestLogExportFilter {
+    pub(crate) organization_id: Option<String>,
+    pub(crate) project_id: Option<String>,
+    pub(crate) logical_model: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) status: Option<u16>,
+    pub(crate) since_unix: Option<u64>,
+    pub(crate) until_unix: Option<u64>,
+    pub(crate) limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RequestLogExportRecord {
+    pub(crate) object: &'static str,
+    pub(crate) request_id: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) route: Option<String>,
+    pub(crate) logical_model: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) provider_model: Option<String>,
+    pub(crate) status_code: u16,
+    pub(crate) error_code: Option<String>,
+    pub(crate) usage: Option<BillingTokenUsage>,
+    pub(crate) latency_ms: Option<u64>,
+    pub(crate) prompt_recorded: bool,
+    pub(crate) response_recorded: bool,
+    pub(crate) prompt_body: Option<String>,
+    pub(crate) response_body: Option<String>,
+    pub(crate) started_at_unix: Option<u64>,
+    pub(crate) completed_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -2640,6 +2814,7 @@ impl AppState {
     pub(crate) fn record_request_log(&self, mut log: StoredRequestLog) {
         log.cluster_id = Some(self.cluster_identity.cluster_id.clone());
         log.node_id = Some(self.cluster_identity.node_id.clone());
+        self.sanitize_request_log_bodies(&mut log);
         self.record_request_metrics(&log);
         if let Ok(mut metrics) = self.provider_routing_metrics.lock() {
             metrics.record_request_log(&log);
@@ -2647,6 +2822,51 @@ impl AppState {
         if let Ok(mut logs) = self.repositories.request_logs.lock() {
             logs.append(log);
         }
+    }
+
+    fn sanitize_request_log_bodies(&self, log: &mut StoredRequestLog) {
+        if let Some(body) = &mut log.prompt_body {
+            *body = self.redact_configured_secrets(body);
+        }
+        if let Some(body) = &mut log.response_body {
+            *body = self.redact_configured_secrets(body);
+        }
+    }
+
+    fn redact_configured_secrets(&self, text: &str) -> String {
+        let mut redacted = text.to_string();
+        for secret in self.configured_secret_values() {
+            redacted = redacted.replace(&secret, "[REDACTED]");
+        }
+        redacted
+    }
+
+    fn configured_secret_values(&self) -> Vec<String> {
+        let mut secrets = Vec::new();
+        for key in &self.config.api_keys {
+            if let Some(value) = key.key.as_ref().filter(|value| !value.is_empty()) {
+                secrets.push(value.clone());
+            }
+            if let Some(env_name) = key.key_env.as_ref() {
+                if let Ok(value) = env::var(env_name) {
+                    if !value.is_empty() {
+                        secrets.push(value);
+                    }
+                }
+            }
+        }
+        for provider in &self.config.providers {
+            if let Some(env_name) = provider.api_key_env.as_ref() {
+                if let Ok(value) = env::var(env_name) {
+                    if !value.is_empty() {
+                        secrets.push(value);
+                    }
+                }
+            }
+        }
+        secrets.sort();
+        secrets.dedup();
+        secrets
     }
 
     fn record_request_metrics(&self, log: &StoredRequestLog) {
@@ -2877,6 +3097,33 @@ impl AppState {
                 offset: pagination.offset,
                 limit: pagination.limit,
             })
+    }
+
+    pub(crate) fn request_log_export_records(
+        &self,
+        filter: RequestLogExportFilter,
+    ) -> Vec<RequestLogExportRecord> {
+        let usage_by_request_id = self
+            .metering_events
+            .list()
+            .into_iter()
+            .map(|event| (event.request_id, event.usage))
+            .collect::<HashMap<_, _>>();
+        self.repositories
+            .request_logs
+            .lock()
+            .map(|logs| {
+                logs.list()
+                    .into_iter()
+                    .filter(|log| filter.matches(log))
+                    .take(filter.limit)
+                    .map(|log| {
+                        let usage = usage_by_request_id.get(&log.request_id).cloned();
+                        RequestLogExportRecord::from_log(log, usage)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn audit_events_page(
@@ -4840,6 +5087,111 @@ mod tests {
         assert!(!logs[0].response_recorded);
         assert!(logs[0].prompt_body.is_none());
         assert!(logs[0].response_body.is_none());
+    }
+
+    #[test]
+    fn request_log_export_filters_records_and_redacts_configured_secrets() {
+        let state = AppState::new(Config {
+            api_keys: vec![crate::config::ApiKey {
+                id: "key_dev".into(),
+                name: "Development key".into(),
+                key_env: None,
+                key: Some("client-secret".into()),
+                key_hash: None,
+                enabled: true,
+                scopes: vec!["chat.completions".into()],
+                allowed_models: vec![],
+                denied_models: vec![],
+                allowed_providers: vec![],
+                denied_providers: vec![],
+                organization_id: Some("org".into()),
+                team_id: None,
+                project_id: Some("project".into()),
+                user_id: None,
+                monthly_token_budget: None,
+                request_limit_per_minute: None,
+                expires_at_unix: None,
+                log_bodies: Some(true),
+                cache_enabled: None,
+            }],
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            ..Config::default()
+        });
+        state.record_request_log(StoredRequestLog {
+            request_id: "fg-export-1".into(),
+            trace_id: Some("trace-export".into()),
+            cluster_id: None,
+            node_id: None,
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key_dev".into()),
+                ..ferrogate_core::TenantContext::default()
+            },
+            route: Some("openai.chat.completions".into()),
+            provider: Some("openai".into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: true,
+            response_recorded: true,
+            prompt_body: Some(r#"{"input":"client-secret prompt"}"#.into()),
+            response_body: Some(r#"{"output":"ok"}"#.into()),
+            cache_status: None,
+            started_at_unix: Some(10),
+            completed_at_unix: Some(11),
+        });
+        state.record_request_log(StoredRequestLog {
+            request_id: "fg-export-2".into(),
+            trace_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some("other".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key_dev".into()),
+                ..ferrogate_core::TenantContext::default()
+            },
+            route: Some("openai.responses".into()),
+            provider: Some("openai".into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: 500,
+            error_code: Some("provider_error".into()),
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: Some("must not export".into()),
+            response_body: Some("must not export".into()),
+            cache_status: None,
+            started_at_unix: Some(12),
+            completed_at_unix: Some(13),
+        });
+
+        let records = state.request_log_export_records(RequestLogExportFilter::from_query(Some(
+            "organization_id=org&project_id=project&model=fast-chat&provider=openai&status=200&since=10&until=11&limit=10",
+        )));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].request_id, "fg-export-1");
+        assert_eq!(records[0].provider.as_deref(), Some("openai"));
+        assert_eq!(records[0].logical_model.as_deref(), Some("fast-chat"));
+        let encoded = serde_json::to_string(&records[0]).unwrap();
+        assert!(encoded.contains("[REDACTED] prompt"));
+        assert!(!encoded.contains("client-secret"));
+        assert!(!encoded.contains("must not export"));
     }
 
     #[test]

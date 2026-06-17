@@ -1145,6 +1145,105 @@
         }
       }
     },
+    "/admin/v1/request-log-exports": {
+      "get": {
+        "operationId": "exportAdminRequestLogsJsonl",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Export retained request logs as redacted JSONL for offline evaluation workflows.",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newline-delimited JSON request-log export records. Prompt and response bodies are included only when body recording was explicitly enabled and configured secrets have been redacted.",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "contentMediaType": "application/x-ndjson"
+                },
+                "examples": {
+                  "record": {
+                    "summary": "One JSONL record",
+                    "value": "{\"object\":\"request_log_export\",\"request_id\":\"fg-example\",\"logical_model\":\"fast-chat\",\"provider\":\"openai\",\"status_code\":200}\n"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/billing-events": {
       "get": {
         "operationId": "listAdminBillingEventsCompat",
@@ -4303,6 +4402,120 @@
       },
       "RequestLogList": {
         "$ref": "#/components/schemas/PaginatedList_RequestLog"
+      },
+      "RequestLogExportRecord": {
+        "type": "object",
+        "required": [
+          "object",
+          "request_id",
+          "tenant",
+          "status_code",
+          "prompt_recorded",
+          "response_recorded"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "request_log_export"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logical_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TokenUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "prompt_recorded": {
+            "type": "boolean"
+          },
+          "response_recorded": {
+            "type": "boolean"
+          },
+          "prompt_body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "completed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "UsageAggregateList": {
         "$ref": "#/components/schemas/AdminList_StoredUsageAggregate"
