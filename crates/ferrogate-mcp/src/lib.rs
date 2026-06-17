@@ -16,7 +16,8 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Arc, Mutex},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result as AnyResult};
@@ -206,6 +207,14 @@ pub struct McpManager {
     inner: Arc<Mutex<McpManagerState>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct McpDispatchCleanup {
+    server_name: String,
+    tool_name: String,
+    session: Arc<Mutex<McpSession>>,
+    stdio_child: Arc<Mutex<Child>>,
+}
+
 #[derive(Debug, Default)]
 struct McpManagerState {
     sessions: HashMap<String, Arc<Mutex<McpSession>>>,
@@ -322,6 +331,52 @@ impl McpManager {
             McpExecutionError::Unavailable(format!("MCP server {server_name} lock is unavailable"))
         })?;
         session.execute(remote_name, request.arguments)
+    }
+
+    pub fn dispatch_cleanup_handle(&self, namespaced_tool: &str) -> Option<McpDispatchCleanup> {
+        let (server_name, tool_name) = namespaced_tool_parts(namespaced_tool)?;
+        let session = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.sessions.get(server_name).cloned())?;
+        let stdio_child = session
+            .try_lock()
+            .ok()
+            .and_then(|session| session.client.as_ref().and_then(McpClient::stdio_child));
+        let stdio_child = stdio_child?;
+        Some(McpDispatchCleanup {
+            server_name: server_name.to_string(),
+            tool_name: tool_name.to_string(),
+            session,
+            stdio_child,
+        })
+    }
+}
+
+impl McpDispatchCleanup {
+    pub fn cleanup_after_timeout(&self, timeout: Duration) -> bool {
+        if let Ok(mut child) = self.stdio_child.lock() {
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
+        let message = format!(
+            "MCP tool {}-{} timed out after {} seconds; session cleanup requested",
+            self.server_name,
+            self.tool_name,
+            timeout.as_secs()
+        );
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Ok(mut session) = self.session.try_lock() {
+                session.mark_unavailable(message);
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -469,6 +524,13 @@ impl McpSession {
             }
         }
     }
+
+    fn mark_unavailable(&mut self, message: String) {
+        self.connected = false;
+        self.client = None;
+        self.tools.clear();
+        self.last_error = Some(message);
+    }
 }
 
 impl McpClient {
@@ -501,6 +563,13 @@ impl McpClient {
         match self {
             Self::Http(client) => client.ping(),
             Self::Stdio(client) => client.ping(),
+        }
+    }
+
+    fn stdio_child(&self) -> Option<Arc<Mutex<Child>>> {
+        match self {
+            Self::Http(_) => None,
+            Self::Stdio(client) => Some(Arc::clone(&client.child)),
         }
     }
 }
@@ -589,7 +658,7 @@ impl HttpMcpClient {
 
 #[derive(Debug)]
 struct StdioMcpClient {
-    child: Child,
+    child: Arc<Mutex<Child>>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
@@ -617,7 +686,7 @@ impl StdioMcpClient {
             .take()
             .ok_or_else(|| anyhow::anyhow!("MCP stdio stdout unavailable"))?;
         Ok(Self {
-            child,
+            child: Arc::new(Mutex::new(child)),
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
@@ -693,7 +762,9 @@ impl StdioMcpClient {
 
 impl Drop for StdioMcpClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
     }
 }
 
@@ -1055,6 +1126,67 @@ mod tests {
         assert_eq!(statuses[0].name, "ready");
     }
 
+    #[test]
+    fn timeout_cleanup_kills_stdio_child_and_marks_session_degraded() {
+        let manager = McpManager::default();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let child = Arc::new(Mutex::new(child));
+        let session = Arc::new(Mutex::new(McpSession {
+            config: test_config("local"),
+            tools: vec![McpTool {
+                name: "local-search".into(),
+                server_name: "local".into(),
+                remote_name: "search".into(),
+                description: Some("Search".into()),
+                input_schema: json!({"type": "object"}),
+                auto_execute: false,
+                approval_policy: ApprovalPolicy::Never,
+            }],
+            client: Some(McpClient::Stdio(StdioMcpClient {
+                child: Arc::clone(&child),
+                stdin,
+                stdout: BufReader::new(stdout),
+                next_id: 1,
+            })),
+            connected: true,
+            last_error: None,
+            reconnect_attempts: 0,
+            last_connected_at_unix: Some(1),
+            next_reconnect_backoff_secs: 1,
+        }));
+        {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.sessions.insert("local".into(), Arc::clone(&session));
+        }
+
+        let cleanup = manager.dispatch_cleanup_handle("local-search").unwrap();
+        assert!(cleanup.cleanup_after_timeout(Duration::from_secs(1)));
+
+        let mut child = child.lock().unwrap();
+        let status = wait_for_child_exit(&mut child)
+            .expect("stdio child should be killed by timeout cleanup");
+        assert!(!status.success());
+        drop(child);
+
+        let status = manager.statuses().pop().unwrap();
+        assert_eq!(status.name, "local");
+        assert_eq!(status.connected, false);
+        assert_eq!(status.health, "degraded");
+        assert_eq!(status.tools, 0);
+        assert!(status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("timed out after 1 seconds")));
+    }
+
     fn test_config(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.into(),
@@ -1076,5 +1208,16 @@ mod tests {
             min_reconnect_backoff_secs: 1,
             max_reconnect_backoff_secs: 30,
         }
+    }
+
+    fn wait_for_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        None
     }
 }

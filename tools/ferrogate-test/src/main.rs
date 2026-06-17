@@ -844,13 +844,8 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
         200,
         |body| {
-            assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 1);
-            assert_eq!(body["result"]["tools"][0]["name"], "http-search");
-            assert_eq!(
-                body["result"]["tools"][0]["description"],
-                "Search the harness MCP upstream"
-            );
-            assert_eq!(body["result"]["tools"][0]["inputSchema"]["type"], "object");
+            assert_mcp_tool_present(&body, "http-search", "Search the harness MCP upstream")?;
+            assert_mcp_tool_present(&body, "stdio-search", "Blocking stdio search")?;
             Ok(())
         },
     )?;
@@ -884,8 +879,56 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     case.expect_mcp_json(
         "POST",
         "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"stdio-search","arguments":{"query":"blocked"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["jsonrpc"], "2.0");
+            assert_eq!(body["id"], 5);
+            assert_eq!(body["error"]["code"], -32000);
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("timed out after 1 seconds")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/mcp-servers",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let stdio = admin_list_item(&body, "name", "stdio")
+                .context("stdio MCP server status missing")?;
+            assert_eq!(stdio["transport"], "stdio");
+            assert_eq!(stdio["health"], "ok");
+            assert_eq!(stdio["connected"], true);
+            assert!(stdio["tools"].as_u64().is_some_and(|tools| tools >= 1));
+            assert!(stdio["reconnect_attempts"]
+                .as_u64()
+                .is_some_and(|attempts| attempts >= 1));
+            assert!(stdio["last_connected_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}"#,
+        200,
+        |body| {
+            assert_mcp_tool_present(&body, "http-search", "Search the harness MCP upstream")?;
+            assert_mcp_tool_present(&body, "stdio-search", "Blocking stdio search")?;
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
         &[JSON_CONTENT],
-        r#"{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}"#,
         401,
         |body| {
             assert_eq!(body["error"]["code"], "missing_api_key");
@@ -1050,9 +1093,11 @@ impl LocalHarness {
         let (provider_addr, provider) =
             spawn_local_provider_upstream(expected_provider_requests).context("start provider")?;
         let (mcp_addr, mcp_server) = spawn_mock_mcp_server().context("start mcp provider")?;
+        let dir = tempfile::tempdir()?;
+        let stdio_mcp_path = dir.path().join("blocking-stdio-mcp.py");
+        std::fs::write(&stdio_mcp_path, blocking_stdio_mcp_script())?;
         let observability =
             spawn_mock_otlp_server().context("start observability provider mock")?;
-        let dir = tempfile::tempdir()?;
         let config_path = dir.path().join("ferrogate.toml");
         std::fs::write(
             &config_path,
@@ -1060,6 +1105,7 @@ impl LocalHarness {
                 &gateway_addr,
                 &provider_addr,
                 &mcp_addr,
+                &stdio_mcp_path,
                 billing.as_ref(),
                 Some(&observability),
             ),
@@ -1326,6 +1372,7 @@ fn local_gateway_config(
     gateway_addr: &str,
     provider_addr: &str,
     mcp_addr: &str,
+    stdio_mcp_path: &Path,
     billing: Option<&MockBillingServer>,
     observability: Option<&MockOtlpServer>,
 ) -> String {
@@ -1380,6 +1427,10 @@ counter_backend = "local"
 [telemetry]
 service_name = "ferrogate-test"
 
+[reliability]
+mcp_dispatch_timeout_secs = 1
+mcp_dispatch_max_concurrency = 4
+
 [[providers]]
 name = "openai"
 kind = "openai"
@@ -1390,6 +1441,16 @@ api_key_env = "FERROGATE_PROVIDER_SECRET"
 name = "http"
 transport = "streamable_http"
 url = "http://{mcp_addr}/mcp"
+tools_to_execute = ["search"]
+tools_to_auto_execute = ["search"]
+approval_policy = "never"
+timeout_ms = 3000
+
+[[mcp_servers]]
+name = "stdio"
+transport = "stdio"
+command = "python3"
+args = [{stdio_mcp_path}]
 tools_to_execute = ["search"]
 tools_to_auto_execute = ["search"]
 approval_policy = "never"
@@ -1425,8 +1486,49 @@ revision = 1
 enabled = true
 api_key_ids = ["client"]
 cache_enabled = false
-"#
+"#,
+        stdio_mcp_path = toml_basic_string(&stdio_mcp_path.to_string_lossy())
     )
+}
+
+fn toml_basic_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn blocking_stdio_mcp_script() -> &'static str {
+    r#"import json
+import sys
+import time
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    response = {"jsonrpc": "2.0", "id": request.get("id")}
+    if method == "initialize":
+        response["result"] = {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "blocking-stdio", "version": "1.0.0"},
+        }
+    elif method == "tools/list":
+        response["result"] = {
+            "tools": [
+                {
+                    "name": "search",
+                    "description": "Blocking stdio search",
+                    "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                }
+            ]
+        }
+    elif method == "tools/call":
+        time.sleep(60)
+        continue
+    elif method == "ping":
+        response["result"] = {}
+    else:
+        response["error"] = {"code": -32601, "message": "unsupported method"}
+    print(json.dumps(response), flush=True)
+"#
 }
 
 fn auth_service_config() -> String {
@@ -1765,6 +1867,25 @@ fn list_contains(body: &Value, field: &str, expected: &str) -> bool {
     body.get("data")
         .and_then(Value::as_array)
         .is_some_and(|items| items.iter().any(|item| item[field] == expected))
+}
+
+fn admin_list_item<'a>(body: &'a Value, field: &str, expected: &str) -> Option<&'a Value> {
+    body.get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| items.iter().find(|item| item[field] == expected))
+}
+
+fn assert_mcp_tool_present(body: &Value, name: &str, description: &str) -> Result<()> {
+    let tools = body["result"]["tools"]
+        .as_array()
+        .context("MCP tools/list result must contain a tools array")?;
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .with_context(|| format!("MCP tool {name} missing from tools/list response: {body}"))?;
+    assert_eq!(tool["description"], description);
+    assert_eq!(tool["inputSchema"]["type"], "object");
+    Ok(())
 }
 
 fn array_contains(body: &Value, array_field: &str, item_field: &str, expected: &str) -> bool {

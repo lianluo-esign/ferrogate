@@ -1654,6 +1654,7 @@ impl AppState {
         let started = std::time::Instant::now();
         let mcp_manager = Arc::clone(&self.mcp_manager);
         let dispatch_timeout = self.mcp_dispatch_timeout();
+        let cleanup_handle = mcp_manager.dispatch_cleanup_handle(&request.name);
         let dispatch_permit = Arc::clone(&self.mcp_dispatch_permits)
             .acquire_owned()
             .await
@@ -1677,11 +1678,16 @@ impl AppState {
             Ok(Err(error)) => Err(ToolExecutionError::Failed(format!(
                 "MCP dispatch task failed: {error}"
             ))),
-            Err(_) => Err(ToolExecutionError::Failed(format!(
-                "MCP tool {} timed out after {} seconds",
-                request.name,
-                dispatch_timeout.as_secs()
-            ))),
+            Err(_) => {
+                if let Some(cleanup_handle) = cleanup_handle {
+                    cleanup_handle.cleanup_after_timeout(dispatch_timeout);
+                }
+                Err(ToolExecutionError::Failed(format!(
+                    "MCP tool {} timed out after {} seconds",
+                    request.name,
+                    dispatch_timeout.as_secs()
+                )))
+            }
         };
         let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let result = match result {
