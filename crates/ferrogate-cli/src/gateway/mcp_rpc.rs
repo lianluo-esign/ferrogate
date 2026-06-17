@@ -57,6 +57,9 @@ pub(super) async fn handle_request(
     auth: &AuthContext,
     rpc: McpJsonRpcRequest,
 ) -> McpJsonRpcResponse {
+    if rpc.id.is_none() {
+        return result(None, json!({}));
+    }
     match rpc.method.as_str() {
         "initialize" => result(rpc.id, initialize_result()),
         "ping" => result(rpc.id, json!({})),
@@ -103,6 +106,7 @@ fn initialize_result() -> Value {
                 "listChanged": false
             }
         },
+        "instructions": "Use FerroGate as a governed MCP gateway. Follow the server's auth, policy, approval, and billing rules for all tool calls.",
         "serverInfo": {
             "name": "ferrogate",
             "version": env!("CARGO_PKG_VERSION")

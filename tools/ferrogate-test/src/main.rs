@@ -809,6 +809,90 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         assert!(body.contains("ferrogate_request_logs_total"));
         Ok(())
     })?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ferrogate-test","version":"1.0.0"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["jsonrpc"], "2.0");
+            assert_eq!(body["id"], 1);
+            assert_eq!(body["result"]["protocolVersion"], "2025-06-18");
+            assert_eq!(body["result"]["serverInfo"]["name"], "ferrogate");
+            assert!(body["result"]["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("governed MCP gateway")));
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        200,
+        |body| {
+            assert_eq!(body["jsonrpc"], "2.0");
+            assert_eq!(body["result"], serde_json::json!({}));
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(body["result"]["tools"][0]["name"], "http-search");
+            assert_eq!(
+                body["result"]["tools"][0]["description"],
+                "Search the harness MCP upstream"
+            );
+            assert_eq!(body["result"]["tools"][0]["inputSchema"]["type"], "object");
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"http-search","arguments":{"query":"ferrogate"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["content"][0]["type"], "text");
+            assert_eq!(body["result"]["content"][0]["text"], "ferrogate-result");
+            assert_eq!(body["result"]["isError"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"http-write","arguments":{"value":"denied"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["error"]["code"], -32001);
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("not allowlisted")));
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}"#,
+        401,
+        |body| {
+            assert_eq!(body["error"]["code"], "missing_api_key");
+            Ok(())
+        },
+    )?;
     case.expect_openmeter_export()?;
     case.wait_for_metering_export_status()?;
 
@@ -826,6 +910,7 @@ struct LocalHarness {
     gateway_addr: String,
     gateway: Child,
     provider: Option<JoinHandle<Vec<String>>>,
+    mcp_server: Option<JoinHandle<Vec<String>>>,
     billing: Option<MockBillingServer>,
     observability: Option<MockOtlpServer>,
 }
@@ -965,6 +1050,7 @@ impl LocalHarness {
         let gateway_addr = free_addr()?;
         let (provider_addr, provider) =
             spawn_local_provider_upstream(expected_provider_requests).context("start provider")?;
+        let (mcp_addr, mcp_server) = spawn_mock_mcp_server().context("start mcp provider")?;
         let observability =
             spawn_mock_otlp_server().context("start observability provider mock")?;
         let dir = tempfile::tempdir()?;
@@ -974,6 +1060,7 @@ impl LocalHarness {
             local_gateway_config(
                 &gateway_addr,
                 &provider_addr,
+                &mcp_addr,
                 billing.as_ref(),
                 Some(&observability),
             ),
@@ -994,6 +1081,7 @@ impl LocalHarness {
             gateway_addr,
             gateway,
             provider: Some(provider),
+            mcp_server: Some(mcp_server),
             billing,
             observability: Some(observability),
         };
@@ -1071,6 +1159,21 @@ impl LocalHarness {
             );
         }
         check(&response.body)
+    }
+
+    fn expect_mcp_json<F>(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[&str],
+        body: &str,
+        expected_status: u16,
+        check: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(Value) -> Result<()>,
+    {
+        self.expect_json(method, path, headers, body, expected_status, check)
     }
 
     fn expect_openmeter_export(&self) -> Result<()> {
@@ -1208,6 +1311,9 @@ impl Drop for LocalHarness {
         if let Some(provider) = self.provider.take() {
             let _ = provider.join();
         }
+        if let Some(mcp_server) = self.mcp_server.take() {
+            let _ = mcp_server.join();
+        }
         if let Some(billing) = self.billing.as_mut() {
             let _ = billing.handle.take().map(|handle| handle.join());
         }
@@ -1220,6 +1326,7 @@ impl Drop for LocalHarness {
 fn local_gateway_config(
     gateway_addr: &str,
     provider_addr: &str,
+    mcp_addr: &str,
     billing: Option<&MockBillingServer>,
     observability: Option<&MockOtlpServer>,
 ) -> String {
@@ -1280,6 +1387,15 @@ kind = "openai"
 base_url = "http://{provider_addr}/v1"
 api_key_env = "FERROGATE_PROVIDER_SECRET"
 
+[[mcp_servers]]
+name = "http"
+transport = "streamable_http"
+url = "http://{mcp_addr}/mcp"
+tools_to_execute = ["search"]
+tools_to_auto_execute = ["search"]
+approval_policy = "never"
+timeout_ms = 3000
+
 [[models]]
 name = "fast-chat"
 provider = "openai"
@@ -1292,7 +1408,7 @@ output_price_per_1m = 2.0
 id = "client"
 name = "Client"
 key = "client-secret"
-scopes = ["models.read", "chat.completions", "responses.create", "admin.read"]
+scopes = ["models.read", "chat.completions", "responses.create", "admin.read", "tools.read", "tools.execute"]
 allowed_models = ["fast-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
@@ -1389,6 +1505,114 @@ fn spawn_local_provider_upstream(
                         r#"{"id":"resp_ferrogate_test","object":"response","output_text":"ok","usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}"#
                     } else {
                         r#"{"id":"chatcmpl_ferrogate_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    requests.push(request);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        requests
+    });
+    Ok((addr, handle))
+}
+
+fn spawn_mock_mcp_server() -> Result<(String, JoinHandle<Vec<String>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?.to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let body = if request.contains(r#""method":"initialize""#) {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {
+                                    "tools": {
+                                        "listChanged": false
+                                    }
+                                },
+                                "serverInfo": {
+                                    "name": "mcp-harness",
+                                    "version": "1.0.0"
+                                },
+                                "instructions": "Use the harness MCP server for compatibility checks."
+                            }
+                        })
+                        .to_string()
+                    } else if request.contains(r#""method":"tools/list""#) {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "tools": [
+                                    {
+                                        "name": "search",
+                                        "description": "Search the harness MCP upstream",
+                                        "inputSchema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "query": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "required": ["query"]
+                                        }
+                                    }
+                                ]
+                            }
+                        })
+                        .to_string()
+                    } else if request.contains(r#""method":"tools/call""#) {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "ferrogate-result"
+                                    }
+                                ],
+                                "isError": false
+                            }
+                        })
+                        .to_string()
+                    } else if request.contains(r#""method":"ping""#) {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {}
+                        })
+                        .to_string()
+                    } else {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "error": {
+                                "code": -32601,
+                                "message": "unsupported method"
+                            }
+                        })
+                        .to_string()
                     };
                     let _ = write!(
                         stream,
@@ -1521,6 +1745,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String> {
         }
     }
     Ok(String::from_utf8_lossy(&request).to_string())
+}
+
+fn extract_jsonrpc_id(request: &str) -> serde_json::Value {
+    http_request_body(request)
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .and_then(|body| body.get("id").cloned())
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn http_request_body(request: &str) -> Result<&str> {
