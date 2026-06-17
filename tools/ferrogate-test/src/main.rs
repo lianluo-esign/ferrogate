@@ -826,15 +826,14 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
-    case.expect_mcp_json(
+    case.expect_text(
         "POST",
         "/v1/mcp",
         &[CLIENT_AUTH, JSON_CONTENT],
         r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
-        200,
+        202,
         |body| {
-            assert_eq!(body["jsonrpc"], "2.0");
-            assert_eq!(body["result"], serde_json::json!({}));
+            assert!(body.is_empty());
             Ok(())
         },
     )?;

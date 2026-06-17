@@ -57,9 +57,6 @@ pub(super) async fn handle_request(
     auth: &AuthContext,
     rpc: McpJsonRpcRequest,
 ) -> McpJsonRpcResponse {
-    if rpc.id.is_none() {
-        return result(None, json!({}));
-    }
     match rpc.method.as_str() {
         "initialize" => result(rpc.id, initialize_result()),
         "ping" => result(rpc.id, json!({})),

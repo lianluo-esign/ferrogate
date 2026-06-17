@@ -420,6 +420,22 @@ pub(crate) async fn write_json_response<T: Serialize>(
         .await
 }
 
+pub(crate) async fn write_empty_response(
+    session: &mut Session,
+    status: StatusCode,
+    request_id: &str,
+) -> PingoraResult<()> {
+    let mut response = ResponseHeader::build(status, Some(4))?;
+    response.insert_header(header::CONTENT_LENGTH, "0")?;
+    response.insert_header("x-request-id", request_id)?;
+    response.insert_header("x-trace-id", request_id)?;
+    response.insert_header("x-ferrogate-runtime", "pingora")?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(None, true).await
+}
+
 pub(crate) async fn write_raw_response(
     session: &mut Session,
     status: StatusCode,

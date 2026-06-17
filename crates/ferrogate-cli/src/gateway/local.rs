@@ -20,12 +20,12 @@ use crate::{
     },
     extensions::ToolExecutionRequest,
     responses::{
-        write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
-        AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation, AdminApiKeyMutationResponse,
-        AdminConfigReloadResponse, AdminConfigValidateRequest, AdminConfigValidateResponse,
-        AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigMutation,
-        AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile, AdminList,
-        AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
+        write_empty_response, write_json_error, write_json_error_and_close, write_json_response,
+        write_raw_response, AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation,
+        AdminApiKeyMutationResponse, AdminConfigReloadResponse, AdminConfigValidateRequest,
+        AdminConfigValidateResponse, AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse,
+        AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
+        AdminList, AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
         AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse, AdminProvider,
         AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus, AdminTenantRef,
         HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
@@ -1439,6 +1439,10 @@ impl FerroGateway {
                 .await;
             }
         };
+
+        if rpc.id.is_none() {
+            return write_empty_response(session, StatusCode::ACCEPTED, &ctx.request_id).await;
+        }
 
         let response = mcp_rpc::handle_request(&state, ctx, &auth, rpc).await;
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
