@@ -179,6 +179,109 @@ pub trait AppendRepository<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredControlPlaneResource {
+    pub kind: String,
+    pub id: String,
+    pub document_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneSnapshot {
+    pub api_keys: Vec<String>,
+    pub policies: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct RuntimeControlPlaneState {
+    api_keys: InMemoryRepository<StoredControlPlaneResource>,
+    policies: InMemoryRepository<StoredControlPlaneResource>,
+}
+
+impl RuntimeControlPlaneState {
+    pub fn new() -> Self {
+        Self {
+            api_keys: InMemoryRepository::new(),
+            policies: InMemoryRepository::new(),
+        }
+    }
+
+    pub fn from_documents(
+        api_keys: Vec<(String, String)>,
+        policies: Vec<(String, String)>,
+    ) -> Self {
+        let mut state = Self::new();
+        for (id, document_json) in api_keys {
+            state.upsert_api_key(id, document_json);
+        }
+        for (id, document_json) in policies {
+            state.upsert_policy(id, document_json);
+        }
+        state
+    }
+
+    pub fn snapshot(&self) -> ControlPlaneSnapshot {
+        let mut api_keys = self
+            .api_keys
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        api_keys.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut policies = self
+            .policies
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        policies.sort_by(|left, right| left.0.cmp(&right.0));
+
+        ControlPlaneSnapshot {
+            api_keys: api_keys
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+            policies: policies
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+        }
+    }
+
+    pub fn upsert_api_key(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.api_keys.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "api_key".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn delete_api_key(&mut self, id: &str) -> bool {
+        self.api_keys.remove(id).is_some()
+    }
+
+    pub fn upsert_policy(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.policies.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "policy".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn delete_policy(&mut self, id: &str) -> bool {
+        self.policies.remove(id).is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiKey {
     pub id: String,
     pub name: String,
@@ -285,6 +388,10 @@ impl<T> InMemoryRepository<T> {
     pub fn insert(&mut self, id: impl Into<String>, record: T) {
         self.records.insert(id.into(), record);
     }
+
+    pub fn remove(&mut self, id: &str) -> Option<T> {
+        self.records.remove(id)
+    }
 }
 
 impl<T: Clone> Repository<T> for InMemoryRepository<T> {
@@ -388,6 +495,7 @@ impl BillingEventRepository for InMemoryAppendRepository<BillingEvent> {}
 #[derive(Debug)]
 pub struct RuntimeStorageRepositories {
     backend: RuntimeStorageBackend,
+    control_plane: Mutex<RuntimeControlPlaneState>,
     request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
     audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
@@ -396,11 +504,13 @@ pub struct RuntimeStorageRepositories {
 impl RuntimeStorageRepositories {
     pub fn new(
         backend: RuntimeStorageBackend,
+        control_plane: RuntimeControlPlaneState,
         request_log_retention_records: usize,
         audit_event_retention_records: usize,
     ) -> Self {
         Self {
             backend,
+            control_plane: Mutex::new(control_plane),
             request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
                 request_log_retention_records,
             )),
@@ -418,6 +528,7 @@ impl RuntimeStorageRepositories {
     ) -> Self {
         Self::new(
             RuntimeStorageBackend::in_memory(provider_order),
+            RuntimeControlPlaneState::new(),
             request_log_retention_records,
             audit_event_retention_records,
         )
@@ -425,6 +536,52 @@ impl RuntimeStorageRepositories {
 
     pub fn backend_evidence(&self) -> StorageBackendEvidence {
         self.backend.evidence()
+    }
+
+    pub fn control_plane_snapshot(&self) -> ControlPlaneSnapshot {
+        self.control_plane
+            .lock()
+            .map(|control_plane| control_plane.snapshot())
+            .unwrap_or_else(|_| ControlPlaneSnapshot {
+                api_keys: Vec::new(),
+                policies: Vec::new(),
+            })
+    }
+
+    pub fn replace_control_plane(
+        &self,
+        api_keys: Vec<(String, String)>,
+        policies: Vec<(String, String)>,
+    ) {
+        if let Ok(mut control_plane) = self.control_plane.lock() {
+            *control_plane = RuntimeControlPlaneState::from_documents(api_keys, policies);
+        }
+    }
+
+    pub fn upsert_control_plane_api_key(&self, id: impl Into<String>, document_json: String) {
+        if let Ok(mut control_plane) = self.control_plane.lock() {
+            control_plane.upsert_api_key(id, document_json);
+        }
+    }
+
+    pub fn delete_control_plane_api_key(&self, id: &str) -> bool {
+        self.control_plane
+            .lock()
+            .map(|mut control_plane| control_plane.delete_api_key(id))
+            .unwrap_or(false)
+    }
+
+    pub fn upsert_control_plane_policy(&self, id: impl Into<String>, document_json: String) {
+        if let Ok(mut control_plane) = self.control_plane.lock() {
+            control_plane.upsert_policy(id, document_json);
+        }
+    }
+
+    pub fn delete_control_plane_policy(&self, id: &str) -> bool {
+        self.control_plane
+            .lock()
+            .map(|mut control_plane| control_plane.delete_policy(id))
+            .unwrap_or(false)
     }
 
     pub fn set_retention_limits(
@@ -773,6 +930,20 @@ mod tests {
     fn runtime_repositories_isolate_control_plane_storage_operations() {
         let repositories =
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 1, 1);
+
+        repositories
+            .upsert_control_plane_api_key("key_a", r#"{"id":"key_a","name":"A"}"#.to_string());
+        repositories.upsert_control_plane_policy(
+            "deny_a",
+            r#"{"name":"deny_a","effect":"deny"}"#.to_string(),
+        );
+        let snapshot = repositories.control_plane_snapshot();
+        assert_eq!(snapshot.api_keys, [r#"{"id":"key_a","name":"A"}"#]);
+        assert_eq!(snapshot.policies, [r#"{"name":"deny_a","effect":"deny"}"#]);
+
+        assert!(repositories.delete_control_plane_api_key("key_a"));
+        assert!(!repositories.delete_control_plane_api_key("key_a"));
+        assert!(repositories.control_plane_snapshot().api_keys.is_empty());
 
         repositories.append_request_log(StoredRequestLog {
             request_id: "fg-1".into(),

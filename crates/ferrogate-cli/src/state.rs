@@ -54,8 +54,8 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_storage::{
-    RuntimeStorageBackend, RuntimeStorageRepositories, StorageBackendEvidence, StoredAuditEvent,
-    StoredRequestLog, StoredUsageAggregate,
+    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageRepositories,
+    StorageBackendEvidence, StoredAuditEvent, StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -401,38 +401,44 @@ impl SharedAppState {
 
     pub(crate) fn upsert_api_key(&self, key: ApiKey) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        if let Some(existing) = candidate
-            .api_keys
-            .iter_mut()
-            .find(|existing| existing.id == key.id)
-        {
-            *existing = key;
-        } else {
-            candidate.api_keys.push(key);
+        let result = (|| {
+            active
+                .repositories
+                .upsert_control_plane_api_key(key.id.clone(), serde_json::to_string(&key)?);
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            let result = self.reload_process_local(candidate);
+            if result.committed {
+                let _ = self.publish_shared_control_plane(&self.current().config)?;
+            }
+            Ok(result)
+        })();
+        if result.is_err() {
+            active.sync_control_plane_storage_from_config(&active.config);
         }
-        candidate.validate()?;
-        let result = self.reload_process_local(candidate);
-        if result.committed {
-            let _ = self.publish_shared_control_plane(&self.current().config)?;
-        }
-        Ok(result)
+        result
     }
 
     pub(crate) fn delete_api_key(&self, id: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        let before = candidate.api_keys.len();
-        candidate.api_keys.retain(|key| key.id != id);
-        if candidate.api_keys.len() == before {
+        if !active.repositories.delete_control_plane_api_key(id) {
             return Ok(None);
         }
-        candidate.validate()?;
-        let result = self.reload_process_local(candidate);
-        if result.committed {
-            let _ = self.publish_shared_control_plane(&self.current().config)?;
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            let result = self.reload_process_local(candidate);
+            if result.committed {
+                let _ = self.publish_shared_control_plane(&self.current().config)?;
+            }
+            Ok(Some(result))
+        })();
+        if result.is_err() {
+            active.sync_control_plane_storage_from_config(&active.config);
         }
-        Ok(Some(result))
+        result
     }
 
     pub(crate) fn upsert_policy(
@@ -440,38 +446,44 @@ impl SharedAppState {
         policy: ConfigPolicyRule,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        if let Some(existing) = candidate
-            .policies
-            .iter_mut()
-            .find(|existing| existing.name == policy.name)
-        {
-            *existing = policy;
-        } else {
-            candidate.policies.push(policy);
+        let result = (|| {
+            active
+                .repositories
+                .upsert_control_plane_policy(policy.name.clone(), serde_json::to_string(&policy)?);
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            let result = self.reload_process_local(candidate);
+            if result.committed {
+                let _ = self.publish_shared_control_plane(&self.current().config)?;
+            }
+            Ok(result)
+        })();
+        if result.is_err() {
+            active.sync_control_plane_storage_from_config(&active.config);
         }
-        candidate.validate()?;
-        let result = self.reload_process_local(candidate);
-        if result.committed {
-            let _ = self.publish_shared_control_plane(&self.current().config)?;
-        }
-        Ok(result)
+        result
     }
 
     pub(crate) fn delete_policy(&self, name: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        let before = candidate.policies.len();
-        candidate.policies.retain(|policy| policy.name != name);
-        if candidate.policies.len() == before {
+        if !active.repositories.delete_control_plane_policy(name) {
             return Ok(None);
         }
-        candidate.validate()?;
-        let result = self.reload_process_local(candidate);
-        if result.committed {
-            let _ = self.publish_shared_control_plane(&self.current().config)?;
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            let result = self.reload_process_local(candidate);
+            if result.committed {
+                let _ = self.publish_shared_control_plane(&self.current().config)?;
+            }
+            Ok(Some(result))
+        })();
+        if result.is_err() {
+            active.sync_control_plane_storage_from_config(&active.config);
         }
-        Ok(Some(result))
+        result
     }
 
     pub(crate) fn upsert_gateway_config(
@@ -728,7 +740,8 @@ fn initial_cluster_sync_status(config: &Config) -> ClusterSyncStatus {
     }
 }
 
-fn runtime_storage_repositories(storage: &StorageConfig) -> RuntimeStorageRepositories {
+fn runtime_storage_repositories(config: &Config) -> RuntimeStorageRepositories {
+    let storage = &config.storage;
     let backend = RuntimeStorageBackend::new(
         storage.provider,
         storage.required,
@@ -738,9 +751,39 @@ fn runtime_storage_repositories(storage: &StorageConfig) -> RuntimeStorageReposi
     .unwrap_or_else(|_| RuntimeStorageBackend::in_memory(storage.provider_order.clone()));
     RuntimeStorageRepositories::new(
         backend,
+        RuntimeControlPlaneState::from_documents(
+            serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
+            serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
+        ),
         storage.request_log_retention_records,
         storage.audit_event_retention_records,
     )
+}
+
+fn serialize_control_plane_documents<T: Serialize>(
+    records: &[T],
+    id: impl Fn(&T) -> String,
+) -> Vec<(String, String)> {
+    records
+        .iter()
+        .filter_map(|record| {
+            serde_json::to_string(record)
+                .ok()
+                .map(|json| (id(record), json))
+        })
+        .collect()
+}
+
+fn deserialize_control_plane_documents<T: for<'de> Deserialize<'de>>(
+    records: Vec<String>,
+) -> anyhow::Result<Vec<T>> {
+    records
+        .into_iter()
+        .map(|record| serde_json::from_str(&record))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            anyhow::anyhow!("failed to decode control-plane storage document: {error}")
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1581,7 +1624,7 @@ impl AppState {
                 storage.billing_event_retention_records,
             )),
             metering_exporter,
-            repositories: Arc::new(runtime_storage_repositories(&storage)),
+            repositories: Arc::new(runtime_storage_repositories(&config)),
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
@@ -1905,6 +1948,7 @@ impl AppState {
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
         self.apply_storage_config(&next.config.storage);
+        self.sync_control_plane_storage_from_config(&next.config);
         next
     }
 
@@ -1916,6 +1960,20 @@ impl AppState {
             storage.request_log_retention_records,
             storage.audit_event_retention_records,
         );
+    }
+
+    fn sync_control_plane_storage_from_config(&self, config: &Config) {
+        self.repositories.replace_control_plane(
+            serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
+            serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
+        );
+    }
+
+    fn apply_control_plane_snapshot_to_config(&self, config: &mut Config) -> anyhow::Result<()> {
+        let snapshot = self.repositories.control_plane_snapshot();
+        config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
+        config.policies = deserialize_control_plane_documents(snapshot.policies)?;
+        Ok(())
     }
 
     pub(crate) fn next_request_id(&self) -> String {
@@ -3998,6 +4056,169 @@ fn expand_optional_subjects(values: &[String]) -> Vec<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_provider() -> Provider {
+        Provider {
+            name: "openai".into(),
+            kind: "openai".into(),
+            base_url: "http://127.0.0.1:10001/v1".into(),
+            api_key_env: None,
+            openrouter_http_referer: None,
+            openrouter_x_title: None,
+            enabled: true,
+        }
+    }
+
+    fn test_model() -> Model {
+        Model {
+            name: "fast-chat".into(),
+            provider: "openai".into(),
+            provider_model: "gpt-test".into(),
+            routing_strategy: RoutingStrategy::default(),
+            fallbacks: Vec::new(),
+            visible_organization_ids: Vec::new(),
+            visible_project_ids: Vec::new(),
+            capabilities: Vec::new(),
+            context_window: None,
+            input_price_per_1m: None,
+            output_price_per_1m: None,
+            enabled: true,
+            cache_enabled: None,
+        }
+    }
+
+    fn test_api_key(id: &str) -> ApiKey {
+        ApiKey {
+            id: id.into(),
+            name: id.into(),
+            key_env: None,
+            key: Some(format!("{id}-secret")),
+            key_hash: None,
+            enabled: true,
+            scopes: vec!["admin.read".into(), "chat.completions".into()],
+            allowed_models: vec!["fast-chat".into()],
+            denied_models: Vec::new(),
+            allowed_providers: vec!["openai".into()],
+            denied_providers: Vec::new(),
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+            expires_at_unix: None,
+            log_bodies: None,
+            cache_enabled: None,
+        }
+    }
+
+    #[test]
+    fn api_key_and_policy_crud_use_control_plane_storage_boundary() {
+        let shared = SharedAppState::with_source_path(
+            Config {
+                providers: vec![test_provider()],
+                models: vec![test_model()],
+                api_keys: vec![test_api_key("key_initial")],
+                ..Config::default()
+            },
+            None,
+        );
+
+        shared.upsert_api_key(test_api_key("key_added")).unwrap();
+        let state = shared.current();
+        assert!(state
+            .config
+            .api_keys
+            .iter()
+            .any(|key| key.id == "key_added"));
+        let snapshot = state.repositories.control_plane_snapshot();
+        assert!(snapshot
+            .api_keys
+            .iter()
+            .any(|document| document.contains("\"id\":\"key_added\"")));
+
+        shared
+            .upsert_policy(ConfigPolicyRule {
+                name: "deny-added".into(),
+                effect: "deny".into(),
+                organization_ids: Vec::new(),
+                project_ids: Vec::new(),
+                api_key_ids: vec!["key_added".into()],
+                models: vec!["fast-chat".into()],
+                providers: vec!["openai".into()],
+                code: "blocked".into(),
+                message: "blocked".into(),
+                enabled: true,
+            })
+            .unwrap();
+        let state = shared.current();
+        assert!(state
+            .config
+            .policies
+            .iter()
+            .any(|policy| policy.name == "deny-added"));
+        assert!(state
+            .repositories
+            .control_plane_snapshot()
+            .policies
+            .iter()
+            .any(|document| document.contains("\"name\":\"deny-added\"")));
+
+        assert!(shared.delete_policy("deny-added").unwrap().is_some());
+        assert!(shared.delete_api_key("key_added").unwrap().is_some());
+        let state = shared.current();
+        assert!(!state
+            .config
+            .api_keys
+            .iter()
+            .any(|key| key.id == "key_added"));
+        assert!(!state
+            .repositories
+            .control_plane_snapshot()
+            .api_keys
+            .iter()
+            .any(|document| document.contains("\"id\":\"key_added\"")));
+    }
+
+    #[test]
+    fn failed_control_plane_storage_mutation_rolls_back_to_active_config() {
+        let shared = SharedAppState::with_source_path(
+            Config {
+                providers: vec![test_provider()],
+                models: vec![test_model()],
+                api_keys: vec![test_api_key("key_initial")],
+                ..Config::default()
+            },
+            None,
+        );
+
+        let result = shared.upsert_policy(ConfigPolicyRule {
+            name: "deny-invalid".into(),
+            effect: "deny".into(),
+            organization_ids: Vec::new(),
+            project_ids: Vec::new(),
+            api_key_ids: vec!["missing-key".into()],
+            models: vec!["fast-chat".into()],
+            providers: vec!["openai".into()],
+            code: "blocked".into(),
+            message: "blocked".into(),
+            enabled: true,
+        });
+
+        assert!(result.is_err());
+        let state = shared.current();
+        assert!(!state
+            .config
+            .policies
+            .iter()
+            .any(|policy| policy.name == "deny-invalid"));
+        assert!(!state
+            .repositories
+            .control_plane_snapshot()
+            .policies
+            .iter()
+            .any(|document| document.contains("\"name\":\"deny-invalid\"")));
+    }
 
     #[test]
     fn listener_runtime_config_allows_process_local_app_state_changes() {
