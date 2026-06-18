@@ -14,6 +14,7 @@ COPY crates ./crates
 COPY tools ./tools
 COPY Ferrogate ./Ferrogate
 COPY config ./config
+COPY sql ./sql
 RUN cargo build --release -p ferrogate-cli --locked
 
 FROM debian:bookworm-slim
