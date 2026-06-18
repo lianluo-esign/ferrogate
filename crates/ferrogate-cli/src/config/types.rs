@@ -12,6 +12,7 @@ pub(crate) use ferrogate_mcp::{
     McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
 use ferrogate_providers::RoutingStrategy;
+use ferrogate_storage::StorageProviderKind;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Config {
@@ -602,6 +603,12 @@ pub(crate) enum AccessLogMode {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct StorageConfig {
+    #[serde(default)]
+    pub(crate) provider: StorageProviderKind,
+    #[serde(default)]
+    pub(crate) required: bool,
+    #[serde(default = "default_storage_provider_order")]
+    pub(crate) provider_order: Vec<StorageProviderKind>,
     #[serde(default = "default_request_log_retention_records")]
     pub(crate) request_log_retention_records: usize,
     #[serde(default = "default_audit_event_retention_records")]
@@ -857,6 +864,10 @@ fn default_mcp_dispatch_max_concurrency() -> usize {
     32
 }
 
+fn default_storage_provider_order() -> Vec<StorageProviderKind> {
+    ferrogate_storage::DEFAULT_DURABLE_PROVIDER_ORDER.to_vec()
+}
+
 fn default_request_log_retention_records() -> usize {
     10_000
 }
@@ -932,6 +943,9 @@ impl Default for CacheConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
+            provider: StorageProviderKind::Memory,
+            required: false,
+            provider_order: default_storage_provider_order(),
             request_log_retention_records: default_request_log_retention_records(),
             audit_event_retention_records: default_audit_event_retention_records(),
             billing_event_retention_records: default_billing_event_retention_records(),

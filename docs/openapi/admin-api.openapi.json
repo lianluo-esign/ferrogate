@@ -2459,6 +2459,7 @@
           "active_extensions",
           "tools",
           "auth_required",
+          "storage",
           "cluster",
           "observability"
         ],
@@ -2528,6 +2529,9 @@
           "auth_required": {
             "type": "boolean"
           },
+          "storage": {
+            "$ref": "#/components/schemas/StorageBackendEvidence"
+          },
           "cluster": {
             "$ref": "#/components/schemas/ClusterStatus"
           },
@@ -2553,6 +2557,51 @@
           }
         },
         "additionalProperties": false
+      },
+      "StorageBackendEvidence": {
+        "type": "object",
+        "required": [
+          "provider",
+          "durable",
+          "implemented",
+          "required",
+          "provider_order",
+          "contract_version"
+        ],
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/StorageProviderKind"
+          },
+          "durable": {
+            "type": "boolean"
+          },
+          "implemented": {
+            "type": "boolean"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "provider_order": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StorageProviderKind"
+            }
+          },
+          "contract_version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "StorageProviderKind": {
+        "type": "string",
+        "enum": [
+          "memory",
+          "turso_libsql",
+          "postgres",
+          "mysql"
+        ]
       },
       "ClusterStatus": {
         "type": "object",

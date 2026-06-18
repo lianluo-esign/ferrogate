@@ -180,6 +180,7 @@ impl FerroGateway {
                         .count(),
                     tools: state.all_tools().len(),
                     auth_required: state.auth_required(),
+                    storage: state.storage_status(),
                     cluster: state.cluster_status(),
                     observability: state.observability_status(),
                     acme: state.acme_renewal_status().map(|status| AdminAcmeStatus {

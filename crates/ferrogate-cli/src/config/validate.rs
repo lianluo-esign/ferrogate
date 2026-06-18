@@ -318,6 +318,37 @@ impl Config {
     }
 
     fn validate_storage(&self) -> AnyResult<()> {
+        if self.storage.provider_order.is_empty() {
+            bail!("field storage.provider_order: must include at least one durable provider");
+        }
+        let mut provider_order = std::collections::HashSet::new();
+        for (index, provider) in self.storage.provider_order.iter().enumerate() {
+            if *provider == ferrogate_storage::StorageProviderKind::Memory {
+                bail!("field storage.provider_order[{index}]: memory is not a durable provider");
+            }
+            if !provider_order.insert(*provider) {
+                bail!(
+                    "field storage.provider_order[{index}]: duplicate storage provider {}",
+                    provider.as_str()
+                );
+            }
+        }
+        if self.storage.provider_order.first()
+            != Some(&ferrogate_storage::StorageProviderKind::TursoLibsql)
+        {
+            bail!(
+                "field storage.provider_order[0]: turso_libsql must be the default commercial cloud provider"
+            );
+        }
+        if !self.storage.provider.implemented() {
+            bail!(
+                "field storage.provider: provider {} is not implemented yet",
+                self.storage.provider.as_str()
+            );
+        }
+        if self.storage.required && !self.storage.provider.is_durable() {
+            bail!("field storage.required: durable storage requires a non-memory provider");
+        }
         if self.storage.request_log_retention_records == 0 {
             bail!("field storage.request_log_retention_records: must be greater than zero");
         }

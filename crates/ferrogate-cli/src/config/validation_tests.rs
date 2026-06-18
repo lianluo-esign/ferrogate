@@ -1212,6 +1212,54 @@ fn rejects_invalid_storage_retention_and_admin_list_limits() {
 }
 
 #[test]
+fn validates_storage_provider_contract_order_and_fail_closed_provider_selection() {
+    let config = Config::default();
+    config.validate().unwrap();
+    assert_eq!(
+        config.storage.provider_order,
+        vec![
+            ferrogate_storage::StorageProviderKind::TursoLibsql,
+            ferrogate_storage::StorageProviderKind::Postgres,
+            ferrogate_storage::StorageProviderKind::Mysql,
+        ]
+    );
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
+            required: true,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.provider: provider turso_libsql is not implemented yet"));
+
+    let config = Config {
+        storage: StorageConfig {
+            required: true,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.required"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider_order: vec![
+                ferrogate_storage::StorageProviderKind::Postgres,
+                ferrogate_storage::StorageProviderKind::TursoLibsql,
+            ],
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("storage.provider_order[0]"));
+}
+
+#[test]
 fn rejects_invalid_ai_cache_limits() {
     let config = Config {
         cache: CacheConfig {

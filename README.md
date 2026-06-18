@@ -113,9 +113,10 @@ Validated end-to-end:
 Still intentionally scoped as next-stage production work:
 
 - Durable database-backed storage implementations for API keys, tenants, policy,
-  billing, request logs, audit logs, and multi-node control-plane state. Current
-  runtime state is primarily config, shared file state, Redis counters, and
-  in-memory repository driven.
+  billing, request logs, audit logs, and multi-node control-plane state. The
+  storage provider interface is separated from the gateway control plane, but
+  current runtime state is still primarily config, shared file state, Redis
+  counters, and in-memory repository driven.
 - Full Admin API write control plane beyond the current API key, policy,
   config-validation, reload, and drain resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.
@@ -267,6 +268,9 @@ export_source = "ferrogate"
 export_subject = "api_key_id"
 
 [storage]
+provider = "memory"
+required = false
+provider_order = ["turso_libsql", "postgres", "mysql"]
 request_log_retention_records = 10000
 audit_event_retention_records = 10000
 billing_event_retention_records = 10000

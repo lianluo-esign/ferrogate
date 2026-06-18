@@ -217,6 +217,13 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert_eq!(body["auth_required"], true);
         assert_eq!(body["cluster"]["ready"], true);
         assert_eq!(body["cluster"]["draining"], false);
+        assert_eq!(body["storage"]["provider"], "memory");
+        assert_eq!(body["storage"]["durable"], false);
+        assert_eq!(body["storage"]["implemented"], true);
+        assert_eq!(body["storage"]["contract_version"], 1);
+        assert_eq!(body["storage"]["provider_order"][0], "turso_libsql");
+        assert_eq!(body["storage"]["provider_order"][1], "postgres");
+        assert_eq!(body["storage"]["provider_order"][2], "mysql");
         assert_eq!(body["observability"][0]["provider"], "vector");
         assert_eq!(body["observability"][0]["endpoint_source"], "observability");
         Ok(())

@@ -6,11 +6,153 @@
 
 //! Repository boundaries for tenant, key, usage, and request-log storage.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Mutex,
+};
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
 use serde::{Deserialize, Serialize};
+
+pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
+    StorageProviderKind::TursoLibsql,
+    StorageProviderKind::Postgres,
+    StorageProviderKind::Mysql,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageProviderKind {
+    Memory,
+    TursoLibsql,
+    Postgres,
+    Mysql,
+}
+
+impl Default for StorageProviderKind {
+    fn default() -> Self {
+        Self::Memory
+    }
+}
+
+impl StorageProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StorageProviderKind::Memory => "memory",
+            StorageProviderKind::TursoLibsql => "turso_libsql",
+            StorageProviderKind::Postgres => "postgres",
+            StorageProviderKind::Mysql => "mysql",
+        }
+    }
+
+    pub fn is_durable(self) -> bool {
+        !matches!(self, StorageProviderKind::Memory)
+    }
+
+    pub fn implemented(self) -> bool {
+        matches!(self, StorageProviderKind::Memory)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageProviderConfig {
+    pub kind: StorageProviderKind,
+    pub required: bool,
+}
+
+impl StorageProviderConfig {
+    pub fn memory() -> Self {
+        Self {
+            kind: StorageProviderKind::Memory,
+            required: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageBackendEvidence {
+    pub provider: StorageProviderKind,
+    pub durable: bool,
+    pub implemented: bool,
+    pub required: bool,
+    pub provider_order: Vec<StorageProviderKind>,
+    pub contract_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStorageBackend {
+    provider: StorageProviderKind,
+    required: bool,
+    provider_order: Vec<StorageProviderKind>,
+    contract_version: u32,
+}
+
+impl RuntimeStorageBackend {
+    pub fn new(
+        provider: StorageProviderKind,
+        required: bool,
+        provider_order: Vec<StorageProviderKind>,
+    ) -> Result<Self, StorageError> {
+        if !provider.implemented() {
+            return Err(StorageError::UnsupportedProvider { provider, required });
+        }
+        Ok(Self {
+            provider,
+            required,
+            provider_order,
+            contract_version: 1,
+        })
+    }
+
+    pub fn in_memory(provider_order: Vec<StorageProviderKind>) -> Self {
+        Self {
+            provider: StorageProviderKind::Memory,
+            required: false,
+            provider_order,
+            contract_version: 1,
+        }
+    }
+
+    pub fn evidence(&self) -> StorageBackendEvidence {
+        StorageBackendEvidence {
+            provider: self.provider,
+            durable: self.provider.is_durable(),
+            implemented: self.provider.implemented(),
+            required: self.required,
+            provider_order: self.provider_order.clone(),
+            contract_version: self.contract_version,
+        }
+    }
+
+    pub fn provider(&self) -> StorageProviderKind {
+        self.provider
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageError {
+    UnsupportedProvider {
+        provider: StorageProviderKind,
+        required: bool,
+    },
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageError::UnsupportedProvider { provider, required } => {
+                write!(
+                    formatter,
+                    "storage provider {} is not implemented yet (required={required})",
+                    provider.as_str()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
 
 pub trait Repository<T> {
     fn get(&self, id: &str) -> Option<T>;
@@ -243,6 +385,157 @@ impl AuditLogRepository for InMemoryAppendRepository<StoredAuditEvent> {}
 
 impl BillingEventRepository for InMemoryAppendRepository<BillingEvent> {}
 
+#[derive(Debug)]
+pub struct RuntimeStorageRepositories {
+    backend: RuntimeStorageBackend,
+    request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
+    audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
+    usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
+}
+
+impl RuntimeStorageRepositories {
+    pub fn new(
+        backend: RuntimeStorageBackend,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Self {
+        Self {
+            backend,
+            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                request_log_retention_records,
+            )),
+            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                audit_event_retention_records,
+            )),
+            usage_aggregates: Mutex::new(InMemoryRepository::new()),
+        }
+    }
+
+    pub fn in_memory(
+        provider_order: Vec<StorageProviderKind>,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Self {
+        Self::new(
+            RuntimeStorageBackend::in_memory(provider_order),
+            request_log_retention_records,
+            audit_event_retention_records,
+        )
+    }
+
+    pub fn backend_evidence(&self) -> StorageBackendEvidence {
+        self.backend.evidence()
+    }
+
+    pub fn set_retention_limits(
+        &self,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) {
+        if let Ok(mut logs) = self.request_logs.lock() {
+            logs.set_retention_limit(request_log_retention_records);
+        }
+        if let Ok(mut events) = self.audit_events.lock() {
+            events.set_retention_limit(audit_event_retention_records);
+        }
+    }
+
+    pub fn append_request_log(&self, log: StoredRequestLog) {
+        if let Ok(mut logs) = self.request_logs.lock() {
+            logs.append(log);
+        }
+    }
+
+    pub fn request_logs(&self) -> Vec<StoredRequestLog> {
+        self.request_logs
+            .lock()
+            .map(|logs| logs.list())
+            .unwrap_or_default()
+    }
+
+    pub fn request_logs_page(&self, offset: usize, limit: usize) -> StoragePage<StoredRequestLog> {
+        self.request_logs
+            .lock()
+            .map(|logs| StoragePage {
+                data: logs.list_paginated(offset, limit),
+                total: logs.len(),
+                offset,
+                limit,
+            })
+            .unwrap_or_else(|_| StoragePage::empty(offset, limit))
+    }
+
+    pub fn append_audit_event(&self, event: StoredAuditEvent) {
+        if let Ok(mut events) = self.audit_events.lock() {
+            events.append(event);
+        }
+    }
+
+    pub fn next_audit_event_id(&self) -> String {
+        self.audit_events
+            .lock()
+            .map(|events| format!("audit-{}", events.len() + 1))
+            .unwrap_or_else(|_| "audit-unknown".to_string())
+    }
+
+    pub fn audit_events(&self) -> Vec<StoredAuditEvent> {
+        self.audit_events
+            .lock()
+            .map(|events| events.list())
+            .unwrap_or_default()
+    }
+
+    pub fn audit_events_page(&self, offset: usize, limit: usize) -> StoragePage<StoredAuditEvent> {
+        self.audit_events
+            .lock()
+            .map(|events| StoragePage {
+                data: events.list_paginated(offset, limit),
+                total: events.len(),
+                offset,
+                limit,
+            })
+            .unwrap_or_else(|_| StoragePage::empty(offset, limit))
+    }
+
+    pub fn upsert_usage_aggregate(
+        &self,
+        id: impl Into<String>,
+        build: impl FnOnce(Option<StoredUsageAggregate>) -> StoredUsageAggregate,
+    ) {
+        if let Ok(mut aggregates) = self.usage_aggregates.lock() {
+            let id = id.into();
+            let existing = aggregates.get(&id);
+            aggregates.insert(id, build(existing));
+        }
+    }
+
+    pub fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
+        self.usage_aggregates
+            .lock()
+            .map(|aggregates| aggregates.list())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoragePage<T> {
+    pub data: Vec<T>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl<T> StoragePage<T> {
+    fn empty(offset: usize, limit: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            total: 0,
+            offset,
+            limit,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +741,99 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].outcome, "accepted");
         assert_eq!(events[1].outcome, "rejected");
+    }
+
+    #[test]
+    fn runtime_backend_reports_provider_contract_evidence() {
+        let backend = RuntimeStorageBackend::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec());
+        let evidence = backend.evidence();
+
+        assert_eq!(evidence.provider, StorageProviderKind::Memory);
+        assert!(!evidence.durable);
+        assert!(evidence.implemented);
+        assert_eq!(evidence.contract_version, 1);
+        assert_eq!(
+            evidence.provider_order,
+            vec![
+                StorageProviderKind::TursoLibsql,
+                StorageProviderKind::Postgres,
+                StorageProviderKind::Mysql,
+            ]
+        );
+
+        let error = RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, true, Vec::new())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "storage provider turso_libsql is not implemented yet (required=true)"
+        );
+    }
+
+    #[test]
+    fn runtime_repositories_isolate_control_plane_storage_operations() {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 1, 1);
+
+        repositories.append_request_log(StoredRequestLog {
+            request_id: "fg-1".into(),
+            trace_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: TenantContext::default(),
+            route: None,
+            provider: None,
+            logical_model: Some("fast-chat".into()),
+            provider_model: None,
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: None,
+            response_body: None,
+            cache_status: None,
+            started_at_unix: None,
+            completed_at_unix: None,
+        });
+        repositories.append_request_log(StoredRequestLog {
+            request_id: "fg-2".into(),
+            trace_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: TenantContext::default(),
+            route: None,
+            provider: None,
+            logical_model: Some("slow-chat".into()),
+            provider_model: None,
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: 500,
+            error_code: Some("provider_error".into()),
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: None,
+            response_body: None,
+            cache_status: None,
+            started_at_unix: None,
+            completed_at_unix: None,
+        });
+
+        let page = repositories.request_logs_page(0, 10);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.data[0].request_id, "fg-2");
+
+        repositories.upsert_usage_aggregate("org:project:fast-chat:openai", |_| {
+            StoredUsageAggregate {
+                id: "org:project:fast-chat:openai".into(),
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                logical_model: "fast-chat".into(),
+                provider: "openai".into(),
+                usage: TokenUsage::new(1, 2, 3),
+            }
+        });
+        assert_eq!(repositories.usage_aggregates()[0].usage.total_tokens, 3);
     }
 }

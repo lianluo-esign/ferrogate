@@ -54,7 +54,7 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_storage::{
-    AppendRepository, InMemoryAppendRepository, InMemoryRepository, Repository, StoredAuditEvent,
+    RuntimeStorageBackend, RuntimeStorageRepositories, StorageBackendEvidence, StoredAuditEvent,
     StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
@@ -71,36 +71,6 @@ pub(crate) const RELOAD_MODE_LISTENER_LEVEL_REQUIRED: &str = "listener-level-req
 #[derive(Debug)]
 struct SharedFileControlPlane {
     path: PathBuf,
-}
-
-#[derive(Debug)]
-struct RuntimeRepositories {
-    request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
-    audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
-    usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
-}
-
-impl RuntimeRepositories {
-    fn in_memory(storage: &StorageConfig) -> Self {
-        Self {
-            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                storage.request_log_retention_records,
-            )),
-            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                storage.audit_event_retention_records,
-            )),
-            usage_aggregates: Mutex::new(InMemoryRepository::new()),
-        }
-    }
-
-    fn apply_storage_config(&self, storage: &StorageConfig) {
-        if let Ok(mut logs) = self.request_logs.lock() {
-            logs.set_retention_limit(storage.request_log_retention_records);
-        }
-        if let Ok(mut events) = self.audit_events.lock() {
-            events.set_retention_limit(storage.audit_event_retention_records);
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -601,7 +571,7 @@ pub(crate) struct AppState {
     cluster_counters: Arc<ClusterCounterBackend>,
     metering_events: Arc<InMemoryBillingEventSink>,
     metering_exporter: Option<Arc<MeteringExporter>>,
-    repositories: Arc<RuntimeRepositories>,
+    repositories: Arc<RuntimeStorageRepositories>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
@@ -756,6 +726,21 @@ fn initial_cluster_sync_status(config: &Config) -> ClusterSyncStatus {
         last_sync_error: None,
         stale: false,
     }
+}
+
+fn runtime_storage_repositories(storage: &StorageConfig) -> RuntimeStorageRepositories {
+    let backend = RuntimeStorageBackend::new(
+        storage.provider,
+        storage.required,
+        storage.provider_order.clone(),
+    )
+    .inspect_err(|error| warn!("failed to initialize storage backend: {error}"))
+    .unwrap_or_else(|_| RuntimeStorageBackend::in_memory(storage.provider_order.clone()));
+    RuntimeStorageRepositories::new(
+        backend,
+        storage.request_log_retention_records,
+        storage.audit_event_retention_records,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1596,7 +1581,7 @@ impl AppState {
                 storage.billing_event_retention_records,
             )),
             metering_exporter,
-            repositories: Arc::new(RuntimeRepositories::in_memory(&storage)),
+            repositories: Arc::new(runtime_storage_repositories(&storage)),
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
@@ -1927,7 +1912,10 @@ impl AppState {
         let _ = self
             .metering_events
             .set_retention_limit(storage.billing_event_retention_records);
-        self.repositories.apply_storage_config(storage);
+        self.repositories.set_retention_limits(
+            storage.request_log_retention_records,
+            storage.audit_event_retention_records,
+        );
     }
 
     pub(crate) fn next_request_id(&self) -> String {
@@ -1937,6 +1925,10 @@ impl AppState {
 
     pub(crate) fn auth_required(&self) -> bool {
         !self.config.api_keys.is_empty()
+    }
+
+    pub(crate) fn storage_status(&self) -> StorageBackendEvidence {
+        self.repositories.backend_evidence()
     }
 
     pub(crate) fn cluster_status(&self) -> ClusterStatus {
@@ -2528,17 +2520,11 @@ impl AppState {
 
     pub(crate) fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
         self.repositories
-            .usage_aggregates
-            .lock()
-            .map(|aggregates| {
-                aggregates
-                    .list()
-                    .into_iter()
-                    .filter(|aggregate| aggregate.api_key_id.as_deref() == Some(api_key_id))
-                    .map(|aggregate| aggregate.usage.total_tokens)
-                    .sum()
-            })
-            .unwrap_or_default()
+            .usage_aggregates()
+            .into_iter()
+            .filter(|aggregate| aggregate.api_key_id.as_deref() == Some(api_key_id))
+            .map(|aggregate| aggregate.usage.total_tokens)
+            .sum()
     }
 
     #[cfg(test)]
@@ -2777,11 +2763,7 @@ impl AppState {
     }
 
     pub(crate) fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
-        self.repositories
-            .usage_aggregates
-            .lock()
-            .map(|aggregates| aggregates.list())
-            .unwrap_or_default()
+        self.repositories.usage_aggregates()
     }
 
     fn record_usage_aggregate(
@@ -2792,23 +2774,22 @@ impl AppState {
         usage: &BillingTokenUsage,
     ) {
         let id = usage_aggregate_id(tenant, logical_model, provider);
-        let Ok(mut aggregates) = self.repositories.usage_aggregates.lock() else {
-            return;
-        };
-
-        let mut aggregate = aggregates.get(&id).unwrap_or_else(|| StoredUsageAggregate {
-            id: id.clone(),
-            organization_id: tenant.organization_id.clone(),
-            project_id: tenant.project_id.clone(),
-            api_key_id: tenant.api_key_id.clone(),
-            logical_model: logical_model.to_string(),
-            provider: provider.to_string(),
-            usage: BillingTokenUsage::default(),
-        });
-        aggregate.usage.prompt_tokens += usage.prompt_tokens;
-        aggregate.usage.completion_tokens += usage.completion_tokens;
-        aggregate.usage.total_tokens += usage.total_tokens;
-        aggregates.insert(id, aggregate);
+        self.repositories
+            .upsert_usage_aggregate(id.clone(), |existing| {
+                let mut aggregate = existing.unwrap_or_else(|| StoredUsageAggregate {
+                    id: id.clone(),
+                    organization_id: tenant.organization_id.clone(),
+                    project_id: tenant.project_id.clone(),
+                    api_key_id: tenant.api_key_id.clone(),
+                    logical_model: logical_model.to_string(),
+                    provider: provider.to_string(),
+                    usage: BillingTokenUsage::default(),
+                });
+                aggregate.usage.prompt_tokens += usage.prompt_tokens;
+                aggregate.usage.completion_tokens += usage.completion_tokens;
+                aggregate.usage.total_tokens += usage.total_tokens;
+                aggregate
+            });
     }
 
     pub(crate) fn record_request_log(&self, mut log: StoredRequestLog) {
@@ -2819,9 +2800,7 @@ impl AppState {
         if let Ok(mut metrics) = self.provider_routing_metrics.lock() {
             metrics.record_request_log(&log);
         }
-        if let Ok(mut logs) = self.repositories.request_logs.lock() {
-            logs.append(log);
-        }
+        self.repositories.append_request_log(log);
     }
 
     fn sanitize_request_log_bodies(&self, log: &mut StoredRequestLog) {
@@ -2882,23 +2861,20 @@ impl AppState {
     }
 
     pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) {
-        if let Ok(mut events) = self.repositories.audit_events.lock() {
-            let id = format!("audit-{}", events.list().len() + 1);
-            events.append(StoredAuditEvent {
-                id,
-                request_id: event.request_id,
-                trace_id: event.trace_id,
-                cluster_id: Some(self.cluster_identity.cluster_id.clone()),
-                node_id: Some(self.cluster_identity.node_id.clone()),
-                actor_api_key_id: event.actor_api_key_id,
-                tenant: event.tenant,
-                action: event.action,
-                target: event.target,
-                outcome: event.outcome,
-                message: event.message,
-                occurred_at_unix: now_unix_seconds(),
-            });
-        }
+        self.repositories.append_audit_event(StoredAuditEvent {
+            id: self.repositories.next_audit_event_id(),
+            request_id: event.request_id,
+            trace_id: event.trace_id,
+            cluster_id: Some(self.cluster_identity.cluster_id.clone()),
+            node_id: Some(self.cluster_identity.node_id.clone()),
+            actor_api_key_id: event.actor_api_key_id,
+            tenant: event.tenant,
+            action: event.action,
+            target: event.target,
+            outcome: event.outcome,
+            message: event.message,
+            occurred_at_unix: now_unix_seconds(),
+        });
     }
 
     fn record_tool_billing_event(
@@ -3059,19 +3035,11 @@ impl AppState {
     }
 
     pub(crate) fn request_logs(&self) -> Vec<StoredRequestLog> {
-        self.repositories
-            .request_logs
-            .lock()
-            .map(|logs| logs.list())
-            .unwrap_or_default()
+        self.repositories.request_logs()
     }
 
     pub(crate) fn audit_events(&self) -> Vec<StoredAuditEvent> {
-        self.repositories
-            .audit_events
-            .lock()
-            .map(|events| events.list())
-            .unwrap_or_default()
+        self.repositories.audit_events()
     }
 
     pub(crate) fn metering_events(&self) -> Vec<BillingEvent> {
@@ -3082,21 +3050,15 @@ impl AppState {
         &self,
         pagination: AdminPagination,
     ) -> AdminPage<StoredRequestLog> {
-        self.repositories
-            .request_logs
-            .lock()
-            .map(|logs| AdminPage {
-                data: logs.list_paginated(pagination.offset, pagination.limit),
-                total: logs.len(),
-                offset: pagination.offset,
-                limit: pagination.limit,
-            })
-            .unwrap_or_else(|_| AdminPage {
-                data: Vec::new(),
-                total: 0,
-                offset: pagination.offset,
-                limit: pagination.limit,
-            })
+        let page = self
+            .repositories
+            .request_logs_page(pagination.offset, pagination.limit);
+        AdminPage {
+            data: page.data,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+        }
     }
 
     pub(crate) fn request_log_export_records(
@@ -3110,60 +3072,43 @@ impl AppState {
             .map(|event| (event.request_id, event.usage))
             .collect::<HashMap<_, _>>();
         self.repositories
-            .request_logs
-            .lock()
-            .map(|logs| {
-                logs.list()
-                    .into_iter()
-                    .filter(|log| filter.matches(log))
-                    .take(filter.limit)
-                    .map(|log| {
-                        let usage = usage_by_request_id.get(&log.request_id).cloned();
-                        RequestLogExportRecord::from_log(log, usage)
-                    })
-                    .collect()
+            .request_logs()
+            .into_iter()
+            .filter(|log| filter.matches(log))
+            .take(filter.limit)
+            .map(|log| {
+                let usage = usage_by_request_id.get(&log.request_id).cloned();
+                RequestLogExportRecord::from_log(log, usage)
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     pub(crate) fn audit_events_page(
         &self,
         pagination: AdminPagination,
     ) -> AdminPage<StoredAuditEvent> {
-        self.repositories
-            .audit_events
-            .lock()
-            .map(|events| AdminPage {
-                data: events.list_paginated(pagination.offset, pagination.limit),
-                total: events.len(),
-                offset: pagination.offset,
-                limit: pagination.limit,
-            })
-            .unwrap_or_else(|_| AdminPage {
-                data: Vec::new(),
-                total: 0,
-                offset: pagination.offset,
-                limit: pagination.limit,
-            })
+        let page = self
+            .repositories
+            .audit_events_page(pagination.offset, pagination.limit);
+        AdminPage {
+            data: page.data,
+            total: page.total,
+            offset: page.offset,
+            limit: page.limit,
+        }
     }
 
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
         let target = format!("tool_session:{session_id}");
         let target_prefix = format!("{target}/");
         self.repositories
-            .audit_events
-            .lock()
-            .map(|events| {
-                events
-                    .list()
-                    .into_iter()
-                    .filter(|event| {
-                        event.action == "tool.execute"
-                            && (event.target == target || event.target.starts_with(&target_prefix))
-                    })
-                    .collect()
+            .audit_events()
+            .into_iter()
+            .filter(|event| {
+                event.action == "tool.execute"
+                    && (event.target == target || event.target.starts_with(&target_prefix))
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     pub(crate) fn admin_pagination(&self, query: Option<&str>) -> AdminPagination {
@@ -5203,6 +5148,7 @@ mod tests {
                 billing_event_retention_records: 2,
                 admin_list_default_limit: 1,
                 admin_list_max_limit: 2,
+                ..crate::config::StorageConfig::default()
             },
             ..Config::default()
         });
