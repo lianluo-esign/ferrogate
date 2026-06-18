@@ -92,9 +92,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ready=false
           for _ in $(seq 1 60); do
             if curl -fsS -H 'Authorization: Bearer admin-secret' \
-              http://127.0.0.1:12019/admin/v1/status >"${RUNNER_TEMP}/status.json"; then
+              http://127.0.0.1:18089/admin/v1/status >"${RUNNER_TEMP}/status.json"; then
+              ready=true
               break
             fi
             if ! docker ps --format '{{.Names}}' | grep -qx ferrogate-turso-init; then
@@ -103,6 +105,16 @@ jobs:
             fi
             sleep 2
           done
+
+          if [[ "${ready}" != "true" ]]; then
+            docker ps -a --filter name=ferrogate-turso-init
+            docker exec ferrogate-turso-init sh -c 'command -v ss >/dev/null && ss -ltnp || true'
+            docker logs ferrogate-turso-init --tail 200
+            curl -v -H 'Authorization: Bearer admin-secret' \
+              http://127.0.0.1:18089/admin/v1/status || true
+            echo "::error::FerroGate admin status did not become ready"
+            exit 1
+          fi
 
           jq -e '
             .storage.provider == "turso_libsql" and
