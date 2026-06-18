@@ -8,10 +8,6 @@
 
 # FerroGate
 
-> Developed by the commercial cloud service company represented by
-> [Token4AI Cloud](https://token4ai.cloud). Created by jamesduan
-> ([X](https://x.com/JamesDuanL)) on 2026-06-11.
-
 **Language:** English | [简体中文](README.zh-CN.md)
 
 FerroGate is an open-source Rust API gateway and AI gateway built on
