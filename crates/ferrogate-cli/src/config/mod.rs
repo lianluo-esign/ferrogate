@@ -31,6 +31,6 @@ pub(crate) use self::types::{
     MeteringExportSubject, Model, ModelFallback, ObservabilityConfig, ObservabilityProvider,
     PolicyRule, PromptTemplate, PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget,
     PromptTemplateVariable, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
-    ReliabilityConfig, RouteRule, StorageConfig, TelemetryConfig, TlsAcmeConfig, TlsConfig,
-    Upstream,
+    ReliabilityConfig, RouteRule, StorageConfig, StorageMigrationMode, TelemetryConfig,
+    TlsAcmeConfig, TlsConfig, Upstream,
 };

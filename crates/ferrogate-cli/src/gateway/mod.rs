@@ -72,7 +72,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
             .enabled
             .then(|| Arc::new(SharedAcmeRenewalState::new(&tls.acme, paths)))
     });
-    let state = SharedAppState::with_source_path(config, source_path)
+    let state = SharedAppState::try_with_source_path(config, source_path)?
         .with_acme_renewal_state(acme_renewal_state.clone());
     let _otlp_sender = start_otlp_background_sender(state.current());
     let _acme_renewal =

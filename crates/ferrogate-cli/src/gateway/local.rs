@@ -1944,7 +1944,7 @@ impl FerroGateway {
                     session,
                     StatusCode::BAD_REQUEST,
                     "invalid_request_body",
-                    "request body must be JSON with config_toml, config_caddyfile, or source=file",
+                    "request body must be JSON with config_toml, config_yaml, config_caddyfile, or source=file",
                     &ctx.request_id,
                 )
                 .await;
@@ -2068,7 +2068,7 @@ impl FerroGateway {
                     session,
                     StatusCode::BAD_REQUEST,
                     "invalid_request_body",
-                    "request body must be JSON with config_toml, config_caddyfile, or source=file",
+                    "request body must be JSON with config_toml, config_yaml, config_caddyfile, or source=file",
                     &ctx.request_id,
                 )
                 .await;
@@ -4046,6 +4046,9 @@ fn config_from_admin_payload(
     if let Some(raw) = payload.config_toml.as_deref() {
         return Config::from_toml_str(raw);
     }
+    if let Some(raw) = payload.config_yaml.as_deref() {
+        return Config::from_yaml_str(raw);
+    }
     if let Some(raw) = payload.config_caddyfile.as_deref() {
         let file = payload.filename.as_deref().unwrap_or("candidate.Caddyfile");
         return Config::from_caddyfile_str(raw, file);
@@ -4056,7 +4059,9 @@ fn config_from_admin_payload(
             .ok_or_else(|| anyhow::anyhow!("runtime was not started from a config file"))?;
         return Config::load(path);
     }
-    anyhow::bail!("request body must include config_toml, config_caddyfile, or source=file")
+    anyhow::bail!(
+        "request body must include config_toml, config_yaml, config_caddyfile, or source=file"
+    )
 }
 
 fn reload_from_admin_payload(

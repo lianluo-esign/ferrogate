@@ -8,11 +8,14 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
+    sync::Arc,
     sync::Mutex,
 };
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
+use libsql::Builder as LibsqlBuilder;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
@@ -51,7 +54,10 @@ impl StorageProviderKind {
     }
 
     pub fn implemented(self) -> bool {
-        matches!(self, StorageProviderKind::Memory)
+        matches!(
+            self,
+            StorageProviderKind::Memory | StorageProviderKind::TursoLibsql
+        )
     }
 }
 
@@ -136,6 +142,7 @@ pub enum StorageError {
         provider: StorageProviderKind,
         required: bool,
     },
+    Libsql(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -148,6 +155,7 @@ impl std::fmt::Display for StorageError {
                     provider.as_str()
                 )
             }
+            StorageError::Libsql(error) => write!(formatter, "libsql storage error: {error}"),
         }
     }
 }
@@ -195,6 +203,169 @@ pub struct ControlPlaneSnapshot {
 pub struct RuntimeControlPlaneState {
     api_keys: InMemoryRepository<StoredControlPlaneResource>,
     policies: InMemoryRepository<StoredControlPlaneResource>,
+}
+
+struct LibsqlControlPlaneStore {
+    database: Arc<libsql::Database>,
+}
+
+impl std::fmt::Debug for LibsqlControlPlaneStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LibsqlControlPlaneStore")
+            .field("database", &"<redacted>")
+            .finish()
+    }
+}
+
+impl LibsqlControlPlaneStore {
+    async fn connect(
+        url: String,
+        auth_token: String,
+        bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_policies: Vec<(String, String)>,
+        initialize_schema: bool,
+    ) -> Result<Self, StorageError> {
+        let database = LibsqlBuilder::new_remote(url, auth_token)
+            .build()
+            .await
+            .map_err(libsql_error)?;
+        let store = Self {
+            database: Arc::new(database),
+        };
+        if initialize_schema {
+            store.initialize_schema().await?;
+        }
+        store
+            .seed_missing_resources("api_key", bootstrap_api_keys)
+            .await?;
+        store
+            .seed_missing_resources("policy", bootstrap_policies)
+            .await?;
+        Ok(store)
+    }
+
+    async fn initialize_schema(&self) -> Result<(), StorageError> {
+        let connection = self.database.connect().map_err(libsql_error)?;
+        connection
+            .execute_transactional_batch(include_str!("../../../sql/001_init_libsql.sql"))
+            .await
+            .map_err(libsql_error)?;
+        Ok(())
+    }
+
+    async fn seed_missing_resources(
+        &self,
+        kind: &'static str,
+        records: Vec<(String, String)>,
+    ) -> Result<(), StorageError> {
+        let connection = self.database.connect().map_err(libsql_error)?;
+        for (id, document_json) in records {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO control_plane_resources \
+                     (resource_kind, resource_id, document_json) VALUES (?1, ?2, ?3)",
+                    libsql::params![kind, id, document_json],
+                )
+                .await
+                .map_err(libsql_error)?;
+        }
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
+        Ok(ControlPlaneSnapshot {
+            api_keys: self.list_documents("api_key").await?,
+            policies: self.list_documents("policy").await?,
+        })
+    }
+
+    async fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
+        let connection = self.database.connect().map_err(libsql_error)?;
+        let mut rows = connection
+            .query(
+                "SELECT document_json FROM control_plane_resources \
+                 WHERE resource_kind = ?1 ORDER BY resource_id ASC",
+                libsql::params![kind],
+            )
+            .await
+            .map_err(libsql_error)?;
+        let mut documents = Vec::new();
+        while let Some(row) = rows.next().await.map_err(libsql_error)? {
+            documents.push(row.get::<String>(0).map_err(libsql_error)?);
+        }
+        Ok(documents)
+    }
+
+    async fn upsert(
+        &self,
+        kind: &'static str,
+        id: String,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        let connection = self.database.connect().map_err(libsql_error)?;
+        connection
+            .execute(
+                "INSERT INTO control_plane_resources \
+                 (resource_kind, resource_id, document_json, revision, updated_at_unix) \
+                 VALUES (?1, ?2, ?3, 1, unixepoch()) \
+                 ON CONFLICT(resource_kind, resource_id) DO UPDATE SET \
+                 document_json = excluded.document_json, \
+                 revision = control_plane_resources.revision + 1, \
+                 updated_at_unix = unixepoch()",
+                libsql::params![kind, id, document_json],
+            )
+            .await
+            .map_err(libsql_error)?;
+        Ok(())
+    }
+
+    async fn replace_kind(
+        &self,
+        kind: &'static str,
+        records: Vec<(String, String)>,
+    ) -> Result<(), StorageError> {
+        let connection = self.database.connect().map_err(libsql_error)?;
+        let transaction = connection.transaction().await.map_err(libsql_error)?;
+        transaction
+            .execute(
+                "DELETE FROM control_plane_resources WHERE resource_kind = ?1",
+                libsql::params![kind],
+            )
+            .await
+            .map_err(libsql_error)?;
+        for (id, document_json) in records {
+            transaction
+                .execute(
+                    "INSERT INTO control_plane_resources \
+                     (resource_kind, resource_id, document_json) VALUES (?1, ?2, ?3)",
+                    libsql::params![kind, id, document_json],
+                )
+                .await
+                .map_err(libsql_error)?;
+        }
+        transaction.commit().await.map_err(libsql_error)?;
+        Ok(())
+    }
+
+    async fn delete(&self, kind: &'static str, id: String) -> Result<bool, StorageError> {
+        let connection = self.database.connect().map_err(libsql_error)?;
+        let rows_changed = connection
+            .execute(
+                "DELETE FROM control_plane_resources \
+                 WHERE resource_kind = ?1 AND resource_id = ?2",
+                libsql::params![kind, id],
+            )
+            .await
+            .map_err(libsql_error)?;
+        Ok(rows_changed > 0)
+    }
+}
+
+#[derive(Debug)]
+enum RuntimeControlPlaneBackend {
+    Memory(Mutex<RuntimeControlPlaneState>),
+    Libsql(Arc<LibsqlControlPlaneStore>),
 }
 
 impl RuntimeControlPlaneState {
@@ -495,7 +666,7 @@ impl BillingEventRepository for InMemoryAppendRepository<BillingEvent> {}
 #[derive(Debug)]
 pub struct RuntimeStorageRepositories {
     backend: RuntimeStorageBackend,
-    control_plane: Mutex<RuntimeControlPlaneState>,
+    control_plane: RuntimeControlPlaneBackend,
     request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
     audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
@@ -510,7 +681,7 @@ impl RuntimeStorageRepositories {
     ) -> Self {
         Self {
             backend,
-            control_plane: Mutex::new(control_plane),
+            control_plane: RuntimeControlPlaneBackend::Memory(Mutex::new(control_plane)),
             request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
                 request_log_retention_records,
             )),
@@ -534,56 +705,138 @@ impl RuntimeStorageRepositories {
         )
     }
 
+    pub async fn turso_libsql(
+        provider_order: Vec<StorageProviderKind>,
+        required: bool,
+        url: String,
+        auth_token: String,
+        initialize_schema: bool,
+        bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_policies: Vec<(String, String)>,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Result<Self, StorageError> {
+        let backend =
+            RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, required, provider_order)?;
+        let control_plane = LibsqlControlPlaneStore::connect(
+            url,
+            auth_token,
+            bootstrap_api_keys,
+            bootstrap_policies,
+            initialize_schema,
+        )
+        .await?;
+        Ok(Self {
+            backend,
+            control_plane: RuntimeControlPlaneBackend::Libsql(Arc::new(control_plane)),
+            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                request_log_retention_records,
+            )),
+            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                audit_event_retention_records,
+            )),
+            usage_aggregates: Mutex::new(InMemoryRepository::new()),
+        })
+    }
+
     pub fn backend_evidence(&self) -> StorageBackendEvidence {
         self.backend.evidence()
     }
 
-    pub fn control_plane_snapshot(&self) -> ControlPlaneSnapshot {
-        self.control_plane
-            .lock()
-            .map(|control_plane| control_plane.snapshot())
-            .unwrap_or_else(|_| ControlPlaneSnapshot {
-                api_keys: Vec::new(),
-                policies: Vec::new(),
-            })
+    pub fn control_plane_snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.snapshot())
+                .unwrap_or_else(|_| ControlPlaneSnapshot {
+                    api_keys: Vec::new(),
+                    policies: Vec::new(),
+                })),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.snapshot())
+            }
+        }
     }
 
     pub fn replace_control_plane(
         &self,
         api_keys: Vec<(String, String)>,
         policies: Vec<(String, String)>,
-    ) {
-        if let Ok(mut control_plane) = self.control_plane.lock() {
-            *control_plane = RuntimeControlPlaneState::from_documents(api_keys, policies);
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    *control_plane = RuntimeControlPlaneState::from_documents(api_keys, policies);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(async {
+                control_plane.replace_kind("api_key", api_keys).await?;
+                control_plane.replace_kind("policy", policies).await?;
+                Ok(())
+            }),
         }
     }
 
-    pub fn upsert_control_plane_api_key(&self, id: impl Into<String>, document_json: String) {
-        if let Ok(mut control_plane) = self.control_plane.lock() {
-            control_plane.upsert_api_key(id, document_json);
+    pub fn upsert_control_plane_api_key(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_api_key(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("api_key", id.into(), document_json))
+            }
         }
     }
 
-    pub fn delete_control_plane_api_key(&self, id: &str) -> bool {
-        self.control_plane
-            .lock()
-            .map(|mut control_plane| control_plane.delete_api_key(id))
-            .unwrap_or(false)
-    }
-
-    pub fn upsert_control_plane_policy(&self, id: impl Into<String>, document_json: String) {
-        if let Ok(mut control_plane) = self.control_plane.lock() {
-            control_plane.upsert_policy(id, document_json);
+    pub fn delete_control_plane_api_key(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_api_key(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("api_key", id.to_string()))
+            }
         }
     }
 
-    pub fn delete_control_plane_policy(&self, id: &str) -> bool {
-        self.control_plane
-            .lock()
-            .map(|mut control_plane| control_plane.delete_policy(id))
-            .unwrap_or(false)
+    pub fn upsert_control_plane_policy(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_policy(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("policy", id.into(), document_json))
+            }
+        }
     }
 
+    pub fn delete_control_plane_policy(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_policy(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("policy", id.to_string()))
+            }
+        }
+    }
     pub fn set_retention_limits(
         &self,
         request_log_retention_records: usize,
@@ -672,6 +925,32 @@ impl RuntimeStorageRepositories {
             .map(|aggregates| aggregates.list())
             .unwrap_or_default()
     }
+}
+
+fn block_on_storage<T: Send>(
+    future: impl Future<Output = Result<T, StorageError>> + Send,
+) -> Result<T, StorageError> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| StorageError::Libsql(error.to_string()))?
+                    .block_on(future)
+            })
+            .join()
+            .map_err(|_| StorageError::Libsql("storage runtime thread panicked".into()))?
+    })
+}
+
+fn libsql_error(error: libsql::Error) -> StorageError {
+    StorageError::Libsql(error.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -918,11 +1197,16 @@ mod tests {
             ]
         );
 
-        let error = RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, true, Vec::new())
+        let turso_backend =
+            RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, true, Vec::new()).unwrap();
+        assert!(turso_backend.evidence().durable);
+        assert!(turso_backend.evidence().implemented);
+
+        let error = RuntimeStorageBackend::new(StorageProviderKind::Postgres, true, Vec::new())
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "storage provider turso_libsql is not implemented yet (required=true)"
+            "storage provider postgres is not implemented yet (required=true)"
         );
     }
 
@@ -932,18 +1216,25 @@ mod tests {
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 1, 1);
 
         repositories
-            .upsert_control_plane_api_key("key_a", r#"{"id":"key_a","name":"A"}"#.to_string());
-        repositories.upsert_control_plane_policy(
-            "deny_a",
-            r#"{"name":"deny_a","effect":"deny"}"#.to_string(),
-        );
-        let snapshot = repositories.control_plane_snapshot();
+            .upsert_control_plane_api_key("key_a", r#"{"id":"key_a","name":"A"}"#.to_string())
+            .unwrap();
+        repositories
+            .upsert_control_plane_policy(
+                "deny_a",
+                r#"{"name":"deny_a","effect":"deny"}"#.to_string(),
+            )
+            .unwrap();
+        let snapshot = repositories.control_plane_snapshot().unwrap();
         assert_eq!(snapshot.api_keys, [r#"{"id":"key_a","name":"A"}"#]);
         assert_eq!(snapshot.policies, [r#"{"name":"deny_a","effect":"deny"}"#]);
 
-        assert!(repositories.delete_control_plane_api_key("key_a"));
-        assert!(!repositories.delete_control_plane_api_key("key_a"));
-        assert!(repositories.control_plane_snapshot().api_keys.is_empty());
+        assert!(repositories.delete_control_plane_api_key("key_a").unwrap());
+        assert!(!repositories.delete_control_plane_api_key("key_a").unwrap());
+        assert!(repositories
+            .control_plane_snapshot()
+            .unwrap()
+            .api_keys
+            .is_empty());
 
         repositories.append_request_log(StoredRequestLog {
             request_id: "fg-1".into(),

@@ -346,6 +346,35 @@ impl Config {
                 self.storage.provider.as_str()
             );
         }
+        if self.storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
+            let Some(url) = self.storage.libsql_url.as_deref() else {
+                bail!("field storage.libsql_url: required when storage.provider is turso_libsql");
+            };
+            let url = url.trim();
+            if url.is_empty() {
+                bail!("field storage.libsql_url: must not be empty");
+            }
+            if !(url.starts_with("libsql://") || url.starts_with("https://")) {
+                bail!(
+                    "field storage.libsql_url: must start with libsql:// or https:// for turso_libsql"
+                );
+            }
+            let has_inline_token = self
+                .storage
+                .libsql_auth_token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty());
+            let has_token_env = self
+                .storage
+                .libsql_auth_token_env
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty());
+            if !has_inline_token && !has_token_env {
+                bail!(
+                    "field storage.libsql_auth_token_env: required when storage.provider is turso_libsql unless storage.libsql_auth_token is set"
+                );
+            }
+        }
         if self.storage.required && !self.storage.provider.is_durable() {
             bail!("field storage.required: durable storage requires a non-memory provider");
         }

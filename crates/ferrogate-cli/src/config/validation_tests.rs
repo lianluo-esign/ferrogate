@@ -1228,12 +1228,25 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         storage: StorageConfig {
             provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
             required: true,
+            libsql_url: Some("libsql://example.turso.io".into()),
+            libsql_auth_token: Some("test-token".into()),
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
+            required: true,
+            libsql_url: Some("libsql://example.turso.io".into()),
             ..StorageConfig::default()
         },
         ..Config::default()
     };
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field storage.provider: provider turso_libsql is not implemented yet"));
+    assert!(error.contains("field storage.libsql_auth_token_env"));
 
     let config = Config {
         storage: StorageConfig {

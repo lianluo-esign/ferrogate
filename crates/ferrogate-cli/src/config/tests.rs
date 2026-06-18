@@ -235,6 +235,43 @@ timeout_ms = 30000
 }
 
 #[test]
+fn parses_yaml_storage_libsql_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.yaml");
+    std::fs::write(
+        &path,
+        r#"
+listen: "127.0.0.1:8080"
+storage:
+  provider: turso_libsql
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  libsql_url: "libsql://example.turso.io"
+  libsql_auth_token: "test-token"
+  migration_mode: auto
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert_eq!(
+        config.storage.provider,
+        ferrogate_storage::StorageProviderKind::TursoLibsql
+    );
+    assert_eq!(
+        config.storage.libsql_url.as_deref(),
+        Some("libsql://example.turso.io")
+    );
+    assert_eq!(
+        config.storage.libsql_auth_token.as_deref(),
+        Some("test-token")
+    );
+}
+
+#[test]
 fn rejects_unsupported_cache_mode() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.toml");

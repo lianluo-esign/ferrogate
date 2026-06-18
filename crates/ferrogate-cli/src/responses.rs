@@ -332,6 +332,8 @@ pub(crate) struct AdminConfigValidateRequest {
     #[serde(default)]
     pub(crate) config_toml: Option<String>,
     #[serde(default)]
+    pub(crate) config_yaml: Option<String>,
+    #[serde(default)]
     pub(crate) config_caddyfile: Option<String>,
     #[serde(default)]
     pub(crate) filename: Option<String>,

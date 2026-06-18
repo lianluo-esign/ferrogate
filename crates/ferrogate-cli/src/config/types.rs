@@ -609,6 +609,14 @@ pub(crate) struct StorageConfig {
     pub(crate) required: bool,
     #[serde(default = "default_storage_provider_order")]
     pub(crate) provider_order: Vec<StorageProviderKind>,
+    #[serde(default)]
+    pub(crate) libsql_url: Option<String>,
+    #[serde(default)]
+    pub(crate) libsql_auth_token: Option<String>,
+    #[serde(default)]
+    pub(crate) libsql_auth_token_env: Option<String>,
+    #[serde(default = "default_storage_migration_mode")]
+    pub(crate) migration_mode: StorageMigrationMode,
     #[serde(default = "default_request_log_retention_records")]
     pub(crate) request_log_retention_records: usize,
     #[serde(default = "default_audit_event_retention_records")]
@@ -619,6 +627,15 @@ pub(crate) struct StorageConfig {
     pub(crate) admin_list_default_limit: usize,
     #[serde(default = "default_admin_list_max_limit")]
     pub(crate) admin_list_max_limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StorageMigrationMode {
+    #[default]
+    Auto,
+    ValidateOnly,
+    Disabled,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -868,6 +885,10 @@ fn default_storage_provider_order() -> Vec<StorageProviderKind> {
     ferrogate_storage::DEFAULT_DURABLE_PROVIDER_ORDER.to_vec()
 }
 
+fn default_storage_migration_mode() -> StorageMigrationMode {
+    StorageMigrationMode::Auto
+}
+
 fn default_request_log_retention_records() -> usize {
     10_000
 }
@@ -946,6 +967,10 @@ impl Default for StorageConfig {
             provider: StorageProviderKind::Memory,
             required: false,
             provider_order: default_storage_provider_order(),
+            libsql_url: None,
+            libsql_auth_token: None,
+            libsql_auth_token_env: None,
+            migration_mode: default_storage_migration_mode(),
             request_log_retention_records: default_request_log_retention_records(),
             audit_event_retention_records: default_audit_event_retention_records(),
             billing_event_retention_records: default_billing_event_retention_records(),

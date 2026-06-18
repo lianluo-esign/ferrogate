@@ -271,6 +271,12 @@ export_subject = "api_key_id"
 provider = "memory"
 required = false
 provider_order = ["turso_libsql", "postgres", "mysql"]
+# For Turso Cloud / libSQL:
+# provider = "turso_libsql"
+# required = true
+# libsql_url = "libsql://your-database.aws-ap-northeast-1.turso.io"
+# libsql_auth_token_env = "FERROGATE_LIBSQL_AUTH_TOKEN"
+# migration_mode = "auto"
 request_log_retention_records = 10000
 audit_event_retention_records = 10000
 billing_event_retention_records = 10000
@@ -342,6 +348,28 @@ models = ["mcp_tool:github-search"]
 providers = ["mcp:github"]
 message = "MCP search is blocked for this key"
 ```
+
+FerroGate also accepts `.yaml` / `.yml` config files. For Turso Cloud, keep the
+auth token in an environment variable for normal deployments:
+
+```yaml
+listen: "0.0.0.0:8080"
+
+storage:
+  provider: turso_libsql
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  libsql_url: "libsql://your-database.aws-ap-northeast-1.turso.io"
+  libsql_auth_token_env: "FERROGATE_LIBSQL_AUTH_TOKEN"
+  migration_mode: auto
+```
+
+The initialization schema lives under `sql/`. The first libSQL migration is
+`sql/001_init_libsql.sql` and uses resource-oriented tables for control-plane
+documents plus request logs, audit events, billing events, and usage aggregates.
 
 For third-party usage billing, set `export_provider = "openmeter"` and point
 `export_endpoint` at an OpenMeter-compatible CloudEvents ingestion endpoint,

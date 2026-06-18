@@ -37,7 +37,7 @@ impl Config {
 
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
-        let mut config: Self = toml::from_str(&raw).context("failed to parse TOML config")?;
+        let mut config: Self = parse_structured_config(path, &raw)?;
         config.resolve_paths_relative_to(path.parent());
         config
             .validate()
@@ -47,6 +47,12 @@ impl Config {
 
     pub(crate) fn from_toml_str(raw: &str) -> AnyResult<Self> {
         let config: Self = toml::from_str(raw).context("failed to parse TOML config")?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub(crate) fn from_yaml_str(raw: &str) -> AnyResult<Self> {
+        let config: Self = serde_yaml::from_str(raw).context("failed to parse YAML config")?;
         config.validate()?;
         Ok(config)
     }
@@ -268,6 +274,18 @@ impl Config {
                 *dns_hook_cleanup = resolve_relative_path(base_dir, dns_hook_cleanup);
             }
         }
+    }
+}
+
+fn parse_structured_config(path: &Path, raw: &str) -> AnyResult<Config> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("yaml" | "yml") => serde_yaml::from_str(raw).context("failed to parse YAML config"),
+        _ => toml::from_str(raw).context("failed to parse TOML config"),
     }
 }
 

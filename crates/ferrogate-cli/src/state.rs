@@ -26,7 +26,7 @@ use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config,
     GatewayConfigProfile, GuardrailEffect, GuardrailStage, HeaderMutation, Model,
     PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus, Provider, RouteRule,
-    StorageConfig, Upstream,
+    StorageConfig, StorageMigrationMode, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -186,21 +186,29 @@ pub(crate) struct RuntimeReloadPlan {
 }
 
 impl SharedAppState {
+    #[cfg(test)]
     pub(crate) fn with_source_path(config: Config, source_path: Option<PathBuf>) -> Self {
+        Self::try_with_source_path(config, source_path).expect("failed to initialize app state")
+    }
+
+    pub(crate) fn try_with_source_path(
+        config: Config,
+        source_path: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
         let snapshot = config_snapshot_id(&config);
         let shared_file_control_plane = SharedFileControlPlane::from_config(&config)
             .inspect_err(|error| warn!("failed to initialize file cluster state: {error}"))
             .ok()
             .flatten()
             .map(Arc::new);
-        Self {
-            inner: Arc::new(RwLock::new(AppState::new(config))),
+        Ok(Self {
+            inner: Arc::new(RwLock::new(AppState::try_new(config)?)),
             reload_coordinator: Arc::new(Mutex::new(ferrogate_runtime::ReloadCoordinator::new(
                 snapshot,
             ))),
             source_path: source_path.map(Arc::new),
             shared_file_control_plane,
-        }
+        })
     }
 
     pub(crate) fn current(&self) -> AppState {
@@ -268,7 +276,19 @@ impl SharedAppState {
             };
         }
 
-        let next = active.with_reloaded_config(candidate);
+        let next = match active.with_reloaded_config(candidate) {
+            Ok(next) => next,
+            Err(error) => {
+                let outcome = coordinator.reject(reload_candidate, error.to_string());
+                return RuntimeReloadResult {
+                    active_snapshot: outcome.active.id,
+                    candidate_snapshot: outcome.candidate.id,
+                    committed: false,
+                    mode: RELOAD_MODE_PROCESS_LOCAL,
+                    reason: outcome.reason,
+                };
+            }
+        };
         match self.inner.write() {
             Ok(mut state) => *state = next,
             Err(poisoned) => *poisoned.into_inner() = next,
@@ -404,7 +424,7 @@ impl SharedAppState {
         let result = (|| {
             active
                 .repositories
-                .upsert_control_plane_api_key(key.id.clone(), serde_json::to_string(&key)?);
+                .upsert_control_plane_api_key(key.id.clone(), serde_json::to_string(&key)?)?;
             let mut candidate = (*active.config).clone();
             active.apply_control_plane_snapshot_to_config(&mut candidate)?;
             candidate.validate()?;
@@ -415,14 +435,14 @@ impl SharedAppState {
             Ok(result)
         })();
         if result.is_err() {
-            active.sync_control_plane_storage_from_config(&active.config);
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
         }
         result
     }
 
     pub(crate) fn delete_api_key(&self, id: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
         let active = self.current();
-        if !active.repositories.delete_control_plane_api_key(id) {
+        if !active.repositories.delete_control_plane_api_key(id)? {
             return Ok(None);
         }
         let result = (|| {
@@ -436,7 +456,7 @@ impl SharedAppState {
             Ok(Some(result))
         })();
         if result.is_err() {
-            active.sync_control_plane_storage_from_config(&active.config);
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
         }
         result
     }
@@ -447,9 +467,10 @@ impl SharedAppState {
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
         let result = (|| {
-            active
-                .repositories
-                .upsert_control_plane_policy(policy.name.clone(), serde_json::to_string(&policy)?);
+            active.repositories.upsert_control_plane_policy(
+                policy.name.clone(),
+                serde_json::to_string(&policy)?,
+            )?;
             let mut candidate = (*active.config).clone();
             active.apply_control_plane_snapshot_to_config(&mut candidate)?;
             candidate.validate()?;
@@ -460,14 +481,14 @@ impl SharedAppState {
             Ok(result)
         })();
         if result.is_err() {
-            active.sync_control_plane_storage_from_config(&active.config);
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
         }
         result
     }
 
     pub(crate) fn delete_policy(&self, name: &str) -> anyhow::Result<Option<RuntimeReloadResult>> {
         let active = self.current();
-        if !active.repositories.delete_control_plane_policy(name) {
+        if !active.repositories.delete_control_plane_policy(name)? {
             return Ok(None);
         }
         let result = (|| {
@@ -481,7 +502,7 @@ impl SharedAppState {
             Ok(Some(result))
         })();
         if result.is_err() {
-            active.sync_control_plane_storage_from_config(&active.config);
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
         }
         result
     }
@@ -740,24 +761,86 @@ fn initial_cluster_sync_status(config: &Config) -> ClusterSyncStatus {
     }
 }
 
-fn runtime_storage_repositories(config: &Config) -> RuntimeStorageRepositories {
+fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorageRepositories> {
     let storage = &config.storage;
+    let api_keys = serialize_control_plane_documents(&config.api_keys, |key| key.id.clone());
+    let policies =
+        serialize_control_plane_documents(&config.policies, |policy| policy.name.clone());
+    if storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
+        let url = storage
+            .libsql_url
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("field storage.libsql_url is required"))?;
+        let auth_token = storage_libsql_auth_token(storage)?;
+        let initialize_schema = storage.migration_mode == StorageMigrationMode::Auto;
+        return block_on_runtime_storage(RuntimeStorageRepositories::turso_libsql(
+            storage.provider_order.clone(),
+            storage.required,
+            url,
+            auth_token,
+            initialize_schema,
+            api_keys,
+            policies,
+            storage.request_log_retention_records,
+            storage.audit_event_retention_records,
+        ))
+        .map_err(|error| anyhow::anyhow!("{error}"));
+    }
     let backend = RuntimeStorageBackend::new(
         storage.provider,
         storage.required,
         storage.provider_order.clone(),
-    )
-    .inspect_err(|error| warn!("failed to initialize storage backend: {error}"))
-    .unwrap_or_else(|_| RuntimeStorageBackend::in_memory(storage.provider_order.clone()));
-    RuntimeStorageRepositories::new(
+    )?;
+    Ok(RuntimeStorageRepositories::new(
         backend,
-        RuntimeControlPlaneState::from_documents(
-            serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
-            serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
-        ),
+        RuntimeControlPlaneState::from_documents(api_keys, policies),
         storage.request_log_retention_records,
         storage.audit_event_retention_records,
-    )
+    ))
+}
+
+fn storage_libsql_auth_token(storage: &StorageConfig) -> anyhow::Result<String> {
+    if let Some(token) = storage
+        .libsql_auth_token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+    {
+        return Ok(token.to_string());
+    }
+    let env_name = storage
+        .libsql_auth_token_env
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("field storage.libsql_auth_token_env is required"))?;
+    env::var(env_name).map_err(|_| {
+        anyhow::anyhow!(
+            "field storage.libsql_auth_token_env: environment variable {env_name} is not set"
+        )
+    })
+}
+
+fn block_on_runtime_storage<T: Send>(
+    future: impl std::future::Future<Output = Result<T, ferrogate_storage::StorageError>> + Send,
+) -> Result<T, ferrogate_storage::StorageError> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| ferrogate_storage::StorageError::Libsql(error.to_string()))?
+                    .block_on(future)
+            })
+            .join()
+            .map_err(|_| {
+                ferrogate_storage::StorageError::Libsql("storage runtime thread panicked".into())
+            })?
+    })
 }
 
 fn serialize_control_plane_documents<T: Serialize>(
@@ -784,6 +867,16 @@ fn deserialize_control_plane_documents<T: for<'de> Deserialize<'de>>(
         .map_err(|error| {
             anyhow::anyhow!("failed to decode control-plane storage document: {error}")
         })
+}
+
+fn apply_control_plane_snapshot_to_config_from_repositories(
+    repositories: &RuntimeStorageRepositories,
+    config: &mut Config,
+) -> anyhow::Result<()> {
+    let snapshot = repositories.control_plane_snapshot()?;
+    config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
+    config.policies = deserialize_control_plane_documents(snapshot.policies)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1515,7 +1608,15 @@ pub(crate) struct ProviderHealthCheck {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub(crate) fn new(config: Config) -> Self {
+        Self::try_new(config).expect("failed to initialize app state")
+    }
+
+    pub(crate) fn try_new(mut config: Config) -> anyhow::Result<Self> {
+        let storage = config.storage.clone();
+        let repositories = Arc::new(runtime_storage_repositories(&config)?);
+        apply_control_plane_snapshot_to_config_from_repositories(&repositories, &mut config)?;
         let providers = config
             .providers
             .iter()
@@ -1595,7 +1696,6 @@ impl AppState {
         } else {
             HashMap::new()
         };
-        let storage = config.storage.clone();
         let mcp_servers = config.mcp_servers.clone();
         let cluster_sync = initial_cluster_sync_status(&config);
         let metering_exporter = MeteringExporter::from_config(&config.metering)
@@ -1604,7 +1704,7 @@ impl AppState {
             .map(Arc::new);
         let cluster_counters = ClusterCounterBackend::from_config(&config);
 
-        Self {
+        Ok(Self {
             cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
             cluster_sync: Arc::new(cluster_sync),
             config: Arc::new(config.clone()),
@@ -1624,7 +1724,7 @@ impl AppState {
                 storage.billing_event_retention_records,
             )),
             metering_exporter,
-            repositories: Arc::new(runtime_storage_repositories(&config)),
+            repositories,
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
@@ -1641,7 +1741,7 @@ impl AppState {
             request_ids: Arc::new(AtomicU64::new(1)),
             drain: Arc::new(AtomicBool::new(false)),
             acme_renewal: None,
-        }
+        })
     }
 
     pub(crate) fn extension_statuses(&self) -> Vec<ExtensionStatus> {
@@ -1929,8 +2029,8 @@ impl AppState {
         self.extension_registry.post_response(request_id, status);
     }
 
-    fn with_reloaded_config(&self, config: Config) -> Self {
-        let mut next = AppState::new(config);
+    fn with_reloaded_config(&self, config: Config) -> anyhow::Result<Self> {
+        let mut next = AppState::try_new(config)?;
         next.cluster_identity = Arc::clone(&self.cluster_identity);
         next.cluster_counters = Arc::new(ClusterCounterBackend::from_reloaded_config(
             &next.config,
@@ -1948,8 +2048,8 @@ impl AppState {
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
         self.apply_storage_config(&next.config.storage);
-        self.sync_control_plane_storage_from_config(&next.config);
-        next
+        let _ = self.sync_control_plane_storage_from_config(&next.config);
+        Ok(next)
     }
 
     fn apply_storage_config(&self, storage: &StorageConfig) {
@@ -1962,15 +2062,16 @@ impl AppState {
         );
     }
 
-    fn sync_control_plane_storage_from_config(&self, config: &Config) {
+    fn sync_control_plane_storage_from_config(&self, config: &Config) -> anyhow::Result<()> {
         self.repositories.replace_control_plane(
             serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
             serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
-        );
+        )?;
+        Ok(())
     }
 
     fn apply_control_plane_snapshot_to_config(&self, config: &mut Config) -> anyhow::Result<()> {
-        let snapshot = self.repositories.control_plane_snapshot();
+        let snapshot = self.repositories.control_plane_snapshot()?;
         config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
         config.policies = deserialize_control_plane_documents(snapshot.policies)?;
         Ok(())
@@ -4131,7 +4232,7 @@ mod tests {
             .api_keys
             .iter()
             .any(|key| key.id == "key_added"));
-        let snapshot = state.repositories.control_plane_snapshot();
+        let snapshot = state.repositories.control_plane_snapshot().unwrap();
         assert!(snapshot
             .api_keys
             .iter()
@@ -4160,6 +4261,7 @@ mod tests {
         assert!(state
             .repositories
             .control_plane_snapshot()
+            .unwrap()
             .policies
             .iter()
             .any(|document| document.contains("\"name\":\"deny-added\"")));
@@ -4175,6 +4277,7 @@ mod tests {
         assert!(!state
             .repositories
             .control_plane_snapshot()
+            .unwrap()
             .api_keys
             .iter()
             .any(|document| document.contains("\"id\":\"key_added\"")));
@@ -4215,6 +4318,7 @@ mod tests {
         assert!(!state
             .repositories
             .control_plane_snapshot()
+            .unwrap()
             .policies
             .iter()
             .any(|document| document.contains("\"name\":\"deny-invalid\"")));

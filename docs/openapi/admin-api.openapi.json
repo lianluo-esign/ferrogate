@@ -3943,6 +3943,9 @@
           "config_toml": {
             "type": "string"
           },
+          "config_yaml": {
+            "type": "string"
+          },
           "config_caddyfile": {
             "type": "string"
           },

@@ -18,7 +18,9 @@ authors.workspace = true
 [dependencies]
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-core = { path = "../ferrogate-core" }
+libsql.workspace = true
 serde.workspace = true
+tokio.workspace = true
 
 [features]
 default = []
