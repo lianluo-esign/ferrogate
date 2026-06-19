@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 use std::{
-    env,
+    env, fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -3133,11 +3133,75 @@ fn setup_environment(image: &str) -> Result<Cleanup> {
     cleanup_containers();
     docker(["network", "create", NETWORK_NAME])?;
     if image == IMAGE_TAG {
-        docker(["build", "-t", IMAGE_TAG, "."])?;
+        build_local_ferrogate_image()?;
     } else {
         docker(["pull", image])?;
     }
     Ok(cleanup)
+}
+
+fn build_local_ferrogate_image() -> Result<()> {
+    match env::var("FERROGATE_TEST_IMAGE_MODE")
+        .unwrap_or_else(|_| "host-binary".into())
+        .as_str()
+    {
+        "docker-build" => docker(["build", "-t", IMAGE_TAG, "."]),
+        "host-binary" => build_local_image_from_host_binary(),
+        other => {
+            bail!("FERROGATE_TEST_IMAGE_MODE must be host-binary or docker-build, got {other}")
+        }
+    }
+}
+
+fn build_local_image_from_host_binary() -> Result<()> {
+    let binary = env::var("FERROGATE_TEST_HOST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("target/debug/ferrogate"));
+    if !binary.exists() {
+        bail!(
+            "host ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli --locked` or set FERROGATE_TEST_IMAGE_MODE=docker-build",
+            binary.display()
+        );
+    }
+    let dir = tempfile::tempdir()?;
+    let binary_name = binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ferrogate");
+    let base_image =
+        env::var("FERROGATE_TEST_HOST_IMAGE_BASE").unwrap_or_else(|_| "rust:1.94-slim".into());
+    fs::copy(&binary, dir.path().join("ferrogate"))
+        .with_context(|| format!("failed to copy {}", binary.display()))?;
+    fs::create_dir_all(dir.path().join("Ferrogate"))?;
+    fs::copy(
+        "Ferrogate/Caddyfile",
+        dir.path().join("Ferrogate/Caddyfile"),
+    )
+    .context("failed to copy default Caddyfile")?;
+    fs::write(
+        dir.path().join("Dockerfile"),
+        format!(
+            r#"FROM {base_image}
+LABEL org.opencontainers.image.vendor="Token4AI Cloud" \
+      org.opencontainers.image.authors="jamesduan <https://x.com/JamesDuanL>"
+COPY ferrogate /usr/local/bin/ferrogate
+COPY Ferrogate/Caddyfile /etc/ferrogate/Caddyfile
+EXPOSE 8080
+ENV FERROGATE_CONFIG=/etc/ferrogate/Caddyfile
+CMD ["ferrogate", "run"]
+"#
+        ),
+    )?;
+    println!(
+        "building {IMAGE_TAG} from host binary {} ({binary_name})",
+        binary.display()
+    );
+    docker_args([
+        "build".to_string(),
+        "-t".to_string(),
+        IMAGE_TAG.to_string(),
+        dir.path().display().to_string(),
+    ])
 }
 
 fn gateway_config(node_id: &str, state_backend: &str, file_state_path: Option<&str>) -> String {
@@ -3587,34 +3651,34 @@ address = "0.0.0.0:4319"
 framing.method = "newline_delimited"
 decoding.codec = "json"
 
-[transforms.request_logs]
+[transforms.request_logs_filter]
 type = "filter"
 inputs = ["ferrogate_analytics"]
 condition = '.event_kind == "request_log"'
 
-[transforms.trace_spans]
+[transforms.trace_spans_filter]
 type = "filter"
 inputs = ["ferrogate_analytics"]
 condition = '.event_kind == "trace_span"'
 
-[transforms.usage_metrics]
+[transforms.usage_metrics_filter]
 type = "filter"
 inputs = ["ferrogate_analytics"]
 condition = '.event_kind == "usage_metric"'
 
-[transforms.billing_metering_events]
+[transforms.billing_metering_events_filter]
 type = "filter"
 inputs = ["ferrogate_analytics"]
 condition = '.event_kind == "billing_metering_event"'
 
-[transforms.audit_timeline]
+[transforms.audit_timeline_filter]
 type = "filter"
 inputs = ["ferrogate_analytics"]
 condition = '.event_kind == "audit_event"'
 
 [sinks.request_logs]
 type = "clickhouse"
-inputs = ["request_logs"]
+inputs = ["request_logs_filter"]
 endpoint = "http://ferrogate-e2e-clickhouse:8123"
 database = "ferrogate"
 table = "ferrogate_request_logs"
@@ -3623,7 +3687,7 @@ skip_unknown_fields = true
 
 [sinks.trace_spans]
 type = "clickhouse"
-inputs = ["trace_spans"]
+inputs = ["trace_spans_filter"]
 endpoint = "http://ferrogate-e2e-clickhouse:8123"
 database = "ferrogate"
 table = "ferrogate_trace_spans"
@@ -3632,7 +3696,7 @@ skip_unknown_fields = true
 
 [sinks.usage_metrics]
 type = "clickhouse"
-inputs = ["usage_metrics"]
+inputs = ["usage_metrics_filter"]
 endpoint = "http://ferrogate-e2e-clickhouse:8123"
 database = "ferrogate"
 table = "ferrogate_usage_metrics"
@@ -3641,7 +3705,7 @@ skip_unknown_fields = true
 
 [sinks.billing_metering_events]
 type = "clickhouse"
-inputs = ["billing_metering_events"]
+inputs = ["billing_metering_events_filter"]
 endpoint = "http://ferrogate-e2e-clickhouse:8123"
 database = "ferrogate"
 table = "ferrogate_billing_metering_events"
@@ -3650,7 +3714,7 @@ skip_unknown_fields = true
 
 [sinks.audit_timeline]
 type = "clickhouse"
-inputs = ["audit_timeline"]
+inputs = ["audit_timeline_filter"]
 endpoint = "http://ferrogate-e2e-clickhouse:8123"
 database = "ferrogate"
 table = "ferrogate_audit_timeline"
@@ -3804,9 +3868,7 @@ fn start_clickhouse() -> Result<()> {
         "-e",
         "CLICKHOUSE_DB=ferrogate",
         "-e",
-        "CLICKHOUSE_USER=default",
-        "-e",
-        "CLICKHOUSE_PASSWORD=",
+        "CLICKHOUSE_SKIP_USER_SETUP=1",
         &clickhouse_image,
     ])
 }
@@ -3867,6 +3929,7 @@ fn validate_vector_config(config_path: &Path) -> Result<()> {
         &mount,
         &vector_image,
         "validate",
+        "--skip-healthchecks",
         "/etc/vector/vector.toml",
     ])
 }
@@ -4209,6 +4272,9 @@ struct Cleanup;
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
+        if env::var("FERROGATE_TEST_KEEP_CONTAINERS").is_ok_and(|value| value == "1") {
+            return;
+        }
         cleanup_containers();
     }
 }
