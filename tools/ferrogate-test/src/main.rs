@@ -15,7 +15,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::mpsc,
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const IMAGE_TAG: &str = "ferrogate:e2e-local";
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::List => {
-            println!("local: admin-api, auth-api, gateway-api, ci");
+            println!("local: admin-api, auth-api, gateway-api, ci, turso-libsql-restart (opt-in)");
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
         }
@@ -49,6 +49,7 @@ fn main() -> Result<()> {
         Commands::AdminApi(args) => run_admin_api(&args),
         Commands::AuthApi(args) => run_auth_api(&args),
         Commands::GatewayApi(args) => run_gateway_api(&args),
+        Commands::TursoLibsqlRestart(args) => run_turso_libsql_restart(&args),
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
@@ -94,6 +95,8 @@ enum Commands {
     AuthApi(AuthArgs),
     /// Run gateway API coverage against a real local FerroGate process.
     GatewayApi(LocalArgs),
+    /// Opt-in live Turso/libSQL restart durability scenario.
+    TursoLibsqlRestart(TursoLibsqlRestartArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
     Ci(CiArgs),
 }
@@ -149,6 +152,18 @@ struct CiArgs {
     local: LocalArgs,
     #[command(flatten)]
     auth: AuthArgs,
+}
+
+#[derive(Debug, Args)]
+struct TursoLibsqlRestartArgs {
+    #[command(flatten)]
+    local: LocalArgs,
+    /// Turso/libSQL remote database URL, for example libsql://database.turso.io.
+    #[arg(long, env = "FERROGATE_LIBSQL_URL")]
+    libsql_url: String,
+    /// Turso/libSQL auth token. Prefer FERROGATE_LIBSQL_AUTH_TOKEN in shell/CI.
+    #[arg(long, env = "FERROGATE_LIBSQL_AUTH_TOKEN")]
+    libsql_auth_token: String,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -983,6 +998,72 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
+    if !args.libsql_url.starts_with("libsql://") {
+        bail!("--libsql-url must use the libsql:// protocol");
+    }
+    if args.libsql_auth_token.trim().is_empty() {
+        bail!("--libsql-auth-token must not be empty");
+    }
+
+    let resource_id = format!(
+        "ferrogate-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before UNIX epoch")?
+            .as_millis()
+    );
+    let request_body = serde_json::json!({
+        "id": resource_id,
+        "name": "Turso restart test key",
+        "key": format!("{resource_id}-secret"),
+        "scopes": ["models.read", "chat.completions"],
+        "allowed_models": ["fast-chat"],
+        "organization_id": "org_turso_e2e",
+        "project_id": "project_restart"
+    })
+    .to_string();
+
+    {
+        let case = TursoRestartHarness::start(args)?;
+        case.expect_storage_status()?;
+        case.expect_json(
+            "POST",
+            "/admin/v1/api-keys",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &request_body,
+            201,
+            |body| {
+                assert_eq!(body["key"]["id"], resource_id);
+                assert_eq!(body["key"]["key_source"], "inline");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        case.expect_api_key(&resource_id)?;
+    }
+
+    {
+        let case = TursoRestartHarness::start(args)?;
+        case.expect_storage_status()?;
+        case.expect_api_key(&resource_id)?;
+        case.expect_json(
+            "DELETE",
+            &format!("/admin/v1/api-keys/{resource_id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["deleted"], true);
+                Ok(())
+            },
+        )?;
+    }
+
+    println!("turso-libsql-restart scenario passed");
+    Ok(())
+}
+
 const ADMIN_AUTH: &str = "Authorization: Bearer admin-secret";
 const CLIENT_AUTH: &str = "Authorization: Bearer client-secret";
 const AUTH_TEST_CLIENT_2: &str = "Authorization: Bearer test-secret-2";
@@ -1014,6 +1095,12 @@ struct AuthHarness {
     _dir: tempfile::TempDir,
     auth_addr: String,
     auth: Child,
+}
+
+struct TursoRestartHarness {
+    _dir: tempfile::TempDir,
+    gateway_addr: String,
+    gateway: Child,
 }
 
 impl AuthHarness {
@@ -1104,6 +1191,132 @@ impl Drop for AuthHarness {
     fn drop(&mut self) {
         let _ = self.auth.kill();
         let _ = self.auth.wait();
+    }
+}
+
+impl TursoRestartHarness {
+    fn start(args: &TursoLibsqlRestartArgs) -> Result<Self> {
+        let ferrogate_bin = &args.local.ferrogate_bin;
+        if !ferrogate_bin.exists() {
+            bail!(
+                "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
+                ferrogate_bin.display()
+            );
+        }
+
+        let gateway_addr = free_addr()?;
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("ferrogate.yaml");
+        std::fs::write(
+            &config_path,
+            turso_libsql_restart_config(&gateway_addr, &args.libsql_url),
+        )?;
+
+        let gateway = Command::new(ferrogate_bin)
+            .args(["run", "--config"])
+            .arg(&config_path)
+            .env("FERROGATE_LIBSQL_AUTH_TOKEN", &args.libsql_auth_token)
+            .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
+
+        let mut harness = Self {
+            _dir: dir,
+            gateway_addr,
+            gateway,
+        };
+        harness.wait_for_gateway()?;
+        Ok(harness)
+    }
+
+    fn wait_for_gateway(&mut self) -> Result<()> {
+        let started = Instant::now();
+        let mut last = String::new();
+        while started.elapsed() < Duration::from_secs(60) {
+            if let Some(status) = self.gateway.try_wait()? {
+                bail!("ferrogate process exited before readiness check: {status}");
+            }
+            match http_request_addr(&self.gateway_addr, "GET", "/healthz", &[], "") {
+                Ok(response) if response.status == 200 => return Ok(()),
+                Ok(response) => last = response.raw,
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        bail!(
+            "timed out waiting for Turso/libSQL FerroGate on {}; last response: {last}",
+            self.gateway_addr
+        );
+    }
+
+    fn expect_json<F>(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[&str],
+        body: &str,
+        expected_status: u16,
+        check: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(Value) -> Result<()>,
+    {
+        let response = http_request_addr(&self.gateway_addr, method, path, headers, body)?;
+        if response.status != expected_status {
+            bail!(
+                "{method} {path} expected status {expected_status}, got {}; raw: {}",
+                response.status,
+                response.raw
+            );
+        }
+        let body: Value = serde_json::from_str(&response.body).with_context(|| {
+            format!(
+                "failed to parse JSON body for {method} {path}: {}",
+                response.body
+            )
+        })?;
+        check(body)
+    }
+
+    fn expect_storage_status(&self) -> Result<()> {
+        self.expect_json("GET", "/admin/v1/status", &[ADMIN_AUTH], "", 200, |body| {
+            assert_eq!(body["storage"]["provider"], "turso_libsql");
+            assert_eq!(body["storage"]["durable"], true);
+            assert_eq!(body["storage"]["implemented"], true);
+            assert_eq!(body["storage"]["required"], true);
+            assert_eq!(body["storage"]["provider_order"][0], "turso_libsql");
+            assert_eq!(body["storage"]["provider_order"][1], "postgres");
+            assert_eq!(body["storage"]["provider_order"][2], "mysql");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        })
+    }
+
+    fn expect_api_key(&self, id: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/api-keys/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["key"]["id"], id);
+                assert_eq!(body["key"]["name"], "Turso restart test key");
+                assert_eq!(body["key"]["key_source"], "inline");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+}
+
+impl Drop for TursoRestartHarness {
+    fn drop(&mut self) {
+        let _ = self.gateway.kill();
+        let _ = self.gateway.wait();
     }
 }
 
@@ -1531,6 +1744,46 @@ api_key_ids = ["client"]
 cache_enabled = false
 "#,
         stdio_mcp_path = toml_basic_string(&stdio_mcp_path.to_string_lossy())
+    )
+}
+
+fn turso_libsql_restart_config(gateway_addr: &str, libsql_url: &str) -> String {
+    format!(
+        r#"
+listen: "{gateway_addr}"
+
+storage:
+  provider: turso_libsql
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  libsql_url: "{libsql_url}"
+  libsql_auth_token_env: FERROGATE_LIBSQL_AUTH_TOKEN
+  migration_mode: auto
+
+providers:
+  - name: openai
+    kind: openai
+    base_url: "http://127.0.0.1:1/v1"
+    api_key_env: FERROGATE_PROVIDER_SECRET
+
+models:
+  - name: fast-chat
+    provider: openai
+    provider_model: gpt-4o-mini
+    capabilities:
+      - chat
+
+api_keys:
+  - id: admin
+    name: Admin
+    key: admin-secret
+    scopes:
+      - admin.read
+      - admin.write
+"#
     )
 }
 

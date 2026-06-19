@@ -32,6 +32,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+
       - name: Verify libSQL secret is configured
         shell: bash
         run: |
@@ -73,6 +83,19 @@ jobs:
               scopes:
                 - "admin.read"
                 - "admin.write"
+
+          providers:
+            - name: "openai"
+              kind: "openai"
+              base_url: "http://127.0.0.1:1/v1"
+              api_key_env: "FERROGATE_PROVIDER_SECRET"
+
+          models:
+            - name: "fast-chat"
+              provider: "openai"
+              provider_model: "gpt-4o-mini"
+              capabilities:
+                - "chat"
           YAML
 
       - name: Run FerroGate container
@@ -84,6 +107,7 @@ jobs:
             -p 18089:8080 \
             -p 12019:2019 \
             -e FERROGATE_LIBSQL_AUTH_TOKEN \
+            -e FERROGATE_PROVIDER_SECRET=provider-secret \
             -v "${RUNNER_TEMP}/ferrogate.yaml:/etc/ferrogate/ferrogate.yaml:ro" \
             ferrogate:turso-libsql-init \
             ferrogate run --config /etc/ferrogate/ferrogate.yaml
@@ -124,6 +148,15 @@ jobs:
           ' "${RUNNER_TEMP}/status.json" >/dev/null
 
           jq '{service, auth_required, storage, api_keys}' "${RUNNER_TEMP}/status.json"
+
+      - name: Build FerroGate live Turso restart harness
+        run: cargo build -p ferrogate-cli -p ferrogate-test --locked
+
+      - name: Verify live Turso restart persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/debug/ferrogate-test turso-libsql-restart
 
       - name: Cleanup container
         if: always()
