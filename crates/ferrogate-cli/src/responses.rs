@@ -44,6 +44,8 @@ pub(crate) struct AdminStatus<'a> {
     pub(crate) enabled_upstreams: usize,
     pub(crate) routes: usize,
     pub(crate) enabled_routes: usize,
+    pub(crate) plugins: usize,
+    pub(crate) active_plugins: usize,
     pub(crate) extensions: usize,
     pub(crate) active_extensions: usize,
     pub(crate) tools: usize,

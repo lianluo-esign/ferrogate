@@ -81,7 +81,7 @@ fn config_model_supports_serde_roundtrip() {
             }],
             enabled: true,
         }],
-        extensions: vec![ExtensionConfig {
+        plugins: vec![ExtensionConfig {
             id: "tool.echo".into(),
             kind: ExtensionKind::ToolProvider,
             enabled: true,
@@ -147,10 +147,10 @@ fn config_model_supports_serde_roundtrip() {
     assert_eq!(decoded.reliability.graceful_upgrade_sock_retries, Some(5));
     assert_eq!(decoded.upstreams[0].endpoint_urls().len(), 2);
     assert_eq!(decoded.routes[0].request_headers[0].name, "x-request");
-    assert_eq!(decoded.extensions[0].kind, ExtensionKind::ToolProvider);
-    assert_eq!(decoded.extensions[0].permissions.tools, ["tool.echo"]);
+    assert_eq!(decoded.plugins[0].kind, ExtensionKind::ToolProvider);
+    assert_eq!(decoded.plugins[0].permissions.tools, ["tool.echo"]);
     assert_eq!(
-        decoded.extensions[0].config.get("timeout_ms"),
+        decoded.plugins[0].config.get("timeout_ms"),
         Some(&toml::Value::Integer(30_000))
     );
     decoded.validate().unwrap();

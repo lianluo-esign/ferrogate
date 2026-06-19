@@ -132,11 +132,22 @@ fn rejects_model_lowest_cost_strategy_without_prices() {
 #[test]
 fn accepts_builtin_extension_config_with_explicit_permissions() {
     let config = Config {
+        plugins: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn accepts_legacy_extensions_as_plugin_registrations() {
+    let config = Config {
         extensions: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
         ..Config::default()
     };
 
     config.validate().unwrap();
+    assert_eq!(config.plugin_registrations().len(), 1);
 }
 
 #[test]
@@ -155,7 +166,7 @@ fn accepts_multiple_builtin_noop_hooks_for_ordered_pipelines() {
 #[test]
 fn rejects_duplicate_extension_ids() {
     let config = Config {
-        extensions: vec![
+        plugins: vec![
             extension("tool.echo", ExtensionKind::ToolProvider, 10),
             extension("tool.echo", ExtensionKind::EventSink, 20),
         ],
@@ -163,7 +174,19 @@ fn rejects_duplicate_extension_ids() {
     };
 
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("duplicate extension id tool.echo"));
+    assert!(error.contains("duplicate plugin id tool.echo"));
+}
+
+#[test]
+fn rejects_duplicate_plugin_ids_across_plugins_and_extensions() {
+    let config = Config {
+        plugins: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
+        extensions: vec![extension("tool.echo", ExtensionKind::ToolProvider, 20)],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("duplicate plugin id tool.echo"));
 }
 
 #[test]
@@ -176,7 +199,7 @@ fn rejects_extension_sources_that_can_execute_out_of_tree_code() {
     };
 
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("only builtin extensions are supported"));
+    assert!(error.contains("only builtin plugins are supported"));
 }
 
 #[test]
@@ -190,7 +213,7 @@ fn rejects_duplicate_enabled_extension_order_for_same_kind() {
     };
 
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("duplicate enabled extension order 10"));
+    assert!(error.contains("duplicate enabled plugin order 10"));
 
     let mut disabled = extension("tool.health_check", ExtensionKind::ToolProvider, 10);
     disabled.enabled = false;

@@ -376,7 +376,7 @@
         "tags": [
           "admin-read"
         ],
-        "summary": "List configured gateway extensions without exposing extension config.",
+        "summary": "List configured gateway plugins through the legacy extensions alias without exposing plugin config.",
         "responses": {
           "200": {
             "description": "Extension list.",
@@ -384,6 +384,33 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AdminExtensionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/plugins": {
+      "get": {
+        "operationId": "listAdminPlugins",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List configured gateway plugins without exposing plugin config.",
+        "responses": {
+          "200": {
+            "description": "Plugin list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPluginList"
                 }
               }
             }
@@ -2455,6 +2482,8 @@
           "enabled_upstreams",
           "routes",
           "enabled_routes",
+          "plugins",
+          "active_plugins",
           "extensions",
           "active_extensions",
           "tools",
@@ -2512,6 +2541,14 @@
             "minimum": 0
           },
           "enabled_routes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "plugins": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "active_plugins": {
             "type": "integer",
             "minimum": 0
           },
@@ -3179,7 +3216,7 @@
         },
         "additionalProperties": false
       },
-      "AdminExtension": {
+      "AdminPlugin": {
         "type": "object",
         "required": [
           "id",
@@ -4548,7 +4585,10 @@
         "$ref": "#/components/schemas/AdminList_ObservabilityStatus"
       },
       "AdminExtensionList": {
-        "$ref": "#/components/schemas/AdminList_AdminExtension"
+        "$ref": "#/components/schemas/AdminPluginList"
+      },
+      "AdminPluginList": {
+        "$ref": "#/components/schemas/AdminList_AdminPlugin"
       },
       "AdminToolList": {
         "$ref": "#/components/schemas/AdminList_AdminTool"
@@ -4774,7 +4814,7 @@
         },
         "additionalProperties": false
       },
-      "AdminList_AdminExtension": {
+      "AdminList_AdminPlugin": {
         "type": "object",
         "required": [
           "object",
@@ -4788,7 +4828,7 @@
           "data": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/AdminExtension"
+              "$ref": "#/components/schemas/AdminPlugin"
             }
           }
         },

@@ -34,7 +34,7 @@ impl Config {
         self.validate_gateway_configs(&api_key_ids)?;
         self.validate_prompt_templates(&model_names)?;
         self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
-        self.validate_extensions()?;
+        self.validate_plugins()?;
         self.validate_tls()?;
         self.validate_telemetry()?;
         self.validate_observability()?;
@@ -1093,53 +1093,76 @@ impl Config {
         Ok(())
     }
 
-    fn validate_extensions(&self) -> AnyResult<()> {
+    fn validate_plugins(&self) -> AnyResult<()> {
         let mut ids = HashSet::new();
         let mut enabled_orders = HashSet::new();
 
-        for (index, extension) in self.extensions.iter().enumerate() {
+        for (section, index, extension) in self.plugin_registrations_for_validation() {
             if extension.id.trim().is_empty() {
-                bail!("field extensions[{index}].id: cannot be empty");
+                bail!("field {section}[{index}].id: cannot be empty");
             }
             if !ids.insert(extension.id.as_str()) {
                 bail!(
-                    "field extensions[{index}].id: duplicate extension id {}",
+                    "field {section}[{index}].id: duplicate plugin id {}",
                     extension.id
                 );
             }
             if extension.source.trim().is_empty() {
-                bail!("field extensions[{index}].source: cannot be empty");
+                bail!("field {section}[{index}].source: cannot be empty");
             }
             if extension.source != "builtin" {
                 bail!(
-                    "field extensions[{index}].source: only builtin extensions are supported in this phase"
+                    "field {section}[{index}].source: only builtin plugins are supported in this phase"
                 );
             }
             if extension.enabled
                 && !enabled_orders.insert((extension.kind.clone(), extension.order))
             {
                 bail!(
-                    "field extensions[{index}].order: duplicate enabled extension order {} for kind {:?}",
+                    "field {section}[{index}].order: duplicate enabled plugin order {} for kind {:?}",
                     extension.order,
                     extension.kind
                 );
             }
 
             validate_extension_permission_names(
+                section,
                 index,
                 "permissions.tools",
                 &extension.permissions.tools,
             )?;
             validate_extension_permission_names(
+                section,
                 index,
                 "permissions.network",
                 &extension.permissions.network,
             )?;
             let _ = extension.approval_policy;
-            validate_builtin_extension_shape(index, extension)?;
+            validate_builtin_plugin_shape(section, index, extension)?;
         }
 
         Ok(())
+    }
+
+    pub(crate) fn plugin_registrations(&self) -> Vec<super::PluginConfig> {
+        let mut plugins = self.plugins.clone();
+        plugins.extend(self.extensions.clone());
+        plugins
+    }
+
+    fn plugin_registrations_for_validation(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, usize, &super::PluginConfig)> {
+        self.plugins
+            .iter()
+            .enumerate()
+            .map(|(index, plugin)| ("plugins", index, plugin))
+            .chain(
+                self.extensions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, extension)| ("extensions", index, extension)),
+            )
     }
 
     fn validate_mcp_servers(&self) -> AnyResult<()> {
@@ -1280,6 +1303,7 @@ where
 }
 
 fn validate_extension_permission_names(
+    section: &str,
     extension_index: usize,
     field: &str,
     names: &[String],
@@ -1287,11 +1311,11 @@ fn validate_extension_permission_names(
     let mut seen = HashSet::new();
     for (index, name) in names.iter().enumerate() {
         if name.trim().is_empty() {
-            bail!("field extensions[{extension_index}].{field}[{index}]: cannot be empty");
+            bail!("field {section}[{extension_index}].{field}[{index}]: cannot be empty");
         }
         if !seen.insert(name.as_str()) {
             bail!(
-                "field extensions[{extension_index}].{field}[{index}]: duplicate permission value {name}"
+                "field {section}[{extension_index}].{field}[{index}]: duplicate permission value {name}"
             );
         }
     }
@@ -1351,7 +1375,8 @@ fn is_prompt_variable_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-fn validate_builtin_extension_shape(
+fn validate_builtin_plugin_shape(
+    section: &str,
     extension_index: usize,
     extension: &super::ExtensionConfig,
 ) -> AnyResult<()> {
@@ -1359,14 +1384,14 @@ fn validate_builtin_extension_shape(
         "tool.echo" | "tool.health_check" => {
             if !matches!(extension.kind, super::ExtensionKind::ToolProvider) {
                 bail!(
-                    "field extensions[{extension_index}].kind: {} must be tool_provider",
+                    "field {section}[{extension_index}].kind: {} must be tool_provider",
                     extension.id
                 );
             }
         }
         "mcp.http" => {
             if !matches!(extension.kind, super::ExtensionKind::ToolProvider) {
-                bail!("field extensions[{extension_index}].kind: mcp.http must be tool_provider");
+                bail!("field {section}[{extension_index}].kind: mcp.http must be tool_provider");
             }
             let endpoint = extension
                 .config
@@ -1374,21 +1399,21 @@ fn validate_builtin_extension_shape(
                 .and_then(toml::Value::as_str)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "field extensions[{extension_index}].config.endpoint: required for mcp.http"
+                        "field {section}[{extension_index}].config.endpoint: required for mcp.http"
                     )
                 })?;
             let uri: http::Uri = endpoint.parse().with_context(|| {
-                format!("field extensions[{extension_index}].config.endpoint: invalid URI")
+                format!("field {section}[{extension_index}].config.endpoint: invalid URI")
             })?;
             if uri.scheme_str() != Some("http") {
-                bail!("field extensions[{extension_index}].config.endpoint: mcp.http supports http endpoints only in this phase");
+                bail!("field {section}[{extension_index}].config.endpoint: mcp.http supports http endpoints only in this phase");
             }
             let host = uri
                 .authority()
                 .map(|authority| authority.host())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "field extensions[{extension_index}].config.endpoint: must include host"
+                        "field {section}[{extension_index}].config.endpoint: must include host"
                     )
                 })?;
             if !extension
@@ -1398,14 +1423,14 @@ fn validate_builtin_extension_shape(
                 .any(|allowed| allowed == "*" || allowed == host)
             {
                 bail!(
-                    "field extensions[{extension_index}].permissions.network: must allow MCP host {host}"
+                    "field {section}[{extension_index}].permissions.network: must allow MCP host {host}"
                 );
             }
         }
         "event.audit_log" => {
             if !matches!(extension.kind, super::ExtensionKind::EventSink) {
                 bail!(
-                    "field extensions[{extension_index}].kind: event.audit_log must be event_sink"
+                    "field {section}[{extension_index}].kind: event.audit_log must be event_sink"
                 );
             }
         }
@@ -1413,7 +1438,7 @@ fn validate_builtin_extension_shape(
             if extension.id == "hook.noop" || extension.id.starts_with("hook.noop.") {
                 if !matches!(extension.kind, super::ExtensionKind::RequestHook) {
                     bail!(
-                        "field extensions[{extension_index}].kind: {} must be request_hook",
+                        "field {section}[{extension_index}].kind: {} must be request_hook",
                         extension.id
                     );
                 }
@@ -1421,7 +1446,7 @@ fn validate_builtin_extension_shape(
             }
             if extension.enabled {
                 bail!(
-                    "field extensions[{extension_index}].id: unsupported builtin extension {}",
+                    "field {section}[{extension_index}].id: unsupported builtin plugin {}",
                     extension.id
                 );
             }

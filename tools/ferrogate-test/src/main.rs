@@ -1113,9 +1113,12 @@ fn run_control_plane_libsql_restart(
     .to_string();
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, true)?;
+        let case =
+            TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, true, true)?;
         case.expect_storage_status()?;
+        case.expect_plugin("tool.echo")?;
         case.expect_mcp_server("dbhttp")?;
+        case.expect_echo_tool()?;
         case.expect_json(
             "POST",
             "/admin/v1/api-keys",
@@ -1176,9 +1179,12 @@ fn run_control_plane_libsql_restart(
     }
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false)?;
+        let case =
+            TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false, false)?;
         case.expect_storage_status()?;
+        case.expect_plugin("tool.echo")?;
         case.expect_mcp_server("dbhttp")?;
+        case.expect_echo_tool()?;
         case.expect_api_key(&resource_id)?;
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_policy(&policy_name)?;
@@ -1230,8 +1236,10 @@ fn run_control_plane_libsql_restart(
     }
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false)?;
+        let case =
+            TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false, false)?;
         case.expect_storage_status()?;
+        case.expect_plugin("tool.echo")?;
         case.expect_mcp_server("dbhttp")?;
         if verify_deleted_after_restart {
             case.expect_missing_api_key(&resource_id)?;
@@ -1380,6 +1388,7 @@ impl TursoRestartHarness {
         ferrogate_bin: &Path,
         libsql_url: &str,
         libsql_auth_token: Option<&str>,
+        include_plugins: bool,
         include_mcp_server: bool,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
@@ -1398,6 +1407,7 @@ impl TursoRestartHarness {
                 &gateway_addr,
                 libsql_url,
                 libsql_auth_token.is_some(),
+                include_plugins,
                 include_mcp_server,
             ),
         )?;
@@ -1635,6 +1645,41 @@ impl TursoRestartHarness {
                     .with_context(|| format!("MCP server {name} was not restored from storage"))?;
                 assert_eq!(server["transport"], "streamable_http");
                 assert_eq!(server["health"], "degraded");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_plugin(&self, id: &str) -> Result<()> {
+        self.expect_json("GET", "/admin/v1/plugins", &[ADMIN_AUTH], "", 200, |body| {
+            let plugins = body["data"]
+                .as_array()
+                .context("plugins response data must be an array")?;
+            let plugin = plugins
+                .iter()
+                .find(|plugin| plugin["id"] == id)
+                .with_context(|| format!("plugin {id} was not restored from storage"))?;
+            assert_eq!(plugin["source"], "builtin");
+            assert_eq!(plugin["enabled"], true);
+            assert_eq!(plugin["active"], true);
+            assert_eq!(plugin["health"], "ok");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        })
+    }
+
+    fn expect_echo_tool(&self) -> Result<()> {
+        self.expect_json(
+            "POST",
+            "/v1/tools/execute",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            r#"{"name":"tool.echo","arguments":{"message":"plugin durable restore"}}"#,
+            200,
+            |body| {
+                assert_eq!(body["object"], "tool_execution");
+                assert_eq!(body["name"], "tool.echo");
+                assert_eq!(body["content"]["echo"]["message"], "plugin durable restore");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
@@ -2080,10 +2125,27 @@ fn turso_libsql_restart_config(
     gateway_addr: &str,
     libsql_url: &str,
     include_auth_token_env: bool,
+    include_plugins: bool,
     include_mcp_server: bool,
 ) -> String {
     let auth_token_env = if include_auth_token_env {
         "\n  libsql_auth_token_env: FERROGATE_LIBSQL_AUTH_TOKEN"
+    } else {
+        ""
+    };
+    let plugins = if include_plugins {
+        r#"
+plugins:
+  - id: tool.echo
+    kind: tool_provider
+    source: builtin
+    enabled: true
+    order: 10
+    approval_policy: never
+    permissions:
+      tools:
+        - tool.echo
+"#
     } else {
         ""
     };
@@ -2139,6 +2201,9 @@ api_keys:
     scopes:
       - admin.read
       - admin.write
+      - tools.read
+      - tools.execute
+{plugins}
 {mcp_server}
 "#
     )

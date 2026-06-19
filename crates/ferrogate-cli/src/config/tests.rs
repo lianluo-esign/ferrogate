@@ -117,20 +117,20 @@ team_id = "team_platform"
 project_id = "project_gateway"
 log_bodies = true
 
-[[extensions]]
+[[plugins]]
 id = "tool.echo"
 kind = "tool_provider"
 source = "builtin"
 enabled = true
 order = 10
 
-[extensions.permissions]
+[plugins.permissions]
 tools = ["tool.echo"]
 network = []
 filesystem = false
 shell = false
 
-[extensions.config]
+[plugins.config]
 timeout_ms = 30000
 "#,
     )
@@ -221,15 +221,16 @@ timeout_ms = 30000
     assert_eq!(config.api_keys.len(), 1);
     assert_eq!(config.api_keys[0].id, "key_dev");
     assert_eq!(config.api_keys[0].log_bodies, Some(true));
-    assert_eq!(config.extensions.len(), 1);
-    assert_eq!(config.extensions[0].id, "tool.echo");
-    assert_eq!(config.extensions[0].kind, ExtensionKind::ToolProvider);
-    assert_eq!(config.extensions[0].source, "builtin");
-    assert_eq!(config.extensions[0].permissions.tools, ["tool.echo"]);
+    assert_eq!(config.plugins.len(), 1);
+    assert_eq!(config.plugins[0].id, "tool.echo");
+    assert_eq!(config.plugins[0].kind, ExtensionKind::ToolProvider);
+    assert_eq!(config.plugins[0].source, "builtin");
+    assert_eq!(config.plugins[0].permissions.tools, ["tool.echo"]);
     assert_eq!(
-        config.extensions[0].config.get("timeout_ms"),
+        config.plugins[0].config.get("timeout_ms"),
         Some(&toml::Value::Integer(30000))
     );
+    assert_eq!(config.plugin_registrations().len(), 1);
     assert_eq!(config.upstreams.len(), 1);
     assert_eq!(config.routes.len(), 1);
 }

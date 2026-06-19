@@ -196,7 +196,7 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        if path == "/admin/v1/extensions" {
+        if path == "/admin/v1/extensions" || path == "/admin/v1/plugins" {
             let headers = req.headers.clone();
             self.handle_admin_extensions(session, ctx, &headers).await?;
             return Ok(true);

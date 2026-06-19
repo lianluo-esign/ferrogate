@@ -37,6 +37,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) guardrails: Vec<GuardrailRule>,
     #[serde(default)]
+    pub(crate) plugins: Vec<PluginConfig>,
+    #[serde(default)]
     pub(crate) extensions: Vec<ExtensionConfig>,
     #[serde(default)]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
@@ -478,6 +480,8 @@ pub(crate) struct ExtensionConfig {
     #[serde(default)]
     pub(crate) config: BTreeMap<String, toml::Value>,
 }
+
+pub(crate) type PluginConfig = ExtensionConfig;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct ExtensionPermissions {
@@ -1100,6 +1104,7 @@ impl Default for Config {
             gateway_configs: Vec::new(),
             prompt_templates: Vec::new(),
             guardrails: Vec::new(),
+            plugins: Vec::new(),
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),

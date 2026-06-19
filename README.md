@@ -65,7 +65,7 @@ The project is developed as the open-source gateway foundation behind
 - **Admin API and dashboard** for gateway status, providers, read-only upstream
   provider model catalog discovery, configured models, API keys, tenants,
   policies, request logs, metering events, usage aggregates, audit events,
-  gateway config profiles, provider health, extensions, tools, MCP servers,
+  gateway config profiles, provider health, plugins/extensions, tools, MCP servers,
   config validation, process-local reload, and node drain/readiness.
 - **Cluster operations** for multi-node deployments with node identity, shared
   file control-plane state, Redis-backed request and token counters, status,
@@ -118,7 +118,7 @@ Still intentionally scoped as next-stage production work:
   contract. High-write request logs, traces, usage metrics, billing analytics,
   and dashboard aggregates stay under the analytics delivery boundary.
 - Full hosted Admin API control plane beyond the current API key, policy,
-  gateway config, prompt template, MCP server, tool approval,
+  gateway config, prompt template, plugin registration, MCP server, tool approval,
   config-validation, reload, and drain resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the
@@ -706,6 +706,7 @@ GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
 GET  /admin/v1/provider-models
+GET  /admin/v1/plugins
 GET  /admin/v1/extensions
 GET  /admin/v1/tools
 GET  /admin/v1/tool-approvals

@@ -818,6 +818,10 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         serialize_control_plane_documents(&config.gateway_configs, |profile| profile.id.clone());
     let prompt_templates =
         serialize_control_plane_documents(&config.prompt_templates, |template| template.id.clone());
+    let plugin_registrations =
+        serialize_control_plane_documents(&config.plugin_registrations(), |plugin| {
+            plugin.id.clone()
+        });
     let mcp_servers =
         serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone());
     if storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
@@ -837,6 +841,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             prompt_templates,
+            plugin_registrations,
             mcp_servers,
             config.analytics.request_log_retention_records,
             config.analytics.audit_event_retention_records,
@@ -855,6 +860,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             prompt_templates,
+            plugin_registrations,
             mcp_servers,
         ),
         config.analytics.request_log_retention_records,
@@ -947,6 +953,8 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     config.policies = deserialize_control_plane_documents(snapshot.policies)?;
     config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
     config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
+    config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
+    config.extensions.clear();
     config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
     Ok(())
 }
@@ -1726,7 +1734,8 @@ impl AppState {
             .iter()
             .map(|upstream| (upstream.name.clone(), AtomicU64::new(0)))
             .collect();
-        let extension_registry = ExtensionRegistry::from_config(&config.extensions);
+        let plugin_registrations = config.plugin_registrations();
+        let extension_registry = ExtensionRegistry::from_config(&plugin_registrations);
         let model_registry = ModelRegistry::new(config.models.iter().map(model_registry_entry))
             .expect("config validation must reject invalid model registry entries");
 
@@ -2227,6 +2236,9 @@ impl AppState {
             serialize_control_plane_documents(&config.prompt_templates, |template| {
                 template.id.clone()
             }),
+            serialize_control_plane_documents(&config.plugin_registrations(), |plugin| {
+                plugin.id.clone()
+            }),
             serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone()),
         )?;
         Ok(())
@@ -2238,6 +2250,8 @@ impl AppState {
         config.policies = deserialize_control_plane_documents(snapshot.policies)?;
         config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
         config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
+        config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
+        config.extensions.clear();
         config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
         Ok(())
     }

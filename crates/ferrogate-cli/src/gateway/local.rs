@@ -172,7 +172,13 @@ impl FerroGateway {
                     enabled_upstreams: state.config.upstreams.iter().filter(|u| u.enabled).count(),
                     routes: state.config.routes.len(),
                     enabled_routes: state.config.routes.iter().filter(|r| r.enabled).count(),
-                    extensions: state.config.extensions.len(),
+                    plugins: state.config.plugin_registrations().len(),
+                    active_plugins: state
+                        .extension_statuses()
+                        .iter()
+                        .filter(|extension| extension.active)
+                        .count(),
+                    extensions: state.config.plugin_registrations().len(),
                     active_extensions: state
                         .extension_statuses()
                         .iter()
