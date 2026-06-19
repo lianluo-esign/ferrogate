@@ -71,6 +71,7 @@ impl AiEndpoint {
 
 const DEFAULT_COMPLETION_TOKEN_RESERVATION: u64 = 512;
 const GATEWAY_CONFIG_HEADER: &str = "x-ferrogate-config";
+const AGENT_RUN_ID_HEADER: &str = "x-ferrogate-agent-run-id";
 
 impl FerroGateway {
     pub(super) async fn handle_chat_completions(
@@ -181,6 +182,7 @@ impl FerroGateway {
         };
         let AiRequestPlan {
             auth,
+            agent_run_id,
             gateway_config,
             request,
             body_json,
@@ -279,6 +281,7 @@ impl FerroGateway {
             let policy_request = RequestContext {
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
+                agent_run_id: Some(agent_run_id.clone()),
                 route: Some(endpoint.route().into()),
                 upstream: Some(provider.name.clone()),
                 tenant: auth.tenant_context(),
@@ -305,6 +308,7 @@ impl FerroGateway {
                 state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
                     request_id: ctx.request_id.clone(),
                     trace_id: ctx.trace_id.clone(),
+                    agent_run_id: Some(agent_run_id.clone()),
                     actor_api_key_id: auth.api_key_id.clone(),
                     tenant: auth.tenant_context(),
                     action: "guardrail.deny".into(),
@@ -378,6 +382,7 @@ impl FerroGateway {
                     state.record_request_log(StoredRequestLog {
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
+                        agent_run_id: Some(agent_run_id.clone()),
                         cluster_id: None,
                         node_id: None,
                         tenant: policy_request.tenant.clone(),
@@ -724,6 +729,7 @@ impl FerroGateway {
                                                 crate::state::AdminAuditEventDraft {
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
+                                                    agent_run_id: Some(agent_run_id.clone()),
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.deny".into(),
@@ -753,6 +759,7 @@ impl FerroGateway {
                                                 crate::state::AdminAuditEventDraft {
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
+                                                    agent_run_id: Some(agent_run_id.clone()),
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.redact".into(),
@@ -771,6 +778,7 @@ impl FerroGateway {
                                 state.record_request_log(StoredRequestLog {
                                     request_id: ctx.request_id.clone(),
                                     trace_id: ctx.trace_id.clone(),
+                                    agent_run_id: Some(agent_run_id.clone()),
                                     cluster_id: None,
                                     node_id: None,
                                     tenant: policy_request.tenant.clone(),
@@ -811,6 +819,7 @@ impl FerroGateway {
                             state.record_request_log(StoredRequestLog {
                                 request_id: ctx.request_id.clone(),
                                 trace_id: ctx.trace_id.clone(),
+                                agent_run_id: Some(agent_run_id.clone()),
                                 cluster_id: None,
                                 node_id: None,
                                 tenant: policy_request.tenant.clone(),
@@ -1046,6 +1055,7 @@ impl FerroGateway {
                                         crate::state::AdminAuditEventDraft {
                                             request_id: ctx.request_id.clone(),
                                             trace_id: ctx.trace_id.clone(),
+                                            agent_run_id: Some(agent_run_id.clone()),
                                             actor_api_key_id: auth.api_key_id.clone(),
                                             tenant: auth.tenant_context(),
                                             action: "guardrail.deny".into(),
@@ -1075,6 +1085,7 @@ impl FerroGateway {
                                         crate::state::AdminAuditEventDraft {
                                             request_id: ctx.request_id.clone(),
                                             trace_id: ctx.trace_id.clone(),
+                                            agent_run_id: Some(agent_run_id.clone()),
                                             actor_api_key_id: auth.api_key_id.clone(),
                                             tenant: auth.tenant_context(),
                                             action: "guardrail.redact".into(),
@@ -1095,6 +1106,7 @@ impl FerroGateway {
                         state.record_request_log(StoredRequestLog {
                             request_id: ctx.request_id.clone(),
                             trace_id: ctx.trace_id.clone(),
+                            agent_run_id: Some(agent_run_id.clone()),
                             cluster_id: None,
                             node_id: None,
                             tenant: policy_request.tenant.clone(),
@@ -1215,6 +1227,7 @@ impl FerroGateway {
         self.state.record_request_log(StoredRequestLog {
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: log.tenant,
@@ -1248,6 +1261,7 @@ struct AiErrorLog<'a> {
 #[derive(Debug)]
 struct AiRequestPlan {
     auth: AuthContext,
+    agent_run_id: String,
     gateway_config: Option<GatewayConfigUse>,
     request: ChatCompletionRequest,
     body_json: serde_json::Value,
@@ -1259,6 +1273,7 @@ struct AiRequestPlan {
 #[derive(Debug)]
 struct AiIngressPlan {
     auth: AuthContext,
+    agent_run_id: String,
     gateway_config: Option<GatewayConfigUse>,
 }
 
@@ -1320,6 +1335,16 @@ fn build_ai_ingress_plan(
         })?;
     let tenant = auth.tenant_context();
 
+    let agent_run_id = requested_agent_run_id(headers, &ctx.request_id).map_err(|message| {
+        reject_ai_request(AiRequestRejection {
+            tenant: tenant.clone(),
+            logical_model: None,
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_agent_run_id_header",
+            message,
+        })
+    })?;
+
     let gateway_config = requested_gateway_config_id(headers)
         .map_err(|message| {
             reject_ai_request(AiRequestRejection {
@@ -1357,6 +1382,7 @@ fn build_ai_ingress_plan(
 
     Ok(AiIngressPlan {
         auth,
+        agent_run_id,
         gateway_config,
     })
 }
@@ -1369,6 +1395,7 @@ fn build_ai_request_plan(
 ) -> AiPlanResult<AiRequestPlan> {
     let AiIngressPlan {
         auth,
+        agent_run_id,
         gateway_config,
     } = ingress;
 
@@ -1441,6 +1468,7 @@ fn build_ai_request_plan(
     let body_text = String::from_utf8_lossy(body).into_owned();
     Ok(AiRequestPlan {
         auth,
+        agent_run_id,
         gateway_config,
         request,
         body_json,
@@ -1567,6 +1595,33 @@ fn requested_gateway_config_id(headers: &HeaderMap) -> Result<Option<&str>, Stri
     } else {
         Ok(Some(value))
     }
+}
+
+fn requested_agent_run_id(headers: &HeaderMap, request_id: &str) -> Result<String, String> {
+    let Some(value) = headers.get(AGENT_RUN_ID_HEADER) else {
+        return Ok(format!("run-{request_id}"));
+    };
+    let value = value.to_str().map_err(|_| {
+        format!("{AGENT_RUN_ID_HEADER} must be valid visible ASCII/UTF-8 header text")
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(format!("run-{request_id}"));
+    }
+    if value.len() > 128 {
+        return Err(format!(
+            "{AGENT_RUN_ID_HEADER} must be at most 128 characters"
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    {
+        return Err(format!(
+            "{AGENT_RUN_ID_HEADER} may only contain letters, numbers, _, -, ., or :"
+        ));
+    }
+    Ok(value.to_string())
 }
 
 fn gateway_config_error_response(

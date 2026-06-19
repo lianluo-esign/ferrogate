@@ -761,6 +761,8 @@ pub struct StoredPolicyRule {
 pub struct StoredRequestLog {
     pub request_id: String,
     pub trace_id: Option<String>,
+    #[serde(default)]
+    pub agent_run_id: Option<String>,
     pub cluster_id: Option<String>,
     pub node_id: Option<String>,
     pub tenant: TenantContext,
@@ -789,6 +791,8 @@ pub struct StoredAuditEvent {
     pub id: String,
     pub request_id: String,
     pub trace_id: Option<String>,
+    #[serde(default)]
+    pub agent_run_id: Option<String>,
     pub cluster_id: Option<String>,
     pub node_id: Option<String>,
     pub actor_api_key_id: Option<String>,
@@ -1431,6 +1435,7 @@ mod tests {
         repository.append(StoredRequestLog {
             request_id: "fg-1".into(),
             trace_id: Some("trace-1".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),
@@ -1453,6 +1458,7 @@ mod tests {
         repository.append(StoredRequestLog {
             request_id: "fg-2".into(),
             trace_id: Some("trace-2".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),
@@ -1486,6 +1492,7 @@ mod tests {
             repository.append(StoredRequestLog {
                 request_id: id.into(),
                 trace_id: None,
+                agent_run_id: None,
                 cluster_id: None,
                 node_id: None,
                 tenant: TenantContext::default(),
@@ -1542,6 +1549,7 @@ mod tests {
             id: "audit-1".into(),
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             actor_api_key_id: Some("admin".into()),
@@ -1556,6 +1564,7 @@ mod tests {
             id: "audit-2".into(),
             request_id: "fg-2".into(),
             trace_id: Some("fg-2".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             actor_api_key_id: Some("admin".into()),
@@ -1660,6 +1669,7 @@ mod tests {
         repositories.append_request_log(StoredRequestLog {
             request_id: "fg-1".into(),
             trace_id: None,
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),
@@ -1682,6 +1692,7 @@ mod tests {
         repositories.append_request_log(StoredRequestLog {
             request_id: "fg-2".into(),
             trace_id: None,
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),

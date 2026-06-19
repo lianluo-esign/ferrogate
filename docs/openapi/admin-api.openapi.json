@@ -1242,6 +1242,83 @@
         }
       }
     },
+    "/admin/v1/agent-runs": {
+      "get": {
+        "operationId": "listAdminAgentRuns",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List retained agent run evidence aggregated from request logs, audit events, and metering events.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated agent run summary list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/agent-runs/{run_id}": {
+      "parameters": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Agent run id from x-ferrogate-agent-run-id or the gateway-generated run id."
+        }
+      ],
+      "get": {
+        "operationId": "getAdminAgentRunTimeline",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Inspect one agent run timeline without exposing raw prompt or tool bodies unless existing recording policy allowed them.",
+        "responses": {
+          "200": {
+            "description": "Agent run timeline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunTimeline"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/admin/v1/request-log-exports": {
       "get": {
         "operationId": "exportAdminRequestLogsJsonl",
@@ -4335,6 +4412,12 @@
               "null"
             ]
           },
+          "agent_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "cluster_id": {
             "type": [
               "string",
@@ -4552,6 +4635,12 @@
               "null"
             ]
           },
+          "agent_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "cluster_id": {
             "type": [
               "string",
@@ -4699,6 +4788,9 @@
       "RequestLogList": {
         "$ref": "#/components/schemas/PaginatedList_RequestLog"
       },
+      "AgentRunList": {
+        "$ref": "#/components/schemas/PaginatedList_AgentRunSummary"
+      },
       "RequestLogExportRecord": {
         "type": "object",
         "required": [
@@ -4718,6 +4810,12 @@
             "type": "string"
           },
           "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_run_id": {
             "type": [
               "string",
               "null"
@@ -4809,6 +4907,107 @@
               "null"
             ],
             "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentRunSummary": {
+        "type": "object",
+        "required": [
+          "object",
+          "id",
+          "tenant",
+          "status",
+          "request_count",
+          "billing_event_count",
+          "audit_event_count"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_run"
+          },
+          "id": {
+            "type": "string"
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "blocked",
+              "failed"
+            ]
+          },
+          "request_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "billing_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "audit_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "first_seen_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "last_seen_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentRunTimeline": {
+        "type": "object",
+        "required": [
+          "object",
+          "id",
+          "summary",
+          "requests",
+          "billing_events",
+          "audit_events"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_run_timeline"
+          },
+          "id": {
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AgentRunSummary"
+          },
+          "requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestLog"
+            }
+          },
+          "billing_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenMeteringEvent"
+            }
+          },
+          "audit_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredAuditEvent"
+            }
           }
         },
         "additionalProperties": false
@@ -5138,6 +5337,41 @@
         },
         "additionalProperties": false
       },
+      "PaginatedList_AgentRunSummary": {
+        "type": "object",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentRunSummary"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "PaginatedList_StoredAuditEvent": {
         "type": "object",
         "required": [
@@ -5226,6 +5460,12 @@
             "type": "string"
           },
           "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_run_id": {
             "type": [
               "string",
               "null"

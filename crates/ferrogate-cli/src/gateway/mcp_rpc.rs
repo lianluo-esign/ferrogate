@@ -407,6 +407,7 @@ fn audit_event(
     AdminAuditEventDraft {
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
+        agent_run_id: None,
         actor_api_key_id: auth.api_key_id.clone(),
         tenant: auth.tenant_context(),
         action: action.into(),

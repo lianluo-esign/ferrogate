@@ -86,6 +86,8 @@ pub enum BillingUsageSource {
 pub struct BillingEvent {
     pub request_id: String,
     pub trace_id: Option<String>,
+    #[serde(default)]
+    pub agent_run_id: Option<String>,
     pub cluster_id: Option<String>,
     pub node_id: Option<String>,
     pub tenant: TenantContext,
@@ -238,6 +240,7 @@ mod tests {
         sink.record(BillingEvent {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext {
@@ -270,6 +273,7 @@ mod tests {
             sink.record(BillingEvent {
                 request_id: request_id.into(),
                 trace_id: None,
+                agent_run_id: None,
                 cluster_id: None,
                 node_id: None,
                 tenant: TenantContext::default(),

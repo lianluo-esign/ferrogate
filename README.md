@@ -63,12 +63,14 @@ The project is developed as the open-source gateway foundation behind
 - **Observability** with structured request logs, token metering events,
   configurable in-memory retention, usage aggregates, provider health, cache
   metrics, MCP tool metrics, Prometheus metrics, request/trace ID propagation,
-  and OTLP/HTTP metrics/logs/traces export.
+  agent run evidence through `x-ferrogate-agent-run-id`, and OTLP/HTTP
+  metrics/logs/traces export.
 - **Admin API and dashboard** for gateway status, providers, read-only upstream
   provider model catalog discovery, configured models, API keys, tenants,
-  policies, request logs, metering events, usage aggregates, audit events,
-  gateway config profiles, provider health, plugins/extensions, tools, MCP servers,
-  config validation, process-local reload, and node drain/readiness.
+  policies, request logs, agent run timelines, metering events, usage
+  aggregates, audit events, gateway config profiles, provider health,
+  plugins/extensions, tools, MCP servers, config validation, process-local
+  reload, and node drain/readiness.
 - **Cluster operations** for multi-node deployments with node identity, shared
   file control-plane state, Redis-backed request and token counters, status,
   readiness, and drain semantics.
@@ -738,6 +740,8 @@ POST /admin/v1/policies
 PUT  /admin/v1/policies/{name}
 DELETE /admin/v1/policies/{name}
 GET  /admin/v1/request-logs
+GET  /admin/v1/agent-runs
+GET  /admin/v1/agent-runs/{run_id}
 GET  /admin/v1/metering-events
 GET  /admin/v1/billing-events  # compatibility alias
 GET  /admin/v1/metering-export-status

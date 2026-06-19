@@ -1873,6 +1873,59 @@ impl FerroGateway {
         }
     }
 
+    pub(super) async fn handle_admin_agent_runs(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path: &str,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                if path == "/admin/v1/agent-runs" {
+                    let page = state.agent_runs_page(state.admin_pagination(query));
+                    let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
+                    return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                        .await;
+                }
+                let run_id = path.trim_start_matches("/admin/v1/agent-runs/");
+                if run_id.is_empty() || run_id.contains('/') {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "agent_run_endpoint_not_found",
+                        "agent run endpoint not found",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                let Some(timeline) = state.agent_run_timeline(run_id) else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "agent_run_not_found",
+                        format!("agent run {run_id} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                write_json_response(session, StatusCode::OK, &timeline, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_admin_audit_events(
         &self,
         session: &mut Session,
@@ -4196,6 +4249,7 @@ fn admin_audit_event_draft_for_target(
     AdminAuditEventDraft {
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
+        agent_run_id: None,
         actor_api_key_id: auth.api_key_id.clone(),
         tenant: auth.tenant_context(),
         action: action.into(),

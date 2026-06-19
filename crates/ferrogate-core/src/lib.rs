@@ -23,6 +23,8 @@ pub enum ApprovalPolicy {
 pub struct RequestContext {
     pub request_id: String,
     pub trace_id: Option<String>,
+    #[serde(default)]
+    pub agent_run_id: Option<String>,
     pub route: Option<String>,
     pub upstream: Option<String>,
     pub tenant: TenantContext,

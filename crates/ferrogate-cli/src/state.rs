@@ -999,6 +999,7 @@ pub(crate) struct ToolInjectionContext<'a> {
 pub(crate) struct AdminAuditEventDraft {
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
+    pub(crate) agent_run_id: Option<String>,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) action: String,
@@ -1156,6 +1157,7 @@ impl RequestLogExportRecord {
             object: "request_log_export",
             request_id: log.request_id,
             trace_id: log.trace_id,
+            agent_run_id: log.agent_run_id,
             tenant: log.tenant,
             route: log.route,
             logical_model: log.logical_model,
@@ -1178,6 +1180,56 @@ impl RequestLogExportRecord {
 fn non_empty(value: String) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+fn summarize_agent_run(
+    id: String,
+    requests: &[StoredRequestLog],
+    billing_events: &[BillingEvent],
+    audit_events: &[StoredAuditEvent],
+) -> AgentRunSummary {
+    let tenant = requests
+        .iter()
+        .map(|log| log.tenant.clone())
+        .chain(billing_events.iter().map(|event| event.tenant.clone()))
+        .chain(audit_events.iter().map(|event| event.tenant.clone()))
+        .next()
+        .unwrap_or_default();
+    let first_seen_unix = requests
+        .iter()
+        .flat_map(|log| [log.started_at_unix, log.completed_at_unix])
+        .chain(billing_events.iter().map(|event| event.occurred_at_unix))
+        .chain(audit_events.iter().map(|event| event.occurred_at_unix))
+        .flatten()
+        .min();
+    let last_seen_unix = requests
+        .iter()
+        .flat_map(|log| [log.started_at_unix, log.completed_at_unix])
+        .chain(billing_events.iter().map(|event| event.occurred_at_unix))
+        .chain(audit_events.iter().map(|event| event.occurred_at_unix))
+        .flatten()
+        .max();
+    let status = if requests
+        .iter()
+        .any(|log| log.status_code >= 500 || log.error_code.is_some())
+    {
+        "failed"
+    } else if requests.iter().any(|log| log.status_code >= 400) {
+        "blocked"
+    } else {
+        "completed"
+    };
+    AgentRunSummary {
+        object: "agent_run",
+        id,
+        tenant,
+        status,
+        request_count: requests.len(),
+        billing_event_count: billing_events.len(),
+        audit_event_count: audit_events.len(),
+        first_seen_unix,
+        last_seen_unix,
+    }
 }
 
 fn query_pairs(query: &str) -> impl Iterator<Item = (String, String)> + '_ {
@@ -1218,6 +1270,7 @@ pub(crate) struct RequestLogExportRecord {
     pub(crate) object: &'static str,
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
+    pub(crate) agent_run_id: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) route: Option<String>,
     pub(crate) logical_model: Option<String>,
@@ -1233,6 +1286,29 @@ pub(crate) struct RequestLogExportRecord {
     pub(crate) response_body: Option<String>,
     pub(crate) started_at_unix: Option<u64>,
     pub(crate) completed_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AgentRunSummary {
+    pub(crate) object: &'static str,
+    pub(crate) id: String,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) status: &'static str,
+    pub(crate) request_count: usize,
+    pub(crate) billing_event_count: usize,
+    pub(crate) audit_event_count: usize,
+    pub(crate) first_seen_unix: Option<u64>,
+    pub(crate) last_seen_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct AgentRunTimeline {
+    pub(crate) object: &'static str,
+    pub(crate) id: String,
+    pub(crate) summary: AgentRunSummary,
+    pub(crate) requests: Vec<StoredRequestLog>,
+    pub(crate) billing_events: Vec<BillingEvent>,
+    pub(crate) audit_events: Vec<StoredAuditEvent>,
 }
 
 #[derive(Debug, Default)]
@@ -2114,6 +2190,7 @@ impl AppState {
         let policy_request = RequestContext {
             request_id: request_id.clone(),
             trace_id: None,
+            agent_run_id: None,
             route: Some("/v1/mcp/tool/execute".into()),
             upstream: Some(format!("mcp:{server_name}")),
             tenant: tenant.clone(),
@@ -3047,6 +3124,7 @@ impl AppState {
         let event = BillingEvent {
             request_id: draft.request.request_id.clone(),
             trace_id: draft.request.trace_id.clone(),
+            agent_run_id: draft.request.agent_run_id.clone(),
             cluster_id: Some(self.cluster_identity.cluster_id.clone()),
             node_id: Some(self.cluster_identity.node_id.clone()),
             tenant: draft.request.tenant.clone(),
@@ -3214,6 +3292,7 @@ impl AppState {
             id: self.repositories.next_audit_event_id(),
             request_id: event.request_id,
             trace_id: event.trace_id,
+            agent_run_id: event.agent_run_id,
             cluster_id: Some(self.cluster_identity.cluster_id.clone()),
             node_id: Some(self.cluster_identity.node_id.clone()),
             actor_api_key_id: event.actor_api_key_id,
@@ -3237,6 +3316,7 @@ impl AppState {
         let event = BillingEvent {
             request_id: request_id.into(),
             trace_id: None,
+            agent_run_id: None,
             cluster_id: Some(self.cluster_identity.cluster_id.clone()),
             node_id: Some(self.cluster_identity.node_id.clone()),
             tenant: tenant.clone(),
@@ -3578,6 +3658,108 @@ impl AppState {
             offset: page.offset,
             limit: page.limit,
         }
+    }
+
+    pub(crate) fn agent_runs_page(
+        &self,
+        pagination: AdminPagination,
+    ) -> AdminPage<AgentRunSummary> {
+        let mut summaries = self.agent_run_summaries();
+        summaries.sort_by(|left, right| {
+            right
+                .last_seen_unix
+                .cmp(&left.last_seen_unix)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let total = summaries.len();
+        let data = summaries
+            .into_iter()
+            .skip(pagination.offset)
+            .take(pagination.limit)
+            .collect();
+        AdminPage {
+            data,
+            total,
+            offset: pagination.offset,
+            limit: pagination.limit,
+        }
+    }
+
+    pub(crate) fn agent_run_timeline(&self, id: &str) -> Option<AgentRunTimeline> {
+        let requests = self
+            .repositories
+            .request_logs()
+            .into_iter()
+            .filter(|log| log.agent_run_id.as_deref() == Some(id))
+            .collect::<Vec<_>>();
+        let billing_events = self
+            .metering_events
+            .list()
+            .into_iter()
+            .filter(|event| event.agent_run_id.as_deref() == Some(id))
+            .collect::<Vec<_>>();
+        let audit_events = self
+            .repositories
+            .audit_events()
+            .into_iter()
+            .filter(|event| event.agent_run_id.as_deref() == Some(id))
+            .collect::<Vec<_>>();
+        if requests.is_empty() && billing_events.is_empty() && audit_events.is_empty() {
+            return None;
+        }
+        let summary =
+            summarize_agent_run(id.to_string(), &requests, &billing_events, &audit_events);
+        Some(AgentRunTimeline {
+            object: "agent_run_timeline",
+            id: id.to_string(),
+            summary,
+            requests,
+            billing_events,
+            audit_events,
+        })
+    }
+
+    fn agent_run_summaries(&self) -> Vec<AgentRunSummary> {
+        let requests = self.repositories.request_logs();
+        let billing_events = self.metering_events.list();
+        let audit_events = self.repositories.audit_events();
+        let mut run_ids = requests
+            .iter()
+            .filter_map(|log| log.agent_run_id.clone())
+            .chain(
+                billing_events
+                    .iter()
+                    .filter_map(|event| event.agent_run_id.clone()),
+            )
+            .chain(
+                audit_events
+                    .iter()
+                    .filter_map(|event| event.agent_run_id.clone()),
+            )
+            .collect::<Vec<_>>();
+        run_ids.sort();
+        run_ids.dedup();
+        run_ids
+            .into_iter()
+            .map(|id| {
+                let run_requests = requests
+                    .iter()
+                    .filter(|log| log.agent_run_id.as_deref() == Some(id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let run_billing_events = billing_events
+                    .iter()
+                    .filter(|event| event.agent_run_id.as_deref() == Some(id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let run_audit_events = audit_events
+                    .iter()
+                    .filter(|event| event.agent_run_id.as_deref() == Some(id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                summarize_agent_run(id, &run_requests, &run_billing_events, &run_audit_events)
+            })
+            .collect()
     }
 
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
@@ -5713,6 +5895,7 @@ mod tests {
         let request = RequestContext {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            agent_run_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext {
@@ -5761,6 +5944,7 @@ mod tests {
         let request = RequestContext {
             request_id: "fg-estimated".into(),
             trace_id: None,
+            agent_run_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext {
@@ -5796,6 +5980,7 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext::default(),
@@ -5864,6 +6049,7 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: "fg-export-1".into(),
             trace_id: Some("trace-export".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext {
@@ -5891,6 +6077,7 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: "fg-export-2".into(),
             trace_id: None,
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext {
@@ -5951,6 +6138,7 @@ mod tests {
             state.record_request_log(StoredRequestLog {
                 request_id: format!("fg-{index}"),
                 trace_id: None,
+                agent_run_id: None,
                 cluster_id: None,
                 node_id: None,
                 tenant: ferrogate_core::TenantContext::default(),
@@ -5973,6 +6161,7 @@ mod tests {
             state.record_admin_audit_event(AdminAuditEventDraft {
                 request_id: format!("fg-{index}"),
                 trace_id: None,
+                agent_run_id: None,
                 actor_api_key_id: None,
                 tenant: ferrogate_core::TenantContext::default(),
                 action: "config.validate".into(),
@@ -5985,6 +6174,7 @@ mod tests {
                     &RequestContext {
                         request_id: format!("fg-{index}"),
                         trace_id: None,
+                        agent_run_id: None,
                         route: None,
                         upstream: None,
                         tenant: ferrogate_core::TenantContext::default(),
@@ -6098,6 +6288,7 @@ mod tests {
         let request = RequestContext {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            agent_run_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext::default(),
@@ -6106,6 +6297,7 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext::default(),
@@ -6245,6 +6437,7 @@ mod tests {
         state.record_request_log(StoredRequestLog {
             request_id: format!("fg-{provider}-{status_code}-{completed_at_unix}"),
             trace_id: None,
+            agent_run_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext::default(),

@@ -771,6 +771,7 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             CLIENT_AUTH,
             JSON_CONTENT,
             "x-ferrogate-config: static-profile",
+            "x-ferrogate-agent-run-id: agent-run-e2e",
         ],
         r#"{"model":"fast-chat","messages":[{"role":"user","content":"profile coverage"}]}"#,
         200,
@@ -845,6 +846,7 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             let raw = body.to_string();
             assert!(raw.contains("openai.chat.completions"));
             assert!(raw.contains("openai.responses"));
+            assert!(raw.contains("agent-run-e2e"));
             assert_secret_redacted(&raw);
             Ok(())
         },
@@ -860,8 +862,11 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert!(!records.is_empty());
             let chat = records
                 .iter()
-                .find(|record| record["route"] == "openai.chat.completions")
-                .context("missing chat completion export record")?;
+                .find(|record| {
+                    record["route"] == "openai.chat.completions"
+                        && record["agent_run_id"] == "agent-run-e2e"
+                })
+                .context("missing chat completion export record with agent run evidence")?;
             assert_eq!(chat["object"], "request_log_export");
             assert_eq!(chat["tenant"]["organization_id"], "org_demo");
             assert_eq!(chat["tenant"]["project_id"], "project_gateway");
@@ -869,17 +874,51 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(chat["provider"], "openai");
             assert_eq!(chat["provider_model"], "gpt-4o-mini");
             assert_eq!(chat["status_code"], 200);
+            assert_eq!(chat["agent_run_id"], "agent-run-e2e");
             assert_eq!(chat["usage"]["total_tokens"], 2);
             assert_eq!(chat["prompt_recorded"], true);
             assert_eq!(chat["response_recorded"], true);
             assert!(chat["prompt_body"]
                 .as_str()
-                .is_some_and(|prompt| prompt.contains("[REDACTED]")));
+                .is_some_and(|prompt| prompt.contains("profile coverage")));
             assert!(records
                 .iter()
                 .any(|record| record["route"] == "openai.responses"));
             assert_secret_redacted(body);
             assert!(!body.contains("provider-secret"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-runs",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let run = admin_list_item(&body, "id", "agent-run-e2e")
+                .context("agent run summary was not listed")?;
+            assert_eq!(run["object"], "agent_run");
+            assert_eq!(run["status"], "completed");
+            assert_eq!(run["request_count"], 1);
+            assert_eq!(run["billing_event_count"], 1);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-runs/agent-run-e2e",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "agent_run_timeline");
+            assert_eq!(body["id"], "agent-run-e2e");
+            assert_eq!(body["summary"]["id"], "agent-run-e2e");
+            assert_eq!(body["requests"][0]["agent_run_id"], "agent-run-e2e");
+            assert_eq!(body["billing_events"][0]["agent_run_id"], "agent-run-e2e");
+            assert_secret_redacted(&body.to_string());
             Ok(())
         },
     )?;
