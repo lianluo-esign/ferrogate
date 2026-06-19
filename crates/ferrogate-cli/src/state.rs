@@ -818,6 +818,8 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         serialize_control_plane_documents(&config.gateway_configs, |profile| profile.id.clone());
     let prompt_templates =
         serialize_control_plane_documents(&config.prompt_templates, |template| template.id.clone());
+    let mcp_servers =
+        serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone());
     if storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
         let url = storage
             .libsql_url
@@ -835,6 +837,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             prompt_templates,
+            mcp_servers,
             config.analytics.request_log_retention_records,
             config.analytics.audit_event_retention_records,
         ))
@@ -852,6 +855,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             prompt_templates,
+            mcp_servers,
         ),
         config.analytics.request_log_retention_records,
         config.analytics.audit_event_retention_records,
@@ -943,6 +947,7 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     config.policies = deserialize_control_plane_documents(snapshot.policies)?;
     config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
     config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
+    config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
     Ok(())
 }
 
@@ -2222,6 +2227,7 @@ impl AppState {
             serialize_control_plane_documents(&config.prompt_templates, |template| {
                 template.id.clone()
             }),
+            serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone()),
         )?;
         Ok(())
     }
@@ -2232,6 +2238,7 @@ impl AppState {
         config.policies = deserialize_control_plane_documents(snapshot.policies)?;
         config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
         config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
+        config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
         Ok(())
     }
 
@@ -4511,6 +4518,26 @@ mod tests {
                 providers: vec![test_provider()],
                 models: vec![test_model()],
                 api_keys: vec![test_api_key("key_initial")],
+                mcp_servers: vec![ferrogate_mcp::McpServerConfig {
+                    name: "github".into(),
+                    transport: ferrogate_mcp::McpTransport::StreamableHttp,
+                    url: Some("http://127.0.0.1:1/mcp".into()),
+                    command: None,
+                    args: Vec::new(),
+                    auth_type: ferrogate_mcp::McpAuthType::None,
+                    headers: Vec::new(),
+                    tools_to_execute: vec!["search".into()],
+                    tools_to_auto_execute: Vec::new(),
+                    approval_policy: ferrogate_core::ApprovalPolicy::Never,
+                    tool_include: vec!["search".into()],
+                    tool_regex: Vec::new(),
+                    tls: ferrogate_mcp::McpTlsConfig::default(),
+                    timeout_ms: 100,
+                    health_ping_interval_secs: 10,
+                    max_reconnect_attempts: 1,
+                    min_reconnect_backoff_secs: 1,
+                    max_reconnect_backoff_secs: 1,
+                }],
                 ..Config::default()
             },
             None,
@@ -4528,6 +4555,10 @@ mod tests {
             .api_keys
             .iter()
             .any(|document| document.contains("\"id\":\"key_added\"")));
+        assert!(snapshot
+            .mcp_servers
+            .iter()
+            .any(|document| document.contains("\"name\":\"github\"")));
 
         shared
             .upsert_policy(ConfigPolicyRule {

@@ -1113,8 +1113,9 @@ fn run_control_plane_libsql_restart(
     .to_string();
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token)?;
+        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, true)?;
         case.expect_storage_status()?;
+        case.expect_mcp_server("dbhttp")?;
         case.expect_json(
             "POST",
             "/admin/v1/api-keys",
@@ -1175,8 +1176,9 @@ fn run_control_plane_libsql_restart(
     }
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token)?;
+        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false)?;
         case.expect_storage_status()?;
+        case.expect_mcp_server("dbhttp")?;
         case.expect_api_key(&resource_id)?;
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_policy(&policy_name)?;
@@ -1228,8 +1230,9 @@ fn run_control_plane_libsql_restart(
     }
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token)?;
+        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false)?;
         case.expect_storage_status()?;
+        case.expect_mcp_server("dbhttp")?;
         if verify_deleted_after_restart {
             case.expect_missing_api_key(&resource_id)?;
             case.expect_missing_gateway_config(&gateway_config_id)?;
@@ -1377,6 +1380,7 @@ impl TursoRestartHarness {
         ferrogate_bin: &Path,
         libsql_url: &str,
         libsql_auth_token: Option<&str>,
+        include_mcp_server: bool,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
@@ -1390,7 +1394,12 @@ impl TursoRestartHarness {
         let config_path = dir.path().join("ferrogate.yaml");
         std::fs::write(
             &config_path,
-            turso_libsql_restart_config(&gateway_addr, libsql_url, libsql_auth_token.is_some()),
+            turso_libsql_restart_config(
+                &gateway_addr,
+                libsql_url,
+                libsql_auth_token.is_some(),
+                include_mcp_server,
+            ),
         )?;
 
         let mut command = Command::new(ferrogate_bin);
@@ -1603,6 +1612,29 @@ impl TursoRestartHarness {
                 assert_eq!(body["prompt_template"]["name"], "Turso restart prompt");
                 assert_eq!(body["prompt_template"]["status"], status);
                 assert_eq!(body["prompt_template"]["active_revision"], 1);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_mcp_server(&self, name: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            "/admin/v1/mcp-servers",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let servers = body["data"]
+                    .as_array()
+                    .context("mcp servers response data must be an array")?;
+                let server = servers
+                    .iter()
+                    .find(|server| server["name"] == name)
+                    .with_context(|| format!("MCP server {name} was not restored from storage"))?;
+                assert_eq!(server["transport"], "streamable_http");
+                assert_eq!(server["health"], "degraded");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
@@ -2048,9 +2080,28 @@ fn turso_libsql_restart_config(
     gateway_addr: &str,
     libsql_url: &str,
     include_auth_token_env: bool,
+    include_mcp_server: bool,
 ) -> String {
     let auth_token_env = if include_auth_token_env {
         "\n  libsql_auth_token_env: FERROGATE_LIBSQL_AUTH_TOKEN"
+    } else {
+        ""
+    };
+    let mcp_server = if include_mcp_server {
+        r#"
+mcp_servers:
+  - name: dbhttp
+    transport: streamable_http
+    url: "http://127.0.0.1:1/mcp"
+    tools_to_execute:
+      - search
+    tools_to_auto_execute:
+      - search
+    tool_include:
+      - search
+    approval_policy: never
+    timeout_ms: 100
+"#
     } else {
         ""
     };
@@ -2088,6 +2139,7 @@ api_keys:
     scopes:
       - admin.read
       - admin.write
+{mcp_server}
 "#
     )
 }

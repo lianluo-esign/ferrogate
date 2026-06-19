@@ -24,6 +24,7 @@ Durable control-plane storage is appropriate for:
 - policies;
 - gateway config profiles;
 - prompt template metadata and revisions;
+- MCP server registrations and execution allowlists;
 - MCP/tool approval records used as operator evidence;
 - future tenant, workspace, and agent-control resources.
 
@@ -116,6 +117,7 @@ restart:
 
 - API key;
 - gateway config profile;
+- MCP server registration;
 - prompt template.
 
 It then deletes or archives those resources, restarts again, and verifies the

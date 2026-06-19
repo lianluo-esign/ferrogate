@@ -118,8 +118,8 @@ Still intentionally scoped as next-stage production work:
   contract. High-write request logs, traces, usage metrics, billing analytics,
   and dashboard aggregates stay under the analytics delivery boundary.
 - Full hosted Admin API control plane beyond the current API key, policy,
-  gateway config, prompt template, tool approval, config-validation, reload,
-  and drain resources.
+  gateway config, prompt template, MCP server, tool approval,
+  config-validation, reload, and drain resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the
   generic external hook boundary.
@@ -385,7 +385,8 @@ storage:
 
 The initialization schema lives under `sql/`. The first libSQL migration is
 `sql/001_init_libsql.sql` and uses resource-oriented tables for control-plane
-documents. Analytics warehouse schema starts in
+documents, including API keys, policies, gateway config profiles, prompt
+templates, and MCP server registrations. Analytics warehouse schema starts in
 `sql/clickhouse/001_init_analytics.sql` for request logs, traces, usage
 metrics, billing/metering analytics, and dashboard aggregates.
 

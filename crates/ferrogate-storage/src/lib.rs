@@ -203,6 +203,7 @@ pub struct ControlPlaneSnapshot {
     pub policies: Vec<String>,
     pub gateway_configs: Vec<String>,
     pub prompt_templates: Vec<String>,
+    pub mcp_servers: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -211,6 +212,7 @@ pub struct RuntimeControlPlaneState {
     policies: InMemoryRepository<StoredControlPlaneResource>,
     gateway_configs: InMemoryRepository<StoredControlPlaneResource>,
     prompt_templates: InMemoryRepository<StoredControlPlaneResource>,
+    mcp_servers: InMemoryRepository<StoredControlPlaneResource>,
     tool_approvals: InMemoryRepository<StoredControlPlaneResource>,
 }
 
@@ -235,6 +237,7 @@ impl LibsqlControlPlaneStore {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
+        bootstrap_mcp_servers: Vec<(String, String)>,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
         let database = build_libsql_database(url, auth_token).await?;
@@ -255,6 +258,9 @@ impl LibsqlControlPlaneStore {
             .await?;
         store
             .seed_missing_resources("prompt_template", bootstrap_prompt_templates)
+            .await?;
+        store
+            .seed_missing_resources("mcp_server", bootstrap_mcp_servers)
             .await?;
         Ok(store)
     }
@@ -293,6 +299,7 @@ impl LibsqlControlPlaneStore {
             policies: self.list_documents("policy").await?,
             gateway_configs: self.list_documents("gateway_config").await?,
             prompt_templates: self.list_documents("prompt_template").await?,
+            mcp_servers: self.list_documents("mcp_server").await?,
         })
     }
 
@@ -441,6 +448,7 @@ impl RuntimeControlPlaneState {
             policies: InMemoryRepository::new(),
             gateway_configs: InMemoryRepository::new(),
             prompt_templates: InMemoryRepository::new(),
+            mcp_servers: InMemoryRepository::new(),
             tool_approvals: InMemoryRepository::new(),
         }
     }
@@ -450,6 +458,7 @@ impl RuntimeControlPlaneState {
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
+        mcp_servers: Vec<(String, String)>,
     ) -> Self {
         let mut state = Self::new();
         for (id, document_json) in api_keys {
@@ -464,6 +473,9 @@ impl RuntimeControlPlaneState {
         for (id, document_json) in prompt_templates {
             state.upsert_prompt_template(id, document_json);
         }
+        for (id, document_json) in mcp_servers {
+            state.upsert_mcp_server(id, document_json);
+        }
         state
     }
 
@@ -473,11 +485,13 @@ impl RuntimeControlPlaneState {
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
+        mcp_servers: Vec<(String, String)>,
     ) {
         self.api_keys = InMemoryRepository::new();
         self.policies = InMemoryRepository::new();
         self.gateway_configs = InMemoryRepository::new();
         self.prompt_templates = InMemoryRepository::new();
+        self.mcp_servers = InMemoryRepository::new();
         for (id, document_json) in api_keys {
             self.upsert_api_key(id, document_json);
         }
@@ -489,6 +503,9 @@ impl RuntimeControlPlaneState {
         }
         for (id, document_json) in prompt_templates {
             self.upsert_prompt_template(id, document_json);
+        }
+        for (id, document_json) in mcp_servers {
+            self.upsert_mcp_server(id, document_json);
         }
     }
 
@@ -525,6 +542,14 @@ impl RuntimeControlPlaneState {
             .collect::<Vec<_>>();
         prompt_templates.sort_by(|left, right| left.0.cmp(&right.0));
 
+        let mut mcp_servers = self
+            .mcp_servers
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        mcp_servers.sort_by(|left, right| left.0.cmp(&right.0));
+
         ControlPlaneSnapshot {
             api_keys: api_keys
                 .into_iter()
@@ -539,6 +564,10 @@ impl RuntimeControlPlaneState {
                 .map(|(_, document_json)| document_json)
                 .collect(),
             prompt_templates: prompt_templates
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+            mcp_servers: mcp_servers
                 .into_iter()
                 .map(|(_, document_json)| document_json)
                 .collect(),
@@ -599,6 +628,18 @@ impl RuntimeControlPlaneState {
             id.clone(),
             StoredControlPlaneResource {
                 kind: "prompt_template".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn upsert_mcp_server(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.mcp_servers.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "mcp_server".into(),
                 id,
                 document_json,
             },
@@ -901,6 +942,7 @@ impl RuntimeStorageRepositories {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
+        bootstrap_mcp_servers: Vec<(String, String)>,
         request_log_retention_records: usize,
         audit_event_retention_records: usize,
     ) -> Result<Self, StorageError> {
@@ -913,6 +955,7 @@ impl RuntimeStorageRepositories {
             bootstrap_policies,
             bootstrap_gateway_configs,
             bootstrap_prompt_templates,
+            bootstrap_mcp_servers,
             initialize_schema,
         )
         .await?;
@@ -943,6 +986,7 @@ impl RuntimeStorageRepositories {
                     policies: Vec::new(),
                     gateway_configs: Vec::new(),
                     prompt_templates: Vec::new(),
+                    mcp_servers: Vec::new(),
                 })),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.snapshot())
@@ -956,6 +1000,7 @@ impl RuntimeStorageRepositories {
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
+        mcp_servers: Vec<(String, String)>,
     ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
@@ -965,6 +1010,7 @@ impl RuntimeStorageRepositories {
                         policies,
                         gateway_configs,
                         prompt_templates,
+                        mcp_servers,
                     );
                 }
                 Ok(())
@@ -977,6 +1023,9 @@ impl RuntimeStorageRepositories {
                     .await?;
                 control_plane
                     .replace_kind("prompt_template", prompt_templates)
+                    .await?;
+                control_plane
+                    .replace_kind("mcp_server", mcp_servers)
                     .await?;
                 Ok(())
             }),
@@ -1520,9 +1569,28 @@ mod tests {
                 r#"{"name":"deny_a","effect":"deny"}"#.to_string(),
             )
             .unwrap();
+        repositories
+            .replace_control_plane(
+                vec![("key_a".into(), r#"{"id":"key_a","name":"A"}"#.to_string())],
+                vec![(
+                    "deny_a".into(),
+                    r#"{"name":"deny_a","effect":"deny"}"#.to_string(),
+                )],
+                Vec::new(),
+                Vec::new(),
+                vec![(
+                    "github".into(),
+                    r#"{"name":"github","transport":"streamable_http"}"#.to_string(),
+                )],
+            )
+            .unwrap();
         let snapshot = repositories.control_plane_snapshot().unwrap();
         assert_eq!(snapshot.api_keys, [r#"{"id":"key_a","name":"A"}"#]);
         assert_eq!(snapshot.policies, [r#"{"name":"deny_a","effect":"deny"}"#]);
+        assert_eq!(
+            snapshot.mcp_servers,
+            [r#"{"name":"github","transport":"streamable_http"}"#]
+        );
 
         assert!(repositories.delete_control_plane_api_key("key_a").unwrap());
         assert!(!repositories.delete_control_plane_api_key("key_a").unwrap());
@@ -1612,6 +1680,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             10,
             10,
         ))
@@ -1626,6 +1695,7 @@ mod tests {
             url,
             None,
             true,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
