@@ -1568,7 +1568,7 @@ impl FerroGateway {
         };
 
         if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
-            let approval = state.create_tool_approval(
+            let approval = match state.create_tool_approval(
                 &request,
                 &ctx.request_id,
                 ctx.trace_id.clone(),
@@ -1580,7 +1580,27 @@ impl FerroGateway {
                     .or_else(|| Some(tool.extension_id.clone())),
                 tool.approval_policy,
                 auth.can_record_bodies(state.config.telemetry.log_bodies),
-            );
+            ) {
+                Ok(approval) => approval,
+                Err(error) => {
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "tool.approval_requested",
+                        format!("tool:{}", request.name),
+                        "error",
+                        format!("tool approval persistence failed: {error}"),
+                    ));
+                    return write_json_error(
+                        session,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "tool_approval_storage_unavailable",
+                        "tool approval could not be persisted",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
             state.record_admin_audit_event(admin_audit_event_draft_for_target(
                 ctx,
                 &auth,

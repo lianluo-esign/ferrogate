@@ -1029,7 +1029,7 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
             .context("system clock is before UNIX epoch")?
             .as_millis()
     );
-    let request_body = serde_json::json!({
+    let api_key_body = serde_json::json!({
         "id": resource_id,
         "name": "Turso restart test key",
         "key": format!("{resource_id}-secret"),
@@ -1037,6 +1037,27 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
         "allowed_models": ["fast-chat"],
         "organization_id": "org_turso_e2e",
         "project_id": "project_restart"
+    })
+    .to_string();
+    let gateway_config_id = format!("{resource_id}-profile");
+    let gateway_config_body = serde_json::json!({
+        "id": gateway_config_id,
+        "name": "Turso restart profile",
+        "revision": 7,
+        "api_key_ids": [resource_id],
+        "cache_enabled": false
+    })
+    .to_string();
+    let prompt_template_id = format!("{resource_id}-prompt");
+    let prompt_template_body = serde_json::json!({
+        "id": prompt_template_id,
+        "name": "Turso restart prompt",
+        "model": "fast-chat",
+        "variables": [{"name": "topic", "required": true}],
+        "version": {
+            "messages": [{"role": "user", "content": "Summarize {{topic}}"}],
+            "temperature": 0.1
+        }
     })
     .to_string();
 
@@ -1047,7 +1068,7 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
             "POST",
             "/admin/v1/api-keys",
             &[ADMIN_AUTH, JSON_CONTENT],
-            &request_body,
+            &api_key_body,
             201,
             |body| {
                 assert_eq!(body["key"]["id"], resource_id);
@@ -1057,12 +1078,43 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
             },
         )?;
         case.expect_api_key(&resource_id)?;
+        case.expect_json(
+            "POST",
+            "/admin/v1/gateway-configs",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &gateway_config_body,
+            201,
+            |body| {
+                assert_eq!(body["gateway_config"]["id"], gateway_config_id);
+                assert_eq!(body["gateway_config"]["revision"], 7);
+                assert_eq!(body["gateway_config"]["cache_enabled"], false);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        case.expect_gateway_config(&gateway_config_id)?;
+        case.expect_json(
+            "POST",
+            "/admin/v1/prompt-templates",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &prompt_template_body,
+            201,
+            |body| {
+                assert_eq!(body["prompt_template"]["id"], prompt_template_id);
+                assert_eq!(body["prompt_template"]["active_revision"], 1);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        case.expect_prompt_template(&prompt_template_id, "active")?;
     }
 
     {
         let case = TursoRestartHarness::start(args)?;
         case.expect_storage_status()?;
         case.expect_api_key(&resource_id)?;
+        case.expect_gateway_config(&gateway_config_id)?;
+        case.expect_prompt_template(&prompt_template_id, "active")?;
         case.expect_json(
             "DELETE",
             &format!("/admin/v1/api-keys/{resource_id}"),
@@ -1074,6 +1126,34 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
                 Ok(())
             },
         )?;
+        case.expect_json(
+            "DELETE",
+            &format!("/admin/v1/gateway-configs/{gateway_config_id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["deleted"], true);
+                Ok(())
+            },
+        )?;
+        case.expect_json(
+            "DELETE",
+            &format!("/admin/v1/prompt-templates/{prompt_template_id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["deleted"], false);
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let case = TursoRestartHarness::start(args)?;
+        case.expect_storage_status()?;
+        case.expect_prompt_template(&prompt_template_id, "archived")?;
     }
 
     println!("turso-libsql-restart scenario passed");
@@ -1117,6 +1197,7 @@ struct TursoRestartHarness {
     _dir: tempfile::TempDir,
     gateway_addr: String,
     gateway: Child,
+    stderr: Option<std::process::ChildStderr>,
 }
 
 impl AuthHarness {
@@ -1235,7 +1316,7 @@ impl TursoRestartHarness {
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
 
@@ -1243,7 +1324,9 @@ impl TursoRestartHarness {
             _dir: dir,
             gateway_addr,
             gateway,
+            stderr: None,
         };
+        harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
         Ok(harness)
     }
@@ -1253,7 +1336,11 @@ impl TursoRestartHarness {
         let mut last = String::new();
         while started.elapsed() < Duration::from_secs(60) {
             if let Some(status) = self.gateway.try_wait()? {
-                bail!("ferrogate process exited before readiness check: {status}");
+                let stderr = self.read_stderr();
+                assert_secret_redacted(&stderr);
+                bail!(
+                    "ferrogate process exited before readiness check: {status}; stderr: {stderr}"
+                );
             }
             match http_request_addr(&self.gateway_addr, "GET", "/healthz", &[], "") {
                 Ok(response) if response.status == 200 => return Ok(()),
@@ -1266,6 +1353,15 @@ impl TursoRestartHarness {
             "timed out waiting for Turso/libSQL FerroGate on {}; last response: {last}",
             self.gateway_addr
         );
+    }
+
+    fn read_stderr(&mut self) -> String {
+        let Some(mut stderr) = self.stderr.take() else {
+            return String::new();
+        };
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output);
+        output
     }
 
     fn expect_json<F>(
@@ -1322,6 +1418,42 @@ impl TursoRestartHarness {
                 assert_eq!(body["key"]["id"], id);
                 assert_eq!(body["key"]["name"], "Turso restart test key");
                 assert_eq!(body["key"]["key_source"], "inline");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_gateway_config(&self, id: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/gateway-configs/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["gateway_config"]["id"], id);
+                assert_eq!(body["gateway_config"]["name"], "Turso restart profile");
+                assert_eq!(body["gateway_config"]["revision"], 7);
+                assert_eq!(body["gateway_config"]["cache_enabled"], false);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_prompt_template(&self, id: &str, status: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/prompt-templates/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["prompt_template"]["id"], id);
+                assert_eq!(body["prompt_template"]["name"], "Turso restart prompt");
+                assert_eq!(body["prompt_template"]["status"], status);
+                assert_eq!(body["prompt_template"]["active_revision"], 1);
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },

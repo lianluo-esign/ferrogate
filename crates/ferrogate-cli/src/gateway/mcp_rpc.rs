@@ -199,7 +199,7 @@ async fn tools_call(
     };
 
     if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
-        let approval = state.create_tool_approval(
+        let approval = match state.create_tool_approval(
             &request,
             &ctx.request_id,
             ctx.trace_id.clone(),
@@ -211,7 +211,24 @@ async fn tools_call(
                 .or_else(|| Some(tool.extension_id.clone())),
             tool.approval_policy,
             auth.can_record_bodies(state.config.telemetry.log_bodies),
-        );
+        ) {
+            Ok(approval) => approval,
+            Err(error_response) => {
+                state.record_admin_audit_event(audit_event(
+                    ctx,
+                    auth,
+                    "tool.approval_requested",
+                    format!("tool:{name}"),
+                    "error",
+                    format!("tool approval persistence failed: {error_response}"),
+                ));
+                return error(
+                    id,
+                    -32003,
+                    "tool approval could not be persisted".to_string(),
+                );
+            }
+        };
         state.record_admin_audit_event(audit_event(
             ctx,
             auth,

@@ -512,18 +512,20 @@ impl SharedAppState {
         profile: GatewayConfigProfile,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        if let Some(existing) = candidate
-            .gateway_configs
-            .iter_mut()
-            .find(|existing| existing.id == profile.id)
-        {
-            *existing = profile;
-        } else {
-            candidate.gateway_configs.push(profile);
+        let result = (|| {
+            active.repositories.upsert_control_plane_gateway_config(
+                profile.id.clone(),
+                serde_json::to_string(&profile)?,
+            )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(self.reload_process_local(candidate))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
         }
-        candidate.validate()?;
-        Ok(self.reload_process_local(candidate))
+        result
     }
 
     pub(crate) fn delete_gateway_config(
@@ -531,14 +533,22 @@ impl SharedAppState {
         id: &str,
     ) -> anyhow::Result<Option<RuntimeReloadResult>> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        let before = candidate.gateway_configs.len();
-        candidate.gateway_configs.retain(|profile| profile.id != id);
-        if candidate.gateway_configs.len() == before {
+        if !active
+            .repositories
+            .delete_control_plane_gateway_config(id)?
+        {
             return Ok(None);
         }
-        candidate.validate()?;
-        Ok(Some(self.reload_process_local(candidate)))
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(Some(self.reload_process_local(candidate)))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
     }
 
     pub(crate) fn upsert_prompt_template(
@@ -546,18 +556,20 @@ impl SharedAppState {
         template: PromptTemplate,
     ) -> anyhow::Result<RuntimeReloadResult> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        if let Some(existing) = candidate
-            .prompt_templates
-            .iter_mut()
-            .find(|existing| existing.id == template.id)
-        {
-            *existing = template;
-        } else {
-            candidate.prompt_templates.push(template);
+        let result = (|| {
+            active.repositories.upsert_control_plane_prompt_template(
+                template.id.clone(),
+                serde_json::to_string(&template)?,
+            )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(self.reload_process_local(candidate))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
         }
-        candidate.validate()?;
-        Ok(self.reload_process_local(candidate))
+        result
     }
 
     pub(crate) fn archive_prompt_template(
@@ -565,17 +577,30 @@ impl SharedAppState {
         id: &str,
     ) -> anyhow::Result<Option<RuntimeReloadResult>> {
         let active = self.current();
-        let mut candidate = (*active.config).clone();
-        let Some(template) = candidate
+        let mut template = active
+            .config
             .prompt_templates
-            .iter_mut()
+            .iter()
             .find(|template| template.id == id)
-        else {
+            .cloned();
+        let Some(mut template) = template.take() else {
             return Ok(None);
         };
         template.status = PromptTemplateStatus::Archived;
-        candidate.validate()?;
-        Ok(Some(self.reload_process_local(candidate)))
+        let result = (|| {
+            active.repositories.upsert_control_plane_prompt_template(
+                template.id.clone(),
+                serde_json::to_string(&template)?,
+            )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(Some(self.reload_process_local(candidate)))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
     }
 
     pub(crate) fn set_drain(&self, drain: bool) -> DrainStatus {
@@ -789,6 +814,10 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
     let api_keys = serialize_control_plane_documents(&config.api_keys, |key| key.id.clone());
     let policies =
         serialize_control_plane_documents(&config.policies, |policy| policy.name.clone());
+    let gateway_configs =
+        serialize_control_plane_documents(&config.gateway_configs, |profile| profile.id.clone());
+    let prompt_templates =
+        serialize_control_plane_documents(&config.prompt_templates, |template| template.id.clone());
     if storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
         let url = storage
             .libsql_url
@@ -804,6 +833,8 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             initialize_schema,
             api_keys,
             policies,
+            gateway_configs,
+            prompt_templates,
             config.analytics.request_log_retention_records,
             config.analytics.audit_event_retention_records,
         ))
@@ -816,7 +847,12 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
     )?;
     Ok(RuntimeStorageRepositories::new(
         backend,
-        RuntimeControlPlaneState::from_documents(api_keys, policies),
+        RuntimeControlPlaneState::from_documents(
+            api_keys,
+            policies,
+            gateway_configs,
+            prompt_templates,
+        ),
         config.analytics.request_log_retention_records,
         config.analytics.audit_event_retention_records,
     ))
@@ -899,6 +935,8 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     let snapshot = repositories.control_plane_snapshot()?;
     config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
     config.policies = deserialize_control_plane_documents(snapshot.policies)?;
+    config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
+    config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
     Ok(())
 }
 
@@ -1810,11 +1848,19 @@ impl AppState {
     }
 
     pub(crate) fn tool_approvals(&self) -> Vec<ToolApprovalRecord> {
-        self.approvals.list()
+        self.repositories
+            .control_plane_tool_approvals()
+            .map(|documents| deserialize_control_plane_documents(documents).unwrap_or_default())
+            .unwrap_or_else(|_| self.approvals.list())
     }
 
     pub(crate) fn tool_approval(&self, id: &str) -> Option<ToolApprovalRecord> {
-        self.approvals.get(id)
+        self.repositories
+            .control_plane_tool_approval(id)
+            .ok()
+            .flatten()
+            .and_then(|document| serde_json::from_str(&document).ok())
+            .or_else(|| self.approvals.get(id))
     }
 
     pub(crate) fn create_tool_approval(
@@ -1827,8 +1873,8 @@ impl AppState {
         server_name: Option<String>,
         approval_policy: ferrogate_core::ApprovalPolicy,
         can_log_bodies: bool,
-    ) -> ToolApprovalRecord {
-        self.approvals.create_pending(ToolApprovalDraft {
+    ) -> anyhow::Result<ToolApprovalRecord> {
+        let record = self.approvals.create_pending(ToolApprovalDraft {
             request_id: request_id.to_string(),
             trace_id,
             tenant,
@@ -1841,7 +1887,9 @@ impl AppState {
             config_snapshot: config_snapshot_id(&self.config),
             arguments: request.arguments.clone(),
             can_log_bodies,
-        })
+        });
+        self.persist_tool_approval(&record)?;
+        Ok(record)
     }
 
     pub(crate) async fn wait_for_tool_approval(
@@ -1854,11 +1902,17 @@ impl AppState {
             .wait_for_resolution(&approval.id, timeout)
             .await
         {
-            Ok(record) if record.status == ApprovalStatus::Approved => Ok(record),
-            Ok(record) => Err(ToolExecutionError::Denied(format!(
-                "tool approval {} ended with status {:?}",
-                record.id, record.status
-            ))),
+            Ok(record) if record.status == ApprovalStatus::Approved => {
+                self.persist_tool_approval_as_tool_result(&record)?;
+                Ok(record)
+            }
+            Ok(record) => {
+                self.persist_tool_approval_as_tool_result(&record)?;
+                Err(ToolExecutionError::Denied(format!(
+                    "tool approval {} ended with status {:?}",
+                    record.id, record.status
+                )))
+            }
             Err(ApprovalWaitError::NotFound(message)) => Err(ToolExecutionError::Denied(message)),
         }
     }
@@ -1874,8 +1928,21 @@ impl AppState {
             .as_deref()
             .unwrap_or_default()
             .to_string();
-        self.approvals
+        match self
+            .approvals
             .approve(id, &fingerprint, reviewer_api_key_id, payload.reason)
+        {
+            Ok(record) => {
+                self.persist_tool_approval_as_decision(&record)?;
+                Ok(record)
+            }
+            Err(error) => {
+                if let Some(record) = self.approvals.get(id) {
+                    self.persist_tool_approval_as_decision(&record)?;
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn deny_tool_approval(
@@ -1884,7 +1951,18 @@ impl AppState {
         payload: ToolApprovalDecisionRequest,
         reviewer_api_key_id: Option<String>,
     ) -> Result<ToolApprovalRecord, ApprovalDecisionError> {
-        self.approvals.deny(id, reviewer_api_key_id, payload.reason)
+        match self.approvals.deny(id, reviewer_api_key_id, payload.reason) {
+            Ok(record) => {
+                self.persist_tool_approval_as_decision(&record)?;
+                Ok(record)
+            }
+            Err(error) => {
+                if let Some(record) = self.approvals.get(id) {
+                    self.persist_tool_approval_as_decision(&record)?;
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn expire_tool_approval(
@@ -1893,8 +1971,49 @@ impl AppState {
         payload: ToolApprovalDecisionRequest,
         reviewer_api_key_id: Option<String>,
     ) -> Result<ToolApprovalRecord, ApprovalDecisionError> {
-        self.approvals
+        match self
+            .approvals
             .expire(id, reviewer_api_key_id, payload.reason)
+        {
+            Ok(record) => {
+                self.persist_tool_approval_as_decision(&record)?;
+                Ok(record)
+            }
+            Err(error) => {
+                if let Some(record) = self.approvals.get(id) {
+                    self.persist_tool_approval_as_decision(&record)?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn persist_tool_approval(&self, record: &ToolApprovalRecord) -> anyhow::Result<()> {
+        self.repositories.upsert_control_plane_tool_approval(
+            record.id.clone(),
+            serde_json::to_string(record)?,
+        )?;
+        Ok(())
+    }
+
+    fn persist_tool_approval_as_decision(
+        &self,
+        record: &ToolApprovalRecord,
+    ) -> Result<(), ApprovalDecisionError> {
+        self.persist_tool_approval(record).map_err(|error| {
+            ApprovalDecisionError::NotFound(format!(
+                "failed to persist tool approval {}: {error}",
+                record.id
+            ))
+        })
+    }
+
+    fn persist_tool_approval_as_tool_result(
+        &self,
+        record: &ToolApprovalRecord,
+    ) -> Result<(), ToolExecutionError> {
+        self.persist_tool_approval(record)
+            .map_err(|error| ToolExecutionError::Denied(error.to_string()))
     }
 
     pub(crate) fn mcp_statuses(&self) -> Vec<McpServerStatus> {
@@ -2091,6 +2210,12 @@ impl AppState {
         self.repositories.replace_control_plane(
             serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
             serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
+            serialize_control_plane_documents(&config.gateway_configs, |profile| {
+                profile.id.clone()
+            }),
+            serialize_control_plane_documents(&config.prompt_templates, |template| {
+                template.id.clone()
+            }),
         )?;
         Ok(())
     }
@@ -2099,6 +2224,8 @@ impl AppState {
         let snapshot = self.repositories.control_plane_snapshot()?;
         config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
         config.policies = deserialize_control_plane_documents(snapshot.policies)?;
+        config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
+        config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
         Ok(())
     }
 
@@ -4372,7 +4499,7 @@ mod tests {
     }
 
     #[test]
-    fn api_key_and_policy_crud_use_control_plane_storage_boundary() {
+    fn control_plane_crud_uses_storage_boundary() {
         let shared = SharedAppState::with_source_path(
             Config {
                 providers: vec![test_provider()],
@@ -4424,6 +4551,83 @@ mod tests {
             .iter()
             .any(|document| document.contains("\"name\":\"deny-added\"")));
 
+        shared
+            .upsert_gateway_config(GatewayConfigProfile {
+                id: "profile-added".into(),
+                name: "Profile added".into(),
+                revision: 3,
+                enabled: true,
+                api_key_ids: vec!["key_added".into()],
+                cache_enabled: Some(false),
+            })
+            .unwrap();
+        let state = shared.current();
+        assert!(state
+            .config
+            .gateway_configs
+            .iter()
+            .any(|profile| profile.id == "profile-added"));
+        assert!(state
+            .repositories
+            .control_plane_snapshot()
+            .unwrap()
+            .gateway_configs
+            .iter()
+            .any(|document| document.contains("\"id\":\"profile-added\"")));
+
+        shared
+            .upsert_prompt_template(PromptTemplate {
+                id: "template-added".into(),
+                name: "Template added".into(),
+                status: PromptTemplateStatus::Active,
+                target: crate::config::PromptTemplateTarget::ChatCompletions,
+                model: "fast-chat".into(),
+                variables: Vec::new(),
+                versions: vec![crate::config::PromptTemplateVersion {
+                    revision: 1,
+                    status: crate::config::PromptTemplateVersionStatus::Active,
+                    messages: vec![crate::config::PromptTemplateMessage {
+                        role: "user".into(),
+                        content: "hello".into(),
+                    }],
+                    temperature: None,
+                    top_p: None,
+                    max_tokens: None,
+                }],
+            })
+            .unwrap();
+        let state = shared.current();
+        assert!(state
+            .config
+            .prompt_templates
+            .iter()
+            .any(|template| template.id == "template-added"));
+        assert!(state
+            .repositories
+            .control_plane_snapshot()
+            .unwrap()
+            .prompt_templates
+            .iter()
+            .any(|document| document.contains("\"id\":\"template-added\"")));
+
+        assert!(shared
+            .delete_gateway_config("profile-added")
+            .unwrap()
+            .is_some());
+        assert!(shared
+            .archive_prompt_template("template-added")
+            .unwrap()
+            .is_some());
+        let state = shared.current();
+        assert!(!state
+            .config
+            .gateway_configs
+            .iter()
+            .any(|profile| profile.id == "profile-added"));
+        assert!(state.config.prompt_templates.iter().any(|template| {
+            template.id == "template-added" && template.status == PromptTemplateStatus::Archived
+        }));
+
         assert!(shared.delete_policy("deny-added").unwrap().is_some());
         assert!(shared.delete_api_key("key_added").unwrap().is_some());
         let state = shared.current();
@@ -4439,6 +4643,48 @@ mod tests {
             .api_keys
             .iter()
             .any(|document| document.contains("\"id\":\"key_added\"")));
+        assert!(!state
+            .repositories
+            .control_plane_snapshot()
+            .unwrap()
+            .gateway_configs
+            .iter()
+            .any(|document| document.contains("\"id\":\"profile-added\"")));
+        assert!(state
+            .repositories
+            .control_plane_snapshot()
+            .unwrap()
+            .prompt_templates
+            .iter()
+            .any(|document| document.contains("\"status\":\"archived\"")));
+
+        let approval = state
+            .create_tool_approval(
+                &ToolExecutionRequest {
+                    name: "github.search".into(),
+                    arguments: serde_json::json!({"query":"ferrogate"}),
+                    route: None,
+                    session_id: None,
+                },
+                "request-test",
+                Some("trace-test".into()),
+                ferrogate_core::TenantContext::default(),
+                Some("key_initial".into()),
+                Some("mcp.github".into()),
+                ferrogate_core::ApprovalPolicy::Always,
+                false,
+            )
+            .unwrap();
+        assert_eq!(approval.status, ApprovalStatus::Pending);
+        let stored_approval = state.tool_approval(&approval.id).unwrap();
+        assert_eq!(stored_approval.id, approval.id);
+        assert_eq!(stored_approval.status, ApprovalStatus::Pending);
+        assert!(state
+            .repositories
+            .control_plane_tool_approvals()
+            .unwrap()
+            .iter()
+            .any(|document| document.contains("\"tool_name\":\"github.search\"")));
     }
 
     #[test]

@@ -201,12 +201,17 @@ pub struct StoredControlPlaneResource {
 pub struct ControlPlaneSnapshot {
     pub api_keys: Vec<String>,
     pub policies: Vec<String>,
+    pub gateway_configs: Vec<String>,
+    pub prompt_templates: Vec<String>,
 }
 
 #[derive(Debug)]
 pub struct RuntimeControlPlaneState {
     api_keys: InMemoryRepository<StoredControlPlaneResource>,
     policies: InMemoryRepository<StoredControlPlaneResource>,
+    gateway_configs: InMemoryRepository<StoredControlPlaneResource>,
+    prompt_templates: InMemoryRepository<StoredControlPlaneResource>,
+    tool_approvals: InMemoryRepository<StoredControlPlaneResource>,
 }
 
 struct LibsqlControlPlaneStore {
@@ -228,6 +233,8 @@ impl LibsqlControlPlaneStore {
         auth_token: String,
         bootstrap_api_keys: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
+        bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_prompt_templates: Vec<(String, String)>,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
         let database = LibsqlBuilder::new_remote(url, auth_token)
@@ -245,6 +252,12 @@ impl LibsqlControlPlaneStore {
             .await?;
         store
             .seed_missing_resources("policy", bootstrap_policies)
+            .await?;
+        store
+            .seed_missing_resources("gateway_config", bootstrap_gateway_configs)
+            .await?;
+        store
+            .seed_missing_resources("prompt_template", bootstrap_prompt_templates)
             .await?;
         Ok(store)
     }
@@ -281,6 +294,8 @@ impl LibsqlControlPlaneStore {
         Ok(ControlPlaneSnapshot {
             api_keys: self.list_documents("api_key").await?,
             policies: self.list_documents("policy").await?,
+            gateway_configs: self.list_documents("gateway_config").await?,
+            prompt_templates: self.list_documents("prompt_template").await?,
         })
     }
 
@@ -299,6 +314,27 @@ impl LibsqlControlPlaneStore {
             documents.push(row.get::<String>(0).map_err(libsql_error)?);
         }
         Ok(documents)
+    }
+
+    async fn get_document(
+        &self,
+        kind: &'static str,
+        id: String,
+    ) -> Result<Option<String>, StorageError> {
+        let connection = self.database.connect().map_err(libsql_error)?;
+        let mut rows = connection
+            .query(
+                "SELECT document_json FROM control_plane_resources \
+                 WHERE resource_kind = ?1 AND resource_id = ?2",
+                libsql::params![kind, id],
+            )
+            .await
+            .map_err(libsql_error)?;
+        rows.next()
+            .await
+            .map_err(libsql_error)?
+            .map(|row| row.get::<String>(0).map_err(libsql_error))
+            .transpose()
     }
 
     async fn upsert(
@@ -377,12 +413,17 @@ impl RuntimeControlPlaneState {
         Self {
             api_keys: InMemoryRepository::new(),
             policies: InMemoryRepository::new(),
+            gateway_configs: InMemoryRepository::new(),
+            prompt_templates: InMemoryRepository::new(),
+            tool_approvals: InMemoryRepository::new(),
         }
     }
 
     pub fn from_documents(
         api_keys: Vec<(String, String)>,
         policies: Vec<(String, String)>,
+        gateway_configs: Vec<(String, String)>,
+        prompt_templates: Vec<(String, String)>,
     ) -> Self {
         let mut state = Self::new();
         for (id, document_json) in api_keys {
@@ -391,7 +432,38 @@ impl RuntimeControlPlaneState {
         for (id, document_json) in policies {
             state.upsert_policy(id, document_json);
         }
+        for (id, document_json) in gateway_configs {
+            state.upsert_gateway_config(id, document_json);
+        }
+        for (id, document_json) in prompt_templates {
+            state.upsert_prompt_template(id, document_json);
+        }
         state
+    }
+
+    pub fn replace_config_documents(
+        &mut self,
+        api_keys: Vec<(String, String)>,
+        policies: Vec<(String, String)>,
+        gateway_configs: Vec<(String, String)>,
+        prompt_templates: Vec<(String, String)>,
+    ) {
+        self.api_keys = InMemoryRepository::new();
+        self.policies = InMemoryRepository::new();
+        self.gateway_configs = InMemoryRepository::new();
+        self.prompt_templates = InMemoryRepository::new();
+        for (id, document_json) in api_keys {
+            self.upsert_api_key(id, document_json);
+        }
+        for (id, document_json) in policies {
+            self.upsert_policy(id, document_json);
+        }
+        for (id, document_json) in gateway_configs {
+            self.upsert_gateway_config(id, document_json);
+        }
+        for (id, document_json) in prompt_templates {
+            self.upsert_prompt_template(id, document_json);
+        }
     }
 
     pub fn snapshot(&self) -> ControlPlaneSnapshot {
@@ -411,12 +483,36 @@ impl RuntimeControlPlaneState {
             .collect::<Vec<_>>();
         policies.sort_by(|left, right| left.0.cmp(&right.0));
 
+        let mut gateway_configs = self
+            .gateway_configs
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        gateway_configs.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut prompt_templates = self
+            .prompt_templates
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        prompt_templates.sort_by(|left, right| left.0.cmp(&right.0));
+
         ControlPlaneSnapshot {
             api_keys: api_keys
                 .into_iter()
                 .map(|(_, document_json)| document_json)
                 .collect(),
             policies: policies
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+            gateway_configs: gateway_configs
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+            prompt_templates: prompt_templates
                 .into_iter()
                 .map(|(_, document_json)| document_json)
                 .collect(),
@@ -453,6 +549,66 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_policy(&mut self, id: &str) -> bool {
         self.policies.remove(id).is_some()
+    }
+
+    pub fn upsert_gateway_config(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.gateway_configs.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "gateway_config".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn delete_gateway_config(&mut self, id: &str) -> bool {
+        self.gateway_configs.remove(id).is_some()
+    }
+
+    pub fn upsert_prompt_template(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.prompt_templates.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "prompt_template".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn upsert_tool_approval(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.tool_approvals.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "tool_approval".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn tool_approval(&self, id: &str) -> Option<String> {
+        self.tool_approvals
+            .get(id)
+            .map(|resource| resource.document_json)
+    }
+
+    pub fn tool_approvals(&self) -> Vec<String> {
+        let mut approvals = self
+            .tool_approvals
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        approvals.sort_by(|left, right| left.0.cmp(&right.0));
+        approvals
+            .into_iter()
+            .map(|(_, document_json)| document_json)
+            .collect()
     }
 }
 
@@ -717,6 +873,8 @@ impl RuntimeStorageRepositories {
         initialize_schema: bool,
         bootstrap_api_keys: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
+        bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_prompt_templates: Vec<(String, String)>,
         request_log_retention_records: usize,
         audit_event_retention_records: usize,
     ) -> Result<Self, StorageError> {
@@ -727,6 +885,8 @@ impl RuntimeStorageRepositories {
             auth_token,
             bootstrap_api_keys,
             bootstrap_policies,
+            bootstrap_gateway_configs,
+            bootstrap_prompt_templates,
             initialize_schema,
         )
         .await?;
@@ -755,6 +915,8 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_else(|_| ControlPlaneSnapshot {
                     api_keys: Vec::new(),
                     policies: Vec::new(),
+                    gateway_configs: Vec::new(),
+                    prompt_templates: Vec::new(),
                 })),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.snapshot())
@@ -766,17 +928,30 @@ impl RuntimeStorageRepositories {
         &self,
         api_keys: Vec<(String, String)>,
         policies: Vec<(String, String)>,
+        gateway_configs: Vec<(String, String)>,
+        prompt_templates: Vec<(String, String)>,
     ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
-                    *control_plane = RuntimeControlPlaneState::from_documents(api_keys, policies);
+                    control_plane.replace_config_documents(
+                        api_keys,
+                        policies,
+                        gateway_configs,
+                        prompt_templates,
+                    );
                 }
                 Ok(())
             }
             RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(async {
                 control_plane.replace_kind("api_key", api_keys).await?;
                 control_plane.replace_kind("policy", policies).await?;
+                control_plane
+                    .replace_kind("gateway_config", gateway_configs)
+                    .await?;
+                control_plane
+                    .replace_kind("prompt_template", prompt_templates)
+                    .await?;
                 Ok(())
             }),
         }
@@ -841,6 +1016,97 @@ impl RuntimeStorageRepositories {
             }
         }
     }
+
+    pub fn upsert_control_plane_gateway_config(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_gateway_config(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("gateway_config", id.into(), document_json))
+            }
+        }
+    }
+
+    pub fn delete_control_plane_gateway_config(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_gateway_config(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("gateway_config", id.to_string()))
+            }
+        }
+    }
+
+    pub fn upsert_control_plane_prompt_template(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_prompt_template(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("prompt_template", id.into(), document_json))
+            }
+        }
+    }
+
+    pub fn upsert_control_plane_tool_approval(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_tool_approval(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("tool_approval", id.into(), document_json))
+            }
+        }
+    }
+
+    pub fn control_plane_tool_approval(&self, id: &str) -> Result<Option<String>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .ok()
+                .and_then(|control_plane| control_plane.tool_approval(id))),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.get_document("tool_approval", id.to_string()))
+            }
+        }
+    }
+
+    pub fn control_plane_tool_approvals(&self) -> Result<Vec<String>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.tool_approvals())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.list_documents("tool_approval"))
+            }
+        }
+    }
+
     pub fn set_retention_limits(
         &self,
         request_log_retention_records: usize,
