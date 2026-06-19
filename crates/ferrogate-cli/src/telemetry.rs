@@ -10,9 +10,10 @@ use ferrogate_observability::{
     build_otlp_logs_request, build_otlp_metrics_request, build_otlp_traces_request, OtlpAttribute,
     OtlpHttpRequest, OtlpLogRecord, OtlpSpanRecord,
 };
-use ferrogate_storage::{StoredAuditEvent, StoredRequestLog};
+use ferrogate_storage::{StoredAuditEvent, StoredRequestLog, StoredUsageAggregate};
 use http::{StatusCode, Uri};
 use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use serde::Serialize;
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -51,6 +52,40 @@ pub(crate) fn start_otlp_background_sender(state: AppState) -> Option<JoinHandle
                 }
             }
             thread::sleep(OTLP_EXPORT_INTERVAL);
+        }
+    }))
+}
+
+pub(crate) fn start_analytics_background_sender(state: AppState) -> Option<JoinHandle<()>> {
+    let endpoint = state.analytics_vector_endpoint()?;
+    let timeout = Duration::from_secs(state.analytics_timeout_secs());
+    let interval = Duration::from_millis(state.analytics_flush_interval_millis());
+    let batch_max_events = state.analytics_batch_max_events();
+
+    Some(thread::spawn(move || {
+        debug!(endpoint = %endpoint, "analytics Vector pipeline sender started");
+        let mut exported_request_logs = 0;
+        let mut exported_audit_events = 0;
+        let mut exported_billing_events = 0;
+        let mut exported_usage_aggregates = 0;
+        loop {
+            match export_analytics_once_since(
+                &state,
+                &endpoint,
+                timeout,
+                batch_max_events,
+                &mut exported_request_logs,
+                &mut exported_audit_events,
+                &mut exported_billing_events,
+                &mut exported_usage_aggregates,
+            ) {
+                Ok(()) => state.record_analytics_export_success(),
+                Err(error) => {
+                    state.record_analytics_export_error(error.to_string());
+                    warn!(error = ?error, "analytics export failed");
+                }
+            }
+            thread::sleep(interval.max(Duration::from_millis(100)));
         }
     }))
 }
@@ -134,6 +169,381 @@ fn export_otlp_once_since(
     }
 
     Ok(())
+}
+
+fn export_analytics_once_since(
+    state: &AppState,
+    endpoint: &str,
+    timeout: Duration,
+    batch_max_events: usize,
+    exported_request_logs: &mut usize,
+    exported_audit_events: &mut usize,
+    exported_billing_events: &mut usize,
+    exported_usage_aggregates: &mut usize,
+) -> AnyResult<()> {
+    let request_logs = state.request_logs();
+    let audit_events = state.audit_events();
+    let billing_events = state.metering_events();
+    let usage_aggregates = state.usage_aggregates();
+
+    let mut records = Vec::new();
+    records.extend(
+        request_logs
+            .get(*exported_request_logs..)
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|log| {
+                [
+                    AnalyticsRecord::from_request_log(log),
+                    AnalyticsRecord::from_trace_span(log),
+                ]
+            }),
+    );
+    records.extend(
+        audit_events
+            .get(*exported_audit_events..)
+            .unwrap_or_default()
+            .iter()
+            .map(AnalyticsRecord::from_audit_event),
+    );
+    records.extend(
+        billing_events
+            .get(*exported_billing_events..)
+            .unwrap_or_default()
+            .iter()
+            .map(AnalyticsRecord::from_billing_event),
+    );
+    records.extend(
+        usage_aggregates
+            .get(*exported_usage_aggregates..)
+            .unwrap_or_default()
+            .iter()
+            .map(AnalyticsRecord::from_usage_aggregate),
+    );
+
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in records.chunks(batch_max_events.max(1)) {
+        dispatch_ndjson_request(endpoint, chunk, timeout)?;
+    }
+    *exported_request_logs = request_logs.len();
+    *exported_audit_events = audit_events.len();
+    *exported_billing_events = billing_events.len();
+    *exported_usage_aggregates = usage_aggregates.len();
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct AnalyticsRecord {
+    event_kind: &'static str,
+    event_time_unix: u64,
+    request_id: String,
+    trace_id: String,
+    tenant_id: String,
+    organization_id: String,
+    project_id: String,
+    api_key_id: String,
+    route: String,
+    provider: String,
+    logical_model: String,
+    provider_model: String,
+    method: String,
+    path: String,
+    status_code: u16,
+    latency_ms: u64,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    request_count: u64,
+    error_count: u64,
+    cost_microusd: u64,
+    cache_status: String,
+    error_code: String,
+    event_id: String,
+    subject: String,
+    action: String,
+    target_kind: String,
+    target_id: String,
+    outcome: String,
+    service_name: String,
+    span_name: String,
+    span_kind: String,
+    span_id: String,
+    parent_span_id: String,
+    duration_ms: u64,
+    idempotency_key: String,
+    document_json: String,
+}
+
+impl AnalyticsRecord {
+    fn from_request_log(log: &StoredRequestLog) -> Self {
+        let started = log.started_at_unix.unwrap_or_else(now_unix_seconds);
+        let completed = log.completed_at_unix.unwrap_or(started);
+        let tenant_id = tenant_id(
+            log.tenant.organization_id.as_deref(),
+            log.tenant.project_id.as_deref(),
+            log.tenant.api_key_id.as_deref(),
+        );
+        Self {
+            event_kind: "request_log",
+            event_time_unix: completed,
+            request_id: log.request_id.clone(),
+            trace_id: log.trace_id.clone().unwrap_or_default(),
+            tenant_id,
+            organization_id: log.tenant.organization_id.clone().unwrap_or_default(),
+            project_id: log.tenant.project_id.clone().unwrap_or_default(),
+            api_key_id: log.tenant.api_key_id.clone().unwrap_or_default(),
+            route: log.route.clone().unwrap_or_default(),
+            provider: log.provider.clone().unwrap_or_default(),
+            logical_model: log.logical_model.clone().unwrap_or_default(),
+            provider_model: log.provider_model.clone().unwrap_or_default(),
+            method: "POST".into(),
+            path: "/v1/chat/completions".into(),
+            status_code: log.status_code,
+            latency_ms: completed.saturating_sub(started).saturating_mul(1_000),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            request_count: 1,
+            error_count: u64::from(log.status_code >= 400 || log.error_code.is_some()),
+            cost_microusd: 0,
+            cache_status: log.cache_status.clone().unwrap_or_default(),
+            error_code: log.error_code.clone().unwrap_or_default(),
+            event_id: log.request_id.clone(),
+            subject: log.tenant.api_key_id.clone().unwrap_or_default(),
+            action: String::new(),
+            target_kind: String::new(),
+            target_id: String::new(),
+            outcome: if log.status_code >= 400 {
+                "error"
+            } else {
+                "success"
+            }
+            .into(),
+            service_name: "ferrogate".into(),
+            span_name: "ferrogate.gateway.request".into(),
+            span_kind: "server".into(),
+            span_id: stable_span_id(&log.request_id),
+            parent_span_id: String::new(),
+            duration_ms: completed.saturating_sub(started).saturating_mul(1_000),
+            idempotency_key: log.request_id.clone(),
+            document_json: sanitized_request_log_json(log),
+        }
+    }
+
+    fn from_trace_span(log: &StoredRequestLog) -> Self {
+        let started = log.started_at_unix.unwrap_or_else(now_unix_seconds);
+        let completed = log.completed_at_unix.unwrap_or(started);
+        let tenant_id = tenant_id(
+            log.tenant.organization_id.as_deref(),
+            log.tenant.project_id.as_deref(),
+            log.tenant.api_key_id.as_deref(),
+        );
+        Self {
+            event_kind: "trace_span",
+            event_time_unix: started,
+            request_id: log.request_id.clone(),
+            trace_id: stable_trace_id(log.trace_id.as_deref().unwrap_or(&log.request_id)),
+            tenant_id,
+            organization_id: log.tenant.organization_id.clone().unwrap_or_default(),
+            project_id: log.tenant.project_id.clone().unwrap_or_default(),
+            api_key_id: log.tenant.api_key_id.clone().unwrap_or_default(),
+            route: log.route.clone().unwrap_or_default(),
+            provider: log.provider.clone().unwrap_or_default(),
+            logical_model: log.logical_model.clone().unwrap_or_default(),
+            provider_model: log.provider_model.clone().unwrap_or_default(),
+            method: "POST".into(),
+            path: "/v1/chat/completions".into(),
+            status_code: log.status_code,
+            latency_ms: completed.saturating_sub(started).saturating_mul(1_000),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            request_count: 1,
+            error_count: u64::from(log.status_code >= 400 || log.error_code.is_some()),
+            cost_microusd: 0,
+            cache_status: log.cache_status.clone().unwrap_or_default(),
+            error_code: log.error_code.clone().unwrap_or_default(),
+            event_id: log.request_id.clone(),
+            subject: log.tenant.api_key_id.clone().unwrap_or_default(),
+            action: String::new(),
+            target_kind: String::new(),
+            target_id: String::new(),
+            outcome: if log.status_code >= 400 {
+                "error"
+            } else {
+                "success"
+            }
+            .into(),
+            service_name: "ferrogate".into(),
+            span_name: "ferrogate.gateway.request".into(),
+            span_kind: "server".into(),
+            span_id: stable_span_id(&log.request_id),
+            parent_span_id: String::new(),
+            duration_ms: completed.saturating_sub(started).saturating_mul(1_000),
+            idempotency_key: log.request_id.clone(),
+            document_json: sanitized_request_log_json(log),
+        }
+    }
+
+    fn from_audit_event(event: &StoredAuditEvent) -> Self {
+        let event_time = event.occurred_at_unix.unwrap_or_else(now_unix_seconds);
+        let (target_kind, target_id) = split_target(&event.target);
+        let tenant_id = tenant_id(
+            event.tenant.organization_id.as_deref(),
+            event.tenant.project_id.as_deref(),
+            event.tenant.api_key_id.as_deref(),
+        );
+        Self {
+            event_kind: "audit_event",
+            event_time_unix: event_time,
+            request_id: event.request_id.clone(),
+            trace_id: event.trace_id.clone().unwrap_or_default(),
+            tenant_id,
+            organization_id: event.tenant.organization_id.clone().unwrap_or_default(),
+            project_id: event.tenant.project_id.clone().unwrap_or_default(),
+            api_key_id: event.tenant.api_key_id.clone().unwrap_or_default(),
+            route: String::new(),
+            provider: String::new(),
+            logical_model: String::new(),
+            provider_model: String::new(),
+            method: String::new(),
+            path: String::new(),
+            status_code: 0,
+            latency_ms: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            request_count: 0,
+            error_count: 0,
+            cost_microusd: 0,
+            cache_status: String::new(),
+            error_code: String::new(),
+            event_id: event.id.clone(),
+            subject: event.actor_api_key_id.clone().unwrap_or_default(),
+            action: event.action.clone(),
+            target_kind,
+            target_id,
+            outcome: event.outcome.clone(),
+            service_name: "ferrogate".into(),
+            span_name: String::new(),
+            span_kind: String::new(),
+            span_id: String::new(),
+            parent_span_id: String::new(),
+            duration_ms: 0,
+            idempotency_key: event.id.clone(),
+            document_json: serde_json::to_string(event).unwrap_or_default(),
+        }
+    }
+
+    fn from_billing_event(event: &BillingEvent) -> Self {
+        let event_time = event.occurred_at_unix.unwrap_or_else(now_unix_seconds);
+        let tenant_id = tenant_id(
+            event.tenant.organization_id.as_deref(),
+            event.tenant.project_id.as_deref(),
+            event.tenant.api_key_id.as_deref(),
+        );
+        let idempotency_key = format!(
+            "{}:{}:{}",
+            event.request_id, event.logical_model, event.provider
+        );
+        Self {
+            event_kind: "billing_metering_event",
+            event_time_unix: event_time,
+            request_id: event.request_id.clone(),
+            trace_id: event.trace_id.clone().unwrap_or_default(),
+            tenant_id,
+            organization_id: event.tenant.organization_id.clone().unwrap_or_default(),
+            project_id: event.tenant.project_id.clone().unwrap_or_default(),
+            api_key_id: event.tenant.api_key_id.clone().unwrap_or_default(),
+            route: String::new(),
+            provider: event.provider.clone(),
+            logical_model: event.logical_model.clone(),
+            provider_model: event.provider_model.clone(),
+            method: String::new(),
+            path: String::new(),
+            status_code: event.status_code,
+            latency_ms: 0,
+            prompt_tokens: event.usage.prompt_tokens,
+            completion_tokens: event.usage.completion_tokens,
+            total_tokens: event.usage.total_tokens,
+            request_count: 1,
+            error_count: u64::from(event.status_code >= 400),
+            cost_microusd: 0,
+            cache_status: String::new(),
+            error_code: String::new(),
+            event_id: idempotency_key.clone(),
+            subject: event.tenant.api_key_id.clone().unwrap_or_default(),
+            action: String::new(),
+            target_kind: String::new(),
+            target_id: String::new(),
+            outcome: if event.status_code >= 400 {
+                "error"
+            } else {
+                "success"
+            }
+            .into(),
+            service_name: "ferrogate".into(),
+            span_name: String::new(),
+            span_kind: String::new(),
+            span_id: String::new(),
+            parent_span_id: String::new(),
+            duration_ms: 0,
+            idempotency_key,
+            document_json: serde_json::to_string(event).unwrap_or_default(),
+        }
+    }
+
+    fn from_usage_aggregate(aggregate: &StoredUsageAggregate) -> Self {
+        let event_time = now_unix_seconds();
+        let tenant_id = tenant_id(
+            aggregate.organization_id.as_deref(),
+            aggregate.project_id.as_deref(),
+            aggregate.api_key_id.as_deref(),
+        );
+        Self {
+            event_kind: "usage_metric",
+            event_time_unix: event_time,
+            request_id: aggregate.id.clone(),
+            trace_id: String::new(),
+            tenant_id,
+            organization_id: aggregate.organization_id.clone().unwrap_or_default(),
+            project_id: aggregate.project_id.clone().unwrap_or_default(),
+            api_key_id: aggregate.api_key_id.clone().unwrap_or_default(),
+            route: String::new(),
+            provider: aggregate.provider.clone(),
+            logical_model: aggregate.logical_model.clone(),
+            provider_model: String::new(),
+            method: String::new(),
+            path: String::new(),
+            status_code: 0,
+            latency_ms: 0,
+            prompt_tokens: aggregate.usage.prompt_tokens,
+            completion_tokens: aggregate.usage.completion_tokens,
+            total_tokens: aggregate.usage.total_tokens,
+            request_count: 1,
+            error_count: 0,
+            cost_microusd: 0,
+            cache_status: String::new(),
+            error_code: String::new(),
+            event_id: aggregate.id.clone(),
+            subject: aggregate.api_key_id.clone().unwrap_or_default(),
+            action: String::new(),
+            target_kind: String::new(),
+            target_id: String::new(),
+            outcome: "success".into(),
+            service_name: "ferrogate".into(),
+            span_name: String::new(),
+            span_kind: String::new(),
+            span_id: String::new(),
+            parent_span_id: String::new(),
+            duration_ms: 0,
+            idempotency_key: aggregate.id.clone(),
+            document_json: serde_json::to_string(aggregate).unwrap_or_default(),
+        }
+    }
 }
 
 fn runtime_events_as_otlp_logs(
@@ -433,6 +843,25 @@ fn send_otlp_http_request<S: Read + Write>(
     Ok(())
 }
 
+fn dispatch_ndjson_request<T: Serialize>(
+    endpoint: &str,
+    records: &[T],
+    timeout: Duration,
+) -> AnyResult<()> {
+    let mut body = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut body, record)?;
+        body.push(b'\n');
+    }
+    let request = OtlpHttpRequest {
+        method: "POST",
+        url: endpoint.to_string(),
+        content_type: "application/x-ndjson",
+        body,
+    };
+    dispatch_otlp_request(&request, timeout)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OtlpScheme {
     Http,
@@ -562,6 +991,32 @@ fn unix_seconds_to_nanos(seconds: u64) -> u64 {
     seconds.saturating_mul(1_000_000_000)
 }
 
+fn tenant_id(
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+    api_key_id: Option<&str>,
+) -> String {
+    organization_id
+        .or(project_id)
+        .or(api_key_id)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn split_target(target: &str) -> (String, String) {
+    target
+        .split_once(':')
+        .map(|(kind, id)| (kind.to_string(), id.to_string()))
+        .unwrap_or_else(|| (target.to_string(), String::new()))
+}
+
+fn sanitized_request_log_json(log: &StoredRequestLog) -> String {
+    let mut sanitized = log.clone();
+    sanitized.prompt_body = None;
+    sanitized.response_body = None;
+    serde_json::to_string(&sanitized).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +1139,130 @@ mod tests {
         assert!(bodies.contains("policy.deny"));
         assert!(bodies.contains("total_tokens"));
         assert!(bodies.contains("fast-chat"));
+        assert!(!bodies.contains("client-secret prompt"));
+        assert!(!bodies.contains("provider-secret response"));
+    }
+
+    #[test]
+    fn analytics_export_posts_flat_ndjson_events_without_bodies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server_bodies = Arc::clone(&bodies);
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buffer[..read]);
+                if let Some(body) = http_body_if_complete(&raw) {
+                    server_bodies
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(body).to_string());
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let state = AppState::new(Config::default());
+        state.record_request_log(StoredRequestLog {
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            cluster_id: None,
+            node_id: None,
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            route: Some("openai.chat.completions".into()),
+            provider: Some("openai".into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: true,
+            response_recorded: true,
+            prompt_body: Some("client-secret prompt".into()),
+            response_body: Some("provider-secret response".into()),
+            cache_status: None,
+            started_at_unix: Some(1),
+            completed_at_unix: Some(2),
+        });
+        state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            actor_api_key_id: Some("key".into()),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            action: "policy.deny".into(),
+            target: "policy:block-secret".into(),
+            outcome: "error".into(),
+            message: "policy denied request".into(),
+        });
+        state
+            .record_estimated_billing_event(
+                &ferrogate_core::RequestContext {
+                    request_id: "fg-1".into(),
+                    trace_id: Some("fg-1".into()),
+                    tenant: TenantContext {
+                        organization_id: Some("org".into()),
+                        project_id: Some("project".into()),
+                        api_key_id: Some("key".into()),
+                        ..TenantContext::default()
+                    },
+                    ..ferrogate_core::RequestContext::default()
+                },
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &ferrogate_billing::TokenUsage::new(1, 2, 3),
+                200,
+            )
+            .unwrap();
+
+        let mut exported_request_logs = 0;
+        let mut exported_audit_events = 0;
+        let mut exported_billing_events = 0;
+        let mut exported_usage_aggregates = 0;
+        export_analytics_once_since(
+            &state,
+            &endpoint,
+            Duration::from_secs(3),
+            128,
+            &mut exported_request_logs,
+            &mut exported_audit_events,
+            &mut exported_billing_events,
+            &mut exported_usage_aggregates,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        let bodies = bodies.lock().unwrap().join("\n");
+        assert!(bodies.contains("\"event_kind\":\"request_log\""));
+        assert!(bodies.contains("\"event_kind\":\"trace_span\""));
+        assert!(bodies.contains("\"event_kind\":\"audit_event\""));
+        assert!(bodies.contains("\"event_kind\":\"billing_metering_event\""));
+        assert!(bodies.contains("\"event_kind\":\"usage_metric\""));
+        assert!(bodies.contains("\"span_name\":\"ferrogate.gateway.request\""));
+        assert!(bodies.contains("\"logical_model\":\"fast-chat\""));
+        assert!(bodies.contains("\"provider\":\"openai\""));
         assert!(!bodies.contains("client-secret prompt"));
         assert!(!bodies.contains("provider-secret response"));
     }

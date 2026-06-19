@@ -41,7 +41,7 @@ use crate::{
     lifecycle::execute_graceful_upgrade_reload,
     routing::UpstreamEndpoint,
     state::{RuntimeRoute, SharedAppState},
-    telemetry::start_otlp_background_sender,
+    telemetry::{start_analytics_background_sender, start_otlp_background_sender},
 };
 
 #[derive(Debug, Default, Clone)]
@@ -75,6 +75,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let state = SharedAppState::try_with_source_path(config, source_path)?
         .with_acme_renewal_state(acme_renewal_state.clone());
     let _otlp_sender = start_otlp_background_sender(state.current());
+    let _analytics_sender = start_analytics_background_sender(state.current());
     let _acme_renewal =
         start_acme_renewal_if_configured(&tls, resolved_tls.as_ref(), acme_renewal_state, &state);
     let _mcp_health = start_mcp_health_scheduler(&state);

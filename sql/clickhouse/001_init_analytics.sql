@@ -4,9 +4,11 @@
 -- Created: 2026-06-19
 -- description: FerroGate analytics warehouse schema for request, trace, usage, and metering data.
 
-CREATE TABLE IF NOT EXISTS ferrogate_request_logs (
-    event_date Date DEFAULT toDate(event_time),
-    event_time DateTime64(3, 'UTC'),
+CREATE DATABASE IF NOT EXISTS ferrogate;
+
+CREATE TABLE IF NOT EXISTS ferrogate.ferrogate_request_logs (
+    event_date Date DEFAULT toDate(toDateTime(event_time_unix, 'UTC')),
+    event_time_unix UInt64,
     request_id String,
     trace_id String,
     tenant_id String,
@@ -29,12 +31,11 @@ CREATE TABLE IF NOT EXISTS ferrogate_request_logs (
     document_json String
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
-ORDER BY (tenant_id, event_time, request_id);
+ORDER BY (tenant_id, event_time_unix, request_id);
 
-CREATE TABLE IF NOT EXISTS ferrogate_trace_spans (
-    event_date Date DEFAULT toDate(start_time),
-    start_time DateTime64(3, 'UTC'),
-    end_time DateTime64(3, 'UTC'),
+CREATE TABLE IF NOT EXISTS ferrogate.ferrogate_trace_spans (
+    event_date Date DEFAULT toDate(toDateTime(event_time_unix, 'UTC')),
+    event_time_unix UInt64,
     trace_id String,
     span_id String,
     parent_span_id String,
@@ -43,17 +44,16 @@ CREATE TABLE IF NOT EXISTS ferrogate_trace_spans (
     service_name LowCardinality(String),
     span_name String,
     span_kind LowCardinality(String),
-    status_code LowCardinality(String),
+    status_code UInt16,
     duration_ms UInt64,
-    attributes_json String
+    document_json String
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
-ORDER BY (tenant_id, trace_id, start_time, span_id);
+ORDER BY (tenant_id, trace_id, event_time_unix, span_id);
 
-CREATE TABLE IF NOT EXISTS ferrogate_usage_metrics (
-    event_date Date DEFAULT toDate(window_start),
-    window_start DateTime64(3, 'UTC'),
-    window_end DateTime64(3, 'UTC'),
+CREATE TABLE IF NOT EXISTS ferrogate.ferrogate_usage_metrics (
+    event_date Date DEFAULT toDate(toDateTime(event_time_unix, 'UTC')),
+    event_time_unix UInt64,
     tenant_id String,
     subject String,
     organization_id String,
@@ -71,11 +71,11 @@ CREATE TABLE IF NOT EXISTS ferrogate_usage_metrics (
     document_json String
 ) ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(event_date)
-ORDER BY (tenant_id, subject, provider, logical_model, window_start);
+ORDER BY (tenant_id, subject, provider, logical_model, event_time_unix);
 
-CREATE TABLE IF NOT EXISTS ferrogate_billing_metering_events (
-    event_date Date DEFAULT toDate(event_time),
-    event_time DateTime64(3, 'UTC'),
+CREATE TABLE IF NOT EXISTS ferrogate.ferrogate_billing_metering_events (
+    event_date Date DEFAULT toDate(toDateTime(event_time_unix, 'UTC')),
+    event_time_unix UInt64,
     event_id String,
     request_id String,
     trace_id String,
@@ -95,15 +95,15 @@ CREATE TABLE IF NOT EXISTS ferrogate_billing_metering_events (
     document_json String
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
-ORDER BY (tenant_id, event_time, event_id);
+ORDER BY (tenant_id, event_time_unix, event_id);
 
-CREATE TABLE IF NOT EXISTS ferrogate_audit_timeline (
-    event_date Date DEFAULT toDate(event_time),
-    event_time DateTime64(3, 'UTC'),
+CREATE TABLE IF NOT EXISTS ferrogate.ferrogate_audit_timeline (
+    event_date Date DEFAULT toDate(toDateTime(event_time_unix, 'UTC')),
+    event_time_unix UInt64,
     event_id String,
     trace_id String,
     tenant_id String,
-    actor_id String,
+    subject String,
     action String,
     target_kind String,
     target_id String,
@@ -111,4 +111,4 @@ CREATE TABLE IF NOT EXISTS ferrogate_audit_timeline (
     document_json String
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
-ORDER BY (tenant_id, event_time, event_id);
+ORDER BY (tenant_id, event_time_unix, event_id);

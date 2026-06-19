@@ -285,7 +285,7 @@ enabled = false
 provider = "vector"
 required = false
 # Vector pipeline mode:
-# vector_endpoint = "http://127.0.0.1:4318/v1/logs"
+# vector_endpoint = "http://127.0.0.1:4319"
 # Direct ClickHouse warehouse mode:
 # provider = "clickhouse"
 # clickhouse_url_env = "FERROGATE_CLICKHOUSE_URL"

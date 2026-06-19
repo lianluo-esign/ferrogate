@@ -22,6 +22,8 @@ const IMAGE_TAG: &str = "ferrogate:e2e-local";
 const NETWORK_NAME: &str = "ferrogate-e2e-net";
 const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
 const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
+const CLICKHOUSE_CONTAINER: &str = "ferrogate-e2e-clickhouse";
+const VECTOR_CONTAINER: &str = "ferrogate-e2e-vector";
 const GATEWAY_A_CONTAINER: &str = "ferrogate-e2e-gateway-a";
 const GATEWAY_B_CONTAINER: &str = "ferrogate-e2e-gateway-b";
 const GATEWAY_A_PORT: u16 = 18080;
@@ -168,6 +170,7 @@ struct TursoLibsqlRestartArgs {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DockerScenario {
+    AnalyticsVectorClickhouse,
     ClusterDrain,
     GuardrailComplete,
     GuardrailRequestDeny,
@@ -181,6 +184,7 @@ enum DockerScenario {
 impl DockerScenario {
     fn names() -> &'static [&'static str] {
         &[
+            "analytics-vector-clickhouse",
             "cluster-drain",
             "guardrail-complete",
             "guardrail-request-deny",
@@ -195,6 +199,7 @@ impl DockerScenario {
 
 fn run_docker_scenario(scenario: DockerScenario, image: &str) -> Result<()> {
     match scenario {
+        DockerScenario::AnalyticsVectorClickhouse => run_analytics_vector_clickhouse(image),
         DockerScenario::ClusterDrain => run_cluster_drain(image),
         DockerScenario::GuardrailComplete => run_guardrail_complete(image),
         DockerScenario::GuardrailRequestDeny => run_guardrail_request_deny(image),
@@ -243,6 +248,9 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert_eq!(body["analytics"]["enabled"], false);
         assert_eq!(body["analytics"]["active"], false);
         assert_eq!(body["analytics"]["mode"], "pipeline");
+        assert_eq!(body["analytics"]["health"], "disabled");
+        assert!(body["analytics"]["last_success_at_unix"].is_null());
+        assert!(body["analytics"]["last_export_error"].is_null());
         assert_eq!(body["analytics"]["contract_version"], 1);
         assert_eq!(body["observability"][0]["provider"], "vector");
         assert_eq!(body["observability"][0]["endpoint_source"], "observability");
@@ -2218,6 +2226,101 @@ fn assert_secret_redacted(raw: &str) {
     }
 }
 
+fn run_analytics_vector_clickhouse(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
+    start_provider()?;
+    start_clickhouse()?;
+    wait_for_provider()?;
+    wait_for_clickhouse()?;
+    initialize_clickhouse_schema()?;
+
+    let dir = tempfile::tempdir()?;
+    let vector_config_path = dir.path().join("vector.toml");
+    std::fs::write(&vector_config_path, vector_clickhouse_config())?;
+    validate_vector_config(&vector_config_path)?;
+    start_vector(&vector_config_path)?;
+    wait_for_container(VECTOR_CONTAINER, "Vector")?;
+
+    let config_path = dir.path().join("ferrogate.toml");
+    std::fs::write(&config_path, analytics_gateway_config())?;
+    start_gateway(
+        image,
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_path,
+        None,
+    )?;
+    wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/status",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["analytics"]["provider"], "vector");
+            assert_eq!(body["analytics"]["mode"], "pipeline");
+            assert_eq!(body["analytics"]["active"], true);
+            assert!(
+                body["analytics"]["health"] == "configured" || body["analytics"]["health"] == "ok"
+            );
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"analytics pipeline"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    wait_for_clickhouse_count(
+        "request log",
+        "SELECT count() FROM ferrogate.ferrogate_request_logs WHERE logical_model = 'fast-chat'",
+    )?;
+    wait_for_clickhouse_count(
+        "trace span",
+        "SELECT count() FROM ferrogate.ferrogate_trace_spans WHERE span_name = 'ferrogate.gateway.request'",
+    )?;
+    wait_for_clickhouse_count(
+        "billing/metering event",
+        "SELECT count() FROM ferrogate.ferrogate_billing_metering_events WHERE logical_model = 'fast-chat'",
+    )?;
+    wait_for_clickhouse_count(
+        "usage metric",
+        "SELECT count() FROM ferrogate.ferrogate_usage_metrics WHERE logical_model = 'fast-chat'",
+    )?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/status",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["analytics"]["health"], "ok");
+            assert!(body["analytics"]["last_success_at_unix"].is_number());
+            assert!(body["analytics"]["last_export_error"].is_null());
+            Ok(())
+        },
+    )?;
+
+    println!("analytics-vector-clickhouse scenario passed");
+    Ok(())
+}
+
 fn run_cluster_drain(image: &str) -> Result<()> {
     let _cleanup = setup_environment(image)?;
     start_provider()?;
@@ -3305,6 +3408,142 @@ scopes = ["admin.read", "admin.write"]
     )
 }
 
+fn analytics_gateway_config() -> String {
+    r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "e2e-node-a"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "local"
+
+[analytics]
+enabled = true
+provider = "vector"
+required = true
+vector_endpoint = "http://ferrogate-e2e-vector:4319"
+export_timeout_secs = 3
+batch_max_events = 256
+flush_interval_millis = 500
+queue_capacity = 1024
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read", "chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+    .to_string()
+}
+
+fn vector_clickhouse_config() -> String {
+    r#"
+[sources.ferrogate_analytics]
+type = "http_server"
+address = "0.0.0.0:4319"
+framing.method = "newline_delimited"
+decoding.codec = "json"
+
+[transforms.request_logs]
+type = "filter"
+inputs = ["ferrogate_analytics"]
+condition = '.event_kind == "request_log"'
+
+[transforms.trace_spans]
+type = "filter"
+inputs = ["ferrogate_analytics"]
+condition = '.event_kind == "trace_span"'
+
+[transforms.usage_metrics]
+type = "filter"
+inputs = ["ferrogate_analytics"]
+condition = '.event_kind == "usage_metric"'
+
+[transforms.billing_metering_events]
+type = "filter"
+inputs = ["ferrogate_analytics"]
+condition = '.event_kind == "billing_metering_event"'
+
+[transforms.audit_timeline]
+type = "filter"
+inputs = ["ferrogate_analytics"]
+condition = '.event_kind == "audit_event"'
+
+[sinks.request_logs]
+type = "clickhouse"
+inputs = ["request_logs"]
+endpoint = "http://ferrogate-e2e-clickhouse:8123"
+database = "ferrogate"
+table = "ferrogate_request_logs"
+format = "json_each_row"
+skip_unknown_fields = true
+
+[sinks.trace_spans]
+type = "clickhouse"
+inputs = ["trace_spans"]
+endpoint = "http://ferrogate-e2e-clickhouse:8123"
+database = "ferrogate"
+table = "ferrogate_trace_spans"
+format = "json_each_row"
+skip_unknown_fields = true
+
+[sinks.usage_metrics]
+type = "clickhouse"
+inputs = ["usage_metrics"]
+endpoint = "http://ferrogate-e2e-clickhouse:8123"
+database = "ferrogate"
+table = "ferrogate_usage_metrics"
+format = "json_each_row"
+skip_unknown_fields = true
+
+[sinks.billing_metering_events]
+type = "clickhouse"
+inputs = ["billing_metering_events"]
+endpoint = "http://ferrogate-e2e-clickhouse:8123"
+database = "ferrogate"
+table = "ferrogate_billing_metering_events"
+format = "json_each_row"
+skip_unknown_fields = true
+
+[sinks.audit_timeline]
+type = "clickhouse"
+inputs = ["audit_timeline"]
+endpoint = "http://ferrogate-e2e-clickhouse:8123"
+database = "ferrogate"
+table = "ferrogate_audit_timeline"
+format = "json_each_row"
+skip_unknown_fields = true
+"#
+    .to_string()
+}
+
 fn start_provider() -> Result<()> {
     start_provider_with_content("ok")
 }
@@ -3434,6 +3673,160 @@ fn start_redis() -> Result<()> {
         "--appendonly",
         "no",
     ])
+}
+
+fn start_clickhouse() -> Result<()> {
+    let clickhouse_image = env::var("FERROGATE_E2E_CLICKHOUSE_IMAGE")
+        .unwrap_or_else(|_| "clickhouse/clickhouse-server:24.8".into());
+    docker([
+        "run",
+        "-d",
+        "--name",
+        CLICKHOUSE_CONTAINER,
+        "--network",
+        NETWORK_NAME,
+        "-e",
+        "CLICKHOUSE_DB=ferrogate",
+        "-e",
+        "CLICKHOUSE_USER=default",
+        "-e",
+        "CLICKHOUSE_PASSWORD=",
+        &clickhouse_image,
+    ])
+}
+
+fn wait_for_clickhouse() -> Result<()> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < Duration::from_secs(45) {
+        match clickhouse_query("SELECT 1") {
+            Ok(output) if output.trim() == "1" => return Ok(()),
+            Ok(output) => last = output,
+            Err(error) => last = error.to_string(),
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    bail!("ClickHouse did not become ready; last output: {last}")
+}
+
+fn initialize_clickhouse_schema() -> Result<()> {
+    let schema = std::fs::read_to_string("sql/clickhouse/001_init_analytics.sql")
+        .context("failed to read ClickHouse analytics schema")?;
+    let mut child = Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            CLICKHOUSE_CONTAINER,
+            "clickhouse-client",
+            "--multiquery",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to run clickhouse-client")?;
+    child
+        .stdin
+        .as_mut()
+        .context("clickhouse-client stdin unavailable")?
+        .write_all(schema.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        bail!(
+            "failed to initialize ClickHouse schema: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn validate_vector_config(config_path: &Path) -> Result<()> {
+    let vector_image = env::var("FERROGATE_E2E_VECTOR_IMAGE")
+        .unwrap_or_else(|_| "timberio/vector:0.56.0-debian".into());
+    let mount = format!("{}:/etc/vector/vector.toml:ro", config_path.display());
+    docker([
+        "run",
+        "--rm",
+        "-v",
+        &mount,
+        &vector_image,
+        "validate",
+        "/etc/vector/vector.toml",
+    ])
+}
+
+fn start_vector(config_path: &Path) -> Result<()> {
+    let vector_image = env::var("FERROGATE_E2E_VECTOR_IMAGE")
+        .unwrap_or_else(|_| "timberio/vector:0.56.0-debian".into());
+    let mount = format!("{}:/etc/vector/vector.toml:ro", config_path.display());
+    docker([
+        "run",
+        "-d",
+        "--name",
+        VECTOR_CONTAINER,
+        "--network",
+        NETWORK_NAME,
+        "-v",
+        &mount,
+        &vector_image,
+        "--config",
+        "/etc/vector/vector.toml",
+    ])
+}
+
+fn wait_for_container(container: &str, label: &str) -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(20) {
+        let status = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", container])
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("failed to inspect {label} container"))?;
+        if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == "true" {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    bail!("{label} container did not stay running")
+}
+
+fn clickhouse_query(query: &str) -> Result<String> {
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            CLICKHOUSE_CONTAINER,
+            "clickhouse-client",
+            "--query",
+            query,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to run ClickHouse query")?;
+    if !output.status.success() {
+        bail!(
+            "ClickHouse query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn wait_for_clickhouse_count(label: &str, query: &str) -> Result<()> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < Duration::from_secs(45) {
+        match clickhouse_query(query) {
+            Ok(output) => {
+                last = output.trim().to_string();
+                if last.parse::<u64>().unwrap_or_default() > 0 {
+                    return Ok(());
+                }
+            }
+            Err(error) => last = error.to_string(),
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    bail!("timed out waiting for {label} rows in ClickHouse; last count/output: {last}")
 }
 
 fn start_gateway(
@@ -3664,6 +4057,8 @@ fn cleanup_containers() {
             GATEWAY_B_CONTAINER,
             PROVIDER_CONTAINER,
             REDIS_CONTAINER,
+            CLICKHOUSE_CONTAINER,
+            VECTOR_CONTAINER,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -607,6 +607,7 @@ pub(crate) struct AppState {
     repositories: Arc<RuntimeStorageRepositories>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
+    analytics_export: Arc<Mutex<ObservabilityExportRuntime>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
     mcp_manager: Arc<McpManager>,
     mcp_dispatch_permits: Arc<Semaphore>,
@@ -701,6 +702,8 @@ pub(crate) struct AnalyticsStatus {
     pub(crate) audit_event_retention_records: usize,
     pub(crate) billing_event_retention_records: usize,
     pub(crate) health: &'static str,
+    pub(crate) last_success_at_unix: Option<u64>,
+    pub(crate) last_export_error: Option<String>,
     pub(crate) contract_version: u32,
 }
 
@@ -1747,6 +1750,7 @@ impl AppState {
             repositories,
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
+            analytics_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
             mcp_dispatch_permits: Arc::new(Semaphore::new(
@@ -2060,6 +2064,7 @@ impl AppState {
         next.metering_events = Arc::clone(&self.metering_events);
         next.repositories = Arc::clone(&self.repositories);
         next.metrics = Arc::clone(&self.metrics);
+        next.analytics_export = Arc::clone(&self.analytics_export);
         next.response_cache = Arc::clone(&self.response_cache);
         next.mcp_manager = Arc::clone(&self.mcp_manager);
         next.mcp_manager.reconfigure(&next.config.mcp_servers);
@@ -3129,6 +3134,32 @@ impl AppState {
         self.config.observability.export_timeout_secs
     }
 
+    pub(crate) fn analytics_vector_endpoint(&self) -> Option<String> {
+        if !self.config.analytics.enabled
+            || self.config.analytics.provider != AnalyticsProvider::Vector
+        {
+            return None;
+        }
+        self.config
+            .analytics
+            .vector_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.trim().to_string())
+            .filter(|endpoint| !endpoint.is_empty())
+    }
+
+    pub(crate) fn analytics_timeout_secs(&self) -> u64 {
+        self.config.analytics.export_timeout_secs
+    }
+
+    pub(crate) fn analytics_flush_interval_millis(&self) -> u64 {
+        self.config.analytics.flush_interval_millis
+    }
+
+    pub(crate) fn analytics_batch_max_events(&self) -> usize {
+        self.config.analytics.batch_max_events
+    }
+
     pub(crate) fn record_observability_export_success(&self) {
         if let Ok(mut status) = self.observability_export.lock() {
             status.last_success_at_unix = now_unix_seconds();
@@ -3138,6 +3169,19 @@ impl AppState {
 
     pub(crate) fn record_observability_export_error(&self, error: impl ToString) {
         if let Ok(mut status) = self.observability_export.lock() {
+            status.last_export_error = Some(error.to_string());
+        }
+    }
+
+    pub(crate) fn record_analytics_export_success(&self) {
+        if let Ok(mut status) = self.analytics_export.lock() {
+            status.last_success_at_unix = now_unix_seconds();
+            status.last_export_error = None;
+        }
+    }
+
+    pub(crate) fn record_analytics_export_error(&self, error: impl ToString) {
+        if let Ok(mut status) = self.analytics_export.lock() {
             status.last_export_error = Some(error.to_string());
         }
     }
@@ -3228,8 +3272,17 @@ impl AppState {
         };
         let active =
             analytics.enabled && sink_configured && analytics.provider != AnalyticsProvider::None;
+        let export = self
+            .analytics_export
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default();
         let health = if !analytics.enabled {
             "disabled"
+        } else if export.last_export_error.is_some() {
+            "degraded"
+        } else if export.last_success_at_unix.is_some() {
+            "ok"
         } else if active {
             "configured"
         } else {
@@ -3257,6 +3310,8 @@ impl AppState {
             audit_event_retention_records: analytics.audit_event_retention_records,
             billing_event_retention_records: analytics.billing_event_retention_records,
             health,
+            last_success_at_unix: export.last_success_at_unix,
+            last_export_error: export.last_export_error,
             contract_version: 1,
         }
     }

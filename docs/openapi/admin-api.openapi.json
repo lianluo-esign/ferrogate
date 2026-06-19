@@ -3085,6 +3085,8 @@
           "audit_event_retention_records",
           "billing_event_retention_records",
           "health",
+          "last_success_at_unix",
+          "last_export_error",
           "contract_version"
         ],
         "properties": {
@@ -3152,7 +3154,22 @@
             "enum": [
               "disabled",
               "configured",
-              "not_configured"
+              "not_configured",
+              "ok",
+              "degraded"
+            ]
+          },
+          "last_success_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "last_export_error": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "contract_version": {
