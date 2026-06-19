@@ -4,7 +4,11 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-//! Repository boundaries for tenant, key, usage, and request-log storage.
+//! Repository boundaries for FerroGate control-plane storage.
+//!
+//! High-write request logs, traces, usage metrics, and metering analytics belong
+//! to the analytics delivery boundary. This crate keeps small in-memory
+//! append-only views only for local Admin API compatibility and tests.
 
 use std::{
     collections::{HashMap, VecDeque},

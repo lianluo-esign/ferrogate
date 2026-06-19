@@ -38,6 +38,7 @@ impl Config {
         self.validate_tls()?;
         self.validate_telemetry()?;
         self.validate_observability()?;
+        self.validate_analytics()?;
         self.validate_metering()?;
         self.validate_cache()?;
         self.validate_storage()?;
@@ -269,6 +270,73 @@ impl Config {
         Ok(())
     }
 
+    fn validate_analytics(&self) -> AnyResult<()> {
+        if self.analytics.required
+            && (!self.analytics.enabled
+                || self.analytics.provider == crate::config::AnalyticsProvider::None)
+        {
+            bail!("field analytics.required: requires analytics.enabled and a non-none provider");
+        }
+        if self.analytics.enabled {
+            match self.analytics.provider {
+                crate::config::AnalyticsProvider::Vector => {
+                    let has_endpoint = self
+                        .analytics
+                        .vector_endpoint
+                        .as_deref()
+                        .is_some_and(|endpoint| !endpoint.trim().is_empty());
+                    if !has_endpoint {
+                        bail!(
+                            "field analytics.vector_endpoint: required when analytics.provider is vector"
+                        );
+                    }
+                }
+                crate::config::AnalyticsProvider::Clickhouse => {
+                    let has_url = self
+                        .analytics
+                        .clickhouse_url
+                        .as_deref()
+                        .is_some_and(|url| !url.trim().is_empty());
+                    let has_url_env = self
+                        .analytics
+                        .clickhouse_url_env
+                        .as_deref()
+                        .is_some_and(|name| !name.trim().is_empty());
+                    if !has_url && !has_url_env {
+                        bail!(
+                            "field analytics.clickhouse_url_env: required when analytics.provider is clickhouse unless analytics.clickhouse_url is set"
+                        );
+                    }
+                }
+                crate::config::AnalyticsProvider::None => {
+                    bail!("field analytics.provider: none cannot be enabled");
+                }
+            }
+        }
+        if self.analytics.export_timeout_secs == 0 {
+            bail!("field analytics.export_timeout_secs: must be greater than zero");
+        }
+        if self.analytics.batch_max_events == 0 {
+            bail!("field analytics.batch_max_events: must be greater than zero");
+        }
+        if self.analytics.flush_interval_millis == 0 {
+            bail!("field analytics.flush_interval_millis: must be greater than zero");
+        }
+        if self.analytics.queue_capacity == 0 {
+            bail!("field analytics.queue_capacity: must be greater than zero");
+        }
+        if self.analytics.request_log_retention_records == 0 {
+            bail!("field analytics.request_log_retention_records: must be greater than zero");
+        }
+        if self.analytics.audit_event_retention_records == 0 {
+            bail!("field analytics.audit_event_retention_records: must be greater than zero");
+        }
+        if self.analytics.billing_event_retention_records == 0 {
+            bail!("field analytics.billing_event_retention_records: must be greater than zero");
+        }
+        Ok(())
+    }
+
     fn validate_metering(&self) -> AnyResult<()> {
         if self.metering.export_enabled {
             if self.metering.export_endpoint.trim().is_empty() {
@@ -377,15 +445,6 @@ impl Config {
         }
         if self.storage.required && !self.storage.provider.is_durable() {
             bail!("field storage.required: durable storage requires a non-memory provider");
-        }
-        if self.storage.request_log_retention_records == 0 {
-            bail!("field storage.request_log_retention_records: must be greater than zero");
-        }
-        if self.storage.audit_event_retention_records == 0 {
-            bail!("field storage.audit_event_retention_records: must be greater than zero");
-        }
-        if self.storage.billing_event_retention_records == 0 {
-            bail!("field storage.billing_event_retention_records: must be greater than zero");
         }
         if self.storage.admin_list_default_limit == 0 {
             bail!("field storage.admin_list_default_limit: must be greater than zero");

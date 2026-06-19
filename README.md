@@ -113,10 +113,10 @@ Validated end-to-end:
 Still intentionally scoped as next-stage production work:
 
 - Durable database-backed storage implementations for API keys, tenants, policy,
-  billing, request logs, audit logs, and multi-node control-plane state. The
-  storage provider interface is separated from the gateway control plane, but
-  current runtime state is still primarily config, shared file state, Redis
-  counters, and in-memory repository driven.
+  prompt/MCP approval metadata, and multi-node control-plane state. The storage
+  provider interface is separated from the gateway control plane, while
+  high-write request logs, traces, usage metrics, billing analytics, and
+  dashboard aggregates are tracked under the analytics delivery boundary.
 - Full Admin API write control plane beyond the current API key, policy,
   config-validation, reload, and drain resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.
@@ -277,11 +277,25 @@ provider_order = ["turso_libsql", "postgres", "mysql"]
 # libsql_url = "libsql://your-database.aws-ap-northeast-1.turso.io"
 # libsql_auth_token_env = "FERROGATE_LIBSQL_AUTH_TOKEN"
 # migration_mode = "auto"
+admin_list_default_limit = 100
+admin_list_max_limit = 1000
+
+[analytics]
+enabled = false
+provider = "vector"
+required = false
+# Vector pipeline mode:
+# vector_endpoint = "http://127.0.0.1:4318/v1/logs"
+# Direct ClickHouse warehouse mode:
+# provider = "clickhouse"
+# clickhouse_url_env = "FERROGATE_CLICKHOUSE_URL"
+export_timeout_secs = 3
+batch_max_events = 500
+flush_interval_millis = 1000
+queue_capacity = 10000
 request_log_retention_records = 10000
 audit_event_retention_records = 10000
 billing_event_retention_records = 10000
-admin_list_default_limit = 100
-admin_list_max_limit = 1000
 
 [cache]
 enabled = true
@@ -369,7 +383,9 @@ storage:
 
 The initialization schema lives under `sql/`. The first libSQL migration is
 `sql/001_init_libsql.sql` and uses resource-oriented tables for control-plane
-documents plus request logs, audit events, billing events, and usage aggregates.
+documents. Analytics warehouse schema starts in
+`sql/clickhouse/001_init_analytics.sql` for request logs, traces, usage
+metrics, billing/metering analytics, and dashboard aggregates.
 
 For third-party usage billing, set `export_provider = "openmeter"` and point
 `export_endpoint` at an OpenMeter-compatible CloudEvents ingestion endpoint,

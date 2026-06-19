@@ -23,10 +23,10 @@ use crate::approval::{
     ToolApprovalDecisionRequest, ToolApprovalDraft, ToolApprovalRecord,
 };
 use crate::config::{
-    config_snapshot_id, resolve_env_placeholders, AccessLogMode, ApiKey, Config,
-    GatewayConfigProfile, GuardrailEffect, GuardrailStage, HeaderMutation, Model,
-    PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus, Provider, RouteRule,
-    StorageConfig, StorageMigrationMode, Upstream,
+    config_snapshot_id, resolve_env_placeholders, AccessLogMode, AnalyticsConfig,
+    AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect, GuardrailStage,
+    HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus,
+    Provider, RouteRule, StorageConfig, StorageMigrationMode, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -684,6 +684,26 @@ pub(crate) struct ObservabilityStatus {
     pub(crate) dropped_events: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AnalyticsStatus {
+    pub(crate) provider: String,
+    pub(crate) enabled: bool,
+    pub(crate) active: bool,
+    pub(crate) required: bool,
+    pub(crate) mode: &'static str,
+    pub(crate) sink_configured: bool,
+    pub(crate) signals: Vec<&'static str>,
+    pub(crate) export_timeout_secs: u64,
+    pub(crate) batch_max_events: usize,
+    pub(crate) flush_interval_millis: u64,
+    pub(crate) queue_capacity: usize,
+    pub(crate) request_log_retention_records: usize,
+    pub(crate) audit_event_retention_records: usize,
+    pub(crate) billing_event_retention_records: usize,
+    pub(crate) health: &'static str,
+    pub(crate) contract_version: u32,
+}
+
 #[derive(Debug, Default, Clone)]
 struct ObservabilityExportRuntime {
     last_success_at_unix: Option<u64>,
@@ -781,8 +801,8 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             initialize_schema,
             api_keys,
             policies,
-            storage.request_log_retention_records,
-            storage.audit_event_retention_records,
+            config.analytics.request_log_retention_records,
+            config.analytics.audit_event_retention_records,
         ))
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
@@ -794,8 +814,8 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
     Ok(RuntimeStorageRepositories::new(
         backend,
         RuntimeControlPlaneState::from_documents(api_keys, policies),
-        storage.request_log_retention_records,
-        storage.audit_event_retention_records,
+        config.analytics.request_log_retention_records,
+        config.analytics.audit_event_retention_records,
     ))
 }
 
@@ -1614,7 +1634,7 @@ impl AppState {
     }
 
     pub(crate) fn try_new(mut config: Config) -> anyhow::Result<Self> {
-        let storage = config.storage.clone();
+        let analytics = config.analytics.clone();
         let repositories = Arc::new(runtime_storage_repositories(&config)?);
         apply_control_plane_snapshot_to_config_from_repositories(&repositories, &mut config)?;
         let providers = config
@@ -1721,7 +1741,7 @@ impl AppState {
             provider_routing_metrics: Arc::new(Mutex::new(ProviderRoutingMetrics::default())),
             cluster_counters: Arc::new(cluster_counters),
             metering_events: Arc::new(InMemoryBillingEventSink::with_retention_limit(
-                storage.billing_event_retention_records,
+                analytics.billing_event_retention_records,
             )),
             metering_exporter,
             repositories,
@@ -2047,18 +2067,18 @@ impl AppState {
         next.request_ids = Arc::clone(&self.request_ids);
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
-        self.apply_storage_config(&next.config.storage);
+        self.apply_analytics_config(&next.config.analytics);
         let _ = self.sync_control_plane_storage_from_config(&next.config);
         Ok(next)
     }
 
-    fn apply_storage_config(&self, storage: &StorageConfig) {
+    fn apply_analytics_config(&self, analytics: &AnalyticsConfig) {
         let _ = self
             .metering_events
-            .set_retention_limit(storage.billing_event_retention_records);
+            .set_retention_limit(analytics.billing_event_retention_records);
         self.repositories.set_retention_limits(
-            storage.request_log_retention_records,
-            storage.audit_event_retention_records,
+            analytics.request_log_retention_records,
+            analytics.audit_event_retention_records,
         );
     }
 
@@ -3179,6 +3199,66 @@ impl AppState {
             queue_backpressure_events: export.queue_backpressure_events,
             dropped_events: export.dropped_events,
         }]
+    }
+
+    pub(crate) fn analytics_status(&self) -> AnalyticsStatus {
+        let analytics = &self.config.analytics;
+        let (provider, mode, sink_configured) = match analytics.provider {
+            AnalyticsProvider::Vector => (
+                "vector".to_string(),
+                "pipeline",
+                analytics
+                    .vector_endpoint
+                    .as_deref()
+                    .is_some_and(|endpoint| !endpoint.trim().is_empty()),
+            ),
+            AnalyticsProvider::Clickhouse => (
+                "clickhouse".to_string(),
+                "direct_warehouse",
+                analytics
+                    .clickhouse_url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
+                    || analytics
+                        .clickhouse_url_env
+                        .as_deref()
+                        .is_some_and(|name| !name.trim().is_empty()),
+            ),
+            AnalyticsProvider::None => ("none".to_string(), "none", false),
+        };
+        let active =
+            analytics.enabled && sink_configured && analytics.provider != AnalyticsProvider::None;
+        let health = if !analytics.enabled {
+            "disabled"
+        } else if active {
+            "configured"
+        } else {
+            "not_configured"
+        };
+        AnalyticsStatus {
+            provider,
+            enabled: analytics.enabled,
+            active,
+            required: analytics.required,
+            mode,
+            sink_configured,
+            signals: vec![
+                "request_logs",
+                "traces",
+                "usage_metrics",
+                "billing_metering",
+                "dashboard_aggregates",
+            ],
+            export_timeout_secs: analytics.export_timeout_secs,
+            batch_max_events: analytics.batch_max_events,
+            flush_interval_millis: analytics.flush_interval_millis,
+            queue_capacity: analytics.queue_capacity,
+            request_log_retention_records: analytics.request_log_retention_records,
+            audit_event_retention_records: analytics.audit_event_retention_records,
+            billing_event_retention_records: analytics.billing_event_retention_records,
+            health,
+            contract_version: 1,
+        }
     }
 
     fn observability_otlp_endpoint(&self) -> Option<String> {
@@ -5465,12 +5545,15 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_runtime_storage_retains_configured_window_with_paginated_admin_views() {
+    fn in_memory_analytics_retains_configured_window_with_paginated_admin_views() {
         let state = AppState::new(Config {
-            storage: crate::config::StorageConfig {
+            analytics: crate::config::AnalyticsConfig {
                 request_log_retention_records: 2,
                 audit_event_retention_records: 2,
                 billing_event_retention_records: 2,
+                ..crate::config::AnalyticsConfig::default()
+            },
+            storage: crate::config::StorageConfig {
                 admin_list_default_limit: 1,
                 admin_list_max_limit: 2,
                 ..crate::config::StorageConfig::default()

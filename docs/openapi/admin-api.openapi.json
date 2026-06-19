@@ -2460,6 +2460,7 @@
           "tools",
           "auth_required",
           "storage",
+          "analytics",
           "cluster",
           "observability"
         ],
@@ -2531,6 +2532,9 @@
           },
           "storage": {
             "$ref": "#/components/schemas/StorageBackendEvidence"
+          },
+          "analytics": {
+            "$ref": "#/components/schemas/AnalyticsStatus"
           },
           "cluster": {
             "$ref": "#/components/schemas/ClusterStatus"
@@ -3059,6 +3063,101 @@
           "dropped_events": {
             "type": "integer",
             "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AnalyticsStatus": {
+        "type": "object",
+        "required": [
+          "provider",
+          "enabled",
+          "active",
+          "required",
+          "mode",
+          "sink_configured",
+          "signals",
+          "export_timeout_secs",
+          "batch_max_events",
+          "flush_interval_millis",
+          "queue_capacity",
+          "request_log_retention_records",
+          "audit_event_retention_records",
+          "billing_event_retention_records",
+          "health",
+          "contract_version"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "vector",
+              "clickhouse",
+              "none"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "pipeline",
+              "direct_warehouse",
+              "none"
+            ]
+          },
+          "sink_configured": {
+            "type": "boolean"
+          },
+          "signals": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "export_timeout_secs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "batch_max_events": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "flush_interval_millis": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "queue_capacity": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "request_log_retention_records": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "audit_event_retention_records": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "billing_event_retention_records": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "health": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "configured",
+              "not_configured"
+            ]
+          },
+          "contract_version": {
+            "type": "integer",
+            "minimum": 1
           }
         },
         "additionalProperties": false

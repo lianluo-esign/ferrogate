@@ -45,6 +45,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) observability: ObservabilityConfig,
     #[serde(default)]
+    pub(crate) analytics: AnalyticsConfig,
+    #[serde(default)]
     pub(crate) metering: MeteringConfig,
     #[serde(default)]
     pub(crate) cache: CacheConfig,
@@ -529,6 +531,45 @@ pub(crate) enum ObservabilityProvider {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct AnalyticsConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) provider: AnalyticsProvider,
+    #[serde(default)]
+    pub(crate) required: bool,
+    #[serde(default)]
+    pub(crate) vector_endpoint: Option<String>,
+    #[serde(default)]
+    pub(crate) clickhouse_url: Option<String>,
+    #[serde(default)]
+    pub(crate) clickhouse_url_env: Option<String>,
+    #[serde(default = "default_analytics_export_timeout_secs")]
+    pub(crate) export_timeout_secs: u64,
+    #[serde(default = "default_analytics_batch_max_events")]
+    pub(crate) batch_max_events: usize,
+    #[serde(default = "default_analytics_flush_interval_millis")]
+    pub(crate) flush_interval_millis: u64,
+    #[serde(default = "default_analytics_queue_capacity")]
+    pub(crate) queue_capacity: usize,
+    #[serde(default = "default_request_log_retention_records")]
+    pub(crate) request_log_retention_records: usize,
+    #[serde(default = "default_audit_event_retention_records")]
+    pub(crate) audit_event_retention_records: usize,
+    #[serde(default = "default_billing_event_retention_records")]
+    pub(crate) billing_event_retention_records: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AnalyticsProvider {
+    #[default]
+    Vector,
+    Clickhouse,
+    None,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct MeteringConfig {
     #[serde(default)]
     pub(crate) export_enabled: bool,
@@ -617,12 +658,6 @@ pub(crate) struct StorageConfig {
     pub(crate) libsql_auth_token_env: Option<String>,
     #[serde(default = "default_storage_migration_mode")]
     pub(crate) migration_mode: StorageMigrationMode,
-    #[serde(default = "default_request_log_retention_records")]
-    pub(crate) request_log_retention_records: usize,
-    #[serde(default = "default_audit_event_retention_records")]
-    pub(crate) audit_event_retention_records: usize,
-    #[serde(default = "default_billing_event_retention_records")]
-    pub(crate) billing_event_retention_records: usize,
     #[serde(default = "default_admin_list_limit")]
     pub(crate) admin_list_default_limit: usize,
     #[serde(default = "default_admin_list_max_limit")]
@@ -861,6 +896,22 @@ fn default_observability_export_timeout_secs() -> u64 {
     3
 }
 
+fn default_analytics_export_timeout_secs() -> u64 {
+    3
+}
+
+fn default_analytics_batch_max_events() -> usize {
+    500
+}
+
+fn default_analytics_flush_interval_millis() -> u64 {
+    1_000
+}
+
+fn default_analytics_queue_capacity() -> usize {
+    10_000
+}
+
 fn default_cache_ttl_secs() -> u64 {
     300
 }
@@ -934,6 +985,26 @@ impl Default for ObservabilityConfig {
     }
 }
 
+impl Default for AnalyticsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: AnalyticsProvider::Vector,
+            required: false,
+            vector_endpoint: None,
+            clickhouse_url: None,
+            clickhouse_url_env: None,
+            export_timeout_secs: default_analytics_export_timeout_secs(),
+            batch_max_events: default_analytics_batch_max_events(),
+            flush_interval_millis: default_analytics_flush_interval_millis(),
+            queue_capacity: default_analytics_queue_capacity(),
+            request_log_retention_records: default_request_log_retention_records(),
+            audit_event_retention_records: default_audit_event_retention_records(),
+            billing_event_retention_records: default_billing_event_retention_records(),
+        }
+    }
+}
+
 impl Default for MeteringConfig {
     fn default() -> Self {
         Self {
@@ -971,9 +1042,6 @@ impl Default for StorageConfig {
             libsql_auth_token: None,
             libsql_auth_token_env: None,
             migration_mode: default_storage_migration_mode(),
-            request_log_retention_records: default_request_log_retention_records(),
-            audit_event_retention_records: default_audit_event_retention_records(),
-            billing_event_retention_records: default_billing_event_retention_records(),
             admin_list_default_limit: default_admin_list_limit(),
             admin_list_max_limit: default_admin_list_max_limit(),
         }
@@ -1036,6 +1104,7 @@ impl Default for Config {
             mcp_servers: Vec::new(),
             telemetry: TelemetryConfig::default(),
             observability: ObservabilityConfig::default(),
+            analytics: AnalyticsConfig::default(),
             metering: MeteringConfig::default(),
             cache: CacheConfig::default(),
             storage: StorageConfig::default(),

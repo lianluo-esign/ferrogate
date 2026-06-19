@@ -989,6 +989,53 @@ fn rejects_invalid_observability_metrics_path() {
 }
 
 #[test]
+fn validates_analytics_pipeline_and_direct_warehouse_config() {
+    let config = Config {
+        analytics: AnalyticsConfig {
+            enabled: true,
+            provider: AnalyticsProvider::Vector,
+            vector_endpoint: Some("http://127.0.0.1:4318/v1/logs".into()),
+            ..AnalyticsConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        analytics: AnalyticsConfig {
+            enabled: true,
+            provider: AnalyticsProvider::Clickhouse,
+            clickhouse_url_env: Some("FERROGATE_CLICKHOUSE_URL".into()),
+            ..AnalyticsConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        analytics: AnalyticsConfig {
+            enabled: true,
+            provider: AnalyticsProvider::Vector,
+            ..AnalyticsConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field analytics.vector_endpoint"));
+
+    let config = Config {
+        analytics: AnalyticsConfig {
+            enabled: true,
+            provider: AnalyticsProvider::Clickhouse,
+            ..AnalyticsConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field analytics.clickhouse_url_env"));
+}
+
+#[test]
 fn rejects_incomplete_provider_circuit_breaker_config() {
     let config = Config {
         reliability: ReliabilityConfig {
@@ -1188,16 +1235,16 @@ fn rejects_invalid_request_header_name_with_route_context() {
 }
 
 #[test]
-fn rejects_invalid_storage_retention_and_admin_list_limits() {
+fn rejects_invalid_analytics_retention_and_storage_admin_list_limits() {
     let config = Config {
-        storage: StorageConfig {
+        analytics: crate::config::AnalyticsConfig {
             request_log_retention_records: 0,
-            ..StorageConfig::default()
+            ..crate::config::AnalyticsConfig::default()
         },
         ..Config::default()
     };
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field storage.request_log_retention_records"));
+    assert!(error.contains("field analytics.request_log_retention_records"));
 
     let config = Config {
         storage: StorageConfig {
