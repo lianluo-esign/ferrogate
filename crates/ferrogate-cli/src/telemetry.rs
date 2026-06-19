@@ -57,13 +57,13 @@ pub(crate) fn start_otlp_background_sender(state: AppState) -> Option<JoinHandle
 }
 
 pub(crate) fn start_analytics_background_sender(state: AppState) -> Option<JoinHandle<()>> {
-    let endpoint = state.analytics_vector_endpoint()?;
+    let sink = AnalyticsSink::from_state(&state)?;
     let timeout = Duration::from_secs(state.analytics_timeout_secs());
     let interval = Duration::from_millis(state.analytics_flush_interval_millis());
     let batch_max_events = state.analytics_batch_max_events();
 
     Some(thread::spawn(move || {
-        debug!(endpoint = %endpoint, "analytics Vector pipeline sender started");
+        debug!(sink = ?sink, "analytics sender started");
         let mut exported_request_logs = 0;
         let mut exported_audit_events = 0;
         let mut exported_billing_events = 0;
@@ -71,7 +71,7 @@ pub(crate) fn start_analytics_background_sender(state: AppState) -> Option<JoinH
         loop {
             match export_analytics_once_since(
                 &state,
-                &endpoint,
+                &sink,
                 timeout,
                 batch_max_events,
                 &mut exported_request_logs,
@@ -173,7 +173,7 @@ fn export_otlp_once_since(
 
 fn export_analytics_once_since(
     state: &AppState,
-    endpoint: &str,
+    sink: &AnalyticsSink,
     timeout: Duration,
     batch_max_events: usize,
     exported_request_logs: &mut usize,
@@ -226,13 +226,89 @@ fn export_analytics_once_since(
     }
 
     for chunk in records.chunks(batch_max_events.max(1)) {
-        dispatch_ndjson_request(endpoint, chunk, timeout)?;
+        dispatch_analytics_records(sink, chunk, timeout)?;
     }
     *exported_request_logs = request_logs.len();
     *exported_audit_events = audit_events.len();
     *exported_billing_events = billing_events.len();
     *exported_usage_aggregates = usage_aggregates.len();
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnalyticsSink {
+    Vector { endpoint: String },
+    Clickhouse { base_url: String },
+}
+
+impl AnalyticsSink {
+    fn from_state(state: &AppState) -> Option<Self> {
+        state
+            .analytics_vector_endpoint()
+            .map(|endpoint| Self::Vector { endpoint })
+            .or_else(|| {
+                state
+                    .analytics_clickhouse_url()
+                    .map(|base_url| Self::Clickhouse { base_url })
+            })
+    }
+}
+
+fn dispatch_analytics_records(
+    sink: &AnalyticsSink,
+    records: &[AnalyticsRecord],
+    timeout: Duration,
+) -> AnyResult<()> {
+    match sink {
+        AnalyticsSink::Vector { endpoint } => dispatch_ndjson_request(endpoint, records, timeout),
+        AnalyticsSink::Clickhouse { base_url } => {
+            for table in CLICKHOUSE_ANALYTICS_TABLES {
+                let table_records = records
+                    .iter()
+                    .filter(|record| record.clickhouse_table() == *table)
+                    .collect::<Vec<_>>();
+                if table_records.is_empty() {
+                    continue;
+                }
+                dispatch_ndjson_request(
+                    &clickhouse_insert_url(base_url, table),
+                    &table_records,
+                    timeout,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+const CLICKHOUSE_ANALYTICS_TABLES: &[&str] = &[
+    "ferrogate.ferrogate_request_logs",
+    "ferrogate.ferrogate_trace_spans",
+    "ferrogate.ferrogate_audit_timeline",
+    "ferrogate.ferrogate_billing_metering_events",
+    "ferrogate.ferrogate_usage_metrics",
+];
+
+fn clickhouse_insert_url(base_url: &str, table: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let query = format!("INSERT INTO {table} FORMAT JSONEachRow");
+    format!(
+        "{base}/?input_format_skip_unknown_fields=1&query={}",
+        percent_encode_query_value(&query)
+    )
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 #[derive(Debug, Serialize)]
@@ -278,6 +354,17 @@ struct AnalyticsRecord {
 }
 
 impl AnalyticsRecord {
+    fn clickhouse_table(&self) -> &'static str {
+        match self.event_kind {
+            "request_log" => "ferrogate.ferrogate_request_logs",
+            "trace_span" => "ferrogate.ferrogate_trace_spans",
+            "audit_event" => "ferrogate.ferrogate_audit_timeline",
+            "billing_metering_event" => "ferrogate.ferrogate_billing_metering_events",
+            "usage_metric" => "ferrogate.ferrogate_usage_metrics",
+            _ => "ferrogate.ferrogate_request_logs",
+        }
+    }
+
     fn from_request_log(log: &StoredRequestLog) -> Self {
         let started = log.started_at_unix.unwrap_or_else(now_unix_seconds);
         let completed = log.completed_at_unix.unwrap_or(started);
@@ -1243,7 +1330,7 @@ mod tests {
         let mut exported_usage_aggregates = 0;
         export_analytics_once_since(
             &state,
-            &endpoint,
+            &AnalyticsSink::Vector { endpoint },
             Duration::from_secs(3),
             128,
             &mut exported_request_logs,
@@ -1265,6 +1352,80 @@ mod tests {
         assert!(bodies.contains("\"provider\":\"openai\""));
         assert!(!bodies.contains("client-secret prompt"));
         assert!(!bodies.contains("provider-secret response"));
+    }
+
+    #[test]
+    fn analytics_clickhouse_export_routes_events_to_table_inserts_without_bodies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server_requests = Arc::clone(&requests);
+
+        let server = thread::spawn(move || {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut raw = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buffer[..read]);
+                    if http_body_if_complete(&raw).is_some() {
+                        server_requests
+                            .lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&raw).to_string());
+                        break;
+                    }
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+            }
+        });
+
+        let state = analytics_test_state();
+        let mut exported_request_logs = 0;
+        let mut exported_audit_events = 0;
+        let mut exported_billing_events = 0;
+        let mut exported_usage_aggregates = 0;
+        export_analytics_once_since(
+            &state,
+            &AnalyticsSink::Clickhouse { base_url: endpoint },
+            Duration::from_secs(3),
+            128,
+            &mut exported_request_logs,
+            &mut exported_audit_events,
+            &mut exported_billing_events,
+            &mut exported_usage_aggregates,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        let requests = requests
+            .lock()
+            .unwrap()
+            .join("\n---clickhouse-request---\n");
+        assert!(requests.contains("INSERT%20INTO%20ferrogate.ferrogate_request_logs"));
+        assert!(requests.contains("INSERT%20INTO%20ferrogate.ferrogate_trace_spans"));
+        assert!(requests.contains("INSERT%20INTO%20ferrogate.ferrogate_audit_timeline"));
+        assert!(requests.contains("INSERT%20INTO%20ferrogate.ferrogate_billing_metering_events"));
+        assert!(requests.contains("INSERT%20INTO%20ferrogate.ferrogate_usage_metrics"));
+        assert!(requests.contains("input_format_skip_unknown_fields=1"));
+        assert!(requests.contains("\"logical_model\":\"fast-chat\""));
+        assert!(requests.contains("\"provider\":\"openai\""));
+        assert!(!requests.contains("client-secret prompt"));
+        assert!(!requests.contains("provider-secret response"));
+    }
+
+    #[test]
+    fn clickhouse_insert_url_encodes_json_each_row_query() {
+        assert_eq!(
+            clickhouse_insert_url("http://clickhouse:8123/", "ferrogate.ferrogate_request_logs"),
+            "http://clickhouse:8123/?input_format_skip_unknown_fields=1&query=INSERT%20INTO%20ferrogate.ferrogate_request_logs%20FORMAT%20JSONEachRow"
+        );
     }
 
     #[test]
@@ -1295,5 +1456,72 @@ mod tests {
             return None;
         }
         Some(&raw[body_start..body_start + content_length])
+    }
+
+    fn analytics_test_state() -> AppState {
+        let state = AppState::new(Config::default());
+        state.record_request_log(StoredRequestLog {
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            cluster_id: None,
+            node_id: None,
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            route: Some("openai.chat.completions".into()),
+            provider: Some("openai".into()),
+            logical_model: Some("fast-chat".into()),
+            provider_model: Some("gpt-4o-mini".into()),
+            gateway_config_id: None,
+            gateway_config_revision: None,
+            status_code: 200,
+            error_code: None,
+            prompt_recorded: true,
+            response_recorded: true,
+            prompt_body: Some("client-secret prompt".into()),
+            response_body: Some("provider-secret response".into()),
+            cache_status: None,
+            started_at_unix: Some(1),
+            completed_at_unix: Some(2),
+        });
+        state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            actor_api_key_id: Some("key".into()),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            action: "policy.deny".into(),
+            target: "policy:block-secret".into(),
+            outcome: "error".into(),
+            message: "policy denied request".into(),
+        });
+        state
+            .record_estimated_billing_event(
+                &ferrogate_core::RequestContext {
+                    request_id: "fg-1".into(),
+                    trace_id: Some("fg-1".into()),
+                    tenant: TenantContext {
+                        organization_id: Some("org".into()),
+                        project_id: Some("project".into()),
+                        api_key_id: Some("key".into()),
+                        ..TenantContext::default()
+                    },
+                    ..ferrogate_core::RequestContext::default()
+                },
+                "fast-chat",
+                "openai",
+                "gpt-4o-mini",
+                &ferrogate_billing::TokenUsage::new(1, 2, 3),
+                200,
+            )
+            .unwrap();
+        state
     }
 }

@@ -3148,6 +3148,29 @@ impl AppState {
             .filter(|endpoint| !endpoint.is_empty())
     }
 
+    pub(crate) fn analytics_clickhouse_url(&self) -> Option<String> {
+        if !self.config.analytics.enabled
+            || self.config.analytics.provider != AnalyticsProvider::Clickhouse
+        {
+            return None;
+        }
+        self.config
+            .analytics
+            .clickhouse_url
+            .as_ref()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .or_else(|| {
+                self.config
+                    .analytics
+                    .clickhouse_url_env
+                    .as_ref()
+                    .and_then(|name| std::env::var(name).ok())
+                    .map(|url| url.trim().to_string())
+                    .filter(|url| !url.is_empty())
+            })
+    }
+
     pub(crate) fn analytics_timeout_secs(&self) -> u64 {
         self.config.analytics.export_timeout_secs
     }

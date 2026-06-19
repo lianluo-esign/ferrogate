@@ -170,6 +170,7 @@ struct TursoLibsqlRestartArgs {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DockerScenario {
+    AnalyticsDirectClickhouse,
     AnalyticsVectorClickhouse,
     ClusterDrain,
     GuardrailComplete,
@@ -184,6 +185,7 @@ enum DockerScenario {
 impl DockerScenario {
     fn names() -> &'static [&'static str] {
         &[
+            "analytics-direct-clickhouse",
             "analytics-vector-clickhouse",
             "cluster-drain",
             "guardrail-complete",
@@ -199,6 +201,7 @@ impl DockerScenario {
 
 fn run_docker_scenario(scenario: DockerScenario, image: &str) -> Result<()> {
     match scenario {
+        DockerScenario::AnalyticsDirectClickhouse => run_analytics_direct_clickhouse(image),
         DockerScenario::AnalyticsVectorClickhouse => run_analytics_vector_clickhouse(image),
         DockerScenario::ClusterDrain => run_cluster_drain(image),
         DockerScenario::GuardrailComplete => run_guardrail_complete(image),
@@ -2226,6 +2229,79 @@ fn assert_secret_redacted(raw: &str) {
     }
 }
 
+fn run_analytics_direct_clickhouse(image: &str) -> Result<()> {
+    let _cleanup = setup_environment(image)?;
+    start_provider()?;
+    start_clickhouse()?;
+    wait_for_provider()?;
+    wait_for_clickhouse()?;
+    initialize_clickhouse_schema()?;
+
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("ferrogate.toml");
+    std::fs::write(&config_path, analytics_direct_clickhouse_gateway_config())?;
+    start_gateway(
+        image,
+        GATEWAY_A_CONTAINER,
+        GATEWAY_A_PORT,
+        &config_path,
+        None,
+    )?;
+    wait_for_http(GATEWAY_A_PORT, "/readyz", 200)?;
+
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/status",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["analytics"]["provider"], "clickhouse");
+            assert_eq!(body["analytics"]["mode"], "direct_warehouse");
+            assert_eq!(body["analytics"]["active"], true);
+            assert!(
+                body["analytics"]["health"] == "configured" || body["analytics"]["health"] == "ok"
+            );
+            Ok(())
+        },
+    )?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"direct clickhouse analytics"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    expect_clickhouse_analytics_rows()?;
+    expect_json(
+        GATEWAY_A_PORT,
+        "GET",
+        "/admin/v1/status",
+        &["Authorization: Bearer admin-secret"],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["analytics"]["health"], "ok");
+            assert!(body["analytics"]["last_success_at_unix"].is_number());
+            assert!(body["analytics"]["last_export_error"].is_null());
+            Ok(())
+        },
+    )?;
+
+    println!("analytics-direct-clickhouse scenario passed");
+    Ok(())
+}
+
 fn run_analytics_vector_clickhouse(image: &str) -> Result<()> {
     let _cleanup = setup_environment(image)?;
     start_provider()?;
@@ -2285,22 +2361,7 @@ fn run_analytics_vector_clickhouse(image: &str) -> Result<()> {
         },
     )?;
 
-    wait_for_clickhouse_count(
-        "request log",
-        "SELECT count() FROM ferrogate.ferrogate_request_logs WHERE logical_model = 'fast-chat'",
-    )?;
-    wait_for_clickhouse_count(
-        "trace span",
-        "SELECT count() FROM ferrogate.ferrogate_trace_spans WHERE span_name = 'ferrogate.gateway.request'",
-    )?;
-    wait_for_clickhouse_count(
-        "billing/metering event",
-        "SELECT count() FROM ferrogate.ferrogate_billing_metering_events WHERE logical_model = 'fast-chat'",
-    )?;
-    wait_for_clickhouse_count(
-        "usage metric",
-        "SELECT count() FROM ferrogate.ferrogate_usage_metrics WHERE logical_model = 'fast-chat'",
-    )?;
+    expect_clickhouse_analytics_rows()?;
 
     expect_json(
         GATEWAY_A_PORT,
@@ -3463,6 +3524,61 @@ scopes = ["admin.read", "admin.write"]
     .to_string()
 }
 
+fn analytics_direct_clickhouse_gateway_config() -> String {
+    r#"
+listen = "0.0.0.0:8080"
+
+[cluster]
+enabled = true
+cluster_id = "e2e-cluster"
+node_id = "e2e-node-a"
+node_region = "local"
+node_zone = "local-a"
+state_backend = "local"
+counter_backend = "local"
+
+[analytics]
+enabled = true
+provider = "clickhouse"
+required = true
+clickhouse_url = "http://ferrogate-e2e-clickhouse:8123"
+export_timeout_secs = 3
+batch_max_events = 256
+flush_interval_millis = 500
+queue_capacity = 1024
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://ferrogate-e2e-provider:8081/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read", "chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+    .to_string()
+}
+
 fn vector_clickhouse_config() -> String {
     r#"
 [sources.ferrogate_analytics]
@@ -3827,6 +3943,25 @@ fn wait_for_clickhouse_count(label: &str, query: &str) -> Result<()> {
         thread::sleep(Duration::from_millis(500));
     }
     bail!("timed out waiting for {label} rows in ClickHouse; last count/output: {last}")
+}
+
+fn expect_clickhouse_analytics_rows() -> Result<()> {
+    wait_for_clickhouse_count(
+        "request log",
+        "SELECT count() FROM ferrogate.ferrogate_request_logs WHERE logical_model = 'fast-chat'",
+    )?;
+    wait_for_clickhouse_count(
+        "trace span",
+        "SELECT count() FROM ferrogate.ferrogate_trace_spans WHERE span_name = 'ferrogate.gateway.request'",
+    )?;
+    wait_for_clickhouse_count(
+        "billing/metering event",
+        "SELECT count() FROM ferrogate.ferrogate_billing_metering_events WHERE logical_model = 'fast-chat'",
+    )?;
+    wait_for_clickhouse_count(
+        "usage metric",
+        "SELECT count() FROM ferrogate.ferrogate_usage_metrics WHERE logical_model = 'fast-chat'",
+    )
 }
 
 fn start_gateway(

@@ -288,6 +288,7 @@ required = false
 # vector_endpoint = "http://127.0.0.1:4319"
 # Direct ClickHouse warehouse mode:
 # provider = "clickhouse"
+# clickhouse_url = "http://127.0.0.1:8123"
 # clickhouse_url_env = "FERROGATE_CLICKHOUSE_URL"
 export_timeout_secs = 3
 batch_max_events = 500

@@ -297,6 +297,17 @@ impl Config {
                         .clickhouse_url
                         .as_deref()
                         .is_some_and(|url| !url.trim().is_empty());
+                    if let Some(url) = self.analytics.clickhouse_url.as_deref() {
+                        let url = url.trim();
+                        if !url.is_empty()
+                            && !url.starts_with("http://")
+                            && !url.starts_with("https://")
+                        {
+                            bail!(
+                                "field analytics.clickhouse_url: must start with http:// or https://"
+                            );
+                        }
+                    }
                     let has_url_env = self
                         .analytics
                         .clickhouse_url_env
