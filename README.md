@@ -100,7 +100,8 @@ Validated end-to-end:
 - Agentic Lite tools and MCP gateway execution through auth, policy, billing,
   audit, and metrics.
 - Request logs, token metering events, usage aggregates, provider health, cache
-  metrics, MCP tool metrics, Prometheus, and OTLP export.
+  metrics, MCP tool metrics, Prometheus, OTLP export, and ClickHouse analytics
+  delivery through Vector pipeline or direct warehouse mode.
 - Admin API, API key and policy CRUD, static dashboard, config validation,
   process-local reload, status, readiness, and drain.
 - Manual TLS, ACME HTTP-01, ACME DNS-01, renewal scheduling, and listener-level
@@ -112,13 +113,13 @@ Validated end-to-end:
 
 Still intentionally scoped as next-stage production work:
 
-- Durable database-backed storage implementations for API keys, tenants, policy,
-  prompt/MCP approval metadata, and multi-node control-plane state. The storage
-  provider interface is separated from the gateway control plane, while
-  high-write request logs, traces, usage metrics, billing analytics, and
-  dashboard aggregates are tracked under the analytics delivery boundary.
-- Full Admin API write control plane beyond the current API key, policy,
-  config-validation, reload, and drain resources.
+- Additional durable database providers beyond the implemented Turso/libSQL
+  control-plane provider. PostgreSQL and MySQL must follow the same storage
+  contract. High-write request logs, traces, usage metrics, billing analytics,
+  and dashboard aggregates stay under the analytics delivery boundary.
+- Full hosted Admin API control plane beyond the current API key, policy,
+  gateway config, prompt template, tool approval, config-validation, reload,
+  and drain resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the
   generic external hook boundary.
@@ -387,6 +388,11 @@ The initialization schema lives under `sql/`. The first libSQL migration is
 documents. Analytics warehouse schema starts in
 `sql/clickhouse/001_init_analytics.sql` for request logs, traces, usage
 metrics, billing/metering analytics, and dashboard aggregates.
+
+Operator runbooks:
+
+- Durable control-plane storage: [`docs/durable-storage.md`](docs/durable-storage.md)
+- Analytics warehouse delivery: [`docs/analytics-warehouse.md`](docs/analytics-warehouse.md)
 
 For third-party usage billing, set `export_provider = "openmeter"` and point
 `export_endpoint` at an OpenMeter-compatible CloudEvents ingestion endpoint,
