@@ -34,7 +34,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::List => {
-            println!("local: admin-api, auth-api, gateway-api, ci, turso-libsql-restart (opt-in)");
+            println!(
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, turso-libsql-restart (opt-in)"
+            );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
         }
@@ -51,11 +53,13 @@ fn main() -> Result<()> {
         Commands::AdminApi(args) => run_admin_api(&args),
         Commands::AuthApi(args) => run_auth_api(&args),
         Commands::GatewayApi(args) => run_gateway_api(&args),
+        Commands::LibsqlFileRestart(args) => run_libsql_file_restart(&args),
         Commands::TursoLibsqlRestart(args) => run_turso_libsql_restart(&args),
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
-            run_gateway_api(&args.local)
+            run_gateway_api(&args.local)?;
+            run_libsql_file_restart(&args.local)
         }
     }
 }
@@ -97,6 +101,8 @@ enum Commands {
     AuthApi(AuthArgs),
     /// Run gateway API coverage against a real local FerroGate process.
     GatewayApi(LocalArgs),
+    /// Run deterministic local file-backed libSQL restart durability coverage.
+    LibsqlFileRestart(LocalArgs),
     /// Opt-in live Turso/libSQL restart durability scenario.
     TursoLibsqlRestart(TursoLibsqlRestartArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
@@ -1022,8 +1028,42 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
         bail!("--libsql-auth-token must not be empty");
     }
 
+    run_control_plane_libsql_restart(
+        &args.local.ferrogate_bin,
+        &args.libsql_url,
+        Some(&args.libsql_auth_token),
+        "ferrogate-test",
+        false,
+    )?;
+    println!("turso-libsql-restart scenario passed");
+    Ok(())
+}
+
+fn run_libsql_file_restart(args: &LocalArgs) -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("ferrogate-control-plane.db");
+    let libsql_url = format!("file://{}", db_path.display());
+
+    run_control_plane_libsql_restart(
+        &args.ferrogate_bin,
+        &libsql_url,
+        None,
+        "ferrogate-file-test",
+        true,
+    )?;
+    println!("libsql-file-restart scenario passed");
+    Ok(())
+}
+
+fn run_control_plane_libsql_restart(
+    ferrogate_bin: &Path,
+    libsql_url: &str,
+    libsql_auth_token: Option<&str>,
+    resource_prefix: &str,
+    verify_deleted_after_restart: bool,
+) -> Result<()> {
     let resource_id = format!(
-        "ferrogate-test-{}",
+        "{resource_prefix}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before UNIX epoch")?
@@ -1062,7 +1102,7 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
     .to_string();
 
     {
-        let case = TursoRestartHarness::start(args)?;
+        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token)?;
         case.expect_storage_status()?;
         case.expect_json(
             "POST",
@@ -1110,14 +1150,14 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
     }
 
     {
-        let case = TursoRestartHarness::start(args)?;
+        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token)?;
         case.expect_storage_status()?;
         case.expect_api_key(&resource_id)?;
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
         case.expect_json(
             "DELETE",
-            &format!("/admin/v1/api-keys/{resource_id}"),
+            &format!("/admin/v1/gateway-configs/{gateway_config_id}"),
             &[ADMIN_AUTH],
             "",
             200,
@@ -1128,7 +1168,7 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
         )?;
         case.expect_json(
             "DELETE",
-            &format!("/admin/v1/gateway-configs/{gateway_config_id}"),
+            &format!("/admin/v1/api-keys/{resource_id}"),
             &[ADMIN_AUTH],
             "",
             200,
@@ -1151,12 +1191,15 @@ fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
     }
 
     {
-        let case = TursoRestartHarness::start(args)?;
+        let case = TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token)?;
         case.expect_storage_status()?;
+        if verify_deleted_after_restart {
+            case.expect_missing_api_key(&resource_id)?;
+            case.expect_missing_gateway_config(&gateway_config_id)?;
+        }
         case.expect_prompt_template(&prompt_template_id, "archived")?;
     }
 
-    println!("turso-libsql-restart scenario passed");
     Ok(())
 }
 
@@ -1292,8 +1335,11 @@ impl Drop for AuthHarness {
 }
 
 impl TursoRestartHarness {
-    fn start(args: &TursoLibsqlRestartArgs) -> Result<Self> {
-        let ferrogate_bin = &args.local.ferrogate_bin;
+    fn start(
+        ferrogate_bin: &Path,
+        libsql_url: &str,
+        libsql_auth_token: Option<&str>,
+    ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
                 "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
@@ -1306,17 +1352,21 @@ impl TursoRestartHarness {
         let config_path = dir.path().join("ferrogate.yaml");
         std::fs::write(
             &config_path,
-            turso_libsql_restart_config(&gateway_addr, &args.libsql_url),
+            turso_libsql_restart_config(&gateway_addr, libsql_url, libsql_auth_token.is_some()),
         )?;
 
-        let gateway = Command::new(ferrogate_bin)
+        let mut command = Command::new(ferrogate_bin);
+        command
             .args(["run", "--config"])
             .arg(&config_path)
-            .env("FERROGATE_LIBSQL_AUTH_TOKEN", &args.libsql_auth_token)
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(token) = libsql_auth_token {
+            command.env("FERROGATE_LIBSQL_AUTH_TOKEN", token);
+        }
+        let gateway = command
             .spawn()
             .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
 
@@ -1436,6 +1486,36 @@ impl TursoRestartHarness {
                 assert_eq!(body["gateway_config"]["name"], "Turso restart profile");
                 assert_eq!(body["gateway_config"]["revision"], 7);
                 assert_eq!(body["gateway_config"]["cache_enabled"], false);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_missing_api_key(&self, id: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/api-keys/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            404,
+            |body| {
+                assert_eq!(body["error"]["code"], "api_key_not_found");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_missing_gateway_config(&self, id: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/gateway-configs/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            404,
+            |body| {
+                assert_eq!(body["error"]["code"], "gateway_config_not_found");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
@@ -1895,7 +1975,16 @@ cache_enabled = false
     )
 }
 
-fn turso_libsql_restart_config(gateway_addr: &str, libsql_url: &str) -> String {
+fn turso_libsql_restart_config(
+    gateway_addr: &str,
+    libsql_url: &str,
+    include_auth_token_env: bool,
+) -> String {
+    let auth_token_env = if include_auth_token_env {
+        "\n  libsql_auth_token_env: FERROGATE_LIBSQL_AUTH_TOKEN"
+    } else {
+        ""
+    };
     format!(
         r#"
 listen: "{gateway_addr}"
@@ -1907,8 +1996,7 @@ storage:
     - turso_libsql
     - postgres
     - mysql
-  libsql_url: "{libsql_url}"
-  libsql_auth_token_env: FERROGATE_LIBSQL_AUTH_TOKEN
+  libsql_url: "{libsql_url}"{auth_token_env}
   migration_mode: auto
 
 providers:

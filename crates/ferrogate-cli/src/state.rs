@@ -823,7 +823,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             .libsql_url
             .clone()
             .ok_or_else(|| anyhow::anyhow!("field storage.libsql_url is required"))?;
-        let auth_token = storage_libsql_auth_token(storage)?;
+        let auth_token = storage_libsql_auth_token(storage, &url)?;
         let initialize_schema = storage.migration_mode == StorageMigrationMode::Auto;
         return block_on_runtime_storage(RuntimeStorageRepositories::turso_libsql(
             storage.provider_order.clone(),
@@ -858,20 +858,26 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
     ))
 }
 
-fn storage_libsql_auth_token(storage: &StorageConfig) -> anyhow::Result<String> {
+fn storage_libsql_auth_token(
+    storage: &StorageConfig,
+    libsql_url: &str,
+) -> anyhow::Result<Option<String>> {
+    if libsql_url.trim().starts_with("file://") {
+        return Ok(None);
+    }
     if let Some(token) = storage
         .libsql_auth_token
         .as_deref()
         .filter(|token| !token.trim().is_empty())
     {
-        return Ok(token.to_string());
+        return Ok(Some(token.to_string()));
     }
     let env_name = storage
         .libsql_auth_token_env
         .as_deref()
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("field storage.libsql_auth_token_env is required"))?;
-    env::var(env_name).map_err(|_| {
+    env::var(env_name).map(Some).map_err(|_| {
         anyhow::anyhow!(
             "field storage.libsql_auth_token_env: environment variable {env_name} is not set"
         )

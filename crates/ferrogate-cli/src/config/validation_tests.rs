@@ -1287,6 +1287,17 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         storage: StorageConfig {
             provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
             required: true,
+            libsql_url: Some("file:///tmp/ferrogate-control-plane.db".into()),
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
+            required: true,
             libsql_url: Some("libsql://example.turso.io".into()),
             ..StorageConfig::default()
         },

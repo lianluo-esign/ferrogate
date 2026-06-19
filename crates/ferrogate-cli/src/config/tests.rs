@@ -272,6 +272,44 @@ storage:
 }
 
 #[test]
+fn parses_yaml_storage_libsql_file_config_without_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("ferrogate-control-plane.db");
+    let path = dir.path().join("ferrogate.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+listen: "127.0.0.1:8080"
+storage:
+  provider: turso_libsql
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  libsql_url: "file://{}"
+  migration_mode: auto
+"#,
+            db_path.display()
+        ),
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert_eq!(
+        config.storage.provider,
+        ferrogate_storage::StorageProviderKind::TursoLibsql
+    );
+    assert_eq!(
+        config.storage.libsql_url.as_deref(),
+        Some(format!("file://{}", db_path.display()).as_str())
+    );
+    assert!(config.storage.libsql_auth_token.is_none());
+    assert!(config.storage.libsql_auth_token_env.is_none());
+}
+
+#[test]
 fn rejects_unsupported_cache_mode() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.toml");

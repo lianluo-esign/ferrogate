@@ -230,17 +230,14 @@ impl std::fmt::Debug for LibsqlControlPlaneStore {
 impl LibsqlControlPlaneStore {
     async fn connect(
         url: String,
-        auth_token: String,
+        auth_token: Option<String>,
         bootstrap_api_keys: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
-        let database = LibsqlBuilder::new_remote(url, auth_token)
-            .build()
-            .await
-            .map_err(libsql_error)?;
+        let database = build_libsql_database(url, auth_token).await?;
         let store = Self {
             database: Arc::new(database),
         };
@@ -400,6 +397,35 @@ impl LibsqlControlPlaneStore {
             .map_err(libsql_error)?;
         Ok(rows_changed > 0)
     }
+}
+
+async fn build_libsql_database(
+    url: String,
+    auth_token: Option<String>,
+) -> Result<libsql::Database, StorageError> {
+    if let Some(path) = url.strip_prefix("file://") {
+        if path.trim().is_empty() {
+            return Err(StorageError::Libsql(
+                "field storage.libsql_url: file:// path must not be empty".into(),
+            ));
+        }
+        return LibsqlBuilder::new_local(path)
+            .build()
+            .await
+            .map_err(libsql_error);
+    }
+
+    let auth_token = auth_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            StorageError::Libsql(
+                "field storage.libsql_auth_token_env is required for remote libSQL URLs".into(),
+            )
+        })?;
+    LibsqlBuilder::new_remote(url, auth_token)
+        .build()
+        .await
+        .map_err(libsql_error)
 }
 
 #[derive(Debug)]
@@ -869,7 +895,7 @@ impl RuntimeStorageRepositories {
         provider_order: Vec<StorageProviderKind>,
         required: bool,
         url: String,
-        auth_token: String,
+        auth_token: Option<String>,
         initialize_schema: bool,
         bootstrap_api_keys: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,

@@ -433,11 +433,15 @@ impl Config {
             if url.is_empty() {
                 bail!("field storage.libsql_url: must not be empty");
             }
-            if !(url.starts_with("libsql://") || url.starts_with("https://")) {
+            if !(url.starts_with("libsql://")
+                || url.starts_with("https://")
+                || url.starts_with("file://"))
+            {
                 bail!(
-                    "field storage.libsql_url: must start with libsql:// or https:// for turso_libsql"
+                    "field storage.libsql_url: must start with libsql://, https://, or file:// for turso_libsql"
                 );
             }
+            let remote_url = !url.starts_with("file://");
             let has_inline_token = self
                 .storage
                 .libsql_auth_token
@@ -448,7 +452,7 @@ impl Config {
                 .libsql_auth_token_env
                 .as_deref()
                 .is_some_and(|name| !name.trim().is_empty());
-            if !has_inline_token && !has_token_env {
+            if remote_url && !has_inline_token && !has_token_env {
                 bail!(
                     "field storage.libsql_auth_token_env: required when storage.provider is turso_libsql unless storage.libsql_auth_token is set"
                 );
