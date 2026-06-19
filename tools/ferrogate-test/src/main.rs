@@ -1664,9 +1664,53 @@ impl TursoRestartHarness {
             assert_eq!(plugin["enabled"], true);
             assert_eq!(plugin["active"], true);
             assert_eq!(plugin["health"], "ok");
+            assert_array_contains(&plugin["capabilities"], "tool_provider")
+                .context("plugin must advertise the tool_provider capability")?;
+            assert_array_contains(&plugin["tools"], "tool.echo")
+                .context("plugin must advertise its registered tool")?;
             assert_secret_redacted(&body.to_string());
             Ok(())
-        })
+        })?;
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/plugins/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["id"], id);
+                assert_eq!(body["source"], "builtin");
+                assert_eq!(body["enabled"], true);
+                assert_eq!(body["active"], true);
+                assert_eq!(body["health"], "ok");
+                assert_array_contains(&body["capabilities"], "tool_provider")
+                    .context("plugin detail must advertise the tool_provider capability")?;
+                assert_array_contains(&body["tools"], "tool.echo")
+                    .context("plugin detail must advertise its registered tool")?;
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/plugins/{id}/tools"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let tools = body["data"]
+                    .as_array()
+                    .context("plugin tools response data must be an array")?;
+                let tool = tools
+                    .iter()
+                    .find(|tool| tool["name"] == "tool.echo")
+                    .context("plugin tool.echo was not listed")?;
+                assert_eq!(tool["extension_id"], id);
+                assert_eq!(tool["approval_policy"], "never");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
     }
 
     fn expect_echo_tool(&self) -> Result<()> {
@@ -2620,6 +2664,16 @@ fn array_contains(body: &Value, array_field: &str, item_field: &str, expected: &
     body.get(array_field)
         .and_then(Value::as_array)
         .is_some_and(|items| items.iter().any(|item| item[item_field] == expected))
+}
+
+fn assert_array_contains(array: &Value, expected: &str) -> Result<()> {
+    let values = array
+        .as_array()
+        .with_context(|| format!("expected JSON array containing {expected}"))?;
+    if values.iter().any(|value| value == expected) {
+        return Ok(());
+    }
+    bail!("JSON array does not contain {expected}: {array}");
 }
 
 fn assert_secret_redacted(raw: &str) {

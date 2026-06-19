@@ -196,9 +196,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        if path == "/admin/v1/extensions" || path == "/admin/v1/plugins" {
+        if path == "/admin/v1/extensions"
+            || path == "/admin/v1/plugins"
+            || path.starts_with("/admin/v1/plugins/")
+        {
             let headers = req.headers.clone();
-            self.handle_admin_extensions(session, ctx, &headers).await?;
+            self.handle_admin_plugins(session, ctx, &headers, &path)
+                .await?;
             return Ok(true);
         }
 

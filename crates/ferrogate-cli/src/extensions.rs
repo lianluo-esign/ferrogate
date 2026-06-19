@@ -25,6 +25,8 @@ pub(crate) struct ExtensionStatus {
     pub(crate) id: String,
     pub(crate) kind: ExtensionKind,
     pub(crate) source: String,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) tools: Vec<String>,
     pub(crate) enabled: bool,
     pub(crate) active: bool,
     pub(crate) health: &'static str,
@@ -131,26 +133,37 @@ impl ExtensionRegistry {
 
         for extension in sorted {
             if !extension.enabled {
-                statuses.push(status(extension, false, "disabled", None));
+                statuses.push(status(extension, Vec::new(), false, "disabled", None));
                 continue;
             }
 
             match build_builtin_extension(extension) {
                 Ok(BuiltinExtension::ToolProvider(provider)) => {
-                    tools.extend(provider.tools());
+                    let provider_tools = provider.tools();
+                    let tool_names = provider_tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>();
+                    tools.extend(provider_tools);
                     tool_providers.insert(extension.id.clone(), provider);
-                    statuses.push(status(extension, true, "ok", None));
+                    statuses.push(status(extension, tool_names, true, "ok", None));
                 }
                 Ok(BuiltinExtension::RequestHook(hook)) => {
                     hooks.push(hook);
-                    statuses.push(status(extension, true, "ok", None));
+                    statuses.push(status(extension, Vec::new(), true, "ok", None));
                 }
                 Ok(BuiltinExtension::EventSink(sink)) => {
                     event_sinks.push(sink);
-                    statuses.push(status(extension, true, "ok", None));
+                    statuses.push(status(extension, Vec::new(), true, "ok", None));
                 }
                 Err(error) => {
-                    statuses.push(status(extension, false, "error", Some(error.to_string())));
+                    statuses.push(status(
+                        extension,
+                        Vec::new(),
+                        false,
+                        "error",
+                        Some(error.to_string()),
+                    ));
                 }
             }
         }
@@ -186,6 +199,14 @@ impl ExtensionRegistry {
 
     pub(crate) fn all_tools(&self) -> Vec<RegisteredTool> {
         self.tools.as_ref().clone()
+    }
+
+    pub(crate) fn tools_for_plugin(&self, plugin_id: &str) -> Vec<RegisteredTool> {
+        self.tools
+            .iter()
+            .filter(|tool| tool.extension_id == plugin_id)
+            .cloned()
+            .collect()
     }
 
     #[cfg(test)]
@@ -394,6 +415,7 @@ struct ToolEventDraft {
 
 fn status(
     extension: &ExtensionConfig,
+    tools: Vec<String>,
     active: bool,
     health: &'static str,
     last_error: Option<String>,
@@ -402,12 +424,39 @@ fn status(
         id: extension.id.clone(),
         kind: extension.kind.clone(),
         source: extension.source.clone(),
+        capabilities: plugin_capabilities(extension),
+        tools,
         enabled: extension.enabled,
         active,
         health,
         order: extension.order,
         last_error,
     }
+}
+
+fn plugin_capabilities(extension: &ExtensionConfig) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    match extension.kind {
+        ExtensionKind::ToolProvider => capabilities.push("tool_provider".into()),
+        ExtensionKind::RequestHook => {
+            capabilities.push("request_hook".into());
+            capabilities.push("tool_hook".into());
+        }
+        ExtensionKind::EventSink => capabilities.push("event_sink".into()),
+    }
+    if extension.approval_policy == ApprovalPolicy::Always {
+        capabilities.push("approval_required".into());
+    }
+    if !extension.permissions.network.is_empty() {
+        capabilities.push("network".into());
+    }
+    if extension.permissions.filesystem {
+        capabilities.push("filesystem".into());
+    }
+    if extension.permissions.shell {
+        capabilities.push("shell".into());
+    }
+    capabilities
 }
 
 enum BuiltinExtension {
@@ -979,6 +1028,23 @@ mod tests {
             .statuses()
             .iter()
             .any(|status| status.id == "tool.echo" && status.active));
+        let echo_status = registry
+            .statuses()
+            .into_iter()
+            .find(|status| status.id == "tool.echo")
+            .expect("tool.echo status");
+        assert_eq!(echo_status.capabilities, vec!["tool_provider"]);
+        assert_eq!(echo_status.tools, vec!["tool.echo"]);
+        assert_eq!(registry.tools_for_plugin("tool.echo")[0].name, "tool.echo");
+
+        let hook_status = registry
+            .statuses()
+            .into_iter()
+            .find(|status| status.id == "hook.noop")
+            .expect("hook.noop status");
+        assert_eq!(hook_status.capabilities, vec!["request_hook", "tool_hook"]);
+        assert!(hook_status.tools.is_empty());
+
         assert!(registry
             .statuses()
             .iter()

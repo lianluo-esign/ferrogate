@@ -44,9 +44,11 @@ The project is developed as the open-source gateway foundation behind
   `serverName-toolName` tools, deny-by-default execution allowlists, policy
   targets, admin visibility, health checks, reconnects, and
   `POST /v1/mcp/tool/execute`.
-- **Agentic Lite extension surface** with built-in request hooks, tool
-  providers, event sinks, `GET /v1/tools`, `POST /v1/tools/execute`, admin tool
-  session views, and audit events.
+- **Agentic Lite plugin surface** where a plugin is the governed capability
+  bundle and tools are the executable actions exposed to agents and APIs. Built-in
+  plugins cover request hooks, tool providers, event sinks, `GET /v1/tools`,
+  `POST /v1/tools/execute`, admin plugin/tool views, tool sessions, and audit
+  events.
 - **Caddy-style config file compatibility** through `Ferrogate/Caddyfile`
   parsing for familiar reverse-proxy routes, matchers, TLS, logging, and
   gateway settings, alongside structured TOML configuration.
@@ -707,6 +709,8 @@ GET  /admin/v1/providers
 GET  /admin/v1/provider-health
 GET  /admin/v1/provider-models
 GET  /admin/v1/plugins
+GET  /admin/v1/plugins/{plugin_id}
+GET  /admin/v1/plugins/{plugin_id}/tools
 GET  /admin/v1/extensions
 GET  /admin/v1/tools
 GET  /admin/v1/tool-approvals

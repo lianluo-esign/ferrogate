@@ -2478,17 +2478,64 @@ impl FerroGateway {
         }
     }
 
-    pub(super) async fn handle_admin_extensions(
+    pub(super) async fn handle_admin_plugins(
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList::new(state.extension_statuses());
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                if path == "/admin/v1/extensions" || path == "/admin/v1/plugins" {
+                    let body = AdminList::new(state.extension_statuses());
+                    return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                        .await;
+                }
+                let plugin_path = path.trim_start_matches("/admin/v1/plugins/");
+                if let Some(plugin_id) = plugin_path.strip_suffix("/tools") {
+                    let Some(_) = state.plugin_status(plugin_id) else {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "plugin_not_found",
+                            format!("plugin {plugin_id} is not registered"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    };
+                    let body = AdminList::new(state.plugin_tools(plugin_id));
+                    return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                        .await;
+                }
+                if !plugin_path.contains('/') {
+                    if let Some(plugin) = state.plugin_status(plugin_path) {
+                        return write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &plugin,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "plugin_not_found",
+                        format!("plugin {plugin_path} is not registered"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "plugin_endpoint_not_found",
+                    "plugin endpoint not found",
+                    &ctx.request_id,
+                )
+                .await
             }
             Err(error) => {
                 write_json_error(

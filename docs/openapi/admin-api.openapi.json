@@ -424,13 +424,83 @@
         }
       }
     },
+    "/admin/v1/plugins/{plugin_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PluginId"
+        }
+      ],
+      "get": {
+        "operationId": "getAdminPlugin",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Inspect one gateway plugin capability bundle without exposing plugin config.",
+        "responses": {
+          "200": {
+            "description": "Plugin status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPlugin"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/plugins/{plugin_id}/tools": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PluginId"
+        }
+      ],
+      "get": {
+        "operationId": "listAdminPluginTools",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List executable tools registered by one gateway plugin without exposing provider secrets.",
+        "responses": {
+          "200": {
+            "description": "Plugin tool list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminToolList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/admin/v1/tools": {
       "get": {
         "operationId": "listAdminTools",
         "tags": [
           "admin-read"
         ],
-        "summary": "List registered extension tools without exposing provider secrets or extension config.",
+        "summary": "List registered plugin tools without exposing provider secrets or plugin config.",
         "responses": {
           "200": {
             "description": "Tool list.",
@@ -2038,6 +2108,16 @@
         },
         "description": "Clamped by storage.admin_list_max_limit."
       },
+      "PluginId": {
+        "name": "plugin_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": "Gateway plugin id."
+      },
       "PromptTemplateId": {
         "name": "id",
         "in": "path",
@@ -3222,6 +3302,8 @@
           "id",
           "kind",
           "source",
+          "capabilities",
+          "tools",
           "enabled",
           "active",
           "health",
@@ -3242,6 +3324,12 @@
           },
           "source": {
             "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "tools": {
+            "$ref": "#/components/schemas/StringList"
           },
           "enabled": {
             "type": "boolean"

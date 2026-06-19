@@ -1830,6 +1830,17 @@ impl AppState {
         self.extension_registry.statuses()
     }
 
+    pub(crate) fn plugin_status(&self, id: &str) -> Option<ExtensionStatus> {
+        self.extension_registry
+            .statuses()
+            .into_iter()
+            .find(|status| status.id == id)
+    }
+
+    pub(crate) fn plugin_tools(&self, id: &str) -> Vec<RegisteredTool> {
+        self.extension_registry.tools_for_plugin(id)
+    }
+
     pub(crate) fn tools_for(
         &self,
         tenant: &ferrogate_core::TenantContext,
