@@ -2501,6 +2501,7 @@ fn run_analytics_direct_clickhouse(image: &str) -> Result<()> {
             Ok(())
         },
     )?;
+    emit_analytics_audit_event(GATEWAY_A_PORT)?;
 
     expect_clickhouse_analytics_rows()?;
     expect_json(
@@ -2580,6 +2581,7 @@ fn run_analytics_vector_clickhouse(image: &str) -> Result<()> {
             Ok(())
         },
     )?;
+    emit_analytics_audit_event(GATEWAY_A_PORT)?;
 
     expect_clickhouse_analytics_rows()?;
 
@@ -4244,6 +4246,32 @@ fn expect_clickhouse_analytics_rows() -> Result<()> {
     wait_for_clickhouse_count(
         "usage metric",
         "SELECT count() FROM ferrogate.ferrogate_usage_metrics WHERE logical_model = 'fast-chat'",
+    )?;
+    wait_for_clickhouse_count(
+        "audit timeline event",
+        "SELECT count() FROM ferrogate.ferrogate_audit_timeline WHERE action = 'config.validate'",
+    )
+}
+
+fn emit_analytics_audit_event(port: u16) -> Result<()> {
+    let config_candidate = serde_json::json!({
+        "config_toml": "listen = \"0.0.0.0:8080\"\n"
+    })
+    .to_string();
+    expect_json(
+        port,
+        "POST",
+        "/admin/v1/config/validate",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &config_candidate,
+        200,
+        |body| {
+            assert_eq!(body["valid"], true);
+            Ok(())
+        },
     )
 }
 
