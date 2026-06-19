@@ -1016,6 +1016,7 @@ dependencies = [
  "ferrogate-core",
  "libsql",
  "serde",
+ "tempfile",
  "tokio",
 ]
 

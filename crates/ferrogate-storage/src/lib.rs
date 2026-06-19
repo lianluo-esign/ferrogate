@@ -1594,4 +1594,58 @@ mod tests {
         });
         assert_eq!(repositories.usage_aggregates()[0].usage.total_tokens, 3);
     }
+
+    #[test]
+    fn libsql_file_store_persists_tool_approval_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ferrogate-control-plane.db");
+        let url = format!("file://{}", db_path.display());
+        let approval_json = r#"{"id":"approval-1","tool_name":"github.search","status":"pending"}"#;
+
+        let repositories = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url.clone(),
+            None,
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            10,
+            10,
+        ))
+        .unwrap();
+        repositories
+            .upsert_control_plane_tool_approval("approval-1", approval_json.to_string())
+            .unwrap();
+
+        let reopened = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url,
+            None,
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            10,
+            10,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            reopened
+                .control_plane_tool_approval("approval-1")
+                .unwrap()
+                .as_deref(),
+            Some(approval_json)
+        );
+        assert!(reopened
+            .control_plane_tool_approvals()
+            .unwrap()
+            .iter()
+            .any(|document| document.contains("\"tool_name\":\"github.search\"")));
+    }
 }
