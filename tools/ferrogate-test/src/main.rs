@@ -1088,6 +1088,17 @@ fn run_control_plane_libsql_restart(
         "cache_enabled": false
     })
     .to_string();
+    let policy_name = format!("{resource_id}-policy");
+    let policy_body = serde_json::json!({
+        "name": policy_name,
+        "effect": "deny",
+        "models": ["fast-chat"],
+        "providers": ["openai"],
+        "code": "blocked_by_turso_restart_test",
+        "message": "blocked by Turso restart test",
+        "enabled": false
+    })
+    .to_string();
     let prompt_template_id = format!("{resource_id}-prompt");
     let prompt_template_body = serde_json::json!({
         "id": prompt_template_id,
@@ -1135,6 +1146,20 @@ fn run_control_plane_libsql_restart(
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_json(
             "POST",
+            "/admin/v1/policies",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &policy_body,
+            201,
+            |body| {
+                assert_eq!(body["policy"]["name"], policy_name);
+                assert_eq!(body["policy"]["enabled"], false);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        case.expect_policy(&policy_name)?;
+        case.expect_json(
+            "POST",
             "/admin/v1/prompt-templates",
             &[ADMIN_AUTH, JSON_CONTENT],
             &prompt_template_body,
@@ -1154,10 +1179,22 @@ fn run_control_plane_libsql_restart(
         case.expect_storage_status()?;
         case.expect_api_key(&resource_id)?;
         case.expect_gateway_config(&gateway_config_id)?;
+        case.expect_policy(&policy_name)?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
         case.expect_json(
             "DELETE",
             &format!("/admin/v1/gateway-configs/{gateway_config_id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["deleted"], true);
+                Ok(())
+            },
+        )?;
+        case.expect_json(
+            "DELETE",
+            &format!("/admin/v1/policies/{policy_name}"),
             &[ADMIN_AUTH],
             "",
             200,
@@ -1196,6 +1233,7 @@ fn run_control_plane_libsql_restart(
         if verify_deleted_after_restart {
             case.expect_missing_api_key(&resource_id)?;
             case.expect_missing_gateway_config(&gateway_config_id)?;
+            case.expect_missing_policy(&policy_name)?;
         }
         case.expect_prompt_template(&prompt_template_id, "archived")?;
     }
@@ -1492,6 +1530,22 @@ impl TursoRestartHarness {
         )
     }
 
+    fn expect_policy(&self, name: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/policies/{name}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["policy"]["name"], name);
+                assert_eq!(body["policy"]["enabled"], false);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
     fn expect_missing_api_key(&self, id: &str) -> Result<()> {
         self.expect_json(
             "GET",
@@ -1516,6 +1570,21 @@ impl TursoRestartHarness {
             404,
             |body| {
                 assert_eq!(body["error"]["code"], "gateway_config_not_found");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_missing_policy(&self, name: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/policies/{name}"),
+            &[ADMIN_AUTH],
+            "",
+            404,
+            |body| {
+                assert_eq!(body["error"]["code"], "policy_not_found");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
