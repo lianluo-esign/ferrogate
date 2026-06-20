@@ -2940,7 +2940,11 @@ scopes = ["admin.read", "admin.write"]
             "shell": false
         },
         "config": {
-            "timeout_ms": 30000
+            "timeout_ms": 30000,
+            "api_token": "plugin-secret-token",
+            "headers": {
+                "authorization": "Bearer plugin-secret-token"
+            }
         }
     })
     .to_string();
@@ -2962,6 +2966,16 @@ scopes = ["admin.read", "admin.write"]
     assert!(created.contains("\"active\":true"), "{created}");
     assert!(created.contains("\"health\":\"ok\""), "{created}");
     assert!(created.contains("\"tools\":[\"tool.echo\"]"), "{created}");
+    assert!(created.contains("\"timeout_ms\":30000"), "{created}");
+    assert!(
+        created.contains("\"api_token\":\"[redacted]\""),
+        "{created}"
+    );
+    assert!(
+        created.contains("\"authorization\":\"[redacted]\""),
+        "{created}"
+    );
+    assert!(!created.contains("plugin-secret-token"), "{created}");
     assert!(!created.contains("admin-secret"), "{created}");
 
     let listed = http_request(
@@ -3020,7 +3034,8 @@ scopes = ["admin.read", "admin.write"]
             },
             "config": {
                 "timeout_ms": 15000,
-                "mode": "updated"
+                "mode": "updated",
+                "client_secret": "updated-plugin-secret"
             }
         })
         .to_string(),
@@ -3028,6 +3043,14 @@ scopes = ["admin.read", "admin.write"]
     assert!(duplicate_update.contains("200 OK"), "{duplicate_update}");
     assert!(
         duplicate_update.contains("\"mode\":\"updated\""),
+        "{duplicate_update}"
+    );
+    assert!(
+        duplicate_update.contains("\"client_secret\":\"[redacted]\""),
+        "{duplicate_update}"
+    );
+    assert!(
+        !duplicate_update.contains("updated-plugin-secret"),
         "{duplicate_update}"
     );
 

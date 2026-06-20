@@ -4112,13 +4112,63 @@ fn admin_plugin(
         order: plugin.order,
         approval_policy: plugin.approval_policy,
         permissions: plugin.permissions.clone(),
-        config: plugin.config.clone(),
+        config: redact_plugin_config(&plugin.config),
         capabilities: status.capabilities.clone(),
         tools: status.tools.clone(),
         active: status.active,
         health: status.health,
         last_error: status.last_error.clone(),
     }
+}
+
+fn redact_plugin_config(config: &BTreeMap<String, toml::Value>) -> BTreeMap<String, toml::Value> {
+    config
+        .iter()
+        .map(|(key, value)| {
+            let value = if is_plugin_secret_key(key) {
+                toml::Value::String("[redacted]".into())
+            } else {
+                redact_plugin_config_value(value)
+            };
+            (key.clone(), value)
+        })
+        .collect()
+}
+
+fn redact_plugin_config_value(value: &toml::Value) -> toml::Value {
+    match value {
+        toml::Value::Array(values) => {
+            toml::Value::Array(values.iter().map(redact_plugin_config_value).collect())
+        }
+        toml::Value::Table(table) => toml::Value::Table(
+            table
+                .iter()
+                .map(|(key, value)| {
+                    let value = if is_plugin_secret_key(key) {
+                        toml::Value::String("[redacted]".into())
+                    } else {
+                        redact_plugin_config_value(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn is_plugin_secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "api_key",
+        "auth",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
 }
 
 fn admin_prompt_template(template: &PromptTemplate) -> AdminPromptTemplate {
