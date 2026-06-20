@@ -239,6 +239,59 @@ impl SharedAppState {
         self.current().record_request_log(log);
     }
 
+    pub(crate) fn upsert_plugin_registration(
+        &self,
+        plugin: crate::config::PluginConfig,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let result = (|| {
+            active
+                .repositories
+                .upsert_control_plane_plugin_registration(
+                    plugin.id.clone(),
+                    serde_json::to_string(&plugin)?,
+                )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            upsert_or_replace_plugin_registration(&mut candidate.plugins, plugin);
+            candidate.validate()?;
+            let result = self.reload_process_local(candidate);
+            if result.committed {
+                let _ = self.publish_shared_control_plane(&self.current().config)?;
+            }
+            Ok(result)
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
+    pub(crate) fn delete_plugin_registration(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        if !active
+            .repositories
+            .delete_control_plane_plugin_registration(id)?
+        {
+            return Ok(None);
+        }
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.plugins.retain(|plugin| plugin.id != id);
+            candidate.extensions.retain(|plugin| plugin.id != id);
+            candidate.validate()?;
+            Ok(Some(self.reload_process_local(candidate)))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
     pub(crate) fn source_path(&self) -> Option<&PathBuf> {
         self.source_path.as_deref()
     }
@@ -980,6 +1033,17 @@ fn apply_tenant_refs_to_api_keys(
             key.project_id = tenant.project_id;
             key.user_id = tenant.user_id;
         }
+    }
+}
+
+fn upsert_or_replace_plugin_registration(
+    plugins: &mut Vec<crate::config::PluginConfig>,
+    plugin: crate::config::PluginConfig,
+) {
+    if let Some(existing) = plugins.iter_mut().find(|existing| existing.id == plugin.id) {
+        *existing = plugin;
+    } else {
+        plugins.push(plugin);
     }
 }
 

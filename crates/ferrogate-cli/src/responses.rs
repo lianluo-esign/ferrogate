@@ -170,6 +170,48 @@ pub(crate) struct AdminGatewayConfigMutationResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminPlugin {
+    pub(crate) id: String,
+    pub(crate) kind: crate::config::ExtensionKind,
+    pub(crate) enabled: bool,
+    pub(crate) source: String,
+    pub(crate) order: u32,
+    pub(crate) approval_policy: ferrogate_core::ApprovalPolicy,
+    pub(crate) permissions: crate::config::ExtensionPermissions,
+    pub(crate) config: BTreeMap<String, toml::Value>,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) tools: Vec<String>,
+    pub(crate) active: bool,
+    pub(crate) health: &'static str,
+    pub(crate) last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminPluginMutation {
+    pub(crate) id: Option<String>,
+    pub(crate) kind: crate::config::ExtensionKind,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) source: Option<String>,
+    #[serde(default)]
+    pub(crate) order: Option<u32>,
+    #[serde(default)]
+    pub(crate) approval_policy: Option<ferrogate_core::ApprovalPolicy>,
+    #[serde(default)]
+    pub(crate) permissions: Option<crate::config::ExtensionPermissions>,
+    #[serde(default)]
+    pub(crate) config: Option<BTreeMap<String, toml::Value>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPluginMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) plugin: AdminPlugin,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AdminPromptTemplate {
     pub(crate) id: String,
     pub(crate) name: String,

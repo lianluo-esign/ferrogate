@@ -728,6 +728,10 @@ impl RuntimeControlPlaneState {
         );
     }
 
+    pub fn delete_plugin_registration(&mut self, id: &str) -> bool {
+        self.plugin_registrations.remove(id).is_some()
+    }
+
     pub fn upsert_tool_approval(&mut self, id: impl Into<String>, document_json: String) {
         let id = id.into();
         self.tool_approvals.insert(
@@ -1236,6 +1240,36 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.upsert("prompt_template", id.into(), document_json))
+            }
+        }
+    }
+
+    pub fn upsert_control_plane_plugin_registration(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_plugin_registration(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(
+                control_plane.upsert("plugin_registration", id.into(), document_json),
+            ),
+        }
+    }
+
+    pub fn delete_control_plane_plugin_registration(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_plugin_registration(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("plugin_registration", id.to_string()))
             }
         }
     }
@@ -1798,6 +1832,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             10,
             10,
         ))
@@ -1812,6 +1847,7 @@ mod tests {
             url,
             None,
             true,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -1835,5 +1871,59 @@ mod tests {
             .unwrap()
             .iter()
             .any(|document| document.contains("\"tool_name\":\"github.search\"")));
+    }
+
+    #[test]
+    fn libsql_file_store_persists_plugin_registration_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ferrogate-control-plane.db");
+        let url = format!("file://{}", db_path.display());
+        let plugin_json = r#"{"id":"tool.echo","kind":"tool_provider","enabled":true,"source":"builtin","order":10,"approval_policy":"never","permissions":{"tools":["tool.echo"],"network":[],"filesystem":false,"shell":false},"config":{"timeout_ms":30000}}"#;
+
+        let repositories = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url.clone(),
+            None,
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            10,
+            10,
+        ))
+        .unwrap();
+        repositories
+            .upsert_control_plane_plugin_registration("tool.echo", plugin_json.to_string())
+            .unwrap();
+
+        let reopened = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url,
+            None,
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            10,
+            10,
+        ))
+        .unwrap();
+
+        assert!(reopened
+            .control_plane_snapshot()
+            .unwrap()
+            .plugin_registrations
+            .iter()
+            .any(|document| document == plugin_json));
     }
 }

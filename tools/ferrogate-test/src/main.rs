@@ -379,6 +379,53 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+
+    let plugin = r#"{"id":"hook.noop.harness","kind":"request_hook","source":"builtin","enabled":true,"order":90,"permissions":{"tools":[],"network":[],"filesystem":false,"shell":false},"config":{"mode":"harness"}}"#;
+    case.expect_json(
+        "POST",
+        "/admin/v1/plugins",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        plugin,
+        201,
+        |body| {
+            assert_eq!(body["plugin"]["id"], "hook.noop.harness");
+            assert_eq!(body["plugin"]["kind"], "request_hook");
+            assert_eq!(body["plugin"]["active"], true);
+            assert_eq!(body["plugin"]["health"], "ok");
+            assert_array_contains(&body["plugin"]["capabilities"], "request_hook")?;
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/plugins/hook.noop.harness",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["id"], "hook.noop.harness");
+            assert_eq!(body["active"], true);
+            assert_array_contains(&body["capabilities"], "request_hook")?;
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    let updated_plugin = r#"{"id":"hook.noop.harness","kind":"request_hook","source":"builtin","enabled":false,"order":90,"permissions":{"tools":[],"network":[],"filesystem":false,"shell":false},"config":{"mode":"harness-disabled"}}"#;
+    case.expect_json(
+        "PATCH",
+        "/admin/v1/plugins/hook.noop.harness",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        updated_plugin,
+        200,
+        |body| {
+            assert_eq!(body["plugin"]["id"], "hook.noop.harness");
+            assert_eq!(body["plugin"]["enabled"], false);
+            assert_eq!(body["plugin"]["active"], false);
+            assert_eq!(body["plugin"]["health"], "disabled");
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "GET",
         "/admin/v1/tool-sessions/ferrogate-test-session",
@@ -622,6 +669,7 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert!(list_contains(&body, "action", "api_key.upsert"));
             assert!(list_contains(&body, "action", "policy.upsert"));
             assert!(list_contains(&body, "action", "gateway_config.upsert"));
+            assert!(list_contains(&body, "action", "plugin.upsert"));
             assert_secret_redacted(&body.to_string());
             Ok(())
         },
@@ -652,6 +700,29 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert_eq!(body["deleted"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "DELETE",
+        "/admin/v1/plugins/hook.noop.harness",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["deleted"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/audit-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "action", "plugin.delete"));
+            assert_secret_redacted(&body.to_string());
             Ok(())
         },
     )?;

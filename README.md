@@ -711,7 +711,10 @@ GET  /admin/v1/providers
 GET  /admin/v1/provider-health
 GET  /admin/v1/provider-models
 GET  /admin/v1/plugins
+POST /admin/v1/plugins
 GET  /admin/v1/plugins/{plugin_id}
+PATCH /admin/v1/plugins/{plugin_id}
+DELETE /admin/v1/plugins/{plugin_id}
 GET  /admin/v1/plugins/{plugin_id}/tools
 GET  /admin/v1/extensions
 GET  /admin/v1/tools

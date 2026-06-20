@@ -494,6 +494,16 @@ project_id = "project_b"
 user_id = "user_b"
 
 [[api_keys]]
+id = "tenant-c"
+name = "Tenant C"
+key = "tenant-c-secret"
+scopes = ["chat.completions"]
+allowed_models = ["fast-chat"]
+organization_id = "org_c"
+project_id = "project_c"
+user_id = "user_c"
+
+[[api_keys]]
 id = "admin"
 name = "Admin"
 key = "admin-secret"
@@ -531,11 +541,11 @@ scopes = ["admin.read"]
         "{tenants_after_reload}"
     );
     assert!(
-        tenants_after_reload.contains("\"organization_id\":\"org_demo\""),
+        tenants_after_reload.contains("\"organization_id\":\"org_a\""),
         "{tenants_after_reload}"
     );
     assert!(
-        tenants_after_reload.contains("\"api_key_id\":\"key_dev\""),
+        tenants_after_reload.contains("\"api_key_id\":\"tenant-a\""),
         "{tenants_after_reload}"
     );
 
@@ -599,7 +609,7 @@ scopes = ["admin.read"]
         &gateway_addr,
         "GET",
         "/admin/v1/request-logs",
-        &["Authorization: Bearer client-secret"],
+        &["Authorization: Bearer tenant-c-secret"],
         "",
     );
     assert!(denied_request_logs.contains("403 Forbidden"));
@@ -2887,6 +2897,170 @@ scopes = ["admin.read", "admin.write"]
     assert!(audit_events.contains("\"action\":\"api_key.delete\""));
     assert!(!audit_events.contains("client-secret"));
     assert!(!audit_events.contains("client-secret-2"));
+    assert!(!audit_events.contains("admin-secret"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
+fn admin_plugin_crud_updates_runtime_plugin_registry() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let create_body = serde_json::json!({
+        "id": "tool.echo",
+        "kind": "tool_provider",
+        "enabled": true,
+        "source": "builtin",
+        "order": 10,
+        "permissions": {
+            "tools": ["tool.echo"],
+            "network": [],
+            "filesystem": false,
+            "shell": false
+        },
+        "config": {
+            "timeout_ms": 30000
+        }
+    })
+    .to_string();
+    let created = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &create_body,
+    );
+    assert!(created.contains("201 Created"), "{created}");
+    assert!(created.contains("\"object\":\"plugin\""), "{created}");
+    assert!(created.contains("\"id\":\"tool.echo\""), "{created}");
+    assert!(created.contains("\"kind\":\"tool_provider\""), "{created}");
+    assert!(created.contains("\"enabled\":true"), "{created}");
+    assert!(created.contains("\"active\":true"), "{created}");
+    assert!(created.contains("\"health\":\"ok\""), "{created}");
+    assert!(created.contains("\"tools\":[\"tool.echo\"]"), "{created}");
+    assert!(!created.contains("admin-secret"), "{created}");
+
+    let listed = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(listed.contains("200 OK"), "{listed}");
+    assert!(listed.contains("\"id\":\"tool.echo\""), "{listed}");
+    assert!(listed.contains("\"active\":true"), "{listed}");
+
+    let fetched = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins/tool.echo",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(fetched.contains("200 OK"), "{fetched}");
+    assert!(fetched.contains("\"id\":\"tool.echo\""), "{fetched}");
+    assert!(fetched.contains("\"kind\":\"tool_provider\""), "{fetched}");
+    assert!(fetched.contains("\"active\":true"), "{fetched}");
+    assert!(fetched.contains("\"health\":\"ok\""), "{fetched}");
+
+    let tools = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins/tool.echo/tools",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(tools.contains("200 OK"), "{tools}");
+    assert!(tools.contains("\"name\":\"tool.echo\""), "{tools}");
+
+    let duplicate_update = http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/plugins/tool.echo",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "tool.echo",
+            "kind": "tool_provider",
+            "enabled": true,
+            "source": "builtin",
+            "order": 10,
+            "permissions": {
+                "tools": ["tool.echo"],
+                "network": [],
+                "filesystem": false,
+                "shell": false
+            },
+            "config": {
+                "timeout_ms": 15000,
+                "mode": "updated"
+            }
+        })
+        .to_string(),
+    );
+    assert!(duplicate_update.contains("200 OK"), "{duplicate_update}");
+    assert!(
+        duplicate_update.contains("\"mode\":\"updated\""),
+        "{duplicate_update}"
+    );
+
+    let delete = http_request(
+        &gateway_addr,
+        "DELETE",
+        "/admin/v1/plugins/tool.echo",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(delete.contains("200 OK"), "{delete}");
+    assert!(delete.contains("\"deleted\":true"), "{delete}");
+
+    let missing = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins/tool.echo",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(missing.contains("404 Not Found"), "{missing}");
+    assert!(missing.contains("plugin_not_found"), "{missing}");
+
+    let audit_events = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/audit-events",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(audit_events.contains("200 OK"));
+    assert!(audit_events.contains("\"action\":\"plugin.upsert\""));
+    assert!(audit_events.contains("\"action\":\"plugin.delete\""));
     assert!(!audit_events.contains("admin-secret"));
 
     gateway.kill().unwrap();

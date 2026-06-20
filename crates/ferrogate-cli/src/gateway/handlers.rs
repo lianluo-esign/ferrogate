@@ -209,7 +209,8 @@ impl FerroGateway {
             || path.starts_with("/admin/v1/plugins/")
         {
             let headers = req.headers.clone();
-            self.handle_admin_plugins(session, ctx, &headers, &path)
+            let method = req.method.clone();
+            self.handle_admin_plugins(session, ctx, &headers, &method, &path)
                 .await?;
             return Ok(true);
         }

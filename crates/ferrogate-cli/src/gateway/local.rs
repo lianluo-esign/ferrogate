@@ -25,7 +25,8 @@ use crate::{
         AdminApiKeyMutationResponse, AdminConfigReloadResponse, AdminConfigValidateRequest,
         AdminConfigValidateResponse, AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse,
         AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
-        AdminList, AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
+        AdminList, AdminPlugin, AdminPluginMutation, AdminPluginMutationResponse,
+        AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
         AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse, AdminProvider,
         AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus, HealthResponse,
         OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
@@ -2540,15 +2541,51 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        method: &Method,
         path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                if path == "/admin/v1/extensions" || path == "/admin/v1/plugins" {
+                if path == "/admin/v1/extensions" {
+                    if method != &Method::GET {
+                        return write_json_error(
+                            session,
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "method_not_allowed",
+                            "legacy extensions alias supports GET only",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                     let body = AdminList::new(state.extension_statuses());
                     return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                         .await;
+                }
+                if path == "/admin/v1/plugins" {
+                    if method == &Method::GET {
+                        let body = AdminList::new(state.extension_statuses());
+                        return write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &body,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    if method == &Method::POST {
+                        return self
+                            .handle_admin_plugin_upsert(session, ctx, headers, None)
+                            .await;
+                    }
+                    return write_json_error(
+                        session,
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "method_not_allowed",
+                        "plugin list endpoint supports GET and POST",
+                        &ctx.request_id,
+                    )
+                    .await;
                 }
                 let plugin_path = path.trim_start_matches("/admin/v1/plugins/");
                 if let Some(plugin_id) = plugin_path.strip_suffix("/tools") {
@@ -2567,23 +2604,53 @@ impl FerroGateway {
                         .await;
                 }
                 if !plugin_path.contains('/') {
-                    if let Some(plugin) = state.plugin_status(plugin_path) {
-                        return write_json_response(
-                            session,
-                            StatusCode::OK,
-                            &plugin,
-                            &ctx.request_id,
-                        )
-                        .await;
+                    match method {
+                        &Method::GET => {
+                            if let Some(plugin) = state.plugin_status(plugin_path) {
+                                return write_json_response(
+                                    session,
+                                    StatusCode::OK,
+                                    &plugin,
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
+                            return write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "plugin_not_found",
+                                format!("plugin {plugin_path} is not registered"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                        &Method::POST => {
+                            return self
+                                .handle_admin_plugin_upsert(
+                                    session,
+                                    ctx,
+                                    headers,
+                                    Some(plugin_path),
+                                )
+                                .await;
+                        }
+                        &Method::PUT | &Method::PATCH => {
+                            return self
+                                .handle_admin_plugin_upsert(
+                                    session,
+                                    ctx,
+                                    headers,
+                                    Some(plugin_path),
+                                )
+                                .await;
+                        }
+                        &Method::DELETE => {
+                            return self
+                                .handle_admin_plugin_delete(session, ctx, headers, plugin_path)
+                                .await;
+                        }
+                        _ => {}
                     }
-                    return write_json_error(
-                        session,
-                        StatusCode::NOT_FOUND,
-                        "plugin_not_found",
-                        format!("plugin {plugin_path} is not registered"),
-                        &ctx.request_id,
-                    )
-                    .await;
                 }
                 write_json_error(
                     session,
@@ -2600,6 +2667,274 @@ impl FerroGateway {
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_plugin_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_id: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let payload = match serde_json::from_slice::<AdminPluginMutation>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON plugin object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let plugin = match plugin_from_mutation(path_id, payload) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.upsert",
+                    path_id.unwrap_or("new"),
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_plugin",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let plugin_id = plugin.id.clone();
+        let response_plugin_source = plugin.clone();
+        match self.state.upsert_plugin_registration(plugin) {
+            Ok(outcome) if outcome.committed => {
+                let current = self.state.current();
+                let response_plugin = current
+                    .plugin_status(&plugin_id)
+                    .map(|status| admin_plugin(&response_plugin_source, Some(status)))
+                    .unwrap_or_else(|| admin_plugin(&response_plugin_source, None));
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.upsert",
+                    &plugin_id,
+                    "committed",
+                    format!(
+                        "plugin {plugin_id} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminPluginMutationResponse {
+                    object: "plugin",
+                    plugin: response_plugin,
+                };
+                write_json_response(
+                    session,
+                    if path_id.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &body,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate plugin config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.upsert",
+                    &plugin_id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "plugin_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.upsert",
+                    &plugin_id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_plugin",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_plugin_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match self.state.delete_plugin_registration(id) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.delete",
+                    id,
+                    "committed",
+                    format!(
+                        "plugin {id} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminDeleteResponse {
+                    object: "plugin",
+                    id: id.to_string(),
+                    deleted: true,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate plugin config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.delete",
+                    id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "plugin_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "plugin_not_found",
+                    format!("plugin {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "plugin.delete",
+                    id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_plugin_delete",
+                    message,
                     &ctx.request_id,
                 )
                 .await
@@ -3753,6 +4088,39 @@ fn admin_gateway_config(
     }
 }
 
+fn admin_plugin(
+    plugin: &crate::config::PluginConfig,
+    status: Option<crate::extensions::ExtensionStatus>,
+) -> AdminPlugin {
+    let status = status.unwrap_or(crate::extensions::ExtensionStatus {
+        id: plugin.id.clone(),
+        kind: plugin.kind.clone(),
+        source: plugin.source.clone(),
+        capabilities: Vec::new(),
+        tools: Vec::new(),
+        enabled: plugin.enabled,
+        active: false,
+        health: "unknown",
+        order: plugin.order,
+        last_error: Some("plugin is not loaded".into()),
+    });
+    AdminPlugin {
+        id: plugin.id.clone(),
+        kind: plugin.kind.clone(),
+        enabled: plugin.enabled,
+        source: plugin.source.clone(),
+        order: plugin.order,
+        approval_policy: plugin.approval_policy,
+        permissions: plugin.permissions.clone(),
+        config: plugin.config.clone(),
+        capabilities: status.capabilities.clone(),
+        tools: status.tools.clone(),
+        active: status.active,
+        health: status.health,
+        last_error: status.last_error.clone(),
+    }
+}
+
 fn admin_prompt_template(template: &PromptTemplate) -> AdminPromptTemplate {
     AdminPromptTemplate {
         id: template.id.clone(),
@@ -3889,6 +4257,30 @@ fn gateway_config_from_mutation(
         enabled: payload.enabled.unwrap_or(true),
         api_key_ids: payload.api_key_ids.unwrap_or_default(),
         cache_enabled: payload.cache_enabled,
+    })
+}
+
+fn plugin_from_mutation(
+    path_id: Option<&str>,
+    payload: AdminPluginMutation,
+) -> anyhow::Result<crate::config::PluginConfig> {
+    let id = payload
+        .id
+        .or_else(|| path_id.map(ToOwned::to_owned))
+        .ok_or_else(|| anyhow::anyhow!("field id is required"))?;
+    if path_id.is_some_and(|path_id| path_id != id) {
+        anyhow::bail!("request path id and body id must match");
+    }
+
+    Ok(crate::config::PluginConfig {
+        id,
+        kind: payload.kind,
+        enabled: payload.enabled.unwrap_or(true),
+        source: payload.source.unwrap_or_else(|| "builtin".into()),
+        order: payload.order.unwrap_or(10),
+        approval_policy: payload.approval_policy.unwrap_or_default(),
+        permissions: payload.permissions.unwrap_or_default(),
+        config: payload.config.unwrap_or_default(),
     })
 }
 

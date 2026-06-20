@@ -422,6 +422,47 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "operationId": "createAdminPlugin",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create or replace a configured gateway plugin and persist the control-plane record.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminPluginMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Plugin created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPluginMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
       }
     },
     "/admin/v1/plugins/{plugin_id}": {
@@ -455,6 +496,81 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateAdminPlugin",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Update a configured gateway plugin and persist the control-plane record.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminPluginMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plugin updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPluginMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminPlugin",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete a configured gateway plugin from the control plane.",
+        "responses": {
+          "200": {
+            "description": "Plugin deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
           }
         }
       }
@@ -3402,6 +3518,16 @@
           "source": {
             "type": "string"
           },
+          "approval_policy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/ExtensionPermissions"
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          },
           "capabilities": {
             "$ref": "#/components/schemas/StringList"
           },
@@ -3426,6 +3552,88 @@
               "string",
               "null"
             ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPluginMutation": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "request_hook",
+              "tool_provider",
+              "event_sink"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "approval_policy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/ExtensionPermissions"
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ApprovalPolicy": {
+        "type": "string",
+        "enum": [
+          "never",
+          "always"
+        ]
+      },
+      "ExtensionPermissions": {
+        "type": "object",
+        "properties": {
+          "tools": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "network": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "filesystem": {
+            "type": "boolean"
+          },
+          "shell": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminPluginMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "plugin"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "plugin"
+          },
+          "plugin": {
+            "$ref": "#/components/schemas/AdminPlugin"
           }
         },
         "additionalProperties": false
