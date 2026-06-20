@@ -731,6 +731,13 @@ GET  /admin/v1/gateway-configs/{id}
 POST /admin/v1/gateway-configs
 PUT  /admin/v1/gateway-configs/{id}
 DELETE /admin/v1/gateway-configs/{id}
+GET  /admin/v1/prompt-templates
+GET  /admin/v1/prompt-templates/{id}
+POST /admin/v1/prompt-templates
+PUT  /admin/v1/prompt-templates/{id}
+PATCH /admin/v1/prompt-templates/{id}
+DELETE /admin/v1/prompt-templates/{id}
+POST /v1/prompts/{id}/render
 GET  /admin/v1/api-keys
 GET  /admin/v1/api-keys/{id}
 POST /admin/v1/api-keys
@@ -765,10 +772,39 @@ candidates plus best-effort capability metadata without exposing provider API
 keys or environment variable names. It never mutates the configured
 `[[models]]` list; operators must explicitly review and apply any import.
 
+Prompt templates are durable control-plane resources for reusable
+OpenAI-compatible request bodies. Operators create or update templates through
+the Admin API; every update preserves inspectable revisions. Runtime clients
+with the `prompts.render` scope call `POST /v1/prompts/{id}/render` with
+variables and receive a normal Chat Completions or Responses request body that
+can be submitted unchanged through FerroGate:
+
+```bash
+curl -X POST http://127.0.0.1:8080/admin/v1/prompt-templates \
+  -H "Authorization: Bearer $FERROGATE_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"support-reply","name":"Support Reply","model":"prompt-chat","variables":[{"name":"customer","required":true},{"name":"tone","required":false,"default":"brief"}],"version":{"messages":[{"role":"system","content":"Reply in {{tone}} mode."},{"role":"user","content":"Hello {{customer}}"}],"temperature":0.2}}'
+
+curl -X POST http://127.0.0.1:8080/v1/prompts/support-reply/render \
+  -H "Authorization: Bearer $FERROGATE_CLIENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"variables":{"customer":"Ada"}}' \
+  | curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+      -H "Authorization: Bearer $FERROGATE_CLIENT_TOKEN" \
+      -H "Content-Type: application/json" \
+      --data-binary @-
+```
+
+Prompt render audit events include the template id, revision, target, model,
+variable schema hash, request id, actor API key id, and tenant context. Audit
+messages stay metadata-only; raw variables and rendered prompt text remain under
+the existing body-recording and redaction policy.
+
 Read endpoints require `admin.read` when API keys are configured. Tool listing
 requires `tools.read`, explicit tool execution requires `tools.execute`, chat
 completions require `chat.completions`, Responses API requests require
-`responses.create`, and config validation and reload require `admin.write`.
+`responses.create`, prompt rendering requires `prompts.render`, and config
+validation and reload require `admin.write`.
 
 ## Tenant and RBAC Service
 
