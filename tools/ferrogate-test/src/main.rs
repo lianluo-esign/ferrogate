@@ -1224,8 +1224,9 @@ fn run_control_plane_libsql_restart(
 
     {
         let case =
-            TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, true, true)?;
+            TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false, true)?;
         case.expect_storage_status()?;
+        case.register_echo_plugin()?;
         case.expect_plugin("tool.echo")?;
         case.expect_mcp_server("dbhttp")?;
         case.expect_echo_tool()?;
@@ -1755,6 +1756,31 @@ impl TursoRestartHarness {
                     .with_context(|| format!("MCP server {name} was not restored from storage"))?;
                 assert_eq!(server["transport"], "streamable_http");
                 assert_eq!(server["health"], "degraded");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn register_echo_plugin(&self) -> Result<()> {
+        self.expect_json(
+            "POST",
+            "/admin/v1/plugins",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            r#"{"id":"tool.echo","kind":"tool_provider","source":"builtin","enabled":true,"order":10,"approval_policy":"never","permissions":{"tools":["tool.echo"],"network":[],"filesystem":false,"shell":false},"config":{"registered_by":"ferrogate-test"}}"#,
+            201,
+            |body| {
+                assert_eq!(body["object"], "plugin");
+                assert_eq!(body["plugin"]["id"], "tool.echo");
+                assert_eq!(body["plugin"]["kind"], "tool_provider");
+                assert_eq!(body["plugin"]["source"], "builtin");
+                assert_eq!(body["plugin"]["enabled"], true);
+                assert_eq!(body["plugin"]["active"], true);
+                assert_eq!(body["plugin"]["health"], "ok");
+                assert_array_contains(&body["plugin"]["capabilities"], "tool_provider")
+                    .context("registered plugin must advertise tool_provider capability")?;
+                assert_array_contains(&body["plugin"]["tools"], "tool.echo")
+                    .context("registered plugin must expose tool.echo")?;
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
