@@ -5,7 +5,10 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use serde_json::{json, Value};
-use std::io::{Error as IoError, Read};
+use std::{
+    collections::BTreeMap,
+    io::{Error as IoError, Read},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResponsesStreamProviderKind {
@@ -27,6 +30,8 @@ pub(super) struct ResponsesStreamNormalizer<R> {
     eof: bool,
     completed: bool,
     saw_text_delta: bool,
+    saw_function_call_delta: bool,
+    function_calls: BTreeMap<u64, FunctionCallState>,
     usage: ProviderUsageState,
 }
 
@@ -35,6 +40,13 @@ struct ProviderUsageState {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct FunctionCallState {
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: String,
 }
 
 impl ProviderUsageState {
@@ -95,6 +107,8 @@ impl<R: Read> ResponsesStreamNormalizer<R> {
             eof: false,
             completed: false,
             saw_text_delta: false,
+            saw_function_call_delta: false,
+            function_calls: BTreeMap::new(),
             usage: ProviderUsageState::default(),
         }
     }
@@ -128,6 +142,25 @@ impl<R: Read> ResponsesStreamNormalizer<R> {
         }
         if self.saw_text_delta {
             self.queue_event(Some("response.output_text.done"), "{}");
+        }
+        if self.saw_function_call_delta {
+            let function_calls = self
+                .function_calls
+                .iter()
+                .map(|(index, call)| (*index, call.clone()))
+                .collect::<Vec<_>>();
+            for (index, call) in function_calls {
+                self.queue_json_event(
+                    "response.function_call_arguments.done",
+                    json!({
+                        "request_id": self.request_id,
+                        "index": index,
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }),
+                );
+            }
         }
         self.queue_json_event(
             "response.completed",
@@ -178,6 +211,25 @@ impl<R: Read> ResponsesStreamNormalizer<R> {
                 json!({
                     "request_id": self.request_id,
                     "delta": delta,
+                }),
+            );
+        }
+
+        for delta in extract_function_call_deltas(
+            self.provider_kind,
+            event_name.as_deref(),
+            parsed.as_ref(),
+            &mut self.function_calls,
+        ) {
+            self.saw_function_call_delta = true;
+            self.queue_json_event(
+                "response.function_call_arguments.delta",
+                json!({
+                    "request_id": self.request_id,
+                    "index": delta.index,
+                    "call_id": delta.call_id,
+                    "name": delta.name,
+                    "delta": delta.delta,
                 }),
             );
         }
@@ -385,6 +437,192 @@ fn extract_text_deltas(
     }
 }
 
+#[derive(Debug, Clone)]
+struct FunctionCallDelta {
+    index: u64,
+    call_id: Option<String>,
+    name: Option<String>,
+    delta: String,
+}
+
+fn extract_function_call_deltas(
+    provider_kind: ResponsesStreamProviderKind,
+    event_name: Option<&str>,
+    parsed: Option<&Value>,
+    function_calls: &mut BTreeMap<u64, FunctionCallState>,
+) -> Vec<FunctionCallDelta> {
+    let Some(value) = parsed else {
+        return Vec::new();
+    };
+
+    match provider_kind {
+        ResponsesStreamProviderKind::OpenAiCompatible | ResponsesStreamProviderKind::Other => value
+            .get("choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .flat_map(|(choice_index, choice)| {
+                let Some(delta) = choice.get("delta") else {
+                    return Vec::new();
+                };
+
+                let mut deltas = Vec::new();
+                if let Some(function_call) = delta.get("function_call") {
+                    let index = choice_index as u64;
+                    let entry = function_calls.entry(index).or_default();
+                    if let Some(call_id) = function_call.get("id").and_then(Value::as_str) {
+                        entry.call_id = Some(call_id.to_string());
+                    }
+                    if let Some(name) = function_call.get("name").and_then(Value::as_str) {
+                        entry.name = Some(name.to_string());
+                    }
+                    if let Some(arguments) = function_call.get("arguments").and_then(Value::as_str)
+                    {
+                        if !arguments.is_empty() {
+                            entry.arguments.push_str(arguments);
+                            deltas.push(FunctionCallDelta {
+                                index,
+                                call_id: entry.call_id.clone(),
+                                name: entry.name.clone(),
+                                delta: arguments.to_string(),
+                            });
+                        }
+                    }
+                }
+
+                if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    for (tool_index, tool_call) in tool_calls.iter().enumerate() {
+                        let index = tool_call
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(choice_index as u64 + tool_index as u64);
+                        let entry = function_calls.entry(index).or_default();
+                        if let Some(call_id) = tool_call.get("id").and_then(Value::as_str) {
+                            entry.call_id = Some(call_id.to_string());
+                        }
+                        if let Some(function) = tool_call.get("function") {
+                            if let Some(name) = function.get("name").and_then(Value::as_str) {
+                                entry.name = Some(name.to_string());
+                            }
+                            if let Some(arguments) =
+                                function.get("arguments").and_then(Value::as_str)
+                            {
+                                if !arguments.is_empty() {
+                                    entry.arguments.push_str(arguments);
+                                    deltas.push(FunctionCallDelta {
+                                        index,
+                                        call_id: entry.call_id.clone(),
+                                        name: entry.name.clone(),
+                                        delta: arguments.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                deltas
+            })
+            .collect(),
+        ResponsesStreamProviderKind::Anthropic => {
+            if matches!(
+                event_name,
+                Some("content_block_delta") | Some("response.output_item.delta")
+            ) {
+                if let Some(delta) = value.get("delta") {
+                    let index = value
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    let entry = function_calls.entry(index).or_default();
+                    if let Some(call_id) = value.get("id").and_then(Value::as_str) {
+                        entry.call_id = Some(call_id.to_string());
+                    }
+                    if let Some(name) = delta
+                        .get("name")
+                        .or_else(|| value.get("name"))
+                        .and_then(Value::as_str)
+                    {
+                        entry.name = Some(name.to_string());
+                    }
+                    if let Some(arguments) = delta
+                        .get("text")
+                        .or_else(|| delta.get("input"))
+                        .and_then(Value::as_str)
+                        .filter(|arguments| !arguments.is_empty())
+                    {
+                        entry.arguments.push_str(arguments);
+                        return vec![FunctionCallDelta {
+                            index,
+                            call_id: entry.call_id.clone(),
+                            name: entry.name.clone(),
+                            delta: arguments.to_string(),
+                        }];
+                    }
+                }
+            }
+            Vec::new()
+        }
+        ResponsesStreamProviderKind::Gemini => {
+            if matches!(
+                event_name,
+                Some("data") | Some("message") | Some("response.output_item.delta")
+            ) {
+                let mut deltas = Vec::new();
+                if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
+                    for (candidate_index, candidate) in candidates.iter().enumerate() {
+                        if let Some(content) = candidate.get("content") {
+                            if let Some(parts) = content.get("parts").and_then(Value::as_array) {
+                                for (part_index, part) in parts.iter().enumerate() {
+                                    let index = candidate_index as u64 + part_index as u64;
+                                    let entry = function_calls.entry(index).or_default();
+                                    if let Some(call_id) =
+                                        part.get("functionCall").and_then(|value| value.get("id"))
+                                    {
+                                        if let Some(call_id) = call_id.as_str() {
+                                            entry.call_id = Some(call_id.to_string());
+                                        }
+                                    }
+                                    if let Some(name) = part
+                                        .get("functionCall")
+                                        .and_then(|value| value.get("name"))
+                                        .and_then(Value::as_str)
+                                    {
+                                        entry.name = Some(name.to_string());
+                                    }
+                                    if let Some(args) = part
+                                        .get("functionCall")
+                                        .and_then(|value| value.get("args"))
+                                        .or_else(|| {
+                                            part.get("functionCall")
+                                                .and_then(|value| value.get("arguments"))
+                                        })
+                                        .and_then(Value::as_str)
+                                    {
+                                        if !args.is_empty() {
+                                            entry.arguments.push_str(args);
+                                            deltas.push(FunctionCallDelta {
+                                                index,
+                                                call_id: entry.call_id.clone(),
+                                                name: entry.name.clone(),
+                                                delta: args.to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                deltas
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +688,26 @@ mod tests {
         assert!(normalized.contains(r#""prompt_tokens":3"#));
         assert!(normalized.contains(r#""completion_tokens":5"#));
         assert!(normalized.contains(r#""total_tokens":8"#));
+    }
+
+    #[test]
+    fn normalizes_openai_tool_call_arguments_into_responses_events() {
+        let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ferrogate\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
+        let reader = Cursor::new(body.to_vec());
+        let normalizer = ResponsesStreamNormalizer::new(
+            reader,
+            ResponsesStreamProviderKind::OpenAiCompatible,
+            "fg-test",
+            "text/event-stream",
+        );
+
+        let normalized = read_all(normalizer);
+        assert!(normalized.contains("event: response.function_call_arguments.delta"));
+        assert!(normalized.contains(r#""name":"lookup""#));
+        assert!(normalized.contains(r#""delta":"{\"query\":\""#));
+        assert!(normalized.contains(r#""delta":"ferrogate\"}"#));
+        assert!(normalized.contains("event: response.function_call_arguments.done"));
+        assert!(normalized.contains(r#""arguments":"{\"query\":\"ferrogate\"}"#));
+        assert!(normalized.contains("data: [DONE]"));
     }
 }
