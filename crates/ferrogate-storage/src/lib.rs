@@ -200,6 +200,7 @@ pub struct StoredControlPlaneResource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPlaneSnapshot {
     pub api_keys: Vec<String>,
+    pub tenants: Vec<String>,
     pub policies: Vec<String>,
     pub gateway_configs: Vec<String>,
     pub prompt_templates: Vec<String>,
@@ -210,6 +211,7 @@ pub struct ControlPlaneSnapshot {
 #[derive(Debug)]
 pub struct RuntimeControlPlaneState {
     api_keys: InMemoryRepository<StoredControlPlaneResource>,
+    tenants: InMemoryRepository<StoredControlPlaneResource>,
     policies: InMemoryRepository<StoredControlPlaneResource>,
     gateway_configs: InMemoryRepository<StoredControlPlaneResource>,
     prompt_templates: InMemoryRepository<StoredControlPlaneResource>,
@@ -236,6 +238,7 @@ impl LibsqlControlPlaneStore {
         url: String,
         auth_token: Option<String>,
         bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
@@ -252,6 +255,9 @@ impl LibsqlControlPlaneStore {
         }
         store
             .seed_missing_resources("api_key", bootstrap_api_keys)
+            .await?;
+        store
+            .seed_missing_resources("tenant", bootstrap_tenants)
             .await?;
         store
             .seed_missing_resources("policy", bootstrap_policies)
@@ -302,6 +308,7 @@ impl LibsqlControlPlaneStore {
     async fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
         Ok(ControlPlaneSnapshot {
             api_keys: self.list_documents("api_key").await?,
+            tenants: self.list_documents("tenant").await?,
             policies: self.list_documents("policy").await?,
             gateway_configs: self.list_documents("gateway_config").await?,
             prompt_templates: self.list_documents("prompt_template").await?,
@@ -452,6 +459,7 @@ impl RuntimeControlPlaneState {
     pub fn new() -> Self {
         Self {
             api_keys: InMemoryRepository::new(),
+            tenants: InMemoryRepository::new(),
             policies: InMemoryRepository::new(),
             gateway_configs: InMemoryRepository::new(),
             prompt_templates: InMemoryRepository::new(),
@@ -463,6 +471,7 @@ impl RuntimeControlPlaneState {
 
     pub fn from_documents(
         api_keys: Vec<(String, String)>,
+        tenants: Vec<(String, String)>,
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
@@ -472,6 +481,9 @@ impl RuntimeControlPlaneState {
         let mut state = Self::new();
         for (id, document_json) in api_keys {
             state.upsert_api_key(id, document_json);
+        }
+        for (id, document_json) in tenants {
+            state.upsert_tenant(id, document_json);
         }
         for (id, document_json) in policies {
             state.upsert_policy(id, document_json);
@@ -494,6 +506,7 @@ impl RuntimeControlPlaneState {
     pub fn replace_config_documents(
         &mut self,
         api_keys: Vec<(String, String)>,
+        tenants: Vec<(String, String)>,
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
@@ -501,6 +514,7 @@ impl RuntimeControlPlaneState {
         mcp_servers: Vec<(String, String)>,
     ) {
         self.api_keys = InMemoryRepository::new();
+        self.tenants = InMemoryRepository::new();
         self.policies = InMemoryRepository::new();
         self.gateway_configs = InMemoryRepository::new();
         self.prompt_templates = InMemoryRepository::new();
@@ -508,6 +522,9 @@ impl RuntimeControlPlaneState {
         self.mcp_servers = InMemoryRepository::new();
         for (id, document_json) in api_keys {
             self.upsert_api_key(id, document_json);
+        }
+        for (id, document_json) in tenants {
+            self.upsert_tenant(id, document_json);
         }
         for (id, document_json) in policies {
             self.upsert_policy(id, document_json);
@@ -534,6 +551,14 @@ impl RuntimeControlPlaneState {
             .map(|resource| (resource.id, resource.document_json))
             .collect::<Vec<_>>();
         api_keys.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut tenants = self
+            .tenants
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        tenants.sort_by(|left, right| left.0.cmp(&right.0));
 
         let mut policies = self
             .policies
@@ -580,6 +605,10 @@ impl RuntimeControlPlaneState {
                 .into_iter()
                 .map(|(_, document_json)| document_json)
                 .collect(),
+            tenants: tenants
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
             policies: policies
                 .into_iter()
                 .map(|(_, document_json)| document_json)
@@ -617,6 +646,18 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_api_key(&mut self, id: &str) -> bool {
         self.api_keys.remove(id).is_some()
+    }
+
+    pub fn upsert_tenant(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.tenants.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "tenant".into(),
+                id,
+                document_json,
+            },
+        );
     }
 
     pub fn upsert_policy(&mut self, id: impl Into<String>, document_json: String) {
@@ -984,6 +1025,7 @@ impl RuntimeStorageRepositories {
         auth_token: Option<String>,
         initialize_schema: bool,
         bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
@@ -998,6 +1040,7 @@ impl RuntimeStorageRepositories {
             url,
             auth_token,
             bootstrap_api_keys,
+            bootstrap_tenants,
             bootstrap_policies,
             bootstrap_gateway_configs,
             bootstrap_prompt_templates,
@@ -1030,6 +1073,7 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.snapshot())
                 .unwrap_or_else(|_| ControlPlaneSnapshot {
                     api_keys: Vec::new(),
+                    tenants: Vec::new(),
                     policies: Vec::new(),
                     gateway_configs: Vec::new(),
                     prompt_templates: Vec::new(),
@@ -1045,6 +1089,7 @@ impl RuntimeStorageRepositories {
     pub fn replace_control_plane(
         &self,
         api_keys: Vec<(String, String)>,
+        tenants: Vec<(String, String)>,
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
@@ -1056,6 +1101,7 @@ impl RuntimeStorageRepositories {
                 if let Ok(mut control_plane) = control_plane.lock() {
                     control_plane.replace_config_documents(
                         api_keys,
+                        tenants,
                         policies,
                         gateway_configs,
                         prompt_templates,
@@ -1067,6 +1113,7 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(async {
                 control_plane.replace_kind("api_key", api_keys).await?;
+                control_plane.replace_kind("tenant", tenants).await?;
                 control_plane.replace_kind("policy", policies).await?;
                 control_plane
                     .replace_kind("gateway_config", gateway_configs)
@@ -1630,6 +1677,7 @@ mod tests {
         repositories
             .replace_control_plane(
                 vec![("key_a".into(), r#"{"id":"key_a","name":"A"}"#.to_string())],
+                Vec::new(),
                 vec![(
                     "deny_a".into(),
                     r#"{"name":"deny_a","effect":"deny"}"#.to_string(),

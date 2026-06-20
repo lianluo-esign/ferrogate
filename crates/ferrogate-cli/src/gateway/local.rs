@@ -27,9 +27,8 @@ use crate::{
         AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
         AdminList, AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
         AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse, AdminProvider,
-        AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus, AdminTenantRef,
-        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
-        ReadinessResponse,
+        AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus, HealthResponse,
+        OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
     },
     state::{AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord},
 };
@@ -3601,26 +3600,7 @@ impl FerroGateway {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
-                let body = AdminList::new(
-                    state
-                        .config
-                        .api_keys
-                        .iter()
-                        .filter(|key| {
-                            key.organization_id.is_some()
-                                || key.team_id.is_some()
-                                || key.project_id.is_some()
-                                || key.user_id.is_some()
-                        })
-                        .map(|key| AdminTenantRef {
-                            organization_id: key.organization_id.clone(),
-                            team_id: key.team_id.clone(),
-                            project_id: key.project_id.clone(),
-                            user_id: key.user_id.clone(),
-                            api_key_id: key.id.clone(),
-                        })
-                        .collect(),
-                );
+                let body = AdminList::new(state.tenant_refs());
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {

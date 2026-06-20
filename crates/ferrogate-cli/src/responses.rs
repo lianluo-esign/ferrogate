@@ -321,7 +321,7 @@ pub(crate) struct AdminPolicyMutationResponse<T> {
     pub(crate) policy: T,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct AdminTenantRef {
     pub(crate) organization_id: Option<String>,
     pub(crate) team_id: Option<String>,

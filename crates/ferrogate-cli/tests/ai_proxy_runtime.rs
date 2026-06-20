@@ -455,6 +455,90 @@ enabled = false
     assert!(tenants.contains("\"user_id\":\"user_demo\""));
     assert!(tenants.contains("\"api_key_id\":\"key_dev\""));
 
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "tenant-a"
+name = "Tenant A"
+key = "tenant-a-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_a"
+project_id = "project_a"
+user_id = "user_a"
+
+[[api_keys]]
+id = "tenant-b"
+name = "Tenant B"
+key = "tenant-b-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_b"
+project_id = "project_b"
+user_id = "user_b"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+"#
+        ),
+    )
+    .unwrap();
+    let reload = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/config/reload",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "config_toml": std::fs::read_to_string(&config).unwrap(),
+            "filename": "ferrogate.toml"
+        })
+        .to_string(),
+    );
+    assert!(reload.contains("200 OK"), "{reload}");
+    assert!(reload.contains("\"committed\":true"), "{reload}");
+
+    let tenants_after_reload = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tenants",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        tenants_after_reload.contains("200 OK"),
+        "{tenants_after_reload}"
+    );
+    assert!(
+        tenants_after_reload.contains("\"organization_id\":\"org_demo\""),
+        "{tenants_after_reload}"
+    );
+    assert!(
+        tenants_after_reload.contains("\"api_key_id\":\"key_dev\""),
+        "{tenants_after_reload}"
+    );
+
     let request_logs = http_request(
         &gateway_addr,
         "GET",

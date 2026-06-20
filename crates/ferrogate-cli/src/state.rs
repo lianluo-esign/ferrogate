@@ -812,6 +812,10 @@ fn initial_cluster_sync_status(config: &Config) -> ClusterSyncStatus {
 fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorageRepositories> {
     let storage = &config.storage;
     let api_keys = serialize_control_plane_documents(&config.api_keys, |key| key.id.clone());
+    let tenants =
+        serialize_control_plane_documents(&tenant_refs_from_api_keys(&config.api_keys), |tenant| {
+            tenant.api_key_id.clone()
+        });
     let policies =
         serialize_control_plane_documents(&config.policies, |policy| policy.name.clone());
     let gateway_configs =
@@ -838,6 +842,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             auth_token,
             initialize_schema,
             api_keys,
+            tenants,
             policies,
             gateway_configs,
             prompt_templates,
@@ -857,6 +862,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         backend,
         RuntimeControlPlaneState::from_documents(
             api_keys,
+            tenants,
             policies,
             gateway_configs,
             prompt_templates,
@@ -944,18 +950,56 @@ fn deserialize_control_plane_documents<T: for<'de> Deserialize<'de>>(
         })
 }
 
+fn tenant_refs_from_api_keys(api_keys: &[ApiKey]) -> Vec<crate::responses::AdminTenantRef> {
+    api_keys
+        .iter()
+        .filter(|key| {
+            key.organization_id.is_some()
+                || key.team_id.is_some()
+                || key.project_id.is_some()
+                || key.user_id.is_some()
+        })
+        .map(|key| crate::responses::AdminTenantRef {
+            organization_id: key.organization_id.clone(),
+            team_id: key.team_id.clone(),
+            project_id: key.project_id.clone(),
+            user_id: key.user_id.clone(),
+            api_key_id: key.id.clone(),
+        })
+        .collect()
+}
+
+fn apply_tenant_refs_to_api_keys(
+    api_keys: &mut [ApiKey],
+    tenant_refs: Vec<crate::responses::AdminTenantRef>,
+) {
+    for tenant in tenant_refs {
+        if let Some(key) = api_keys.iter_mut().find(|key| key.id == tenant.api_key_id) {
+            key.organization_id = tenant.organization_id;
+            key.team_id = tenant.team_id;
+            key.project_id = tenant.project_id;
+            key.user_id = tenant.user_id;
+        }
+    }
+}
+
 fn apply_control_plane_snapshot_to_config_from_repositories(
     repositories: &RuntimeStorageRepositories,
     config: &mut Config,
 ) -> anyhow::Result<()> {
     let snapshot = repositories.control_plane_snapshot()?;
     config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
+    let tenant_refs: Vec<crate::responses::AdminTenantRef> =
+        deserialize_control_plane_documents(snapshot.tenants)?;
     config.policies = deserialize_control_plane_documents(snapshot.policies)?;
     config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
     config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
     config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
     config.extensions.clear();
     config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
+    if !tenant_refs.is_empty() {
+        apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
+    }
     Ok(())
 }
 
@@ -1980,6 +2024,26 @@ impl AppState {
         self.extension_registry.tools_for_plugin(id)
     }
 
+    pub(crate) fn tenant_refs(&self) -> Vec<crate::responses::AdminTenantRef> {
+        self.config
+            .api_keys
+            .iter()
+            .filter(|key| {
+                key.organization_id.is_some()
+                    || key.team_id.is_some()
+                    || key.project_id.is_some()
+                    || key.user_id.is_some()
+            })
+            .map(|key| crate::responses::AdminTenantRef {
+                organization_id: key.organization_id.clone(),
+                team_id: key.team_id.clone(),
+                project_id: key.project_id.clone(),
+                user_id: key.user_id.clone(),
+                api_key_id: key.id.clone(),
+            })
+            .collect()
+    }
+
     pub(crate) fn tools_for(
         &self,
         tenant: &ferrogate_core::TenantContext,
@@ -2380,6 +2444,10 @@ impl AppState {
     fn sync_control_plane_storage_from_config(&self, config: &Config) -> anyhow::Result<()> {
         self.repositories.replace_control_plane(
             serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
+            serialize_control_plane_documents(
+                &tenant_refs_from_api_keys(&config.api_keys),
+                |tenant| tenant.api_key_id.clone(),
+            ),
             serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
             serialize_control_plane_documents(&config.gateway_configs, |profile| {
                 profile.id.clone()
@@ -2398,12 +2466,17 @@ impl AppState {
     fn apply_control_plane_snapshot_to_config(&self, config: &mut Config) -> anyhow::Result<()> {
         let snapshot = self.repositories.control_plane_snapshot()?;
         config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
+        let tenant_refs: Vec<crate::responses::AdminTenantRef> =
+            deserialize_control_plane_documents(snapshot.tenants)?;
         config.policies = deserialize_control_plane_documents(snapshot.policies)?;
         config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
         config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
         config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
         config.extensions.clear();
         config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
+        if !tenant_refs.is_empty() {
+            apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
+        }
         Ok(())
     }
 
