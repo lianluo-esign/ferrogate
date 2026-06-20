@@ -334,6 +334,12 @@ pub(crate) struct AdminDeleteResponse {
     pub(crate) deleted: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminMcpServerMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) server: ferrogate_mcp::McpServerStatus,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct AdminPolicyMutation {
     pub(crate) name: Option<String>,

@@ -229,9 +229,10 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        if path == "/admin/v1/mcp-servers" {
+        if path == "/admin/v1/mcp-servers" || path.starts_with("/admin/v1/mcp-servers/") {
             let headers = req.headers.clone();
-            self.handle_admin_mcp_servers(session, ctx, &headers)
+            let method = req.method.clone();
+            self.handle_admin_mcp_servers(session, ctx, &headers, &method, &path)
                 .await?;
             return Ok(true);
         }

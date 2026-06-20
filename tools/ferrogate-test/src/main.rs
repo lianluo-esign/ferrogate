@@ -1223,16 +1223,24 @@ fn run_control_plane_libsql_restart(
     .to_string();
 
     let approval_id;
+    let mcp_server_name = format!(
+        "dbhttp{}",
+        resource_id
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+    );
     {
         let case =
             TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false, true)?;
         case.expect_storage_status()?;
         case.register_echo_plugin()?;
         case.expect_plugin("tool.echo")?;
-        case.expect_mcp_server("dbhttp")?;
         approval_id = case.create_expired_echo_approval()?;
         case.register_echo_plugin()?;
         case.expect_echo_tool()?;
+        case.register_mcp_server(&mcp_server_name)?;
+        case.expect_mcp_server(&mcp_server_name)?;
         case.expect_json(
             "POST",
             "/admin/v1/api-keys",
@@ -1297,13 +1305,14 @@ fn run_control_plane_libsql_restart(
             TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false, false)?;
         case.expect_storage_status()?;
         case.expect_plugin("tool.echo")?;
-        case.expect_mcp_server("dbhttp")?;
+        case.expect_mcp_server(&mcp_server_name)?;
         case.expect_echo_tool()?;
         case.expect_tool_approval(&approval_id, "expired")?;
         case.expect_api_key(&resource_id)?;
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_policy(&policy_name)?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
+        case.delete_mcp_server(&mcp_server_name)?;
         case.expect_json(
             "DELETE",
             &format!("/admin/v1/gateway-configs/{gateway_config_id}"),
@@ -1355,7 +1364,7 @@ fn run_control_plane_libsql_restart(
             TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false, false)?;
         case.expect_storage_status()?;
         case.expect_plugin("tool.echo")?;
-        case.expect_mcp_server("dbhttp")?;
+        case.expect_missing_mcp_server(&mcp_server_name)?;
         case.expect_tool_approval(&approval_id, "expired")?;
         if verify_deleted_after_restart {
             case.expect_missing_api_key(&resource_id)?;
@@ -1767,6 +1776,20 @@ impl TursoRestartHarness {
         )
     }
 
+    fn expect_missing_mcp_server(&self, name: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/mcp-servers/{name}"),
+            &[ADMIN_AUTH],
+            "",
+            404,
+            |body| {
+                assert_eq!(body["error"]["code"], "mcp_server_not_found");
+                Ok(())
+            },
+        )
+    }
+
     fn register_echo_plugin(&self) -> Result<()> {
         self.register_echo_plugin_with_policy("never")
     }
@@ -1810,6 +1833,60 @@ impl TursoRestartHarness {
                 assert_array_contains(&body["plugin"]["tools"], "tool.echo")
                     .context("registered plugin must expose tool.echo")?;
                 assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn register_mcp_server(&self, name: &str) -> Result<()> {
+        let body = serde_json::json!({
+            "name": name,
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:1/mcp",
+            "auth_type": "none",
+            "tools_to_execute": ["search"],
+            "tools_to_auto_execute": ["search"],
+            "approval_policy": "never",
+            "tool_include": ["search"],
+            "tool_regex": [],
+            "headers": [],
+            "tls": {},
+            "timeout_ms": 100,
+            "health_ping_interval_secs": 30,
+            "max_reconnect_attempts": 3,
+            "min_reconnect_backoff_secs": 1,
+            "max_reconnect_backoff_secs": 5
+        })
+        .to_string();
+        self.expect_json(
+            "POST",
+            "/admin/v1/mcp-servers",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &body,
+            201,
+            |body| {
+                assert_eq!(body["object"], "mcp_server");
+                assert_eq!(body["server"]["name"], name);
+                assert_eq!(body["server"]["transport"], "streamable_http");
+                assert_eq!(body["server"]["health"], "degraded");
+                assert_eq!(body["server"]["connected"], false);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn delete_mcp_server(&self, name: &str) -> Result<()> {
+        self.expect_json(
+            "DELETE",
+            &format!("/admin/v1/mcp-servers/{name}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["object"], "mcp_server");
+                assert_eq!(body["id"], name);
+                assert_eq!(body["deleted"], true);
                 Ok(())
             },
         )

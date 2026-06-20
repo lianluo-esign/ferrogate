@@ -292,6 +292,53 @@ impl SharedAppState {
         result
     }
 
+    pub(crate) fn upsert_mcp_server(
+        &self,
+        server: crate::config::McpServerConfig,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let result = (|| {
+            active.repositories.upsert_control_plane_mcp_server(
+                server.name.clone(),
+                serde_json::to_string(&server)?,
+            )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            upsert_or_replace_mcp_server(&mut candidate.mcp_servers, server);
+            candidate.validate()?;
+            let result = self.reload_process_local(candidate);
+            if result.committed {
+                let _ = self.publish_shared_control_plane(&self.current().config)?;
+            }
+            Ok(result)
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
+    pub(crate) fn delete_mcp_server(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        if !active.repositories.delete_control_plane_mcp_server(name)? {
+            return Ok(None);
+        }
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.mcp_servers.retain(|server| server.name != name);
+            candidate.validate()?;
+            Ok(Some(self.reload_process_local(candidate)))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
     pub(crate) fn source_path(&self) -> Option<&PathBuf> {
         self.source_path.as_deref()
     }
@@ -1044,6 +1091,20 @@ fn upsert_or_replace_plugin_registration(
         *existing = plugin;
     } else {
         plugins.push(plugin);
+    }
+}
+
+fn upsert_or_replace_mcp_server(
+    servers: &mut Vec<crate::config::McpServerConfig>,
+    server: crate::config::McpServerConfig,
+) {
+    if let Some(existing) = servers
+        .iter_mut()
+        .find(|existing| existing.name == server.name)
+    {
+        *existing = server;
+    } else {
+        servers.push(server);
     }
 }
 

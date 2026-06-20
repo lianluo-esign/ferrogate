@@ -716,6 +716,10 @@ impl RuntimeControlPlaneState {
         );
     }
 
+    pub fn delete_mcp_server(&mut self, id: &str) -> bool {
+        self.mcp_servers.remove(id).is_some()
+    }
+
     pub fn upsert_plugin_registration(&mut self, id: impl Into<String>, document_json: String) {
         let id = id.into();
         self.plugin_registrations.insert(
@@ -1270,6 +1274,36 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.delete("plugin_registration", id.to_string()))
+            }
+        }
+    }
+
+    pub fn upsert_control_plane_mcp_server(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_mcp_server(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("mcp_server", id.into(), document_json))
+            }
+        }
+    }
+
+    pub fn delete_control_plane_mcp_server(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_mcp_server(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("mcp_server", id.to_string()))
             }
         }
     }

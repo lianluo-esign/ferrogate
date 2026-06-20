@@ -25,11 +25,12 @@ use crate::{
         AdminApiKeyMutationResponse, AdminConfigReloadResponse, AdminConfigValidateRequest,
         AdminConfigValidateResponse, AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse,
         AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
-        AdminList, AdminPlugin, AdminPluginMutation, AdminPluginMutationResponse,
-        AdminPolicyMutation, AdminPolicyMutationResponse, AdminPromptTemplate,
-        AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse, AdminProvider,
-        AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus, HealthResponse,
-        OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
+        AdminList, AdminMcpServerMutationResponse, AdminPlugin, AdminPluginMutation,
+        AdminPluginMutationResponse, AdminPolicyMutation, AdminPolicyMutationResponse,
+        AdminPromptTemplate, AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse,
+        AdminProvider, AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus,
+        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
+        ReadinessResponse,
     },
     state::{AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord},
 };
@@ -251,22 +252,348 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                state.mcp_health_check_and_reconnect();
-                let statuses = state.mcp_statuses();
-                let total = statuses.len();
-                let body = AdminList::paginated(statuses, total, 0, total);
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-            }
+            Ok(_) => match (method, path.strip_prefix("/admin/v1/mcp-servers/")) {
+                (&Method::GET, None) => {
+                    state.mcp_health_check_and_reconnect();
+                    let statuses = state.mcp_statuses();
+                    let total = statuses.len();
+                    let body = AdminList::paginated(statuses, total, 0, total);
+                    write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                }
+                (&Method::POST, None) => {
+                    self.handle_admin_mcp_server_upsert(session, ctx, headers, None)
+                        .await
+                }
+                (&Method::GET, Some(name)) if !name.contains('/') => {
+                    state.mcp_health_check_and_reconnect();
+                    if let Some(status) = state
+                        .mcp_statuses()
+                        .into_iter()
+                        .find(|status| status.name == name)
+                    {
+                        return write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &status,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "mcp_server_not_found",
+                        format!("MCP server {name} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+                (&Method::PUT | &Method::PATCH, Some(name)) if !name.contains('/') => {
+                    self.handle_admin_mcp_server_upsert(session, ctx, headers, Some(name))
+                        .await
+                }
+                (&Method::DELETE, Some(name)) if !name.contains('/') => {
+                    self.handle_admin_mcp_server_delete(session, ctx, headers, name)
+                        .await
+                }
+                _ => {
+                    write_json_error(
+                        session,
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "method_not_allowed",
+                        "MCP server endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            },
             Err(error) => {
                 write_json_error(
                     session,
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_mcp_server_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_name: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.upsert",
+                    path_name.unwrap_or("new"),
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let server = match serde_json::from_slice::<crate::config::McpServerConfig>(&body) {
+            Ok(server) => {
+                if path_name.is_some_and(|path_name| path_name != server.name.as_str()) {
+                    let message = "request path name and body name must match";
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "mcp_server.upsert",
+                        path_name.unwrap_or("new"),
+                        "rejected",
+                        message,
+                    ));
+                    return write_json_error(
+                        session,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_mcp_server",
+                        message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                server
+            }
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.upsert",
+                    path_name.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON MCP server config object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let server_name = server.name.clone();
+        match self.state.upsert_mcp_server(server) {
+            Ok(outcome) if outcome.committed => {
+                let current = self.state.current();
+                current.mcp_health_check_and_reconnect();
+                let Some(status) = current
+                    .mcp_statuses()
+                    .into_iter()
+                    .find(|status| status.name == server_name)
+                else {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "mcp_server_reload_rejected",
+                        format!("MCP server {server_name} was not visible after reload"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.upsert",
+                    &server_name,
+                    "committed",
+                    format!(
+                        "MCP server {server_name} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminMcpServerMutationResponse {
+                    object: "mcp_server",
+                    server: status,
+                };
+                write_json_response(
+                    session,
+                    if path_name.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &body,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate MCP server config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.upsert",
+                    &server_name,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "mcp_server_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.upsert",
+                    &server_name,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_mcp_server",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_mcp_server_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        name: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match self.state.delete_mcp_server(name) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.delete",
+                    name,
+                    "committed",
+                    format!(
+                        "MCP server {name} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminDeleteResponse {
+                    object: "mcp_server",
+                    id: name.to_string(),
+                    deleted: true,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate MCP server config".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.delete",
+                    name,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "mcp_server_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "mcp_server_not_found",
+                    format!("MCP server {name} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "mcp_server.delete",
+                    name,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_mcp_server_delete",
+                    message,
                     &ctx.request_id,
                 )
                 .await

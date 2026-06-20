@@ -884,6 +884,149 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "operationId": "createAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create an MCP server registration and apply it through process-local reload.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminMcpServerMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/mcp-servers/{name}": {
+      "parameters": [
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Stable MCP server name."
+        }
+      ],
+      "get": {
+        "operationId": "getAdminMcpServer",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one MCP server status and discovered tool count.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminMcpServerStatusOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace MCP server metadata or reconnect settings while preserving durable registration history.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminMcpServerMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Update MCP server metadata or reconnect settings while preserving history.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminMcpServerMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete an MCP server registration without deleting its session evidence.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteMcpServerResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
       }
     },
     "/admin/v1/tool-sessions/{session_id}": {
@@ -921,6 +1064,149 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create an MCP server registration and apply it through process-local reload.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminMcpServerMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/mcp-servers/{name}": {
+      "parameters": [
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Stable MCP server name."
+        }
+      ],
+      "get": {
+        "operationId": "getAdminMcpServer",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one MCP server status and discovered tool count.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminMcpServerStatusOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace MCP server metadata or reconnect settings while preserving durable registration history.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminMcpServerMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Update MCP server metadata or reconnect settings while preserving history.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminMcpServerMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminMcpServer",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete an MCP server registration without deleting its session evidence.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteMcpServerResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         }
       }
@@ -2513,6 +2799,44 @@
           }
         }
       },
+      "AdminMcpServerMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminMcpServerMutation"
+            },
+            "examples": {
+              "registerStreamableHttp": {
+                "summary": "Register an MCP server over streamable HTTP.",
+                "value": {
+                  "name": "docs-mcp",
+                  "transport": "streamable_http",
+                  "url": "https://example.com/mcp",
+                  "tools_to_execute": [
+                    "search"
+                  ],
+                  "tools_to_auto_execute": [
+                    "search"
+                  ],
+                  "approval_policy": "never",
+                  "tool_include": [
+                    "search"
+                  ],
+                  "tool_regex": [],
+                  "headers": [],
+                  "tls": {},
+                  "timeout_ms": 1000,
+                  "health_ping_interval_secs": 30,
+                  "max_reconnect_attempts": 3,
+                  "min_reconnect_backoff_secs": 1,
+                  "max_reconnect_backoff_secs": 5
+                }
+              }
+            }
+          }
+        }
+      },
       "PromptTemplateRenderRequest": {
         "required": false,
         "content": {
@@ -2565,6 +2889,26 @@
           }
         }
       },
+      "AdminMcpServerMutationOk": {
+        "description": "MCP server mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminMcpServerMutationResponse"
+            }
+          }
+        }
+      },
+      "AdminMcpServerStatusOk": {
+        "description": "MCP server status response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/McpServerStatus"
+            }
+          }
+        }
+      },
       "DeleteApiKeyOk": {
         "description": "API key delete response.",
         "content": {
@@ -2591,6 +2935,16 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/DeleteGatewayConfigResponse"
+            }
+          }
+        }
+      },
+      "DeleteMcpServerResponse": {
+        "description": "MCP server delete response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteMcpServerResponse"
             }
           }
         }
@@ -5993,6 +6347,61 @@
       "McpServerStatusList": {
         "$ref": "#/components/schemas/AdminList_McpServerStatus"
       },
+      "AdminMcpServerMutation": {
+        "$ref": "#/components/schemas/McpServerConfig"
+      },
+      "AdminMcpServerMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "server"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "mcp_server"
+          },
+          "server": {
+            "$ref": "#/components/schemas/McpServerStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminMcpServerStatusOk": {
+        "description": "MCP server status response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/McpServerStatus"
+            }
+          }
+        }
+      },
+      "AdminMcpServerMutationOk": {
+        "description": "MCP server mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminMcpServerMutationResponse"
+            }
+          }
+        }
+      },
+      "DeleteMcpServerResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "mcp_server"
+              }
+            }
+          }
+        ]
+      },
       "AdminGatewayConfigProfile": {
         "type": "object",
         "required": [
@@ -6066,6 +6475,140 @@
           "chat_completions",
           "responses"
         ]
+      },
+      "McpServerConfig": {
+        "type": "object",
+        "required": [
+          "name",
+          "transport",
+          "tools_to_execute"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "streamable_http",
+              "sse",
+              "stdio"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "args": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "auth_type": {
+            "$ref": "#/components/schemas/McpAuthType"
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/McpHeaderConfig"
+            }
+          },
+          "tools_to_execute": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "tools_to_auto_execute": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "approval_policy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "tool_include": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "tool_regex": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "tls": {
+            "$ref": "#/components/schemas/McpTlsConfig"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "health_ping_interval_secs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_reconnect_attempts": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "min_reconnect_backoff_secs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_reconnect_backoff_secs": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpAuthType": {
+        "type": "string",
+        "enum": [
+          "none",
+          "headers",
+          "oauth",
+          "per_user_oauth",
+          "per_user_headers"
+        ]
+      },
+      "McpHeaderConfig": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value_env": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpTlsConfig": {
+        "type": "object",
+        "properties": {
+          "insecure_skip_verify": {
+            "type": "boolean",
+            "default": false
+          },
+          "ca_cert_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "PromptTemplateVersionStatus": {
         "type": "string",
