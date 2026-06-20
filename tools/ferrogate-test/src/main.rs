@@ -1222,6 +1222,7 @@ fn run_control_plane_libsql_restart(
     })
     .to_string();
 
+    let approval_id;
     {
         let case =
             TursoRestartHarness::start(ferrogate_bin, libsql_url, libsql_auth_token, false, true)?;
@@ -1229,6 +1230,8 @@ fn run_control_plane_libsql_restart(
         case.register_echo_plugin()?;
         case.expect_plugin("tool.echo")?;
         case.expect_mcp_server("dbhttp")?;
+        approval_id = case.create_expired_echo_approval()?;
+        case.register_echo_plugin()?;
         case.expect_echo_tool()?;
         case.expect_json(
             "POST",
@@ -1296,6 +1299,7 @@ fn run_control_plane_libsql_restart(
         case.expect_plugin("tool.echo")?;
         case.expect_mcp_server("dbhttp")?;
         case.expect_echo_tool()?;
+        case.expect_tool_approval(&approval_id, "expired")?;
         case.expect_api_key(&resource_id)?;
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_policy(&policy_name)?;
@@ -1352,6 +1356,7 @@ fn run_control_plane_libsql_restart(
         case.expect_storage_status()?;
         case.expect_plugin("tool.echo")?;
         case.expect_mcp_server("dbhttp")?;
+        case.expect_tool_approval(&approval_id, "expired")?;
         if verify_deleted_after_restart {
             case.expect_missing_api_key(&resource_id)?;
             case.expect_missing_gateway_config(&gateway_config_id)?;
@@ -1763,11 +1768,33 @@ impl TursoRestartHarness {
     }
 
     fn register_echo_plugin(&self) -> Result<()> {
+        self.register_echo_plugin_with_policy("never")
+    }
+
+    fn register_echo_plugin_with_policy(&self, approval_policy: &str) -> Result<()> {
+        let body = serde_json::json!({
+            "id": "tool.echo",
+            "kind": "tool_provider",
+            "source": "builtin",
+            "enabled": true,
+            "order": 10,
+            "approval_policy": approval_policy,
+            "permissions": {
+                "tools": ["tool.echo"],
+                "network": [],
+                "filesystem": false,
+                "shell": false
+            },
+            "config": {
+                "registered_by": "ferrogate-test"
+            }
+        })
+        .to_string();
         self.expect_json(
             "POST",
             "/admin/v1/plugins",
             &[ADMIN_AUTH, JSON_CONTENT],
-            r#"{"id":"tool.echo","kind":"tool_provider","source":"builtin","enabled":true,"order":10,"approval_policy":"never","permissions":{"tools":["tool.echo"],"network":[],"filesystem":false,"shell":false},"config":{"registered_by":"ferrogate-test"}}"#,
+            &body,
             201,
             |body| {
                 assert_eq!(body["object"], "plugin");
@@ -1777,10 +1804,79 @@ impl TursoRestartHarness {
                 assert_eq!(body["plugin"]["enabled"], true);
                 assert_eq!(body["plugin"]["active"], true);
                 assert_eq!(body["plugin"]["health"], "ok");
+                assert_eq!(body["plugin"]["approval_policy"], approval_policy);
                 assert_array_contains(&body["plugin"]["capabilities"], "tool_provider")
                     .context("registered plugin must advertise tool_provider capability")?;
                 assert_array_contains(&body["plugin"]["tools"], "tool.echo")
                     .context("registered plugin must expose tool.echo")?;
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn create_expired_echo_approval(&self) -> Result<String> {
+        self.register_echo_plugin_with_policy("always")?;
+        let mut request_id = String::new();
+        self.expect_json(
+            "POST",
+            "/v1/tools/execute",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            r#"{"name":"tool.echo","arguments":{"message":"approval durability"}}"#,
+            403,
+            |body| {
+                assert_eq!(body["error"]["code"], "tool_denied");
+                request_id = body["error"]["request_id"]
+                    .as_str()
+                    .context("tool approval error response must include request_id")?
+                    .to_string();
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        let mut approval_id = String::new();
+        self.expect_json(
+            "GET",
+            "/admin/v1/tool-approvals",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let approvals = body["data"]
+                    .as_array()
+                    .context("tool approvals response data must be an array")?;
+                let approval = approvals
+                    .iter()
+                    .find(|approval| approval["request_id"] == request_id)
+                    .with_context(|| {
+                        format!("tool approval for request {request_id} was not persisted")
+                    })?;
+                assert_eq!(approval["tool_name"], "tool.echo");
+                assert_eq!(approval["status"], "expired");
+                assert_eq!(approval["approval_policy"], "always");
+                assert_secret_redacted(&body.to_string());
+                approval_id = approval["id"]
+                    .as_str()
+                    .context("tool approval id missing")?
+                    .to_string();
+                Ok(())
+            },
+        )?;
+        Ok(approval_id)
+    }
+
+    fn expect_tool_approval(&self, id: &str, status: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/tool-approvals/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["id"], id);
+                assert_eq!(body["tool_name"], "tool.echo");
+                assert_eq!(body["status"], status);
+                assert_eq!(body["approval_policy"], "always");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
@@ -2360,6 +2456,9 @@ storage:
     - mysql
   libsql_url: "{libsql_url}"{auth_token_env}
   migration_mode: auto
+
+reliability:
+  tool_approval_timeout_secs: 1
 
 providers:
   - name: openai
