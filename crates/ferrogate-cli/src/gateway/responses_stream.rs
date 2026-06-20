@@ -634,6 +634,26 @@ mod tests {
         body
     }
 
+    fn sse_json_events(body: &str, event_name: &str) -> Vec<Value> {
+        body.split("\n\n")
+            .filter_map(|frame| {
+                let mut event = None;
+                let mut data = Vec::new();
+                for line in frame.lines() {
+                    if let Some(value) = line.strip_prefix("event:") {
+                        event = Some(value.trim());
+                    } else if let Some(value) = line.strip_prefix("data:") {
+                        data.push(value.trim_start());
+                    }
+                }
+                if event != Some(event_name) {
+                    return None;
+                }
+                serde_json::from_str::<Value>(&data.join("\n")).ok()
+            })
+            .collect()
+    }
+
     #[test]
     fn normalizes_openai_sse_stream_into_responses_events() {
         let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\ndata: [DONE]\n\n";
@@ -692,7 +712,7 @@ mod tests {
 
     #[test]
     fn normalizes_openai_tool_call_arguments_into_responses_events() {
-        let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ferrogate\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
+        let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"query\\\":\\\"\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ferrogate\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
         let reader = Cursor::new(body.to_vec());
         let normalizer = ResponsesStreamNormalizer::new(
             reader,
@@ -703,11 +723,18 @@ mod tests {
 
         let normalized = read_all(normalizer);
         assert!(normalized.contains("event: response.function_call_arguments.delta"));
-        assert!(normalized.contains(r#""name":"lookup""#));
-        assert!(normalized.contains(r#""delta":"{\"query\":\""#));
-        assert!(normalized.contains(r#""delta":"ferrogate\"}"#));
+        let delta_events = sse_json_events(&normalized, "response.function_call_arguments.delta");
+        assert_eq!(delta_events.len(), 2, "{normalized}");
+        assert_eq!(delta_events[0]["name"], "lookup");
+        assert_eq!(delta_events[0]["call_id"], "call_1");
+        assert_eq!(delta_events[0]["delta"], r#"{"query":""#);
+        assert_eq!(delta_events[1]["delta"], r#"ferrogate"}"#);
         assert!(normalized.contains("event: response.function_call_arguments.done"));
-        assert!(normalized.contains(r#""arguments":"{\"query\":\"ferrogate\"}"#));
+        let done_events = sse_json_events(&normalized, "response.function_call_arguments.done");
+        assert_eq!(done_events.len(), 1, "{normalized}");
+        assert_eq!(done_events[0]["name"], "lookup");
+        assert_eq!(done_events[0]["call_id"], "call_1");
+        assert_eq!(done_events[0]["arguments"], r#"{"query":"ferrogate"}"#);
         assert!(normalized.contains("data: [DONE]"));
     }
 
