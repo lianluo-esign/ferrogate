@@ -30,6 +30,7 @@ use super::{
     dispatch::{
         dispatch_provider_request, dispatch_provider_streaming_request, ProviderBodyReader,
     },
+    responses_stream::{ResponsesStreamNormalizer, ResponsesStreamProviderKind},
     FerroGateway, ProxyContext,
 };
 
@@ -843,6 +844,24 @@ impl FerroGateway {
                                 started_at_unix: None,
                                 completed_at_unix: None,
                             });
+                            if endpoint == AiEndpoint::Responses {
+                                let provider_kind = responses_stream_provider_kind(&provider.kind);
+                                let normalized = ResponsesStreamNormalizer::new(
+                                    response.body,
+                                    provider_kind,
+                                    ctx.request_id.clone(),
+                                    response.content_type.clone(),
+                                );
+                                return write_streaming_response(
+                                    session,
+                                    response.status,
+                                    "text/event-stream",
+                                    response.initial_body,
+                                    normalized,
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
                             return write_streaming_response(
                                 session,
                                 response.status,
@@ -1247,6 +1266,17 @@ impl FerroGateway {
             started_at_unix: None,
             completed_at_unix: None,
         });
+    }
+}
+
+fn responses_stream_provider_kind(provider_kind: &str) -> ResponsesStreamProviderKind {
+    match provider_kind.trim().to_ascii_lowercase().as_str() {
+        "openai" | "openai-compatible" | "deepseek" | "newapi" | "sub2api" | "cliproxyapi"
+        | "cli-proxy-api" | "vllm" | "llama.cpp" | "llama-cpp" | "llamacpp" | "tgi" | "ollama"
+        | "ollama-compatible" => ResponsesStreamProviderKind::OpenAiCompatible,
+        "anthropic" => ResponsesStreamProviderKind::Anthropic,
+        "gemini" => ResponsesStreamProviderKind::Gemini,
+        _ => ResponsesStreamProviderKind::Other,
     }
 }
 

@@ -11,6 +11,7 @@ mod handlers;
 mod local;
 mod mcp_rpc;
 mod proxy;
+mod responses_stream;
 
 use anyhow::{Context, Result as AnyResult};
 use pingora::{

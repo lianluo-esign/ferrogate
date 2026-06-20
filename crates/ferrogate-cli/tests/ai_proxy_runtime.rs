@@ -1818,6 +1818,282 @@ project_id = "project_gateway"
 }
 
 #[test]
+fn openai_responses_streaming_events_are_normalized() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_sse_provider_upstream_with_body(
+        r#"data: {"choices":[{"delta":{"content":"hello"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}
+
+data: [DONE]
+
+"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4.1-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["responses.create"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/responses",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","stream":true,"input":"hello"}"#,
+    );
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("content-type: text/event-stream"));
+    assert!(response.contains("event: response.output_text.delta"));
+    assert!(response.contains("event: response.completed"));
+    assert!(response.contains("data: [DONE]"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_request = provider_handle.join().unwrap();
+    assert!(provider_request.contains("POST /v1/responses HTTP/1.1"));
+    assert!(provider_request.contains(r#""stream":true"#));
+}
+
+#[test]
+fn openai_responses_streaming_forwards_first_chunk_before_provider_finishes() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_slow_sse_provider_upstream();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4.1-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["responses.create"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(&gateway_addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let body = r#"{"model":"fast-chat","stream":true,"input":"hello"}"#;
+    write!(
+        stream,
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer client-secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .unwrap();
+
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 256];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        assert!(read > 0, "gateway closed before first normalized SSE chunk");
+        response.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&response);
+        if text.contains("event: response.output_text.delta") {
+            assert!(
+                started.elapsed() < Duration::from_millis(900),
+                "first normalized SSE chunk was buffered until provider completion"
+            );
+            assert!(!text.contains("data: [DONE]"));
+            break;
+        }
+    }
+
+    let mut rest = String::new();
+    stream.read_to_string(&mut rest).unwrap();
+    assert!(rest.contains("data: [DONE]"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_request = provider_handle.join().unwrap();
+    assert!(provider_request.contains(r#""stream":true"#));
+}
+
+#[test]
+fn anthropic_responses_streaming_events_are_normalized() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_sse_provider_upstream_with_body(
+        r#"event: content_block_delta
+data: {"delta":{"text":"hello"}}
+
+event: message_stop
+data: {}
+
+"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "anthropic"
+kind = "anthropic"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "claude-chat"
+provider = "anthropic"
+provider_model = "claude-3-5-sonnet-latest"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["responses.create"]
+allowed_models = ["claude-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/responses",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"claude-chat","stream":true,"input":"hello"}"#,
+    );
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("event: response.output_text.delta"));
+    assert!(response.contains("event: response.completed"));
+    assert!(response.contains("data: [DONE]"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_request = provider_handle.join().unwrap();
+    assert!(provider_request.contains("POST /v1/responses HTTP/1.1"));
+}
+
+#[test]
+fn gemini_responses_streaming_events_are_normalized() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_sse_provider_upstream_with_body(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5,"totalTokenCount":8}}
+
+data: [DONE]
+
+"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "gemini"
+kind = "gemini"
+base_url = "http://{provider_addr}/v1beta"
+
+[[models]]
+name = "flash-chat"
+provider = "gemini"
+provider_model = "gemini-2.5-flash"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["responses.create"]
+allowed_models = ["flash-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/responses",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"flash-chat","stream":true,"input":"hello"}"#,
+    );
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("event: response.output_text.delta"));
+    assert!(response.contains("event: response.completed"));
+    assert!(response.contains(r#""prompt_tokens":3"#));
+    assert!(response.contains("data: [DONE]"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_request = provider_handle.join().unwrap();
+    assert!(provider_request
+        .contains("POST /v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1"));
+}
+
+#[test]
 fn anthropic_responses_dispatch_converts_request_shape() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(
@@ -3454,12 +3730,19 @@ scopes = ["admin.read"]
 }
 
 fn spawn_sse_provider_upstream() -> (String, thread::JoinHandle<String>) {
+    spawn_sse_provider_upstream_with_body(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+    )
+}
+
+fn spawn_sse_provider_upstream_with_body(
+    body: &'static str,
+) -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let request = read_http_request(&mut stream);
-        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
