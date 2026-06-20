@@ -672,6 +672,154 @@ user_id = "user_agent_runner"
 }
 
 #[test]
+fn agent_run_admin_views_support_tenant_and_request_filters() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_provider_upstream(
+        1,
+        r#"{"id":"chatcmpl_agent_run","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "tenant-a"
+name = "Tenant A"
+key = "tenant-a-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_a"
+project_id = "project_a"
+user_id = "user_a"
+
+[[api_keys]]
+id = "tenant-b"
+name = "Tenant B"
+key = "tenant-b-secret"
+scopes = ["chat.completions", "admin.read"]
+allowed_models = ["fast-chat"]
+organization_id = "org_b"
+project_id = "project_b"
+user_id = "user_b"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+"#
+        ),
+    )
+    .unwrap();
+    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let agent_run_id = "run-agent-1";
+    let tenant_a_chat = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            "Authorization: Bearer tenant-a-secret",
+            "Content-Type: application/json",
+            &format!("X-FerroGate-Agent-Run-Id: {agent_run_id}"),
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"hello"}]}"#,
+    );
+    assert!(tenant_a_chat.contains("200 OK"), "{tenant_a_chat}");
+    let request_id = response_header(&tenant_a_chat, "x-request-id")
+        .expect("tenant-a chat response should include x-request-id");
+
+    let filtered_list = http_request(
+        &gateway_addr,
+        "GET",
+        &format!(
+            "/admin/v1/agent-runs?organization_id=org_a&api_key_id=tenant-a&request_id={request_id}"
+        ),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(filtered_list.contains("200 OK"), "{filtered_list}");
+    assert!(
+        filtered_list.contains("\"object\":\"list\""),
+        "{filtered_list}"
+    );
+    assert!(
+        filtered_list.contains(&format!("\"id\":\"{agent_run_id}\"")),
+        "{filtered_list}"
+    );
+    assert!(
+        filtered_list.contains("\"tenant\":{\"organization_id\":\"org_a\""),
+        "{filtered_list}"
+    );
+    assert!(
+        !filtered_list.contains("\"organization_id\":\"org_b\""),
+        "{filtered_list}"
+    );
+
+    let filtered_timeline = http_request(
+        &gateway_addr,
+        "GET",
+        &format!(
+            "/admin/v1/agent-runs/{agent_run_id}?organization_id=org_a&api_key_id=tenant-a&request_id={request_id}"
+        ),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(filtered_timeline.contains("200 OK"), "{filtered_timeline}");
+    assert!(
+        filtered_timeline.contains("\"object\":\"agent_run_timeline\""),
+        "{filtered_timeline}"
+    );
+    assert!(
+        filtered_timeline.contains("\"request_count\":1"),
+        "{filtered_timeline}"
+    );
+
+    let tenant_b_filtered_list = http_request(
+        &gateway_addr,
+        "GET",
+        &format!(
+            "/admin/v1/agent-runs?organization_id=org_b&api_key_id=tenant-b&request_id={request_id}"
+        ),
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        tenant_b_filtered_list.contains("200 OK"),
+        "{tenant_b_filtered_list}"
+    );
+    assert!(
+        tenant_b_filtered_list.contains("\"data\":[]"),
+        "{tenant_b_filtered_list}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_requests = provider_handle.join().unwrap();
+    assert_eq!(provider_requests.len(), 1);
+    assert!(provider_requests[0].contains("POST /v1/chat/completions HTTP/1.1"));
+}
+
+#[test]
 fn prompt_template_admin_render_and_chat_submission_work() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_provider_upstream(
@@ -1871,7 +2019,9 @@ allowed_models = ["fast-chat"]
         r#"{"model":"fast-chat","stream":true,"input":"hello"}"#,
     );
     assert!(response.contains("200 OK"));
-    assert!(response.to_ascii_lowercase().contains("content-type: text/event-stream"));
+    assert!(response
+        .to_ascii_lowercase()
+        .contains("content-type: text/event-stream"));
     assert!(response.contains("event: response.output_text.delta"));
     assert!(response.contains("event: response.completed"));
     assert!(response.contains("data: [DONE]"));
@@ -3887,4 +4037,14 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
         }
     }
     String::from_utf8_lossy(&request).into_owned()
+}
+
+fn response_header(response: &str, header: &str) -> Option<String> {
+    response.lines().find_map(|line| {
+        line.split_once(':').and_then(|(name, value)| {
+            name.trim()
+                .eq_ignore_ascii_case(header)
+                .then(|| value.trim().to_string())
+        })
+    })
 }

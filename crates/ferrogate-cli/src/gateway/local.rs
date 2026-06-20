@@ -1885,7 +1885,10 @@ impl FerroGateway {
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
                 if path == "/admin/v1/agent-runs" {
-                    let page = state.agent_runs_page(state.admin_pagination(query));
+                    let page = state.agent_runs_page(
+                        state.admin_pagination(query),
+                        crate::state::AgentRunFilter::from_query(query),
+                    );
                     let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                     return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                         .await;
@@ -1901,7 +1904,9 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                let Some(timeline) = state.agent_run_timeline(run_id) else {
+                let Some(timeline) = state
+                    .agent_run_timeline(run_id, crate::state::AgentRunFilter::from_query(query))
+                else {
                     return write_json_error(
                         session,
                         StatusCode::NOT_FOUND,

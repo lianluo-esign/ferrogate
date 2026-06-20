@@ -1253,6 +1253,69 @@ pub(crate) struct AdminPage<T> {
     pub(crate) limit: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentRunFilter {
+    pub(crate) organization_id: Option<String>,
+    pub(crate) project_id: Option<String>,
+    pub(crate) api_key_id: Option<String>,
+    pub(crate) request_id: Option<String>,
+}
+
+impl AgentRunFilter {
+    pub(crate) fn from_query(query: Option<&str>) -> Self {
+        let mut filter = Self::default();
+        let Some(query) = query else {
+            return filter;
+        };
+        for (name, value) in query_pairs(query) {
+            match name.as_str() {
+                "organization_id" | "tenant" => filter.organization_id = non_empty(value),
+                "project_id" | "project" => filter.project_id = non_empty(value),
+                "api_key_id" | "api_key" => filter.api_key_id = non_empty(value),
+                "request_id" => filter.request_id = non_empty(value),
+                _ => {}
+            }
+        }
+        filter
+    }
+}
+
+fn agent_run_matches_filter(
+    request_id: &str,
+    tenant: &ferrogate_core::TenantContext,
+    filter: &AgentRunFilter,
+) -> bool {
+    if filter
+        .organization_id
+        .as_ref()
+        .is_some_and(|expected| tenant.organization_id.as_ref() != Some(expected))
+    {
+        return false;
+    }
+    if filter
+        .project_id
+        .as_ref()
+        .is_some_and(|expected| tenant.project_id.as_ref() != Some(expected))
+    {
+        return false;
+    }
+    if filter
+        .api_key_id
+        .as_ref()
+        .is_some_and(|expected| tenant.api_key_id.as_ref() != Some(expected))
+    {
+        return false;
+    }
+    if filter
+        .request_id
+        .as_ref()
+        .is_some_and(|expected| request_id != expected)
+    {
+        return false;
+    }
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RequestLogExportFilter {
     pub(crate) organization_id: Option<String>,
@@ -3663,8 +3726,9 @@ impl AppState {
     pub(crate) fn agent_runs_page(
         &self,
         pagination: AdminPagination,
+        filter: AgentRunFilter,
     ) -> AdminPage<AgentRunSummary> {
-        let mut summaries = self.agent_run_summaries();
+        let mut summaries = self.agent_run_summaries(&filter);
         summaries.sort_by(|left, right| {
             right
                 .last_seen_unix
@@ -3685,24 +3749,31 @@ impl AppState {
         }
     }
 
-    pub(crate) fn agent_run_timeline(&self, id: &str) -> Option<AgentRunTimeline> {
+    pub(crate) fn agent_run_timeline(
+        &self,
+        id: &str,
+        filter: AgentRunFilter,
+    ) -> Option<AgentRunTimeline> {
         let requests = self
             .repositories
             .request_logs()
             .into_iter()
             .filter(|log| log.agent_run_id.as_deref() == Some(id))
+            .filter(|log| agent_run_matches_filter(&log.request_id, &log.tenant, &filter))
             .collect::<Vec<_>>();
         let billing_events = self
             .metering_events
             .list()
             .into_iter()
             .filter(|event| event.agent_run_id.as_deref() == Some(id))
+            .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
             .collect::<Vec<_>>();
         let audit_events = self
             .repositories
             .audit_events()
             .into_iter()
             .filter(|event| event.agent_run_id.as_deref() == Some(id))
+            .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
             .collect::<Vec<_>>();
         if requests.is_empty() && billing_events.is_empty() && audit_events.is_empty() {
             return None;
@@ -3719,7 +3790,7 @@ impl AppState {
         })
     }
 
-    fn agent_run_summaries(&self) -> Vec<AgentRunSummary> {
+    fn agent_run_summaries(&self, filter: &AgentRunFilter) -> Vec<AgentRunSummary> {
         let requests = self.repositories.request_logs();
         let billing_events = self.metering_events.list();
         let audit_events = self.repositories.audit_events();
@@ -3745,20 +3816,39 @@ impl AppState {
                 let run_requests = requests
                     .iter()
                     .filter(|log| log.agent_run_id.as_deref() == Some(id.as_str()))
+                    .filter(|log| agent_run_matches_filter(&log.request_id, &log.tenant, filter))
                     .cloned()
                     .collect::<Vec<_>>();
                 let run_billing_events = billing_events
                     .iter()
                     .filter(|event| event.agent_run_id.as_deref() == Some(id.as_str()))
+                    .filter(|event| {
+                        agent_run_matches_filter(&event.request_id, &event.tenant, filter)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 let run_audit_events = audit_events
                     .iter()
                     .filter(|event| event.agent_run_id.as_deref() == Some(id.as_str()))
+                    .filter(|event| {
+                        agent_run_matches_filter(&event.request_id, &event.tenant, filter)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
-                summarize_agent_run(id, &run_requests, &run_billing_events, &run_audit_events)
+                if run_requests.is_empty()
+                    && run_billing_events.is_empty()
+                    && run_audit_events.is_empty()
+                {
+                    return None;
+                }
+                Some(summarize_agent_run(
+                    id,
+                    &run_requests,
+                    &run_billing_events,
+                    &run_audit_events,
+                ))
             })
+            .flatten()
             .collect()
     }
 
