@@ -710,4 +710,22 @@ mod tests {
         assert!(normalized.contains(r#""arguments":"{\"query\":\"ferrogate\"}"#));
         assert!(normalized.contains("data: [DONE]"));
     }
+
+    #[test]
+    fn normalizes_provider_stream_errors_into_failed_responses_events() {
+        let body = b"event: error\ndata: {\"error\":{\"message\":\"stream exploded\",\"type\":\"rate_limit_exceeded\",\"code\":\"rate_limit_exceeded\"}}\n\n";
+        let reader = Cursor::new(body.to_vec());
+        let normalizer = ResponsesStreamNormalizer::new(
+            reader,
+            ResponsesStreamProviderKind::OpenAiCompatible,
+            "fg-test",
+            "text/event-stream",
+        );
+
+        let normalized = read_all(normalizer);
+        assert!(normalized.contains("event: response.failed"));
+        assert!(normalized.contains(r#""message":"stream exploded""#));
+        assert!(normalized.contains(r#""code":"rate_limit_exceeded""#));
+        assert!(normalized.contains("data: [DONE]"));
+    }
 }
