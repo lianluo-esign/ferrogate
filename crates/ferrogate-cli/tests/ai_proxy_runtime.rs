@@ -2196,6 +2196,75 @@ allowed_models = ["fast-chat"]
 }
 
 #[test]
+fn openai_responses_streaming_tool_call_events_are_normalized() {
+    let gateway_addr = free_addr();
+    let (provider_addr, provider_handle) = spawn_sse_provider_upstream_with_body(
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"lookup","arguments":"{\"query\":\""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ferrogate\"}"}}]}}]}
+
+data: [DONE]
+
+"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[providers]]
+name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+
+[[models]]
+name = "fast-chat"
+provider = "openai"
+provider_model = "gpt-4.1-mini"
+capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "key_dev"
+name = "Development key"
+key = "client-secret"
+scopes = ["responses.create"]
+allowed_models = ["fast-chat"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/responses",
+        &[
+            "Authorization: Bearer client-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"model":"fast-chat","stream":true,"input":"hello"}"#,
+    );
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("event: response.function_call_arguments.delta"));
+    assert!(response.contains("event: response.function_call_arguments.done"));
+    assert!(response.contains(r#""name":"lookup""#));
+    assert!(response.contains(r#""arguments":"{\"query\":\"ferrogate\"}"#));
+    assert!(response.contains("data: [DONE]"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let provider_request = provider_handle.join().unwrap();
+    assert!(provider_request.contains("POST /v1/responses HTTP/1.1"));
+    assert!(provider_request.contains(r#""stream":true"#));
+}
+
+#[test]
 fn anthropic_responses_streaming_events_are_normalized() {
     let gateway_addr = free_addr();
     let (provider_addr, provider_handle) = spawn_sse_provider_upstream_with_body(
