@@ -1871,7 +1871,7 @@ allowed_models = ["fast-chat"]
         r#"{"model":"fast-chat","stream":true,"input":"hello"}"#,
     );
     assert!(response.contains("200 OK"));
-    assert!(response.contains("content-type: text/event-stream"));
+    assert!(response.to_ascii_lowercase().contains("content-type: text/event-stream"));
     assert!(response.contains("event: response.output_text.delta"));
     assert!(response.contains("event: response.completed"));
     assert!(response.contains("data: [DONE]"));
@@ -2024,7 +2024,7 @@ allowed_models = ["claude-chat"]
     gateway.kill().unwrap();
     gateway.wait().unwrap();
     let provider_request = provider_handle.join().unwrap();
-    assert!(provider_request.contains("POST /v1/responses HTTP/1.1"));
+    assert!(provider_request.contains("POST /v1/messages HTTP/1.1"));
 }
 
 #[test]
