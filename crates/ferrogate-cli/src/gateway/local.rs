@@ -1294,8 +1294,12 @@ impl FerroGateway {
             id,
             "success",
             format!(
-                "prompt template {id} rendered revision {} for api key {}",
+                "prompt template render accepted revision={} target={} model={} variable_count={} variable_schema_hash={} api_key_id={}",
                 version.revision,
+                prompt_template_target_name(template.target),
+                template.model,
+                request.variables.len(),
+                prompt_template_variable_schema_hash(template),
                 auth.api_key_id.as_deref().unwrap_or("anonymous")
             ),
         ));
@@ -4551,6 +4555,47 @@ fn prompt_template_json_value_to_string(value: &serde_json::Value) -> String {
         serde_json::Value::Bool(value) => value.to_string(),
         serde_json::Value::Number(value) => value.to_string(),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => value.to_string(),
+    }
+}
+
+fn prompt_template_target_name(target: PromptTemplateTarget) -> &'static str {
+    match target {
+        PromptTemplateTarget::ChatCompletions => "chat_completions",
+        PromptTemplateTarget::Responses => "responses",
+    }
+}
+
+fn prompt_template_variable_schema_hash(template: &PromptTemplate) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for variable in &template.variables {
+        fnv1a64_update(&mut hash, variable.name.as_bytes());
+        fnv1a64_update(&mut hash, &[0]);
+        fnv1a64_update(
+            &mut hash,
+            if variable.required {
+                b"required"
+            } else {
+                b"optional"
+            },
+        );
+        fnv1a64_update(&mut hash, &[0]);
+        fnv1a64_update(
+            &mut hash,
+            if variable.default.is_some() {
+                b"default"
+            } else {
+                b"no_default"
+            },
+        );
+        fnv1a64_update(&mut hash, &[0xff]);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn fnv1a64_update(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
 }
 

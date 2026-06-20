@@ -975,6 +975,7 @@ scopes = ["admin.read", "admin.write"]
 
     let mut gateway = start_gateway(&config);
     wait_for_gateway(&gateway_addr);
+    let customer_value = "Ada Sensitive-Customer-8713";
 
     let create = http_request(
         &gateway_addr,
@@ -1012,7 +1013,7 @@ scopes = ["admin.read", "admin.write"]
             "Authorization: Bearer client-secret",
             "Content-Type: application/json",
         ],
-        r#"{"variables":{"customer":"Ada"}}"#,
+        &format!(r#"{{"variables":{{"customer":"{customer_value}"}}}}"#),
     );
     assert!(render.contains("200 OK"), "{render}");
     let rendered: serde_json::Value =
@@ -1020,7 +1021,10 @@ scopes = ["admin.read", "admin.write"]
     assert_eq!(rendered["model"], "prompt-chat");
     assert_eq!(rendered["temperature"], 0.2);
     assert_eq!(rendered["messages"][0]["content"], "Reply in brief mode.");
-    assert_eq!(rendered["messages"][1]["content"], "Hello Ada");
+    assert_eq!(
+        rendered["messages"][1]["content"],
+        format!("Hello {customer_value}")
+    );
 
     let denied_render = http_request(
         &gateway_addr,
@@ -1030,14 +1034,18 @@ scopes = ["admin.read", "admin.write"]
             "Authorization: Bearer denied-secret",
             "Content-Type: application/json",
         ],
-        r#"{"variables":{"customer":"Ada"}}"#,
+        &format!(r#"{{"variables":{{"customer":"{customer_value}"}}}}"#),
     );
     assert!(denied_render.contains("403 Forbidden"), "{denied_render}");
     assert!(
         denied_render.contains("model_not_allowed"),
         "{denied_render}"
     );
-    assert!(!denied_render.contains("Hello Ada"), "{denied_render}");
+    assert!(
+        !denied_render.contains(&format!("Hello {customer_value}")),
+        "{denied_render}"
+    );
+    assert!(!denied_render.contains(customer_value), "{denied_render}");
     assert!(!denied_render.contains("denied-secret"), "{denied_render}");
 
     let chat = http_request(
@@ -1115,7 +1123,7 @@ scopes = ["admin.read", "admin.write"]
             "Authorization: Bearer client-secret",
             "Content-Type: application/json",
         ],
-        r#"{"variables":{"customer":"Ada"}}"#,
+        &format!(r#"{{"variables":{{"customer":"{customer_value}"}}}}"#),
     );
     assert!(
         inactive_render.contains("409 Conflict"),
@@ -1135,9 +1143,47 @@ scopes = ["admin.read", "admin.write"]
     assert!(audit_events.contains("\"action\":\"prompt_template.render\""));
     assert!(audit_events.contains("\"action\":\"prompt_template.archive\""));
     assert!(audit_events.contains("\"actor_api_key_id\":\"prompt-client\""));
+    let audit_body = audit_events.split("\r\n\r\n").nth(1).unwrap();
+    let audit_json: serde_json::Value = serde_json::from_str(audit_body).unwrap();
+    let render_audit = audit_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["action"] == "prompt_template.render" && event["outcome"] == "success")
+        .unwrap();
+    assert_eq!(render_audit["target"], "support-reply");
+    assert_eq!(render_audit["actor_api_key_id"], "prompt-client");
+    assert_eq!(render_audit["tenant"]["organization_id"], "org_prompt");
+    assert_eq!(render_audit["tenant"]["project_id"], "project_templates");
+    let render_message = render_audit["message"].as_str().unwrap();
+    assert!(render_message.contains("revision=1"), "{render_message}");
+    assert!(
+        render_message.contains("target=chat_completions"),
+        "{render_message}"
+    );
+    assert!(
+        render_message.contains("model=prompt-chat"),
+        "{render_message}"
+    );
+    assert!(
+        render_message.contains("variable_count=1"),
+        "{render_message}"
+    );
+    assert!(
+        render_message.contains("variable_schema_hash=fnv1a64:"),
+        "{render_message}"
+    );
     assert!(!audit_events.contains("client-secret"), "{audit_events}");
     assert!(!audit_events.contains("admin-secret"), "{audit_events}");
-    assert!(!audit_events.contains("\"Ada\""), "{audit_events}");
+    assert!(!audit_events.contains(customer_value), "{audit_events}");
+    assert!(
+        !audit_events.contains(&format!("Hello {customer_value}")),
+        "{audit_events}"
+    );
+    assert!(
+        !audit_events.contains("Reply in brief mode."),
+        "{audit_events}"
+    );
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
@@ -1147,7 +1193,7 @@ scopes = ["admin.read", "admin.write"]
     assert!(provider_requests[0].contains("authorization: Bearer provider-secret"));
     assert!(provider_requests[0].contains(r#""model":"gpt-4o-mini""#));
     assert!(provider_requests[0].contains("Reply in brief mode."));
-    assert!(provider_requests[0].contains("Hello Ada"));
+    assert!(provider_requests[0].contains(&format!("Hello {customer_value}")));
     assert!(!provider_requests[0].contains("prompt-chat"));
     assert!(!provider_requests[0].contains("client-secret"));
 }
