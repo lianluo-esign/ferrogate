@@ -14,6 +14,8 @@ fn rejects_enabled_auth_service_with_non_http_endpoint() {
             enabled: true,
             endpoint: "https://auth.example.test".into(),
             timeout_millis: 500,
+            max_retries: 0,
+            retry_backoff_millis: 50,
         },
         ..Config::default()
     };
@@ -29,12 +31,31 @@ fn rejects_auth_service_with_zero_timeout() {
             enabled: false,
             endpoint: "http://127.0.0.1:8090".into(),
             timeout_millis: 0,
+            max_retries: 0,
+            retry_backoff_millis: 50,
         },
         ..Config::default()
     };
 
     let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("field auth_service.timeout_millis"));
+}
+
+#[test]
+fn rejects_auth_service_retry_without_backoff() {
+    let config = Config {
+        auth_service: AuthServiceConfig {
+            enabled: false,
+            endpoint: "http://127.0.0.1:8090".into(),
+            timeout_millis: 500,
+            max_retries: 1,
+            retry_backoff_millis: 0,
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field auth_service.retry_backoff_millis"));
 }
 
 #[test]

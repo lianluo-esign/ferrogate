@@ -12,6 +12,8 @@ auth_service:
   enabled: true
   endpoint: "http://127.0.0.1:8090"
   timeout_millis: 1000
+  max_retries: 2
+  retry_backoff_millis: 50
 ```
 
 When `auth_service.enabled` is `false`, FerroGate uses the existing local
@@ -19,9 +21,10 @@ When `auth_service.enabled` is `false`, FerroGate uses the existing local
 keys through the external service and fails closed if the service is unavailable
 or rejects the request.
 
-The current gateway client supports `http://` endpoints. Put TLS termination,
-service discovery, retries, and mTLS policy in front of the service until the
-gateway grows those client-side controls explicitly.
+The current gateway client supports `http://` endpoints and bounded retries for
+transport and 5xx failures. It does not retry 401, 403, or denied RBAC
+decisions. Put TLS termination, service discovery, and mTLS policy in front of
+the service until the gateway grows those client-side controls explicitly.
 
 ## Health
 

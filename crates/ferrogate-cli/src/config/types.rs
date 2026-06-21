@@ -82,6 +82,10 @@ pub(crate) struct AuthServiceConfig {
     pub(crate) endpoint: String,
     #[serde(default = "default_auth_service_timeout_millis")]
     pub(crate) timeout_millis: u64,
+    #[serde(default)]
+    pub(crate) max_retries: u32,
+    #[serde(default = "default_auth_service_retry_backoff_millis")]
+    pub(crate) retry_backoff_millis: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -892,6 +896,10 @@ fn default_auth_service_timeout_millis() -> u64 {
     500
 }
 
+fn default_auth_service_retry_backoff_millis() -> u64 {
+    50
+}
+
 fn default_provider_kind() -> String {
     "openai".to_string()
 }
@@ -1288,6 +1296,8 @@ impl Default for AuthServiceConfig {
             enabled: false,
             endpoint: default_auth_service_endpoint(),
             timeout_millis: default_auth_service_timeout_millis(),
+            max_retries: 0,
+            retry_backoff_millis: default_auth_service_retry_backoff_millis(),
         }
     }
 }

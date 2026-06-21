@@ -94,6 +94,11 @@ impl Config {
         if self.auth_service.timeout_millis == 0 {
             bail!("field auth_service.timeout_millis: must be greater than zero");
         }
+        if self.auth_service.max_retries > 0 && self.auth_service.retry_backoff_millis == 0 {
+            bail!(
+                "field auth_service.retry_backoff_millis: must be greater than zero when auth_service.max_retries is set"
+            );
+        }
         if !self.auth_service.enabled {
             return Ok(());
         }

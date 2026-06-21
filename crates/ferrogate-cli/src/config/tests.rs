@@ -17,6 +17,8 @@ fn default_config_uses_localhost_8080() {
     assert!(!config.auth_service.enabled);
     assert_eq!(config.auth_service.endpoint, "http://127.0.0.1:8090");
     assert_eq!(config.auth_service.timeout_millis, 500);
+    assert_eq!(config.auth_service.max_retries, 0);
+    assert_eq!(config.auth_service.retry_backoff_millis, 50);
     assert!(config.upstreams.is_empty());
     assert!(config.routes.is_empty());
     assert!(!config.agent_runtime.enabled);
@@ -63,6 +65,8 @@ export_timeout_secs = 4
 enabled = true
 endpoint = "http://127.0.0.1:8090"
 timeout_millis = 750
+max_retries = 2
+retry_backoff_millis = 25
 
 [cache]
 enabled = true
@@ -185,6 +189,8 @@ timeout_ms = 30000
     assert!(config.auth_service.enabled);
     assert_eq!(config.auth_service.endpoint, "http://127.0.0.1:8090");
     assert_eq!(config.auth_service.timeout_millis, 750);
+    assert_eq!(config.auth_service.max_retries, 2);
+    assert_eq!(config.auth_service.retry_backoff_millis, 25);
     assert_eq!(
         config
             .reliability

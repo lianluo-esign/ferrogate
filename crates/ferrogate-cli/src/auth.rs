@@ -338,6 +338,29 @@ where
         .map_err(|error| AuthServiceClientError::Request(error.to_string()))?;
     let endpoint = build_auth_service_target(&state.config.auth_service.endpoint, path)?;
     let timeout = Duration::from_millis(state.config.auth_service.timeout_millis);
+    let attempts = state.config.auth_service.max_retries.saturating_add(1);
+    let backoff = Duration::from_millis(state.config.auth_service.retry_backoff_millis);
+    let mut last_retryable_error = None;
+    for attempt in 0..attempts {
+        match auth_service_post_json_once(&endpoint, &body, timeout) {
+            Ok(response) => return Ok(response),
+            Err(error) if error.is_retryable() && attempt + 1 < attempts => {
+                last_retryable_error = Some(error);
+                std::thread::sleep(backoff);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_retryable_error.unwrap_or_else(|| {
+        AuthServiceClientError::Transport("auth service retry budget exhausted".into())
+    }))
+}
+
+fn auth_service_post_json_once<R: DeserializeOwned>(
+    endpoint: &AuthServiceTarget,
+    body: &[u8],
+    timeout: Duration,
+) -> std::result::Result<R, AuthServiceClientError> {
     let address = endpoint
         .host_port
         .to_socket_addrs()
@@ -434,6 +457,19 @@ enum AuthServiceClientError {
     Transport(String),
     Response(String),
     HttpStatus { status: u16, body: String },
+}
+
+impl AuthServiceClientError {
+    fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport(_)
+                | Self::HttpStatus {
+                    status: 500..=599,
+                    ..
+                }
+        )
+    }
 }
 
 impl std::fmt::Display for AuthServiceClientError {
