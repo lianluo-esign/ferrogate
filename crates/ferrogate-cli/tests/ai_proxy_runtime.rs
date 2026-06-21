@@ -3241,6 +3241,67 @@ scopes = ["admin.read", "admin.write"]
         "{plugins_after_denied_network}"
     );
 
+    let failed_mcp_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "mcp.http",
+            "kind": "tool_provider",
+            "enabled": true,
+            "source": "builtin",
+            "order": 20,
+            "permissions": {
+                "tools": ["search"],
+                "network": ["127.0.0.1"],
+                "filesystem": false,
+                "shell": false
+            },
+            "config": {
+                "endpoint": "http://127.0.0.1:1/mcp",
+                "timeout_ms": 100
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        failed_mcp_plugin.contains("201 Created"),
+        "{failed_mcp_plugin}"
+    );
+    assert!(
+        failed_mcp_plugin.contains("\"id\":\"mcp.http\""),
+        "{failed_mcp_plugin}"
+    );
+    assert!(
+        failed_mcp_plugin.contains("\"active\":false"),
+        "{failed_mcp_plugin}"
+    );
+    assert!(
+        failed_mcp_plugin.contains("\"health\":\"failed\""),
+        "{failed_mcp_plugin}"
+    );
+    assert!(
+        failed_mcp_plugin.contains("failed to list MCP tools for mcp.http"),
+        "{failed_mcp_plugin}"
+    );
+
+    let failed_mcp_tools = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins/mcp.http/tools",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(failed_mcp_tools.contains("200 OK"), "{failed_mcp_tools}");
+    assert!(
+        !failed_mcp_tools.contains("\"name\":\"search\""),
+        "{failed_mcp_tools}"
+    );
+
     let invalid_manifest_plugin = http_request(
         &gateway_addr,
         "POST",
@@ -3259,7 +3320,7 @@ scopes = ["admin.read", "admin.write"]
             },
             "enabled": true,
             "source": "builtin",
-            "order": 20,
+            "order": 30,
             "permissions": {
                 "tools": ["tool.health_check"],
                 "network": [],
@@ -3371,7 +3432,7 @@ scopes = ["admin.read", "admin.write"]
             },
             "enabled": true,
             "source": "builtin",
-            "order": 20,
+            "order": 30,
             "permissions": {
                 "tools": ["tool.health_check"],
                 "network": [],

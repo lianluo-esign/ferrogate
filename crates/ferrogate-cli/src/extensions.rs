@@ -174,7 +174,7 @@ impl ExtensionRegistry {
                         extension,
                         Vec::new(),
                         false,
-                        "error",
+                        "failed",
                         Some(error.to_string()),
                     ));
                 }
@@ -1108,6 +1108,30 @@ mod tests {
         assert_eq!(
             registry.tools_for(&TenantContext::default(), None, None)[0].name,
             "tool.echo"
+        );
+    }
+
+    #[test]
+    fn registry_surfaces_builtin_load_failures_as_failed_plugins() {
+        let registry = ExtensionRegistry::from_config(&[extension(
+            "tool.missing",
+            ExtensionKind::ToolProvider,
+        )]);
+        let statuses = registry.statuses();
+        let status = statuses
+            .iter()
+            .find(|status| status.id == "tool.missing")
+            .expect("tool.missing status");
+
+        assert!(!status.active);
+        assert_eq!(status.health, "failed");
+        assert!(status.tools.is_empty());
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unsupported builtin tool provider")),
+            "{status:?}"
         );
     }
 

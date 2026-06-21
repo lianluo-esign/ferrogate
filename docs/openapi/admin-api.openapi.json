@@ -3908,7 +3908,15 @@
             "type": "boolean"
           },
           "health": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "disabled",
+              "ok",
+              "degraded",
+              "failed",
+              "version_incompatible",
+              "unknown"
+            ]
           },
           "order": {
             "type": "integer",
