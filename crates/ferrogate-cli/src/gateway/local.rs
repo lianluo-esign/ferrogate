@@ -4453,8 +4453,24 @@ fn admin_plugin(
         capabilities: status.capabilities.clone(),
         tools: status.tools.clone(),
         active: status.active,
+        lifecycle: plugin_lifecycle(&status),
         health: status.health,
         last_error: status.last_error.clone(),
+    }
+}
+
+fn plugin_lifecycle(status: &crate::extensions::ExtensionStatus) -> &'static str {
+    if !status.enabled {
+        return "disabled";
+    }
+    if status.active {
+        return "enabled";
+    }
+    match status.health {
+        "version_incompatible" => "version_incompatible",
+        "failed" => "failed",
+        "degraded" => "degraded",
+        _ => "registered",
     }
 }
 

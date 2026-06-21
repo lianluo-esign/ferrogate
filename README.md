@@ -812,7 +812,9 @@ allowlists require `permissions.tenant_scope = true`; secret-shaped plugin
 config is rejected unless the plugin explicitly declares
 `permissions.secrets = true`. Plugin manifests can also declare
 `manifest.required_permissions`; the granted registration permissions must cover
-those requirements before the plugin is accepted.
+those requirements before the plugin is accepted. Admin plugin responses expose
+an explicit lifecycle state for registered, enabled, disabled, degraded, failed,
+and version-incompatible plugins.
 
 ## Tenant and RBAC Service
 

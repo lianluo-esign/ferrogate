@@ -185,6 +185,7 @@ pub(crate) struct AdminPlugin {
     pub(crate) capabilities: Vec<String>,
     pub(crate) tools: Vec<String>,
     pub(crate) active: bool,
+    pub(crate) lifecycle: &'static str,
     pub(crate) health: &'static str,
     pub(crate) last_error: Option<String>,
 }

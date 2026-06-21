@@ -3304,6 +3304,7 @@ scopes = ["admin.read", "admin.write"]
     );
     assert!(created.contains("\"enabled\":true"), "{created}");
     assert!(created.contains("\"active\":true"), "{created}");
+    assert!(created.contains("\"lifecycle\":\"enabled\""), "{created}");
     assert!(created.contains("\"health\":\"ok\""), "{created}");
     assert!(created.contains("\"tools\":[\"tool.echo\"]"), "{created}");
     assert!(created.contains("\"tenant_scope\":true"), "{created}");
@@ -3458,6 +3459,10 @@ scopes = ["admin.read", "admin.write"]
     );
     assert!(
         failed_mcp_plugin.contains("\"health\":\"failed\""),
+        "{failed_mcp_plugin}"
+    );
+    assert!(
+        failed_mcp_plugin.contains("\"lifecycle\":\"failed\""),
         "{failed_mcp_plugin}"
     );
     assert!(
@@ -3625,6 +3630,10 @@ scopes = ["admin.read", "admin.write"]
     assert!(incompatible.contains("201 Created"), "{incompatible}");
     assert!(
         incompatible.contains("\"health\":\"version_incompatible\""),
+        "{incompatible}"
+    );
+    assert!(
+        incompatible.contains("\"lifecycle\":\"version_incompatible\""),
         "{incompatible}"
     );
     assert!(incompatible.contains("\"active\":false"), "{incompatible}");
