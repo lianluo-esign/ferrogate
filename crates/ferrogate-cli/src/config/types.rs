@@ -439,6 +439,8 @@ pub(crate) struct AgentWorkflowNode {
     #[serde(default)]
     pub(crate) model: Option<String>,
     #[serde(default)]
+    pub(crate) providers: Vec<String>,
+    #[serde(default)]
     pub(crate) tool: Option<String>,
     #[serde(default)]
     pub(crate) max_iterations: Option<u32>,

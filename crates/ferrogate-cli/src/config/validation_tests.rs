@@ -199,6 +199,7 @@ fn accepts_agent_workflow_policy_with_model_graph() {
                     id: "draft".into(),
                     kind: AgentWorkflowNodeKind::Model,
                     model: Some("fast-chat".into()),
+                    providers: vec!["openai".into()],
                     tool: None,
                     max_iterations: Some(2),
                     token_budget: Some(600),
@@ -207,6 +208,7 @@ fn accepts_agent_workflow_policy_with_model_graph() {
                     id: "review".into(),
                     kind: AgentWorkflowNodeKind::Human,
                     model: None,
+                    providers: vec![],
                     tool: None,
                     max_iterations: None,
                     token_budget: None,
@@ -248,6 +250,7 @@ fn rejects_agent_workflow_with_unknown_model_api_key_and_bad_budget() {
                 id: "draft".into(),
                 kind: AgentWorkflowNodeKind::Model,
                 model: Some("missing-chat".into()),
+                providers: vec![],
                 tool: None,
                 max_iterations: None,
                 token_budget: None,
@@ -290,6 +293,7 @@ fn rejects_agent_workflow_with_bad_graph_references() {
             id: "draft".into(),
             kind: AgentWorkflowNodeKind::Model,
             model: Some("fast-chat".into()),
+            providers: vec![],
             tool: None,
             max_iterations: None,
             token_budget: None,
@@ -322,6 +326,7 @@ fn rejects_agent_workflow_with_bad_graph_references() {
         id: "draft".into(),
         kind: AgentWorkflowNodeKind::Tool,
         model: None,
+        providers: vec![],
         tool: Some("tool.echo".into()),
         max_iterations: None,
         token_budget: None,
@@ -348,6 +353,7 @@ fn accepts_agent_workflow_tool_nodes_with_registered_tools() {
                     id: "echo".into(),
                     kind: AgentWorkflowNodeKind::Tool,
                     model: None,
+                    providers: vec![],
                     tool: Some("tool.echo".into()),
                     max_iterations: Some(2),
                     token_budget: None,
@@ -356,6 +362,7 @@ fn accepts_agent_workflow_tool_nodes_with_registered_tools() {
                     id: "search".into(),
                     kind: AgentWorkflowNodeKind::Tool,
                     model: None,
+                    providers: vec![],
                     tool: Some("github-search".into()),
                     max_iterations: None,
                     token_budget: None,
@@ -391,6 +398,7 @@ fn rejects_agent_workflow_tool_node_with_unknown_tool() {
                 id: "missing".into(),
                 kind: AgentWorkflowNodeKind::Tool,
                 model: None,
+                providers: vec![],
                 tool: Some("tool.missing".into()),
                 max_iterations: None,
                 token_budget: None,
@@ -426,6 +434,7 @@ fn rejects_agent_workflow_non_tool_node_declaring_tool() {
                 id: "draft".into(),
                 kind: AgentWorkflowNodeKind::Model,
                 model: None,
+                providers: vec![],
                 tool: Some("tool.echo".into()),
                 max_iterations: None,
                 token_budget: None,
@@ -443,6 +452,79 @@ fn rejects_agent_workflow_non_tool_node_declaring_tool() {
 
     let error = format!("{:#}", config.validate().unwrap_err());
     assert!(error.contains("only tool nodes may declare a tool"));
+}
+
+#[test]
+fn rejects_agent_workflow_model_node_with_unknown_provider() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        agent_workflows: vec![AgentWorkflowPolicy {
+            id: "bad-provider-flow".into(),
+            name: "Bad provider flow".into(),
+            version: 1,
+            enabled: true,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec![],
+            nodes: vec![AgentWorkflowNode {
+                id: "draft".into(),
+                kind: AgentWorkflowNodeKind::Model,
+                model: Some("fast-chat".into()),
+                providers: vec!["missing-provider".into()],
+                tool: None,
+                max_iterations: None,
+                token_budget: None,
+            }],
+            edges: vec![],
+            max_model_calls: None,
+            max_tool_calls: None,
+            max_parallelism: None,
+            max_iterations: None,
+            timeout_millis: None,
+            token_budget: None,
+        }],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("references unknown provider missing-provider"));
+}
+
+#[test]
+fn rejects_agent_workflow_non_model_node_declaring_provider() {
+    let config = Config {
+        providers: vec![provider()],
+        agent_workflows: vec![AgentWorkflowPolicy {
+            id: "bad-provider-flow".into(),
+            name: "Bad provider flow".into(),
+            version: 1,
+            enabled: true,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec![],
+            nodes: vec![AgentWorkflowNode {
+                id: "review".into(),
+                kind: AgentWorkflowNodeKind::Human,
+                model: None,
+                providers: vec!["openai".into()],
+                tool: None,
+                max_iterations: None,
+                token_budget: None,
+            }],
+            edges: vec![],
+            max_model_calls: None,
+            max_tool_calls: None,
+            max_parallelism: None,
+            max_iterations: None,
+            timeout_millis: None,
+            token_budget: None,
+        }],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("only model nodes may declare providers"));
 }
 
 #[test]

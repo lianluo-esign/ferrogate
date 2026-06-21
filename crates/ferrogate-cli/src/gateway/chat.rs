@@ -198,10 +198,10 @@ impl FerroGateway {
             request,
             body_json,
             estimated_usage,
-            routes,
+            mut routes,
             body_text,
         } = request_plan;
-        if let Err(rejection) = enforce_ai_workflow_policy(
+        let workflow_provider_constraint = match enforce_ai_workflow_policy(
             &state,
             AiWorkflowRequestContext {
                 auth: &auth,
@@ -213,38 +213,42 @@ impl FerroGateway {
                 estimated_usage: &estimated_usage,
             },
         ) {
-            self.state.record_request_log(StoredRequestLog {
-                request_id: ctx.request_id.clone(),
-                trace_id: ctx.trace_id.clone(),
-                agent_run_id: Some(agent_run_id.clone()),
-                workflow_id: workflow_id.clone(),
-                workflow_version,
-                workflow_node_id: workflow_node_id.clone(),
-                cluster_id: None,
-                node_id: None,
-                tenant: auth.tenant_context(),
-                route: Some(endpoint.route().into()),
-                provider: None,
-                logical_model: Some(request.model.clone()),
-                provider_model: None,
-                gateway_config_id: gateway_config.as_ref().map(|profile| profile.id.clone()),
-                gateway_config_revision: gateway_config.as_ref().map(|profile| profile.revision),
-                status_code: rejection.status.as_u16(),
-                error_code: Some(rejection.code.to_string()),
-                prompt_recorded: false,
-                response_recorded: false,
-                prompt_body: None,
-                response_body: None,
-                cache_status: None,
-                started_at_unix: None,
-                completed_at_unix: None,
-            });
-            write_json_error(
+            Ok(constraint) => constraint,
+            Err(rejection) => {
+                self.record_ai_workflow_rejection(
+                    session,
+                    endpoint,
+                    &ctx,
+                    &agent_run_id,
+                    workflow_id.as_deref(),
+                    workflow_version,
+                    workflow_node_id.as_deref(),
+                    &auth,
+                    gateway_config.as_ref(),
+                    &request.model,
+                    rejection,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if let Err(rejection) = apply_workflow_provider_constraint(
+            workflow_provider_constraint.as_ref(),
+            &request.model,
+            &mut routes,
+        ) {
+            self.record_ai_workflow_rejection(
                 session,
-                rejection.status,
-                rejection.code,
-                rejection.message,
-                &ctx.request_id,
+                endpoint,
+                &ctx,
+                &agent_run_id,
+                workflow_id.as_deref(),
+                workflow_version,
+                workflow_node_id.as_deref(),
+                &auth,
+                gateway_config.as_ref(),
+                &request.model,
+                rejection,
             )
             .await?;
             return Ok(());
@@ -1358,6 +1362,56 @@ impl FerroGateway {
             completed_at_unix: None,
         });
     }
+
+    async fn record_ai_workflow_rejection(
+        &self,
+        session: &mut Session,
+        endpoint: AiEndpoint,
+        ctx: &ProxyContext,
+        agent_run_id: &str,
+        workflow_id: Option<&str>,
+        workflow_version: Option<u32>,
+        workflow_node_id: Option<&str>,
+        auth: &AuthContext,
+        gateway_config: Option<&GatewayConfigUse>,
+        logical_model: &str,
+        rejection: AiWorkflowRejection,
+    ) -> PingoraResult<()> {
+        self.state.record_request_log(StoredRequestLog {
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            agent_run_id: Some(agent_run_id.to_string()),
+            workflow_id: workflow_id.map(ToOwned::to_owned),
+            workflow_version,
+            workflow_node_id: workflow_node_id.map(ToOwned::to_owned),
+            cluster_id: None,
+            node_id: None,
+            tenant: auth.tenant_context(),
+            route: Some(endpoint.route().into()),
+            provider: None,
+            logical_model: Some(logical_model.to_string()),
+            provider_model: None,
+            gateway_config_id: gateway_config.map(|profile| profile.id.clone()),
+            gateway_config_revision: gateway_config.map(|profile| profile.revision),
+            status_code: rejection.status.as_u16(),
+            error_code: Some(rejection.code.to_string()),
+            prompt_recorded: false,
+            response_recorded: false,
+            prompt_body: None,
+            response_body: None,
+            cache_status: None,
+            started_at_unix: None,
+            completed_at_unix: None,
+        });
+        write_json_error(
+            session,
+            rejection.status,
+            rejection.code,
+            rejection.message,
+            &ctx.request_id,
+        )
+        .await
+    }
 }
 
 fn responses_stream_provider_kind(provider_kind: &str) -> ResponsesStreamProviderKind {
@@ -1903,12 +1957,17 @@ struct AiWorkflowRejection {
     message: String,
 }
 
+struct AiWorkflowProviderConstraint {
+    node_id: String,
+    providers: Vec<String>,
+}
+
 fn enforce_ai_workflow_policy(
     state: &AppState,
     request: AiWorkflowRequestContext<'_>,
-) -> Result<(), AiWorkflowRejection> {
+) -> Result<Option<AiWorkflowProviderConstraint>, AiWorkflowRejection> {
     let Some(workflow_id) = request.workflow_id else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(workflow) = crate::state::select_agent_workflow(
         &state.config.agent_workflows,
@@ -2036,6 +2095,40 @@ fn enforce_ai_workflow_policy(
             code: "workflow_token_budget_exceeded",
             message: format!(
                 "workflow node {node_id} token budget cannot cover the estimated request usage"
+            ),
+        });
+    }
+    if node.providers.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(AiWorkflowProviderConstraint {
+            node_id: node.id.clone(),
+            providers: node.providers.clone(),
+        }))
+    }
+}
+
+fn apply_workflow_provider_constraint(
+    constraint: Option<&AiWorkflowProviderConstraint>,
+    logical_model: &str,
+    routes: &mut Vec<ModelRoute>,
+) -> Result<(), AiWorkflowRejection> {
+    let Some(constraint) = constraint else {
+        return Ok(());
+    };
+    routes.retain(|route| {
+        constraint
+            .providers
+            .iter()
+            .any(|provider| provider == &route.provider)
+    });
+    if routes.is_empty() {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::FORBIDDEN,
+            code: "workflow_provider_not_allowed",
+            message: format!(
+                "workflow node {} is not allowed to use any configured provider route for model {}",
+                constraint.node_id, logical_model
             ),
         });
     }

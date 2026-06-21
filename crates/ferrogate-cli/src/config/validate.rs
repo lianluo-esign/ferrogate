@@ -46,7 +46,7 @@ impl Config {
         self.validate_gateway_configs(&api_key_ids)?;
         self.validate_plugins()?;
         let tool_names = self.workflow_tool_names();
-        self.validate_agent_workflows(&api_key_ids, &model_names, &tool_names)?;
+        self.validate_agent_workflows(&api_key_ids, &model_names, &provider_names, &tool_names)?;
         self.validate_prompt_templates(&model_names)?;
         self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
         self.validate_tls()?;
@@ -1038,6 +1038,7 @@ impl Config {
         &self,
         api_key_ids: &HashSet<String>,
         model_names: &HashSet<String>,
+        provider_names: &HashSet<String>,
         tool_names: &WorkflowToolNames,
     ) -> AnyResult<()> {
         let mut workflow_versions = HashSet::new();
@@ -1129,8 +1130,34 @@ impl Config {
                         "field agent_workflows[{index}].nodes[{node_index}].tool: cannot be empty"
                     );
                 }
+                for provider in &node.providers {
+                    if provider.trim().is_empty() {
+                        bail!(
+                            "field agent_workflows[{index}].nodes[{node_index}].providers: provider names cannot be empty"
+                        );
+                    }
+                    if !provider_names.contains(provider.as_str()) {
+                        bail!(
+                            "field agent_workflows[{index}].nodes[{node_index}].providers: workflow {} references unknown provider {}",
+                            workflow.id,
+                            provider
+                        );
+                    }
+                }
                 match node.kind {
+                    super::AgentWorkflowNodeKind::Model => {
+                        if node.tool.is_some() {
+                            bail!(
+                                "field agent_workflows[{index}].nodes[{node_index}].tool: only tool nodes may declare a tool"
+                            );
+                        }
+                    }
                     super::AgentWorkflowNodeKind::Tool => {
+                        if !node.providers.is_empty() {
+                            bail!(
+                                "field agent_workflows[{index}].nodes[{node_index}].providers: only model nodes may declare providers"
+                            );
+                        }
                         let Some(tool) = node.tool.as_deref() else {
                             bail!(
                                 "field agent_workflows[{index}].nodes[{node_index}].tool: tool node {} must declare a tool",
@@ -1146,6 +1173,11 @@ impl Config {
                         }
                     }
                     _ => {
+                        if !node.providers.is_empty() {
+                            bail!(
+                                "field agent_workflows[{index}].nodes[{node_index}].providers: only model nodes may declare providers"
+                            );
+                        }
                         if node.tool.is_some() {
                             bail!(
                                 "field agent_workflows[{index}].nodes[{node_index}].tool: only tool nodes may declare a tool"

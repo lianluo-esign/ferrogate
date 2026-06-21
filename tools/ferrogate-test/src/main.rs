@@ -848,12 +848,16 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/admin/v1/agent-workflows",
         &[ADMIN_AUTH, JSON_CONTENT],
-        r#"{"id":"support-flow","name":"Support flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"draft","kind":"model","model":"fast-chat","token_budget":600}],"edges":[],"max_model_calls":1,"max_iterations":2,"token_budget":600}"#,
+        r#"{"id":"support-flow","name":"Support flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"draft","kind":"model","model":"fast-chat","providers":["openai"],"token_budget":600}],"edges":[],"max_model_calls":1,"max_iterations":2,"token_budget":600}"#,
         201,
         |body| {
             assert_eq!(body["object"], "agent_workflow");
             assert_eq!(body["agent_workflow"]["workflow"]["id"], "support-flow");
             assert_eq!(body["agent_workflow"]["workflow"]["version"], 1);
+            assert_eq!(
+                body["agent_workflow"]["workflow"]["nodes"][0]["providers"][0],
+                "openai"
+            );
             assert_eq!(body["agent_workflow"]["counters"]["request_count"], 0);
             assert_secret_redacted(&body.to_string());
             Ok(())
@@ -883,6 +887,34 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert!(body["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("references unknown tool tool.missing")));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"bad-provider-flow","name":"Bad provider flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"draft","kind":"model","model":"fast-chat","providers":["missing-provider"]}],"edges":[],"max_model_calls":1}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_agent_workflow");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("references unknown provider missing-provider")));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"provider-flow","name":"Provider flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"draft","kind":"model","model":"fast-chat","providers":["anthropic"]}],"edges":[],"max_model_calls":10,"max_iterations":2}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "provider-flow");
             assert_secret_redacted(&body.to_string());
             Ok(())
         },
@@ -947,6 +979,24 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         429,
         |body| {
             assert_eq!(body["error"]["code"], "workflow_token_budget_exceeded");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-workflow-id: provider-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: draft",
+            "x-ferrogate-workflow-iteration: 1",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow provider denied"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "workflow_provider_not_allowed");
             Ok(())
         },
     )?;
@@ -3290,6 +3340,12 @@ tenant_allowlist = ["org_demo"]
 [[providers]]
 name = "openai"
 kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[providers]]
+name = "anthropic"
+kind = "anthropic"
 base_url = "http://{provider_addr}/v1"
 api_key_env = "FERROGATE_PROVIDER_SECRET"
 
