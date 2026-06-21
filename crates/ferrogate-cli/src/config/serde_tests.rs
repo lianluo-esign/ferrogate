@@ -96,6 +96,8 @@ fn config_model_supports_serde_roundtrip() {
                 network: vec![],
                 filesystem: false,
                 shell: false,
+                secrets: false,
+                admin_mutation: false,
             },
             config: [("timeout_ms".into(), toml::Value::Integer(30_000))]
                 .into_iter()

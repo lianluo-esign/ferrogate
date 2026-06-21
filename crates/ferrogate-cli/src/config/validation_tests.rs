@@ -249,6 +249,39 @@ fn rejects_invalid_extension_permission_values() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("permissions.network[0]: cannot be empty"));
+
+    let mut extension_config = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    extension_config.config.insert(
+        "api_token".into(),
+        toml::Value::String("secret-token".into()),
+    );
+    let config = Config {
+        extensions: vec![extension_config],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("config.api_token"));
+    assert!(error.contains("permissions.secrets = true"));
+
+    let mut extension_config = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    extension_config.permissions.secrets = true;
+    extension_config.config.insert(
+        "headers".into(),
+        toml::Value::Table(
+            [(
+                "authorization".into(),
+                toml::Value::String("Bearer secret-token".into()),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+    );
+    let config = Config {
+        extensions: vec![extension_config],
+        ..Config::default()
+    };
+    config.validate().unwrap();
 }
 
 #[test]
@@ -1706,6 +1739,8 @@ fn extension(id: &str, kind: ExtensionKind, order: u32) -> ExtensionConfig {
             network: vec![],
             filesystem: false,
             shell: false,
+            secrets: false,
+            admin_mutation: false,
         },
         config: std::collections::BTreeMap::new(),
     }

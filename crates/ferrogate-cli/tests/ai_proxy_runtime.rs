@@ -3077,6 +3077,63 @@ scopes = ["admin.read", "admin.write"]
     let mut gateway = start_gateway(&config);
     wait_for_gateway(&gateway_addr);
 
+    let denied_secret_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "tool.echo",
+            "kind": "tool_provider",
+            "enabled": true,
+            "source": "builtin",
+            "order": 10,
+            "permissions": {
+                "tools": ["tool.echo"],
+                "network": [],
+                "filesystem": false,
+                "shell": false,
+                "secrets": false,
+                "admin_mutation": false
+            },
+            "config": {
+                "api_token": "plugin-secret-token"
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        denied_secret_plugin.contains("400 Bad Request"),
+        "{denied_secret_plugin}"
+    );
+    assert!(
+        denied_secret_plugin.contains("invalid_plugin"),
+        "{denied_secret_plugin}"
+    );
+    assert!(
+        denied_secret_plugin.contains("config.api_token"),
+        "{denied_secret_plugin}"
+    );
+    assert!(
+        denied_secret_plugin.contains("permissions.secrets = true"),
+        "{denied_secret_plugin}"
+    );
+
+    let plugins_after_denied_secret = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        !plugins_after_denied_secret.contains("\"id\":\"tool.echo\""),
+        "{plugins_after_denied_secret}"
+    );
+
     let create_body = serde_json::json!({
         "id": "tool.echo",
         "kind": "tool_provider",
@@ -3101,7 +3158,9 @@ scopes = ["admin.read", "admin.write"]
             "tools": ["tool.echo"],
             "network": [],
             "filesystem": false,
-            "shell": false
+            "shell": false,
+            "secrets": true,
+            "admin_mutation": false
         },
         "config": {
             "timeout_ms": 30000,
@@ -3137,6 +3196,8 @@ scopes = ["admin.read", "admin.write"]
     assert!(created.contains("\"active\":true"), "{created}");
     assert!(created.contains("\"health\":\"ok\""), "{created}");
     assert!(created.contains("\"tools\":[\"tool.echo\"]"), "{created}");
+    assert!(created.contains("\"secrets\":true"), "{created}");
+    assert!(created.contains("\"admin_mutation\":false"), "{created}");
     assert!(created.contains("\"timeout_ms\":30000"), "{created}");
     assert!(
         created.contains("\"api_token\":\"[redacted]\""),
@@ -3377,7 +3438,9 @@ scopes = ["admin.read", "admin.write"]
                 "tools": ["tool.echo"],
                 "network": [],
                 "filesystem": false,
-                "shell": false
+                "shell": false,
+                "secrets": true,
+                "admin_mutation": false
             },
             "config": {
                 "timeout_ms": 15000,

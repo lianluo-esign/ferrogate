@@ -4051,6 +4051,12 @@
           },
           "shell": {
             "type": "boolean"
+          },
+          "secrets": {
+            "type": "boolean"
+          },
+          "admin_mutation": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false

@@ -472,6 +472,12 @@ fn plugin_capabilities(extension: &ExtensionConfig) -> Vec<String> {
     if extension.permissions.shell {
         capabilities.push("shell".into());
     }
+    if extension.permissions.secrets {
+        capabilities.push("secrets".into());
+    }
+    if extension.permissions.admin_mutation {
+        capabilities.push("admin_mutation".into());
+    }
     capabilities
 }
 
@@ -1063,6 +1069,8 @@ mod tests {
                 network: vec![],
                 filesystem: false,
                 shell: false,
+                secrets: false,
+                admin_mutation: false,
             },
             config: BTreeMap::new(),
         }

@@ -521,6 +521,10 @@ pub(crate) struct ExtensionPermissions {
     pub(crate) filesystem: bool,
     #[serde(default)]
     pub(crate) shell: bool,
+    #[serde(default)]
+    pub(crate) secrets: bool,
+    #[serde(default)]
+    pub(crate) admin_mutation: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

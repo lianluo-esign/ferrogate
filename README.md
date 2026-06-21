@@ -47,8 +47,8 @@ The project is developed as the open-source gateway foundation behind
 - **Agentic Lite plugin surface** where a plugin is the governed capability
   bundle and tools are the executable actions exposed to agents and APIs. Built-in
   plugins cover request hooks, tool providers, event sinks, `GET /v1/tools`,
-  `POST /v1/tools/execute`, admin plugin/tool views, tool sessions, and audit
-  events.
+  `POST /v1/tools/execute`, admin plugin/tool views, explicit tool/network/
+  secret/admin-mutation permission declarations, tool sessions, and audit events.
 - **Caddy-style config file compatibility** through `Ferrogate/Caddyfile`
   parsing for familiar reverse-proxy routes, matchers, TLS, logging, and
   gateway settings, alongside structured TOML configuration.
@@ -804,7 +804,10 @@ Read endpoints require `admin.read` when API keys are configured. Tool listing
 requires `tools.read`, explicit tool execution requires `tools.execute`, chat
 completions require `chat.completions`, Responses API requests require
 `responses.create`, prompt rendering requires `prompts.render`, and config
-validation and reload require `admin.write`.
+validation and reload require `admin.write`. Plugin registrations also carry
+their own typed permission declarations for tools, network, filesystem, shell,
+secrets, and admin mutation; secret-shaped plugin config is rejected unless the
+plugin explicitly declares `permissions.secrets = true`.
 
 ## Tenant and RBAC Service
 

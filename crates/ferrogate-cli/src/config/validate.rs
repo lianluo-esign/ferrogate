@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result as AnyResult};
 use http::{HeaderName, HeaderValue};
 use pingora::tls::load_certs_and_key_files;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_providers::RoutingStrategy;
@@ -1139,6 +1139,7 @@ impl Config {
                 "permissions.network",
                 &extension.permissions.network,
             )?;
+            validate_plugin_secret_permission(section, index, extension)?;
             validate_plugin_manifest(section, index, extension)?;
             let _ = extension.approval_policy;
             validate_builtin_plugin_shape(section, index, extension)?;
@@ -1323,6 +1324,62 @@ fn validate_extension_permission_names(
         }
     }
     Ok(())
+}
+
+fn validate_plugin_secret_permission(
+    section: &str,
+    extension_index: usize,
+    extension: &super::ExtensionConfig,
+) -> AnyResult<()> {
+    if extension.permissions.secrets {
+        return Ok(());
+    }
+
+    if let Some(path) = first_secret_config_path(&extension.config) {
+        bail!(
+            "field {section}[{extension_index}].config.{path}: secret-shaped plugin config requires permissions.secrets = true"
+        );
+    }
+
+    Ok(())
+}
+
+fn first_secret_config_path(config: &BTreeMap<String, toml::Value>) -> Option<String> {
+    config.iter().find_map(|(key, value)| {
+        if is_plugin_secret_config_key(key) {
+            return Some(key.clone());
+        }
+        first_secret_value_path(value).map(|path| format!("{key}.{path}"))
+    })
+}
+
+fn first_secret_value_path(value: &toml::Value) -> Option<String> {
+    match value {
+        toml::Value::Array(values) => values.iter().enumerate().find_map(|(index, value)| {
+            first_secret_value_path(value).map(|path| format!("{index}.{path}"))
+        }),
+        toml::Value::Table(table) => table.iter().find_map(|(key, value)| {
+            if is_plugin_secret_config_key(key) {
+                return Some(key.clone());
+            }
+            first_secret_value_path(value).map(|path| format!("{key}.{path}"))
+        }),
+        _ => None,
+    }
+}
+
+fn is_plugin_secret_config_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "api_key",
+        "auth",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
 }
 
 fn is_local_libsql_server_url(url: &str) -> bool {
