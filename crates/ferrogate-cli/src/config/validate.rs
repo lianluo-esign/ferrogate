@@ -485,6 +485,14 @@ impl Config {
             if self.storage.postgres_statement_timeout_millis == 0 {
                 bail!("field storage.postgres_statement_timeout_millis: must be greater than zero");
             }
+            if self
+                .storage
+                .postgres_tls_ca_cert_path
+                .as_deref()
+                .is_some_and(|path| path.trim().is_empty())
+            {
+                bail!("field storage.postgres_tls_ca_cert_path: must not be empty when set");
+            }
             if let Some(schema) = self.storage.postgres_schema.as_deref() {
                 validate_postgres_identifier("storage.postgres_schema", schema)?;
             }

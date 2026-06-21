@@ -964,6 +964,12 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
                 dsn,
                 pool_size: storage.postgres_pool_size,
                 tls_mode: storage.postgres_tls_mode,
+                tls_ca_cert_path: storage
+                    .postgres_tls_ca_cert_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(ToOwned::to_owned),
                 connect_timeout_secs: storage.postgres_connect_timeout_secs,
                 statement_timeout_millis: storage.postgres_statement_timeout_millis,
                 schema: storage

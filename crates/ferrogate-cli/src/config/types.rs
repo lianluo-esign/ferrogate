@@ -704,6 +704,8 @@ pub(crate) struct StorageConfig {
     pub(crate) postgres_pool_size: usize,
     #[serde(default)]
     pub(crate) postgres_tls_mode: PostgresTlsMode,
+    #[serde(default)]
+    pub(crate) postgres_tls_ca_cert_path: Option<String>,
     #[serde(default = "default_postgres_connect_timeout_secs")]
     pub(crate) postgres_connect_timeout_secs: u64,
     #[serde(default = "default_postgres_statement_timeout_millis")]
@@ -1117,6 +1119,7 @@ impl Default for StorageConfig {
             postgres_dsn_env: None,
             postgres_pool_size: default_postgres_pool_size(),
             postgres_tls_mode: PostgresTlsMode::default(),
+            postgres_tls_ca_cert_path: None,
             postgres_connect_timeout_secs: default_postgres_connect_timeout_secs(),
             postgres_statement_timeout_millis: default_postgres_statement_timeout_millis(),
             postgres_schema: None,

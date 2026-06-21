@@ -21,8 +21,10 @@ use std::{
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
 use libsql::Builder as LibsqlBuilder;
+use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
 use postgres::config::SslMode as PostgresSslMode;
 use postgres::{Client as PostgresClient, NoTls};
+use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
@@ -113,6 +115,7 @@ pub struct PostgresStorageConfig {
     pub dsn: String,
     pub pool_size: usize,
     pub tls_mode: PostgresTlsMode,
+    pub tls_ca_cert_path: Option<String>,
     pub connect_timeout_secs: u64,
     pub statement_timeout_millis: u64,
     pub schema: Option<String>,
@@ -688,16 +691,6 @@ impl PostgresClientPool {
 }
 
 fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {
-    if !matches!(
-        config.tls_mode,
-        PostgresTlsMode::Disable | PostgresTlsMode::Prefer
-    ) {
-        return Err(StorageError::Postgres(format!(
-            "storage.postgres_tls_mode={} requires a PostgreSQL TLS connector; this build currently supports disable and prefer",
-            config.tls_mode.as_str()
-        )));
-    }
-
     let mut pg_config = postgres::Config::from_str(&config.dsn).map_err(postgres_error)?;
     pg_config.connect_timeout(Duration::from_secs(config.connect_timeout_secs));
     pg_config.ssl_mode(match config.tls_mode {
@@ -707,9 +700,55 @@ fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresCli
         PostgresTlsMode::VerifyCa | PostgresTlsMode::VerifyFull => PostgresSslMode::Require,
     });
 
-    let mut client = pg_config.connect(NoTls).map_err(postgres_error)?;
+    let mut client = match config.tls_mode {
+        PostgresTlsMode::Disable => pg_config.connect(NoTls).map_err(postgres_error)?,
+        PostgresTlsMode::Prefer
+        | PostgresTlsMode::Require
+        | PostgresTlsMode::VerifyCa
+        | PostgresTlsMode::VerifyFull => {
+            let connector = build_postgres_tls_connector(config)?;
+            pg_config.connect(connector).map_err(postgres_error)?
+        }
+    };
     initialize_postgres_session(&mut client, config)?;
     Ok(client)
+}
+
+fn build_postgres_tls_connector(
+    config: &PostgresStorageConfig,
+) -> Result<MakeTlsConnector, StorageError> {
+    let mut builder = TlsConnector::builder();
+    if let Some(path) = config.tls_ca_cert_path.as_deref() {
+        let bytes = std::fs::read(path).map_err(|error| {
+            StorageError::Postgres(format!(
+                "failed to read storage.postgres_tls_ca_cert_path {path}: {error}"
+            ))
+        })?;
+        let certificate = NativeTlsCertificate::from_pem(&bytes)
+            .or_else(|_| NativeTlsCertificate::from_der(&bytes))
+            .map_err(|error| {
+                StorageError::Postgres(format!(
+                    "failed to parse storage.postgres_tls_ca_cert_path {path}: {error}"
+                ))
+            })?;
+        builder.add_root_certificate(certificate);
+    }
+
+    match config.tls_mode {
+        PostgresTlsMode::Disable | PostgresTlsMode::Prefer | PostgresTlsMode::VerifyFull => {}
+        PostgresTlsMode::Require => {
+            builder.danger_accept_invalid_certs(true);
+            builder.danger_accept_invalid_hostnames(true);
+        }
+        PostgresTlsMode::VerifyCa => {
+            builder.danger_accept_invalid_hostnames(true);
+        }
+    }
+
+    let connector = builder.build().map_err(|error| {
+        StorageError::Postgres(format!("postgres TLS connector error: {error}"))
+    })?;
+    Ok(MakeTlsConnector::new(connector))
 }
 
 fn initialize_postgres_session(
@@ -2194,14 +2233,15 @@ mod tests {
     }
 
     #[test]
-    fn postgres_tls_modes_without_connector_fail_closed_before_connecting() {
+    fn postgres_tls_ca_path_errors_before_connecting() {
         let error = RuntimeStorageRepositories::postgres(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             PostgresStorageConfig {
                 dsn: "host=127.0.0.1 port=1 user=postgres dbname=ferrogate".into(),
                 pool_size: 1,
-                tls_mode: PostgresTlsMode::Require,
+                tls_mode: PostgresTlsMode::VerifyFull,
+                tls_ca_cert_path: Some("/tmp/ferrogate-missing-postgres-ca.pem".into()),
                 connect_timeout_secs: 1,
                 statement_timeout_millis: 1_000,
                 schema: None,
@@ -2221,7 +2261,7 @@ mod tests {
         .unwrap_err();
         assert!(error
             .to_string()
-            .contains("requires a PostgreSQL TLS connector"));
+            .contains("storage.postgres_tls_ca_cert_path"));
     }
 
     #[test]

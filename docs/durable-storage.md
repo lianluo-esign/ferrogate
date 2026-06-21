@@ -92,7 +92,8 @@ storage:
     - mysql
   postgres_dsn_env: "FERROGATE_POSTGRES_DSN"
   postgres_pool_size: 4
-  postgres_tls_mode: disable
+  postgres_tls_mode: verify_full
+  postgres_tls_ca_cert_path: "/etc/ferrogate/postgres-ca.pem"
   postgres_connect_timeout_secs: 5
   postgres_statement_timeout_millis: 30000
   postgres_schema: ferrogate_control
@@ -122,9 +123,11 @@ Runtime behavior:
 - `postgres_schema` is created if missing and prepended to the session
   `search_path`; `postgres_search_path` appends additional schemas.
 - `postgres_tls_mode` accepts `disable`, `prefer`, `require`, `verify_ca`, and
-  `verify_full`. This build uses the synchronous `postgres` client without a
-  TLS connector, so `require`, `verify_ca`, and `verify_full` fail closed until
-  a TLS connector is wired in. Use `disable` for local Docker tests.
+  `verify_full`. `require` encrypts the connection without certificate
+  verification, `verify_ca` verifies the certificate chain, and `verify_full`
+  verifies both the chain and hostname. Use `postgres_tls_ca_cert_path` when
+  your managed PostgreSQL provider or private CA requires an explicit root CA.
+  Use `disable` only for local Docker tests or trusted private networks.
 
 The schema file is
 [`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
@@ -228,8 +231,8 @@ policy data.
   validation when `provider: postgres`.
 - Invalid `storage.postgres_pool_size`, PostgreSQL timeout values, schema, or
   search-path identifiers fail config validation.
-- PostgreSQL TLS modes that require a TLS connector fail startup instead of
-  silently falling back to plaintext.
+- Invalid `storage.postgres_tls_ca_cert_path` values fail startup instead of
+  silently falling back to the system trust store.
 - With `storage.required: true`, initialization errors prevent startup instead
   of falling back to memory.
 - Admin mutations that fail to persist are rejected or rolled back before the

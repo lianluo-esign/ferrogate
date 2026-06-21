@@ -290,6 +290,7 @@ storage:
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
   postgres_pool_size: 3
   postgres_tls_mode: prefer
+  postgres_tls_ca_cert_path: "/tmp/ferrogate-postgres-ca.pem"
   postgres_connect_timeout_secs: 7
   postgres_statement_timeout_millis: 4000
   postgres_schema: ferrogate_control
@@ -313,6 +314,10 @@ storage:
     assert_eq!(
         config.storage.postgres_tls_mode,
         ferrogate_storage::PostgresTlsMode::Prefer
+    );
+    assert_eq!(
+        config.storage.postgres_tls_ca_cert_path.as_deref(),
+        Some("/tmp/ferrogate-postgres-ca.pem")
     );
     assert_eq!(config.storage.postgres_connect_timeout_secs, 7);
     assert_eq!(config.storage.postgres_statement_timeout_millis, 4000);

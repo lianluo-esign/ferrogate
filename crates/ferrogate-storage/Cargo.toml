@@ -19,7 +19,9 @@ authors.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-core = { path = "../ferrogate-core" }
 libsql.workspace = true
+native-tls.workspace = true
 postgres.workspace = true
+postgres-native-tls.workspace = true
 serde.workspace = true
 tokio.workspace = true
 

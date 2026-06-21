@@ -6,6 +6,9 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa, KeyPair,
+};
 use serde_json::Value;
 use std::{
     env, fs,
@@ -39,7 +42,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, postgres-restart, turso-libsql-restart (opt-in)"
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, postgres-restart, postgres-tls-restart, turso-libsql-restart (opt-in)"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -60,6 +63,7 @@ fn main() -> Result<()> {
         Commands::LibsqlFileRestart(args) => run_libsql_file_restart(&args),
         Commands::LibsqlServerRestart(args) => run_libsql_server_restart(&args),
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
+        Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
         Commands::TursoLibsqlRestart(args) => run_turso_libsql_restart(&args),
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
@@ -67,7 +71,8 @@ fn main() -> Result<()> {
             run_gateway_api(&args.local)?;
             run_libsql_file_restart(&args.local)?;
             run_libsql_server_restart(&args.local)?;
-            run_postgres_restart(&args.local)
+            run_postgres_restart(&args.local)?;
+            run_postgres_tls_restart(&args.local)
         }
     }
 }
@@ -115,6 +120,8 @@ enum Commands {
     LibsqlServerRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL restart durability coverage.
     PostgresRestart(LocalArgs),
+    /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
+    PostgresTlsRestart(LocalArgs),
     /// Opt-in live Turso/libSQL restart durability scenario.
     TursoLibsqlRestart(TursoLibsqlRestartArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
@@ -1227,9 +1234,105 @@ fn run_postgres_restart(args: &LocalArgs) -> Result<()> {
     wait_for_postgres_server()?;
     let dsn =
         format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=disable");
-    run_control_plane_postgres_restart(&args.ferrogate_bin, &dsn, "ferrogate-postgres-test", true)?;
+    run_control_plane_postgres_restart(
+        &args.ferrogate_bin,
+        &dsn,
+        PostgresRestartTls {
+            mode: "disable",
+            ca_cert_path: None,
+        },
+        "ferrogate-postgres-test",
+        true,
+    )?;
     println!("postgres-restart scenario passed");
     Ok(())
+}
+
+fn run_postgres_tls_restart(args: &LocalArgs) -> Result<()> {
+    let host_port = free_port()?;
+    let cert_dir = tempfile::tempdir()?;
+    let certs = write_postgres_tls_certs(cert_dir.path())?;
+    let _cleanup = PostgresCleanup;
+    stop_postgres_container();
+    let cert_mount = format!("{}:/ferrogate-postgres-tls:ro", cert_dir.path().display());
+    docker_args([
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        POSTGRES_CONTAINER.to_string(),
+        "-e".to_string(),
+        "POSTGRES_PASSWORD=postgres".to_string(),
+        "-e".to_string(),
+        "POSTGRES_DB=ferrogate".to_string(),
+        "-p".to_string(),
+        format!("127.0.0.1:{host_port}:5432"),
+        "-v".to_string(),
+        cert_mount,
+        "--entrypoint".to_string(),
+        "sh".to_string(),
+        POSTGRES_IMAGE.to_string(),
+        "-c".to_string(),
+        r#"set -eu
+mkdir -p /var/lib/postgresql/tls
+cp /ferrogate-postgres-tls/server.crt /var/lib/postgresql/tls/server.crt
+cp /ferrogate-postgres-tls/server.key /var/lib/postgresql/tls/server.key
+chown postgres:postgres /var/lib/postgresql/tls/server.crt /var/lib/postgresql/tls/server.key
+chmod 600 /var/lib/postgresql/tls/server.key
+exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresql/tls/server.crt -c ssl_key_file=/var/lib/postgresql/tls/server.key"#
+            .to_string(),
+    ])?;
+    wait_for_postgres_server()?;
+    let dsn =
+        format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=require");
+    run_control_plane_postgres_restart(
+        &args.ferrogate_bin,
+        &dsn,
+        PostgresRestartTls {
+            mode: "verify_full",
+            ca_cert_path: Some(certs.ca_cert_path.as_path()),
+        },
+        "ferrogate-postgres-tls-test",
+        true,
+    )?;
+    println!("postgres-tls-restart scenario passed");
+    Ok(())
+}
+
+struct PostgresTlsFiles {
+    ca_cert_path: PathBuf,
+}
+
+fn write_postgres_tls_certs(dir: &Path) -> Result<PostgresTlsFiles> {
+    let ca_key = KeyPair::generate().context("failed to generate PostgreSQL test CA key")?;
+    let mut ca_params = CertificateParams::new(vec!["ferrogate-postgres-test-ca".to_string()])
+        .context("failed to build PostgreSQL test CA params")?;
+    let mut ca_name = DistinguishedName::new();
+    ca_name.push(DnType::CommonName, "ferrogate-postgres-test-ca");
+    ca_params.distinguished_name = ca_name;
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = CertifiedIssuer::self_signed(ca_params, ca_key)
+        .context("failed to self-sign PostgreSQL test CA")?;
+
+    let server_key =
+        KeyPair::generate().context("failed to generate PostgreSQL test server key")?;
+    let server_params = CertificateParams::new(vec!["127.0.0.1".to_string()])
+        .context("failed to build PostgreSQL test server params")?;
+    let mut server_params = server_params;
+    let mut server_name = DistinguishedName::new();
+    server_name.push(DnType::CommonName, "127.0.0.1");
+    server_params.distinguished_name = server_name;
+    let server_cert = server_params
+        .signed_by(&server_key, &ca)
+        .context("failed to sign PostgreSQL test server certificate")?;
+
+    let ca_cert_path = dir.join("ca.crt");
+    fs::write(&ca_cert_path, ca.pem()).context("failed to write PostgreSQL test CA cert")?;
+    fs::write(dir.join("server.crt"), server_cert.pem())
+        .context("failed to write PostgreSQL test server cert")?;
+    fs::write(dir.join("server.key"), server_key.serialize_pem())
+        .context("failed to write PostgreSQL test server key")?;
+
+    Ok(PostgresTlsFiles { ca_cert_path })
 }
 
 fn run_control_plane_libsql_restart(
@@ -1253,15 +1356,25 @@ fn run_control_plane_libsql_restart(
 fn run_control_plane_postgres_restart(
     ferrogate_bin: &Path,
     postgres_dsn: &str,
+    tls: PostgresRestartTls<'_>,
     resource_prefix: &str,
     verify_deleted_after_restart: bool,
 ) -> Result<()> {
     run_control_plane_restart(
         ferrogate_bin,
-        ControlPlaneRestartStorage::Postgres { dsn: postgres_dsn },
+        ControlPlaneRestartStorage::Postgres {
+            dsn: postgres_dsn,
+            tls,
+        },
         resource_prefix,
         verify_deleted_after_restart,
     )
+}
+
+#[derive(Clone, Copy)]
+struct PostgresRestartTls<'a> {
+    mode: &'a str,
+    ca_cert_path: Option<&'a Path>,
 }
 
 #[derive(Clone, Copy)]
@@ -1272,6 +1385,7 @@ enum ControlPlaneRestartStorage<'a> {
     },
     Postgres {
         dsn: &'a str,
+        tls: PostgresRestartTls<'a>,
     },
 }
 
@@ -2690,7 +2804,7 @@ impl ControlPlaneRestartStorage<'_> {
             } => {
                 command.env("FERROGATE_LIBSQL_AUTH_TOKEN", token);
             }
-            ControlPlaneRestartStorage::Postgres { dsn } => {
+            ControlPlaneRestartStorage::Postgres { dsn, .. } => {
                 command.env("FERROGATE_POSTGRES_DSN", dsn);
             }
             ControlPlaneRestartStorage::Libsql {
@@ -2719,7 +2833,18 @@ impl ControlPlaneRestartStorage<'_> {
   migration_mode: auto"#
                 )
             }
-            ControlPlaneRestartStorage::Postgres { .. } => r#"storage:
+            ControlPlaneRestartStorage::Postgres { tls, .. } => {
+                let ca_cert_path = tls
+                    .ca_cert_path
+                    .map(|path| {
+                        format!(
+                            "\n  postgres_tls_ca_cert_path: {}",
+                            toml_basic_string(&path.to_string_lossy())
+                        )
+                    })
+                    .unwrap_or_default();
+                format!(
+                    r#"storage:
   provider: postgres
   required: true
   provider_order:
@@ -2728,14 +2853,17 @@ impl ControlPlaneRestartStorage<'_> {
     - mysql
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
   postgres_pool_size: 2
-  postgres_tls_mode: disable
+  postgres_tls_mode: {tls_mode}{ca_cert_path}
   postgres_connect_timeout_secs: 5
   postgres_statement_timeout_millis: 30000
   postgres_schema: ferrogate_control
   postgres_search_path:
     - public
-  migration_mode: auto"#
-                .to_string(),
+  migration_mode: auto"#,
+                    tls_mode = tls.mode,
+                    ca_cert_path = ca_cert_path
+                )
+            }
         }
     }
 
