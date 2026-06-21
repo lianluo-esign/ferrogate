@@ -23,6 +23,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) tls: TlsConfig,
     #[serde(default)]
+    pub(crate) auth_service: AuthServiceConfig,
+    #[serde(default)]
     pub(crate) providers: Vec<Provider>,
     #[serde(default)]
     pub(crate) models: Vec<Model>,
@@ -70,6 +72,16 @@ pub(crate) struct Config {
 pub(crate) struct AdminConfig {
     #[serde(default)]
     pub(crate) listen: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AuthServiceConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_auth_service_endpoint")]
+    pub(crate) endpoint: String,
+    #[serde(default = "default_auth_service_timeout_millis")]
+    pub(crate) timeout_millis: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -872,6 +884,14 @@ fn default_listen() -> String {
     "127.0.0.1:8080".to_string()
 }
 
+fn default_auth_service_endpoint() -> String {
+    "http://127.0.0.1:8090".to_string()
+}
+
+fn default_auth_service_timeout_millis() -> u64 {
+    500
+}
+
 fn default_provider_kind() -> String {
     "openai".to_string()
 }
@@ -1262,6 +1282,16 @@ impl Default for ClusterConfig {
     }
 }
 
+impl Default for AuthServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_auth_service_endpoint(),
+            timeout_millis: default_auth_service_timeout_millis(),
+        }
+    }
+}
+
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -1293,6 +1323,7 @@ impl Default for Config {
             listen: default_listen(),
             admin: AdminConfig::default(),
             tls: TlsConfig::default(),
+            auth_service: AuthServiceConfig::default(),
             providers: Vec::new(),
             models: Vec::new(),
             api_keys: Vec::new(),

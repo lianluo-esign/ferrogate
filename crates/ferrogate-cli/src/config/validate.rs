@@ -28,6 +28,7 @@ impl Config {
         let mut provider_names = self.validate_providers()?;
         let mut model_names = self.validate_models(&provider_names)?;
         self.validate_mcp_servers()?;
+        self.validate_auth_service()?;
         self.add_mcp_policy_targets(&mut model_names, &mut provider_names);
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
@@ -86,6 +87,23 @@ impl Config {
         let key_path = self.tls.key_path.as_deref().unwrap();
         validate_manual_tls_files(cert_path, key_path)?;
 
+        Ok(())
+    }
+
+    fn validate_auth_service(&self) -> AnyResult<()> {
+        if self.auth_service.timeout_millis == 0 {
+            bail!("field auth_service.timeout_millis: must be greater than zero");
+        }
+        if !self.auth_service.enabled {
+            return Ok(());
+        }
+        let endpoint = self.auth_service.endpoint.trim();
+        if endpoint.is_empty() {
+            bail!("field auth_service.endpoint: cannot be empty");
+        }
+        if !endpoint.starts_with("http://") {
+            bail!("field auth_service.endpoint: must start with http://");
+        }
         Ok(())
     }
 

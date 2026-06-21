@@ -6,8 +6,13 @@
 
 use blake2::{Blake2b512, Digest};
 use http::{header, HeaderMap, StatusCode};
+use serde::de::DeserializeOwned;
+use serde_json::json;
 use std::{
     collections::HashSet,
+    io::{Read, Write},
+    net::{TcpStream, ToSocketAddrs},
+    time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -34,6 +39,7 @@ pub(crate) struct AuthContext {
     #[allow(dead_code)]
     pub(crate) user_id: Option<String>,
     pub(crate) log_bodies: bool,
+    pub(crate) rbac_subject: Option<ferrogate_auth::PolicySubject>,
 }
 
 impl AuthContext {
@@ -94,6 +100,7 @@ pub(crate) fn authenticate(
             project_id: None,
             user_id: None,
             log_bodies: false,
+            rbac_subject: None,
         });
     }
 
@@ -104,6 +111,10 @@ pub(crate) fn authenticate(
             message: "missing API key; use Authorization: Bearer or x-api-key".into(),
         });
     };
+
+    if state.config.auth_service.enabled {
+        return authenticate_external(state, &provided_key, required_scope, request_id);
+    }
 
     for configured_key in &state.config.api_keys {
         if configured_key.matches_presented_key(&provided_key) {
@@ -142,6 +153,7 @@ pub(crate) fn authenticate(
                 project_id: configured_key.project_id.clone(),
                 user_id: configured_key.user_id.clone(),
                 log_bodies: configured_key.log_bodies.unwrap_or(false),
+                rbac_subject: None,
             };
             if !auth.has_scope(required_scope) {
                 return Err(AuthError {
@@ -180,6 +192,263 @@ pub(crate) fn authenticate(
         code: "invalid_api_key",
         message: "invalid API key".into(),
     })
+}
+
+pub(crate) fn authorize_external_rbac(
+    state: &AppState,
+    auth: &AuthContext,
+    action: &str,
+    resource: &str,
+) -> std::result::Result<(), AuthError> {
+    if !state.config.auth_service.enabled {
+        return Ok(());
+    }
+    let Some(subject) = auth.rbac_subject.clone() else {
+        return Err(AuthError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "external_auth_unavailable",
+            message: "external auth service did not return an RBAC subject".into(),
+        });
+    };
+    let request = ferrogate_auth::AuthorizeRequest {
+        tenant: auth.tenant_context(),
+        subject,
+        action: action.to_string(),
+        resource: resource.to_string(),
+    };
+    let decision: ferrogate_auth::AuthorizationDecision =
+        auth_service_post_json(state, "/v1/auth/authorize", &request)
+            .map_err(external_authorize_error)?;
+    if decision.allowed {
+        return Ok(());
+    }
+    Err(AuthError {
+        status: StatusCode::FORBIDDEN,
+        code: "rbac_denied",
+        message: format!(
+            "external RBAC denied {action} on {resource}: {}",
+            decision.reason
+        ),
+    })
+}
+
+fn authenticate_external(
+    state: &AppState,
+    provided_key: &str,
+    required_scope: &str,
+    request_id: &str,
+) -> std::result::Result<AuthContext, AuthError> {
+    let request = ferrogate_auth::ResolveApiKeyRequest {
+        presented_key: provided_key.to_string(),
+    };
+    let decision: ferrogate_auth::AuthDecision =
+        auth_service_post_json(state, "/v1/auth/resolve-api-key", &request)
+            .map_err(|error| external_auth_error(error, request_id))?;
+    let auth = AuthContext {
+        api_key_id: decision.tenant.api_key_id.clone(),
+        scopes: decision.scopes.into_iter().collect(),
+        allowed_models: HashSet::new(),
+        denied_models: HashSet::new(),
+        allowed_providers: HashSet::new(),
+        denied_providers: HashSet::new(),
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        organization_id: decision.tenant.organization_id,
+        team_id: decision.tenant.team_id,
+        project_id: decision.tenant.project_id,
+        user_id: decision.tenant.user_id,
+        log_bodies: false,
+        rbac_subject: Some(decision.subject),
+    };
+    if !external_scope_allows(&auth.scopes, required_scope) {
+        return Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "scope_denied",
+            message: format!("API key does not have required scope {required_scope}"),
+        });
+    }
+    Ok(auth)
+}
+
+fn external_scope_allows(scopes: &HashSet<String>, required_scope: &str) -> bool {
+    scopes.contains(required_scope) || scopes.contains("*")
+}
+
+fn external_auth_error(error: AuthServiceClientError, request_id: &str) -> AuthError {
+    match error {
+        AuthServiceClientError::HttpStatus { status, body } if status == 401 => AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_api_key",
+            message: sanitize_auth_error_body(&body),
+        },
+        AuthServiceClientError::HttpStatus { status, body } if status == 403 => AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "external_auth_denied",
+            message: sanitize_auth_error_body(&body),
+        },
+        other => AuthError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "external_auth_unavailable",
+            message: format!(
+                "external auth service is unavailable for request {request_id}: {other}"
+            ),
+        },
+    }
+}
+
+fn external_authorize_error(error: AuthServiceClientError) -> AuthError {
+    match error {
+        AuthServiceClientError::HttpStatus { status, body } if status == 401 || status == 403 => {
+            AuthError {
+                status: StatusCode::FORBIDDEN,
+                code: "rbac_denied",
+                message: sanitize_auth_error_body(&body),
+            }
+        }
+        other => AuthError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "external_auth_unavailable",
+            message: format!("external auth service authorization failed: {other}"),
+        },
+    }
+}
+
+fn sanitize_auth_error_body(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(|message| message.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "external auth service rejected the request".into())
+}
+
+fn auth_service_post_json<T, R>(
+    state: &AppState,
+    path: &str,
+    payload: &T,
+) -> std::result::Result<R, AuthServiceClientError>
+where
+    T: serde::Serialize,
+    R: DeserializeOwned,
+{
+    let body = serde_json::to_vec(payload)
+        .map_err(|error| AuthServiceClientError::Request(error.to_string()))?;
+    let endpoint = build_auth_service_target(&state.config.auth_service.endpoint, path)?;
+    let timeout = Duration::from_millis(state.config.auth_service.timeout_millis);
+    let address = endpoint
+        .host_port
+        .to_socket_addrs()
+        .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?
+        .next()
+        .ok_or_else(|| {
+            AuthServiceClientError::Transport("auth service host resolved no addresses".into())
+        })?;
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
+    write!(
+        stream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        endpoint.path,
+        endpoint.host_port,
+        body.len()
+    )
+    .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
+    stream
+        .write_all(&body)
+        .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
+    parse_auth_service_response(&response)
+}
+
+fn parse_auth_service_response<R: DeserializeOwned>(
+    response: &[u8],
+) -> std::result::Result<R, AuthServiceClientError> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| AuthServiceClientError::Response("missing HTTP header terminator".into()))?;
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| AuthServiceClientError::Response("missing HTTP status".into()))?;
+    let body = String::from_utf8_lossy(&response[header_end + 4..]).into_owned();
+    if !(200..300).contains(&status) {
+        return Err(AuthServiceClientError::HttpStatus { status, body });
+    }
+    serde_json::from_str(&body).map_err(|error| AuthServiceClientError::Response(error.to_string()))
+}
+
+fn build_auth_service_target(
+    endpoint: &str,
+    path: &str,
+) -> std::result::Result<AuthServiceTarget, AuthServiceClientError> {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    let rest = trimmed.strip_prefix("http://").ok_or_else(|| {
+        AuthServiceClientError::Request("auth service endpoint must use http://".into())
+    })?;
+    let (host_port, base_path) = rest.split_once('/').unwrap_or((rest, ""));
+    if host_port.trim().is_empty() {
+        return Err(AuthServiceClientError::Request(
+            "auth service endpoint host is empty".into(),
+        ));
+    }
+    let path = if base_path.is_empty() {
+        path.to_string()
+    } else {
+        format!(
+            "/{}/{}",
+            base_path.trim_matches('/'),
+            path.trim_start_matches('/')
+        )
+    };
+    Ok(AuthServiceTarget {
+        host_port: host_port.to_string(),
+        path,
+    })
+}
+
+#[derive(Debug)]
+struct AuthServiceTarget {
+    host_port: String,
+    path: String,
+}
+
+#[derive(Debug)]
+enum AuthServiceClientError {
+    Request(String),
+    Transport(String),
+    Response(String),
+    HttpStatus { status: u16, body: String },
+}
+
+impl std::fmt::Display for AuthServiceClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(message) => write!(formatter, "{message}"),
+            Self::Transport(message) => write!(formatter, "{message}"),
+            Self::Response(message) => write!(formatter, "{message}"),
+            Self::HttpStatus { status, body } => {
+                let summary = serde_json::from_str::<serde_json::Value>(body)
+                    .unwrap_or_else(|_| json!({ "body": body }));
+                write!(formatter, "auth service returned HTTP {status}: {summary}")
+            }
+        }
+    }
 }
 
 impl ApiKey {
@@ -297,6 +566,7 @@ mod tests {
             project_id: None,
             user_id: None,
             log_bodies: false,
+            rbac_subject: None,
         };
         assert!(auth.can_use_model("fast-chat"));
         assert!(!auth.can_use_model("expensive-model"));
@@ -319,6 +589,7 @@ mod tests {
             project_id: Some("project".into()),
             user_id: None,
             log_bodies: true,
+            rbac_subject: None,
         };
         assert!(auth.can_use_provider("openai"));
         assert!(!auth.can_use_provider("anthropic"));
@@ -342,10 +613,24 @@ mod tests {
             project_id: None,
             user_id: None,
             log_bodies: false,
+            rbac_subject: None,
         };
 
         assert!(!auth.can_use_model("fast-chat"));
         assert!(!auth.can_use_provider("openai"));
+    }
+
+    #[test]
+    fn external_scopes_must_explicitly_allow_required_scope() {
+        assert!(!external_scope_allows(&HashSet::new(), "chat.completions"));
+        assert!(external_scope_allows(
+            &HashSet::from(["chat.completions".into()]),
+            "chat.completions"
+        ));
+        assert!(external_scope_allows(
+            &HashSet::from(["*".into()]),
+            "chat.completions"
+        ));
     }
 
     #[test]

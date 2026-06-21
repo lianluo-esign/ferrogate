@@ -8,6 +8,36 @@ use super::*;
 use ferrogate_providers::RoutingStrategy;
 
 #[test]
+fn rejects_enabled_auth_service_with_non_http_endpoint() {
+    let config = Config {
+        auth_service: AuthServiceConfig {
+            enabled: true,
+            endpoint: "https://auth.example.test".into(),
+            timeout_millis: 500,
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field auth_service.endpoint: must start with http://"));
+}
+
+#[test]
+fn rejects_auth_service_with_zero_timeout() {
+    let config = Config {
+        auth_service: AuthServiceConfig {
+            enabled: false,
+            endpoint: "http://127.0.0.1:8090".into(),
+            timeout_millis: 0,
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field auth_service.timeout_millis"));
+}
+
+#[test]
 fn rejects_model_with_unknown_provider() {
     let config = Config {
         models: vec![Model {

@@ -53,6 +53,7 @@ fn main() -> Result<()> {
         Commands::RunAll(args) => {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
+            run_gateway_external_auth_api(&args.local, &args.auth)?;
             run_gateway_api(&args.local)?;
             if args.include_docker {
                 run_all_docker_scenarios(&args.image)?;
@@ -72,6 +73,7 @@ fn main() -> Result<()> {
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
+            run_gateway_external_auth_api(&args.local, &args.auth)?;
             run_gateway_api(&args.local)?;
             run_libsql_file_restart(&args.local)?;
             run_libsql_server_restart(&args.local)?;
@@ -1228,6 +1230,42 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     case.wait_for_metering_export_status()?;
 
     println!("gateway-api scenario passed");
+    Ok(())
+}
+
+fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthArgs) -> Result<()> {
+    let auth = AuthHarness::start(&auth_args.ferrogate_auth_bin)?;
+    let case = LocalHarness::start_with_external_auth(&local.ferrogate_bin, 1, &auth.auth_addr)?;
+
+    case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
+        assert!(list_contains(&body, "id", "fast-chat"));
+        Ok(())
+    })?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"external auth allow"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_eq!(body["usage"]["total_tokens"], 2);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"blocked-chat","messages":[{"role":"user","content":"external auth deny"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "rbac_denied");
+            Ok(())
+        },
+    )?;
+
+    println!("gateway-external-auth-api scenario passed");
     Ok(())
 }
 
@@ -2536,19 +2574,38 @@ impl Drop for TursoRestartHarness {
 
 impl LocalHarness {
     fn start(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
-        Self::start_inner(ferrogate_bin, expected_provider_requests, None)
+        Self::start_inner(ferrogate_bin, expected_provider_requests, None, None)
     }
 
     fn start_with_billing(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
         let billing = spawn_mock_billing_server(expected_provider_requests)
             .context("start billing provider")?;
-        Self::start_inner(ferrogate_bin, expected_provider_requests, Some(billing))
+        Self::start_inner(
+            ferrogate_bin,
+            expected_provider_requests,
+            Some(billing),
+            None,
+        )
+    }
+
+    fn start_with_external_auth(
+        ferrogate_bin: &Path,
+        expected_provider_requests: usize,
+        auth_addr: &str,
+    ) -> Result<Self> {
+        Self::start_inner(
+            ferrogate_bin,
+            expected_provider_requests,
+            None,
+            Some(auth_addr),
+        )
     }
 
     fn start_inner(
         ferrogate_bin: &Path,
         expected_provider_requests: usize,
         billing: Option<MockBillingServer>,
+        auth_addr: Option<&str>,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
@@ -2576,6 +2633,7 @@ impl LocalHarness {
                 &stdio_mcp_path,
                 billing.as_ref(),
                 Some(&observability),
+                auth_addr,
             ),
         )?;
 
@@ -2843,6 +2901,7 @@ fn local_gateway_config(
     stdio_mcp_path: &Path,
     billing: Option<&MockBillingServer>,
     observability: Option<&MockOtlpServer>,
+    auth_addr: Option<&str>,
 ) -> String {
     let metering = billing
         .map(|billing| {
@@ -2877,6 +2936,18 @@ export_timeout_secs = 3
             )
         })
         .unwrap_or_default();
+    let auth_service = auth_addr
+        .map(|auth_addr| {
+            format!(
+                r#"
+[auth_service]
+enabled = true
+endpoint = "http://{auth_addr}"
+timeout_millis = 1000
+"#
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"
 listen = "{gateway_addr}"
@@ -2891,6 +2962,7 @@ state_backend = "local"
 counter_backend = "local"
 {metering}
 {observability}
+{auth_service}
 
 [telemetry]
 service_name = "ferrogate-test"
@@ -2952,6 +3024,14 @@ name = "fast-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
 capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models]]
+name = "blocked-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini"
+capabilities = ["chat"]
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
 
@@ -3238,12 +3318,28 @@ api_keys:
     scopes:
       - models.read
       - chat.completions
+  - id: client
+    name: Gateway client key
+    secret: client-secret
+    enabled: true
+    tenant:
+      organization_id: org_demo
+      team_id: null
+      project_id: project_gateway
+      user_id: null
+      api_key_id: client
+    scopes:
+      - models.read
+      - chat.completions
+      - responses.create
 roles:
   - id: role-chat-caller
     name: Chat caller
     permissions:
       - action: chat.completions
         resource: model:fast-chat
+      - action: models.read
+        resource: "*"
 bindings:
   - id: binding-key-example-chat
     role_id: role-chat-caller
@@ -3256,6 +3352,17 @@ bindings:
     subject:
       type: api_key
       api_key_id: key-example
+  - id: binding-client-chat
+    role_id: role-chat-caller
+    tenant:
+      organization_id: org_demo
+      team_id: null
+      project_id: project_gateway
+      user_id: null
+      api_key_id: client
+    subject:
+      type: api_key
+      api_key_id: client
 "#
     .to_string()
 }

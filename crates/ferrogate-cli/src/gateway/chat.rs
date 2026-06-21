@@ -11,7 +11,7 @@ use std::io::{Error as IoError, Read};
 use tracing::{info, warn};
 
 use crate::{
-    auth::{authenticate, AuthContext},
+    auth::{authenticate, authorize_external_rbac, AuthContext},
     config::{GuardrailEffect, GuardrailStage, Provider},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
@@ -1476,6 +1476,22 @@ fn build_ai_request_plan(
             status: StatusCode::BAD_REQUEST,
             code,
             message,
+        })
+    })?;
+
+    authorize_external_rbac(
+        state,
+        &auth,
+        endpoint.scope(),
+        &format!("model:{}", request.model),
+    )
+    .map_err(|error| {
+        reject_ai_request(AiRequestRejection {
+            tenant: auth.tenant_context(),
+            logical_model: Some(request.model.clone()),
+            status: error.status,
+            code: error.code,
+            message: error.message,
         })
     })?;
 

@@ -70,6 +70,7 @@ impl Config {
             admin: AdminConfig {
                 listen: config.admin,
             },
+            auth_service: crate::config::AuthServiceConfig::default(),
             tls: match (config.tls, config.tls_acme) {
                 (Some(tls), None) => TlsConfig {
                     enabled: true,

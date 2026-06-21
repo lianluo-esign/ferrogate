@@ -2780,7 +2780,7 @@ impl AppState {
     }
 
     pub(crate) fn auth_required(&self) -> bool {
-        !self.config.api_keys.is_empty()
+        self.config.auth_service.enabled || !self.config.api_keys.is_empty()
     }
 
     pub(crate) fn storage_status(&self) -> StorageBackendEvidence {

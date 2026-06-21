@@ -14,6 +14,9 @@ fn default_config_uses_localhost_8080() {
     assert!(config.providers.is_empty());
     assert!(config.models.is_empty());
     assert!(config.api_keys.is_empty());
+    assert!(!config.auth_service.enabled);
+    assert_eq!(config.auth_service.endpoint, "http://127.0.0.1:8090");
+    assert_eq!(config.auth_service.timeout_millis, 500);
     assert!(config.upstreams.is_empty());
     assert!(config.routes.is_empty());
     assert!(!config.agent_runtime.enabled);
@@ -55,6 +58,11 @@ provider = "vector"
 otlp_endpoint = "http://vector:4318"
 prometheus_metrics_path = "/metrics"
 export_timeout_secs = 4
+
+[auth_service]
+enabled = true
+endpoint = "http://127.0.0.1:8090"
+timeout_millis = 750
 
 [cache]
 enabled = true
@@ -174,6 +182,9 @@ timeout_ms = 30000
     );
     assert_eq!(config.observability.prometheus_metrics_path, "/metrics");
     assert_eq!(config.observability.export_timeout_secs, 4);
+    assert!(config.auth_service.enabled);
+    assert_eq!(config.auth_service.endpoint, "http://127.0.0.1:8090");
+    assert_eq!(config.auth_service.timeout_millis, 750);
     assert_eq!(
         config
             .reliability
