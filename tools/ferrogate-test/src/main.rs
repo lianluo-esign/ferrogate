@@ -1235,16 +1235,21 @@ fn run_control_plane_libsql_restart(
     })
     .to_string();
     let policy_name = format!("{resource_id}-policy");
-    let policy_body = serde_json::json!({
-        "name": policy_name,
-        "effect": "deny",
-        "models": ["fast-chat"],
-        "providers": ["openai"],
-        "code": "blocked_by_turso_restart_test",
-        "message": "blocked by Turso restart test",
-        "enabled": false
-    })
-    .to_string();
+    let policy_body = |enabled: bool| {
+        serde_json::json!({
+            "name": policy_name,
+            "effect": "deny",
+            "api_key_ids": [resource_id],
+            "models": ["fast-chat"],
+            "providers": ["openai"],
+            "code": "blocked_by_turso_restart_test",
+            "message": "blocked by Turso restart test",
+            "enabled": enabled
+        })
+        .to_string()
+    };
+    let disabled_policy_body = policy_body(false);
+    let enabled_policy_body = policy_body(true);
     let prompt_template_id = format!("{resource_id}-prompt");
     let prompt_template_body = serde_json::json!({
         "id": prompt_template_id,
@@ -1310,7 +1315,7 @@ fn run_control_plane_libsql_restart(
             "POST",
             "/admin/v1/policies",
             &[ADMIN_AUTH, JSON_CONTENT],
-            &policy_body,
+            &disabled_policy_body,
             201,
             |body| {
                 assert_eq!(body["policy"]["name"], policy_name);
@@ -1348,6 +1353,21 @@ fn run_control_plane_libsql_restart(
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_policy(&policy_name)?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
+        case.expect_restored_api_key_models_access(&resource_id)?;
+        case.expect_json(
+            "PATCH",
+            &format!("/admin/v1/policies/{policy_name}"),
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &enabled_policy_body,
+            200,
+            |body| {
+                assert_eq!(body["policy"]["name"], policy_name);
+                assert_eq!(body["policy"]["enabled"], true);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        case.expect_restored_policy_denies_chat(&resource_id)?;
         case.delete_mcp_server(&mcp_server_name)?;
         case.expect_json(
             "DELETE",
@@ -1692,6 +1712,15 @@ impl TursoRestartHarness {
         )
     }
 
+    fn expect_restored_api_key_models_access(&self, id: &str) -> Result<()> {
+        let auth = format!("Authorization: Bearer {id}-secret");
+        self.expect_json("GET", "/v1/models", &[auth.as_str()], "", 200, |body| {
+            assert!(list_contains(&body, "id", "fast-chat"));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        })
+    }
+
     fn expect_gateway_config(&self, id: &str) -> Result<()> {
         self.expect_json(
             "GET",
@@ -1765,6 +1794,23 @@ impl TursoRestartHarness {
             404,
             |body| {
                 assert_eq!(body["error"]["code"], "policy_not_found");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_restored_policy_denies_chat(&self, id: &str) -> Result<()> {
+        let auth = format!("Authorization: Bearer {id}-secret");
+        self.expect_json(
+            "POST",
+            "/v1/chat/completions",
+            &[auth.as_str(), JSON_CONTENT],
+            r#"{"model":"fast-chat","messages":[{"role":"user","content":"durable policy check"}]}"#,
+            403,
+            |body| {
+                assert_eq!(body["error"]["code"], "blocked_by_turso_restart_test");
+                assert_eq!(body["error"]["message"], "blocked by Turso restart test");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
