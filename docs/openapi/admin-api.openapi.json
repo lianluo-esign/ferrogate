@@ -148,6 +148,59 @@
         }
       }
     },
+    "/v1/agent-runs": {
+      "post": {
+        "operationId": "createAgentRun",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Opt into a bounded FerroGate agent run without changing default chat/completions behavior.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentRunCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Agent run completed immediately through the default bounded harness.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunCreateResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Agent run stopped before completion due to configured bounds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
     "/v1/mcp/tool/execute": {
       "post": {
         "operationId": "executeMcpTool",
@@ -6106,6 +6159,110 @@
               }
             },
             "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentRunCreateRequest": {
+        "type": "object",
+        "required": [
+          "input"
+        ],
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128,
+            "description": "Optional stable run id. The x-ferrogate-agent-run-id header takes precedence when both are present."
+          },
+          "max_turns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "timeout_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentRunCreateResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "id",
+          "status",
+          "turns_executed",
+          "output",
+          "tool_results",
+          "request_id"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_run"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "max_turns_exceeded",
+              "cancelled",
+              "timed_out",
+              "failed"
+            ]
+          },
+          "turns_executed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "output": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolResult"
+            }
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ToolResult": {
+        "type": "object",
+        "required": [
+          "tool_call_id",
+          "content",
+          "is_error"
+        ],
+        "properties": {
+          "tool_call_id": {
+            "type": "string"
+          },
+          "content": {},
+          "is_error": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false

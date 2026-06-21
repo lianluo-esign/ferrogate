@@ -94,6 +94,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/v1/agent-runs" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_agent_run_create(session, ctx, headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
         if path.starts_with("/v1/prompts/") && path.ends_with("/render") {
             let headers = req.headers.clone();
             let method = req.method.clone();

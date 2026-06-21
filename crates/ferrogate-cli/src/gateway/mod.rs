@@ -4,6 +4,7 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
+mod agent_runs;
 mod body;
 mod chat;
 mod dispatch;

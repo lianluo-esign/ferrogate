@@ -133,6 +133,103 @@ fn agentic_lite_builtin_tools_are_visible_and_explicitly_executable() {
 }
 
 #[test]
+fn agent_run_endpoint_is_fail_closed_until_enabled() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, builtin_tools_config(&gateway_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let disabled = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer tool-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"input":"summarize this"}"#,
+    ));
+    assert_eq!(disabled["error"]["code"], "agent_runtime_disabled");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
+fn agent_run_endpoint_creates_observable_opt_in_run() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, agent_run_config(&gateway_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let created = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-agent-run-id: agent-run-direct",
+        ],
+        r#"{"input":"produce a bounded agent result","max_turns":2,"timeout_millis":1000}"#,
+    ));
+    assert_eq!(created["object"], "agent_run");
+    assert_eq!(created["id"], "agent-run-direct");
+    assert_eq!(created["status"], "completed");
+    assert_eq!(created["turns_executed"], 1);
+    assert_eq!(created["output"], "produce a bounded agent result");
+    assert_eq!(created["tool_results"].as_array().unwrap().len(), 0);
+
+    let timeline = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-runs/agent-run-direct",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert_eq!(timeline["object"], "agent_run_timeline");
+    assert_eq!(timeline["id"], "agent-run-direct");
+    assert_eq!(timeline["summary"]["status"], "completed");
+    assert_eq!(timeline["summary"]["request_count"], 0);
+    assert_eq!(timeline["summary"]["audit_event_count"], 3);
+    let events = timeline["audit_events"].as_array().unwrap();
+    assert!(events.iter().any(|event| {
+        event["action"] == "agent.run_started"
+            && event["agent_run_id"] == "agent-run-direct"
+            && event["tenant"]["api_key_id"] == "agent-client"
+    }));
+    assert!(events.iter().any(|event| {
+        event["action"] == "agent.turn_started" && event["target"] == "agent_run:agent-run-direct"
+    }));
+    assert!(events.iter().any(|event| {
+        event["action"] == "agent.run_completed"
+            && event["outcome"] == "success"
+            && event["message"] == "agent run completed"
+    }));
+
+    let no_scope = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"input":"blocked"}"#,
+    ));
+    assert_eq!(no_scope["error"]["code"], "scope_denied");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
     let (mcp_addr, mcp_handle) = spawn_mcp_server(2);
     let gateway_addr = free_addr();
@@ -924,6 +1021,33 @@ order = 40
 
 [extensions.permissions]
 tools = ["tool.health_check"]
+"#
+    )
+}
+
+fn agent_run_config(gateway_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[agent_runtime]
+enabled = true
+max_turns = 3
+timeout_millis = 5000
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
+id = "agent-client"
+name = "Agent client"
+key = "agent-secret"
+scopes = ["agent.runs.create"]
+organization_id = "org_demo"
+project_id = "project_gateway"
 "#
     )
 }

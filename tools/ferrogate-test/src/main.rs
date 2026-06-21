@@ -1022,6 +1022,50 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_json(
+        "POST",
+        "/v1/agent-runs",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: agent-run-harness",
+        ],
+        r#"{"input":"run the bounded harness","max_turns":2,"timeout_millis":1000}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_run");
+            assert_eq!(body["id"], "agent-run-harness");
+            assert_eq!(body["status"], "completed");
+            assert_eq!(body["turns_executed"], 1);
+            assert_eq!(body["output"], "run the bounded harness");
+            assert_eq!(body["tool_results"].as_array().unwrap().len(), 0);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-runs/agent-run-harness",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "agent_run_timeline");
+            assert_eq!(body["id"], "agent-run-harness");
+            assert_eq!(body["summary"]["request_count"], 0);
+            assert_eq!(body["summary"]["audit_event_count"], 3);
+            assert!(body["audit_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["action"] == "agent.run_completed"
+                        && event["agent_run_id"] == "agent-run-harness"
+                }));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
     case.expect_text("GET", "/metrics", &[ADMIN_AUTH], "", 200, |body| {
         assert!(body.contains("ferrogate_request_logs_total"));
         Ok(())
@@ -2828,6 +2872,11 @@ log_bodies = true
 mcp_dispatch_timeout_secs = 1
 mcp_dispatch_max_concurrency = 4
 
+[agent_runtime]
+enabled = true
+max_turns = 3
+timeout_millis = 5000
+
 [[providers]]
 name = "openai"
 kind = "openai"
@@ -2865,7 +2914,7 @@ output_price_per_1m = 2.0
 id = "client"
 name = "Client"
 key = "client-secret"
-scopes = ["models.read", "chat.completions", "responses.create", "admin.read", "tools.read", "tools.execute"]
+scopes = ["models.read", "chat.completions", "responses.create", "agent.runs.create", "admin.read", "tools.read", "tools.execute"]
 allowed_models = ["fast-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
