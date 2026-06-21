@@ -1008,6 +1008,13 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             MySqlStorageConfig {
                 dsn,
                 pool_size: storage.mysql_pool_size,
+                tls_mode: storage.mysql_tls_mode,
+                tls_ca_cert_path: storage
+                    .mysql_tls_ca_cert_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(ToOwned::to_owned),
                 connect_timeout_secs: storage.mysql_connect_timeout_secs,
             },
             initialize_schema,

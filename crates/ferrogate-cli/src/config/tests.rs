@@ -345,6 +345,8 @@ storage:
     - mysql
   mysql_dsn_env: FERROGATE_MYSQL_DSN
   mysql_pool_size: 3
+  mysql_tls_mode: verify_ca
+  mysql_tls_ca_cert_path: "/tmp/ferrogate-mysql-ca.pem"
   mysql_connect_timeout_secs: 7
   migration_mode: auto
 "#,
@@ -361,6 +363,14 @@ storage:
         Some("FERROGATE_MYSQL_DSN")
     );
     assert_eq!(config.storage.mysql_pool_size, 3);
+    assert_eq!(
+        config.storage.mysql_tls_mode,
+        ferrogate_storage::MySqlTlsMode::VerifyCa
+    );
+    assert_eq!(
+        config.storage.mysql_tls_ca_cert_path.as_deref(),
+        Some("/tmp/ferrogate-mysql-ca.pem")
+    );
     assert_eq!(config.storage.mysql_connect_timeout_secs, 7);
 }
 

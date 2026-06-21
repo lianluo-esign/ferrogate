@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, postgres-restart, postgres-tls-restart, mysql-restart, turso-libsql-restart (opt-in)"
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -67,6 +67,7 @@ fn main() -> Result<()> {
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
         Commands::MysqlRestart(args) => run_mysql_restart(&args),
+        Commands::MysqlTlsRestart(args) => run_mysql_tls_restart(&args),
         Commands::TursoLibsqlRestart(args) => run_turso_libsql_restart(&args),
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
@@ -76,7 +77,8 @@ fn main() -> Result<()> {
             run_libsql_server_restart(&args.local)?;
             run_postgres_restart(&args.local)?;
             run_postgres_tls_restart(&args.local)?;
-            run_mysql_restart(&args.local)
+            run_mysql_restart(&args.local)?;
+            run_mysql_tls_restart(&args.local)
         }
     }
 }
@@ -128,6 +130,8 @@ enum Commands {
     PostgresTlsRestart(LocalArgs),
     /// Run local Docker-backed MySQL restart durability coverage.
     MysqlRestart(LocalArgs),
+    /// Run local Docker-backed MySQL TLS restart durability coverage.
+    MysqlTlsRestart(LocalArgs),
     /// Opt-in live Turso/libSQL restart durability scenario.
     TursoLibsqlRestart(TursoLibsqlRestartArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
@@ -1307,6 +1311,49 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
 fn run_mysql_restart(args: &LocalArgs) -> Result<()> {
     let host_port = free_port()?;
     let _cleanup = MySqlCleanup;
+    start_mysql_container(host_port)?;
+    let dsn = format!("mysql://root:mysql@127.0.0.1:{host_port}/ferrogate?prefer_socket=false");
+    run_control_plane_mysql_restart(
+        &args.ferrogate_bin,
+        &dsn,
+        MySqlRestartTls {
+            mode: "disable",
+            ca_cert_path: None,
+        },
+        "ferrogate-mysql-test",
+        true,
+    )?;
+    println!("mysql-restart scenario passed");
+    Ok(())
+}
+
+fn run_mysql_tls_restart(args: &LocalArgs) -> Result<()> {
+    let host_port = free_port()?;
+    let ca_dir = tempfile::tempdir()?;
+    let ca_cert_path = ca_dir.path().join("mysql-ca.pem");
+    let _cleanup = MySqlCleanup;
+    start_mysql_container(host_port)?;
+    docker_args([
+        "cp".to_string(),
+        format!("{MYSQL_CONTAINER}:/var/lib/mysql/ca.pem"),
+        ca_cert_path.display().to_string(),
+    ])?;
+    let dsn = format!("mysql://root:mysql@127.0.0.1:{host_port}/ferrogate?prefer_socket=false");
+    run_control_plane_mysql_restart(
+        &args.ferrogate_bin,
+        &dsn,
+        MySqlRestartTls {
+            mode: "verify_ca",
+            ca_cert_path: Some(ca_cert_path.as_path()),
+        },
+        "ferrogate-mysql-tls-test",
+        true,
+    )?;
+    println!("mysql-tls-restart scenario passed");
+    Ok(())
+}
+
+fn start_mysql_container(host_port: u16) -> Result<()> {
     stop_mysql_container();
     docker_args([
         "run".to_string(),
@@ -1321,11 +1368,7 @@ fn run_mysql_restart(args: &LocalArgs) -> Result<()> {
         format!("127.0.0.1:{host_port}:3306"),
         MYSQL_IMAGE.to_string(),
     ])?;
-    wait_for_mysql_server()?;
-    let dsn = format!("mysql://root:mysql@127.0.0.1:{host_port}/ferrogate?prefer_socket=false");
-    run_control_plane_mysql_restart(&args.ferrogate_bin, &dsn, "ferrogate-mysql-test", true)?;
-    println!("mysql-restart scenario passed");
-    Ok(())
+    wait_for_mysql_server()
 }
 
 struct PostgresTlsFiles {
@@ -1404,15 +1447,25 @@ fn run_control_plane_postgres_restart(
 fn run_control_plane_mysql_restart(
     ferrogate_bin: &Path,
     mysql_dsn: &str,
+    tls: MySqlRestartTls<'_>,
     resource_prefix: &str,
     verify_deleted_after_restart: bool,
 ) -> Result<()> {
     run_control_plane_restart(
         ferrogate_bin,
-        ControlPlaneRestartStorage::Mysql { dsn: mysql_dsn },
+        ControlPlaneRestartStorage::Mysql {
+            dsn: mysql_dsn,
+            tls,
+        },
         resource_prefix,
         verify_deleted_after_restart,
     )
+}
+
+#[derive(Clone, Copy)]
+struct MySqlRestartTls<'a> {
+    mode: &'a str,
+    ca_cert_path: Option<&'a Path>,
 }
 
 #[derive(Clone, Copy)]
@@ -1433,6 +1486,7 @@ enum ControlPlaneRestartStorage<'a> {
     },
     Mysql {
         dsn: &'a str,
+        tls: MySqlRestartTls<'a>,
     },
 }
 
@@ -2855,7 +2909,7 @@ impl ControlPlaneRestartStorage<'_> {
             ControlPlaneRestartStorage::Postgres { dsn, .. } => {
                 command.env("FERROGATE_POSTGRES_DSN", dsn);
             }
-            ControlPlaneRestartStorage::Mysql { dsn } => {
+            ControlPlaneRestartStorage::Mysql { dsn, .. } => {
                 command.env("FERROGATE_MYSQL_DSN", dsn);
             }
             ControlPlaneRestartStorage::Libsql {
@@ -2915,7 +2969,18 @@ impl ControlPlaneRestartStorage<'_> {
                     ca_cert_path = ca_cert_path
                 )
             }
-            ControlPlaneRestartStorage::Mysql { .. } => r#"storage:
+            ControlPlaneRestartStorage::Mysql { tls, .. } => {
+                let ca_cert_path = tls
+                    .ca_cert_path
+                    .map(|path| {
+                        format!(
+                            "\n  mysql_tls_ca_cert_path: {}",
+                            toml_basic_string(&path.to_string_lossy())
+                        )
+                    })
+                    .unwrap_or_default();
+                format!(
+                    r#"storage:
   provider: mysql
   required: true
   provider_order:
@@ -2924,9 +2989,13 @@ impl ControlPlaneRestartStorage<'_> {
     - mysql
   mysql_dsn_env: FERROGATE_MYSQL_DSN
   mysql_pool_size: 2
+  mysql_tls_mode: {tls_mode}{ca_cert_path}
   mysql_connect_timeout_secs: 5
-  migration_mode: auto"#
-                .to_string(),
+  migration_mode: auto"#,
+                    tls_mode = tls.mode,
+                    ca_cert_path = ca_cert_path
+                )
+            }
         }
     }
 

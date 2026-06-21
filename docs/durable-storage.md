@@ -146,6 +146,8 @@ storage:
     - mysql
   mysql_dsn_env: "FERROGATE_MYSQL_DSN"
   mysql_pool_size: 4
+  mysql_tls_mode: verify_ca
+  mysql_tls_ca_cert_path: "/etc/ferrogate/mysql-ca.pem"
   mysql_connect_timeout_secs: 5
   migration_mode: auto
 ```
@@ -165,6 +167,11 @@ Runtime behavior:
   PostgreSQL.
 - `mysql_pool_size` configures the maximum MySQL client pool size for Admin API
   control-plane mutations and restart restore.
+- `mysql_tls_mode` accepts `disable`, `require`, `verify_ca`, and
+  `verify_full`. `require` encrypts the connection without certificate
+  verification, `verify_ca` verifies the certificate chain, and `verify_full`
+  verifies both the chain and hostname. Use `mysql_tls_ca_cert_path` when your
+  managed MySQL provider or private CA requires an explicit root CA.
 - `mysql_connect_timeout_secs` is applied to MySQL TCP connection attempts.
 
 The schema file is [`sql/001_init_mysql.sql`](../sql/001_init_mysql.sql).
@@ -217,6 +224,12 @@ Run the Docker-backed MySQL restart test:
 ./target/debug/ferrogate-test mysql-restart
 ```
 
+Run the Docker-backed MySQL TLS restart test:
+
+```bash
+./target/debug/ferrogate-test mysql-tls-restart
+```
+
 This starts real FerroGate gateway processes against the same local libSQL
 database file and verifies through the Admin API that these resources survive
 restart:
@@ -231,7 +244,8 @@ It then deletes or archives those resources, restarts again, and verifies the
 post-cleanup state.
 
 `ferrogate-test ci` includes the local libSQL restart, local libSQL server
-restart, PostgreSQL restart, PostgreSQL TLS restart, and MySQL restart tests:
+restart, PostgreSQL restart, PostgreSQL TLS restart, MySQL restart, and MySQL
+TLS restart tests:
 
 ```bash
 ./target/debug/ferrogate-test ci
@@ -281,6 +295,8 @@ policy data.
   silently falling back to the system trust store.
 - Missing `storage.mysql_dsn` and `storage.mysql_dsn_env` fails config
   validation when `provider: mysql`.
+- Invalid `storage.mysql_tls_ca_cert_path` values fail startup instead of
+  silently falling back to the system trust store.
 - Invalid `storage.mysql_pool_size` and `storage.mysql_connect_timeout_secs`
   fail config validation.
 - With `storage.required: true`, initialization errors prevent startup instead

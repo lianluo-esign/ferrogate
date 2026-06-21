@@ -2254,6 +2254,7 @@ dependencies = [
  "lru",
  "mysql_common",
  "named_pipe",
+ "native-tls",
  "pem",
  "percent-encoding",
  "socket2 0.6.3",

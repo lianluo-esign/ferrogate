@@ -22,7 +22,9 @@ use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
 use libsql::Builder as LibsqlBuilder;
 use mysql::prelude::Queryable;
-use mysql::{params, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, TxOpts};
+use mysql::{
+    params, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, SslOpts, TxOpts,
+};
 use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
 use postgres::config::SslMode as PostgresSslMode;
 use postgres::{Client as PostgresClient, NoTls};
@@ -129,7 +131,30 @@ pub struct PostgresStorageConfig {
 pub struct MySqlStorageConfig {
     pub dsn: String,
     pub pool_size: usize,
+    pub tls_mode: MySqlTlsMode,
+    pub tls_ca_cert_path: Option<String>,
     pub connect_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MySqlTlsMode {
+    #[default]
+    Disable,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
+impl MySqlTlsMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MySqlTlsMode::Disable => "disable",
+            MySqlTlsMode::Require => "require",
+            MySqlTlsMode::VerifyCa => "verify_ca",
+            MySqlTlsMode::VerifyFull => "verify_full",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -915,10 +940,39 @@ fn mysql_opts(config: &MySqlStorageConfig) -> Result<Opts, StorageError> {
         ))
     })?;
     let pool_opts = PoolOpts::default().with_constraints(constraints);
-    Ok(OptsBuilder::from_opts(opts)
+    let mut builder = OptsBuilder::from_opts(opts)
         .pool_opts(Some(pool_opts))
-        .tcp_connect_timeout(Some(Duration::from_secs(config.connect_timeout_secs)))
-        .into())
+        .tcp_connect_timeout(Some(Duration::from_secs(config.connect_timeout_secs)));
+
+    if !matches!(config.tls_mode, MySqlTlsMode::Disable) {
+        builder = builder.ssl_opts(Some(mysql_ssl_opts(config)?));
+    }
+
+    Ok(builder.into())
+}
+
+fn mysql_ssl_opts(config: &MySqlStorageConfig) -> Result<SslOpts, StorageError> {
+    let mut ssl_opts = SslOpts::default();
+    if let Some(path) = config.tls_ca_cert_path.as_deref() {
+        if !std::path::Path::new(path).exists() {
+            return Err(StorageError::Mysql(format!(
+                "failed to read storage.mysql_tls_ca_cert_path {path}: file does not exist"
+            )));
+        }
+        ssl_opts = ssl_opts.with_root_cert_path(Some(std::path::Path::new(path).to_path_buf()));
+    }
+    match config.tls_mode {
+        MySqlTlsMode::Disable | MySqlTlsMode::VerifyFull => {}
+        MySqlTlsMode::Require => {
+            ssl_opts = ssl_opts
+                .with_danger_accept_invalid_certs(true)
+                .with_danger_skip_domain_validation(true);
+        }
+        MySqlTlsMode::VerifyCa => {
+            ssl_opts = ssl_opts.with_danger_skip_domain_validation(true);
+        }
+    }
+    Ok(ssl_opts)
 }
 
 fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {

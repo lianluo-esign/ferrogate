@@ -12,7 +12,7 @@ pub(crate) use ferrogate_mcp::{
     McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
 use ferrogate_providers::RoutingStrategy;
-use ferrogate_storage::{PostgresTlsMode, StorageProviderKind};
+use ferrogate_storage::{MySqlTlsMode, PostgresTlsMode, StorageProviderKind};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Config {
@@ -720,6 +720,10 @@ pub(crate) struct StorageConfig {
     pub(crate) mysql_dsn_env: Option<String>,
     #[serde(default = "default_mysql_pool_size")]
     pub(crate) mysql_pool_size: usize,
+    #[serde(default)]
+    pub(crate) mysql_tls_mode: MySqlTlsMode,
+    #[serde(default)]
+    pub(crate) mysql_tls_ca_cert_path: Option<String>,
     #[serde(default = "default_mysql_connect_timeout_secs")]
     pub(crate) mysql_connect_timeout_secs: u64,
     #[serde(default = "default_storage_migration_mode")]
@@ -1143,6 +1147,8 @@ impl Default for StorageConfig {
             mysql_dsn: None,
             mysql_dsn_env: None,
             mysql_pool_size: default_mysql_pool_size(),
+            mysql_tls_mode: MySqlTlsMode::default(),
+            mysql_tls_ca_cert_path: None,
             mysql_connect_timeout_secs: default_mysql_connect_timeout_secs(),
             migration_mode: default_storage_migration_mode(),
             admin_list_default_limit: default_admin_list_limit(),
