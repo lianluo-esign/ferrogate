@@ -834,7 +834,7 @@ fn run_auth_api(args: &AuthArgs) -> Result<()> {
 }
 
 fn run_gateway_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 3)?;
+    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 4)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));
@@ -846,6 +846,21 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     })?;
     case.expect_json(
         "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"support-flow","name":"Support flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"draft","kind":"model","model":"fast-chat","token_budget":600}],"edges":[],"max_model_calls":1,"max_iterations":2,"token_budget":600}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "support-flow");
+            assert_eq!(body["agent_workflow"]["workflow"]["version"], 1);
+            assert_eq!(body["agent_workflow"]["counters"]["request_count"], 0);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
         "/v1/chat/completions",
         &[CLIENT_AUTH, JSON_CONTENT],
         r#"{"model":"fast-chat","messages":[{"role":"user","content":"gateway coverage client-secret"}]}"#,
@@ -853,6 +868,44 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         |body| {
             assert_eq!(body["object"], "chat.completion");
             assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: workflow-run-e2e",
+            "x-ferrogate-workflow-id: support-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: draft",
+            "x-ferrogate-workflow-iteration: 1",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow coverage"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-workflow-id: support-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: draft",
+            "x-ferrogate-workflow-iteration: 1",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow denied"}],"max_tokens":1000}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "workflow_token_budget_exceeded");
             Ok(())
         },
     )?;
@@ -951,6 +1004,11 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert!(raw.contains("openai.chat.completions"));
             assert!(raw.contains("openai.responses"));
             assert!(raw.contains("agent-run-e2e"));
+            assert!(raw.contains("workflow-run-e2e"));
+            assert!(raw.contains("\"workflow_id\":\"support-flow\""));
+            assert!(raw.contains("\"workflow_version\":1"));
+            assert!(raw.contains("\"workflow_node_id\":\"draft\""));
+            assert!(raw.contains("workflow_token_budget_exceeded"));
             assert_secret_redacted(&raw);
             Ok(())
         },
@@ -988,8 +1046,67 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert!(records
                 .iter()
                 .any(|record| record["route"] == "openai.responses"));
+            let workflow_chat = records
+                .iter()
+                .find(|record| record["agent_run_id"] == "workflow-run-e2e")
+                .context("missing workflow export record")?;
+            assert_eq!(workflow_chat["workflow_id"], "support-flow");
+            assert_eq!(workflow_chat["workflow_version"], 1);
+            assert_eq!(workflow_chat["workflow_node_id"], "draft");
             assert_secret_redacted(body);
             assert!(!body.contains("provider-secret"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-workflows/support-flow",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "support-flow");
+            assert_eq!(body["agent_workflow"]["counters"]["request_count"], 2);
+            assert_eq!(body["agent_workflow"]["counters"]["error_count"], 1);
+            assert_eq!(body["agent_workflow"]["counters"]["billing_event_count"], 1);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let workflow = body["data"]
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item["workflow"]["id"] == "support-flow")
+                })
+                .context("agent workflow summary was not listed")?;
+            assert_eq!(workflow["workflow"]["version"], 1);
+            assert_eq!(workflow["counters"]["request_count"], 2);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/billing-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let raw = body.to_string();
+            assert!(raw.contains("\"workflow_id\":\"support-flow\""));
+            assert!(raw.contains("\"workflow_version\":1"));
+            assert!(raw.contains("\"workflow_node_id\":\"draft\""));
+            assert_secret_redacted(&raw);
             Ok(())
         },
     )?;

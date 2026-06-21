@@ -156,6 +156,7 @@ impl Config {
                 .collect(),
             policies: Vec::new(),
             gateway_configs: Vec::new(),
+            agent_workflows: Vec::new(),
             prompt_templates: Vec::new(),
             plugins: Vec::new(),
             extensions: Vec::new(),

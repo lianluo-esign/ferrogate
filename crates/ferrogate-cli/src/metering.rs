@@ -555,6 +555,9 @@ mod tests {
             request_id: "req_123".into(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext {
@@ -582,6 +585,9 @@ mod tests {
             request_id: "req_123".into(),
             trace_id: Some("trace_456".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: Some("cluster-a".into()),
             node_id: Some("node-a".into()),
             tenant: ferrogate_core::TenantContext {

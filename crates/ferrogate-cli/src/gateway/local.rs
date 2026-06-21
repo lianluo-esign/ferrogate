@@ -15,13 +15,15 @@ use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
     auth::{authenticate, AuthContext},
     config::{
-        config_snapshot_id, ApiKey, Config, PolicyRule, PromptTemplate, PromptTemplateStatus,
-        PromptTemplateTarget, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
+        config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, PolicyRule, PromptTemplate,
+        PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
+        PromptTemplateVersionStatus, Provider,
     },
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
         write_empty_response, write_json_error, write_json_error_and_close, write_json_response,
-        write_raw_response, AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation,
+        write_raw_response, AdminAcmeStatus, AdminAgentWorkflow, AdminAgentWorkflowCounters,
+        AdminAgentWorkflowMutationResponse, AdminApiKey, AdminApiKeyMutation,
         AdminApiKeyMutationResponse, AdminConfigReloadResponse, AdminConfigValidateRequest,
         AdminConfigValidateResponse, AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse,
         AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
@@ -960,6 +962,347 @@ impl FerroGateway {
                     StatusCode::BAD_REQUEST,
                     "invalid_gateway_config_delete",
                     message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_agent_workflows(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let id = path.strip_prefix("/admin/v1/agent-workflows/");
+        match (method, id) {
+            (&Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let data = state
+                            .config
+                            .agent_workflows
+                            .iter()
+                            .map(|workflow| admin_agent_workflow(&state, workflow))
+                            .collect();
+                        write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &AdminList::new(data),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::GET, Some(id)) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let Some(workflow) = crate::state::select_agent_workflow(
+                            &state.config.agent_workflows,
+                            id,
+                            None,
+                        ) else {
+                            return write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "agent_workflow_not_found",
+                                format!("agent workflow {id} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        };
+                        let body = AdminAgentWorkflowMutationResponse {
+                            object: "agent_workflow",
+                            agent_workflow: admin_agent_workflow(&state, workflow),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::POST, None) => {
+                self.handle_admin_agent_workflow_upsert(session, ctx, headers, None)
+                    .await
+            }
+            (&Method::PUT | &Method::PATCH, Some(id)) => {
+                self.handle_admin_agent_workflow_upsert(session, ctx, headers, Some(id))
+                    .await
+            }
+            (&Method::DELETE, Some(id)) => {
+                self.handle_admin_agent_workflow_delete(session, ctx, headers, id)
+                    .await
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "agent workflow endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_agent_workflow_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_id: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let workflow = match serde_json::from_slice::<AgentWorkflowPolicy>(&body) {
+            Ok(workflow) => {
+                if path_id.is_some_and(|path_id| path_id != workflow.id.as_str()) {
+                    return write_json_error(
+                        session,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_agent_workflow",
+                        "request path id and body id must match",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                workflow
+            }
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_workflow.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON agent workflow policy object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let workflow_id = workflow.id.clone();
+        let workflow_version = workflow.version;
+        match self.state.upsert_agent_workflow(workflow) {
+            Ok(outcome) if outcome.committed => {
+                let current = self.state.current();
+                let Some(workflow) = crate::state::select_agent_workflow(
+                    &current.config.agent_workflows,
+                    &workflow_id,
+                    Some(workflow_version),
+                ) else {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "agent_workflow_reload_rejected",
+                        format!("agent workflow {workflow_id}@{workflow_version} was not visible after reload"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_workflow.upsert",
+                    &format!("{workflow_id}@{workflow_version}"),
+                    "committed",
+                    format!(
+                        "agent workflow {workflow_id}@{workflow_version} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                let body = AdminAgentWorkflowMutationResponse {
+                    object: "agent_workflow",
+                    agent_workflow: admin_agent_workflow(&current, workflow),
+                };
+                write_json_response(
+                    session,
+                    if path_id.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &body,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate agent workflow".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_workflow.upsert",
+                    &format!("{workflow_id}@{workflow_version}"),
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "agent_workflow_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_workflow.upsert",
+                    &format!("{workflow_id}@{workflow_version}"),
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_agent_workflow",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_agent_workflow_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        match self.state.delete_agent_workflow(id, None) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_workflow.delete",
+                    id,
+                    "committed",
+                    format!(
+                        "agent workflow {id} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminDeleteResponse {
+                        object: "agent_workflow",
+                        id: id.to_string(),
+                        deleted: true,
+                    },
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected agent workflow delete".into());
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "agent_workflow_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "agent_workflow_not_found",
+                    format!("agent workflow {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_agent_workflow_delete",
+                    error.to_string(),
                     &ctx.request_id,
                 )
                 .await
@@ -4457,6 +4800,47 @@ fn admin_gateway_config(
     }
 }
 
+fn admin_agent_workflow(
+    state: &crate::state::AppState,
+    workflow: &AgentWorkflowPolicy,
+) -> AdminAgentWorkflow {
+    let request_count = state
+        .request_logs()
+        .into_iter()
+        .filter(|log| {
+            log.workflow_id.as_deref() == Some(workflow.id.as_str())
+                && log.workflow_version == Some(workflow.version)
+        })
+        .fold((0_u64, 0_u64), |(requests, errors), log| {
+            (
+                requests.saturating_add(1),
+                errors.saturating_add(u64::from(log.error_code.is_some())),
+            )
+        });
+    let billing = state
+        .metering_events()
+        .into_iter()
+        .filter(|event| {
+            event.workflow_id.as_deref() == Some(workflow.id.as_str())
+                && event.workflow_version == Some(workflow.version)
+        })
+        .fold((0_u64, 0_u64), |(events, tokens), event| {
+            (
+                events.saturating_add(1),
+                tokens.saturating_add(event.usage.total_tokens),
+            )
+        });
+    AdminAgentWorkflow {
+        workflow: workflow.clone(),
+        counters: AdminAgentWorkflowCounters {
+            request_count: request_count.0,
+            error_count: request_count.1,
+            billing_event_count: billing.0,
+            estimated_tokens: billing.1,
+        },
+    }
+}
+
 fn admin_plugin(
     plugin: &crate::config::PluginConfig,
     status: Option<crate::extensions::ExtensionStatus>,
@@ -5112,6 +5496,9 @@ fn admin_audit_event_draft_for_target(
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
         agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
         actor_api_key_id: auth.api_key_id.clone(),
         tenant: auth.tenant_context(),
         action: action.into(),

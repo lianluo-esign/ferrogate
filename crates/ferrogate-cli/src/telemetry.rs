@@ -1152,6 +1152,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext {
@@ -1180,6 +1183,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             actor_api_key_id: Some("key".into()),
             tenant: TenantContext {
                 organization_id: Some("org".into()),
@@ -1267,6 +1273,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext {
@@ -1295,6 +1304,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             actor_api_key_id: Some("key".into()),
             tenant: TenantContext {
                 organization_id: Some("org".into()),
@@ -1468,6 +1480,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext {
@@ -1496,6 +1511,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             actor_api_key_id: Some("key".into()),
             tenant: TenantContext {
                 organization_id: Some("org".into()),

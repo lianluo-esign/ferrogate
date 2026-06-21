@@ -292,6 +292,7 @@ pub struct ControlPlaneSnapshot {
     pub tenants: Vec<String>,
     pub policies: Vec<String>,
     pub gateway_configs: Vec<String>,
+    pub agent_workflows: Vec<String>,
     pub prompt_templates: Vec<String>,
     pub plugin_registrations: Vec<String>,
     pub mcp_servers: Vec<String>,
@@ -333,6 +334,7 @@ pub struct RuntimeControlPlaneState {
     tenants: InMemoryRepository<StoredControlPlaneResource>,
     policies: InMemoryRepository<StoredControlPlaneResource>,
     gateway_configs: InMemoryRepository<StoredControlPlaneResource>,
+    agent_workflows: InMemoryRepository<StoredControlPlaneResource>,
     prompt_templates: InMemoryRepository<StoredControlPlaneResource>,
     plugin_registrations: InMemoryRepository<StoredControlPlaneResource>,
     mcp_servers: InMemoryRepository<StoredControlPlaneResource>,
@@ -373,6 +375,7 @@ impl LibsqlControlPlaneStore {
         bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_agent_workflows: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -396,6 +399,9 @@ impl LibsqlControlPlaneStore {
             .await?;
         store
             .seed_missing_resources("gateway_config", bootstrap_gateway_configs)
+            .await?;
+        store
+            .seed_missing_resources("agent_workflow", bootstrap_agent_workflows)
             .await?;
         store
             .seed_missing_resources("prompt_template", bootstrap_prompt_templates)
@@ -443,6 +449,7 @@ impl LibsqlControlPlaneStore {
             tenants: self.list_documents("tenant").await?,
             policies: self.list_documents("policy").await?,
             gateway_configs: self.list_documents("gateway_config").await?,
+            agent_workflows: self.list_documents("agent_workflow").await?,
             prompt_templates: self.list_documents("prompt_template").await?,
             plugin_registrations: self.list_documents("plugin_registration").await?,
             mcp_servers: self.list_documents("mcp_server").await?,
@@ -568,6 +575,7 @@ impl PostgresControlPlaneStore {
         bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_agent_workflows: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -590,6 +598,7 @@ impl PostgresControlPlaneStore {
         store.seed_missing_resources("tenant", bootstrap_tenants)?;
         store.seed_missing_resources("policy", bootstrap_policies)?;
         store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
+        store.seed_missing_resources("agent_workflow", bootstrap_agent_workflows)?;
         store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
         store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
         store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
@@ -627,6 +636,7 @@ impl PostgresControlPlaneStore {
             tenants: self.list_documents("tenant")?,
             policies: self.list_documents("policy")?,
             gateway_configs: self.list_documents("gateway_config")?,
+            agent_workflows: self.list_documents("agent_workflow")?,
             prompt_templates: self.list_documents("prompt_template")?,
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
@@ -785,6 +795,7 @@ impl MySqlControlPlaneStore {
         bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_agent_workflows: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -804,6 +815,7 @@ impl MySqlControlPlaneStore {
         store.seed_missing_resources("tenant", bootstrap_tenants)?;
         store.seed_missing_resources("policy", bootstrap_policies)?;
         store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
+        store.seed_missing_resources("agent_workflow", bootstrap_agent_workflows)?;
         store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
         store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
         store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
@@ -851,6 +863,7 @@ impl MySqlControlPlaneStore {
             tenants: self.list_documents("tenant")?,
             policies: self.list_documents("policy")?,
             gateway_configs: self.list_documents("gateway_config")?,
+            agent_workflows: self.list_documents("agent_workflow")?,
             prompt_templates: self.list_documents("prompt_template")?,
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
@@ -1178,6 +1191,7 @@ impl RuntimeControlPlaneState {
             tenants: InMemoryRepository::new(),
             policies: InMemoryRepository::new(),
             gateway_configs: InMemoryRepository::new(),
+            agent_workflows: InMemoryRepository::new(),
             prompt_templates: InMemoryRepository::new(),
             plugin_registrations: InMemoryRepository::new(),
             mcp_servers: InMemoryRepository::new(),
@@ -1190,6 +1204,7 @@ impl RuntimeControlPlaneState {
         tenants: Vec<(String, String)>,
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
+        agent_workflows: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
@@ -1206,6 +1221,9 @@ impl RuntimeControlPlaneState {
         }
         for (id, document_json) in gateway_configs {
             state.upsert_gateway_config(id, document_json);
+        }
+        for (id, document_json) in agent_workflows {
+            state.upsert_agent_workflow(id, document_json);
         }
         for (id, document_json) in prompt_templates {
             state.upsert_prompt_template(id, document_json);
@@ -1225,6 +1243,7 @@ impl RuntimeControlPlaneState {
         tenants: Vec<(String, String)>,
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
+        agent_workflows: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
@@ -1233,6 +1252,7 @@ impl RuntimeControlPlaneState {
         self.tenants = InMemoryRepository::new();
         self.policies = InMemoryRepository::new();
         self.gateway_configs = InMemoryRepository::new();
+        self.agent_workflows = InMemoryRepository::new();
         self.prompt_templates = InMemoryRepository::new();
         self.plugin_registrations = InMemoryRepository::new();
         self.mcp_servers = InMemoryRepository::new();
@@ -1247,6 +1267,9 @@ impl RuntimeControlPlaneState {
         }
         for (id, document_json) in gateway_configs {
             self.upsert_gateway_config(id, document_json);
+        }
+        for (id, document_json) in agent_workflows {
+            self.upsert_agent_workflow(id, document_json);
         }
         for (id, document_json) in prompt_templates {
             self.upsert_prompt_template(id, document_json);
@@ -1292,6 +1315,14 @@ impl RuntimeControlPlaneState {
             .collect::<Vec<_>>();
         gateway_configs.sort_by(|left, right| left.0.cmp(&right.0));
 
+        let mut agent_workflows = self
+            .agent_workflows
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        agent_workflows.sort_by(|left, right| left.0.cmp(&right.0));
+
         let mut prompt_templates = self
             .prompt_templates
             .list()
@@ -1330,6 +1361,10 @@ impl RuntimeControlPlaneState {
                 .map(|(_, document_json)| document_json)
                 .collect(),
             gateway_configs: gateway_configs
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+            agent_workflows: agent_workflows
                 .into_iter()
                 .map(|(_, document_json)| document_json)
                 .collect(),
@@ -1406,6 +1441,22 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_gateway_config(&mut self, id: &str) -> bool {
         self.gateway_configs.remove(id).is_some()
+    }
+
+    pub fn upsert_agent_workflow(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.agent_workflows.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "agent_workflow".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn delete_agent_workflow(&mut self, id: &str) -> bool {
+        self.agent_workflows.remove(id).is_some()
     }
 
     pub fn upsert_prompt_template(&mut self, id: impl Into<String>, document_json: String) {
@@ -1528,6 +1579,12 @@ pub struct StoredRequestLog {
     pub trace_id: Option<String>,
     #[serde(default)]
     pub agent_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    pub workflow_version: Option<u32>,
+    #[serde(default)]
+    pub workflow_node_id: Option<String>,
     pub cluster_id: Option<String>,
     pub node_id: Option<String>,
     pub tenant: TenantContext,
@@ -1558,6 +1615,12 @@ pub struct StoredAuditEvent {
     pub trace_id: Option<String>,
     #[serde(default)]
     pub agent_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    pub workflow_version: Option<u32>,
+    #[serde(default)]
+    pub workflow_node_id: Option<String>,
     pub cluster_id: Option<String>,
     pub node_id: Option<String>,
     pub actor_api_key_id: Option<String>,
@@ -1760,6 +1823,7 @@ impl RuntimeStorageRepositories {
         bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_agent_workflows: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -1775,6 +1839,7 @@ impl RuntimeStorageRepositories {
             bootstrap_tenants,
             bootstrap_policies,
             bootstrap_gateway_configs,
+            bootstrap_agent_workflows,
             bootstrap_prompt_templates,
             bootstrap_plugin_registrations,
             bootstrap_mcp_servers,
@@ -1805,6 +1870,7 @@ impl RuntimeStorageRepositories {
         bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_agent_workflows: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -1822,6 +1888,7 @@ impl RuntimeStorageRepositories {
                         bootstrap_tenants,
                         bootstrap_policies,
                         bootstrap_gateway_configs,
+                        bootstrap_agent_workflows,
                         bootstrap_prompt_templates,
                         bootstrap_plugin_registrations,
                         bootstrap_mcp_servers,
@@ -1857,6 +1924,7 @@ impl RuntimeStorageRepositories {
         bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_agent_workflows: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -1874,6 +1942,7 @@ impl RuntimeStorageRepositories {
                         bootstrap_tenants,
                         bootstrap_policies,
                         bootstrap_gateway_configs,
+                        bootstrap_agent_workflows,
                         bootstrap_prompt_templates,
                         bootstrap_plugin_registrations,
                         bootstrap_mcp_servers,
@@ -1912,6 +1981,7 @@ impl RuntimeStorageRepositories {
                     tenants: Vec::new(),
                     policies: Vec::new(),
                     gateway_configs: Vec::new(),
+                    agent_workflows: Vec::new(),
                     prompt_templates: Vec::new(),
                     plugin_registrations: Vec::new(),
                     mcp_servers: Vec::new(),
@@ -1930,6 +2000,7 @@ impl RuntimeStorageRepositories {
         tenants: Vec<(String, String)>,
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
+        agent_workflows: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
@@ -1942,6 +2013,7 @@ impl RuntimeStorageRepositories {
                         tenants,
                         policies,
                         gateway_configs,
+                        agent_workflows,
                         prompt_templates,
                         plugin_registrations,
                         mcp_servers,
@@ -1955,6 +2027,9 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("policy", policies).await?;
                 control_plane
                     .replace_kind("gateway_config", gateway_configs)
+                    .await?;
+                control_plane
+                    .replace_kind("agent_workflow", agent_workflows)
                     .await?;
                 control_plane
                     .replace_kind("prompt_template", prompt_templates)
@@ -1972,6 +2047,7 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("tenant", tenants)?;
                 control_plane.replace_kind("policy", policies)?;
                 control_plane.replace_kind("gateway_config", gateway_configs)?;
+                control_plane.replace_kind("agent_workflow", agent_workflows)?;
                 control_plane.replace_kind("prompt_template", prompt_templates)?;
                 control_plane.replace_kind("plugin_registration", plugin_registrations)?;
                 control_plane.replace_kind("mcp_server", mcp_servers)?;
@@ -1982,6 +2058,7 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("tenant", tenants)?;
                 control_plane.replace_kind("policy", policies)?;
                 control_plane.replace_kind("gateway_config", gateway_configs)?;
+                control_plane.replace_kind("agent_workflow", agent_workflows)?;
                 control_plane.replace_kind("prompt_template", prompt_templates)?;
                 control_plane.replace_kind("plugin_registration", plugin_registrations)?;
                 control_plane.replace_kind("mcp_server", mcp_servers)?;
@@ -2112,6 +2189,48 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("gateway_config", id.to_string())
+            }
+        }
+    }
+
+    pub fn upsert_control_plane_agent_workflow(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_agent_workflow(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("agent_workflow", id.into(), document_json))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("agent_workflow", id.into(), document_json)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("agent_workflow", id.into(), document_json)
+            }
+        }
+    }
+
+    pub fn delete_control_plane_agent_workflow(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_agent_workflow(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("agent_workflow", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("agent_workflow", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.delete("agent_workflow", id.to_string())
             }
         }
     }
@@ -2624,6 +2743,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("trace-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),
@@ -2647,6 +2769,9 @@ mod tests {
             request_id: "fg-2".into(),
             trace_id: Some("trace-2".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),
@@ -2681,6 +2806,9 @@ mod tests {
                 request_id: id.into(),
                 trace_id: None,
                 agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
                 cluster_id: None,
                 node_id: None,
                 tenant: TenantContext::default(),
@@ -2738,6 +2866,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             actor_api_key_id: Some("admin".into()),
@@ -2753,6 +2884,9 @@ mod tests {
             request_id: "fg-2".into(),
             trace_id: Some("fg-2".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             actor_api_key_id: Some("admin".into()),
@@ -2894,6 +3028,9 @@ mod tests {
             request_id: "fg-1".into(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),
@@ -2917,6 +3054,9 @@ mod tests {
             request_id: "fg-2".into(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: TenantContext::default(),

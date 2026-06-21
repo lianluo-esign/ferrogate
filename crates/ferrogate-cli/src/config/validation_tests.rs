@@ -181,6 +181,156 @@ fn rejects_model_lowest_cost_strategy_without_prices() {
 }
 
 #[test]
+fn accepts_agent_workflow_policy_with_model_graph() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("client", "client")],
+        agent_workflows: vec![AgentWorkflowPolicy {
+            id: "support-flow".into(),
+            name: "Support flow".into(),
+            version: 1,
+            enabled: true,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["client".into()],
+            nodes: vec![
+                AgentWorkflowNode {
+                    id: "draft".into(),
+                    kind: AgentWorkflowNodeKind::Model,
+                    model: Some("fast-chat".into()),
+                    tool: None,
+                    max_iterations: Some(2),
+                    token_budget: Some(600),
+                },
+                AgentWorkflowNode {
+                    id: "review".into(),
+                    kind: AgentWorkflowNodeKind::Human,
+                    model: None,
+                    tool: None,
+                    max_iterations: None,
+                    token_budget: None,
+                },
+            ],
+            edges: vec![AgentWorkflowEdge {
+                from: "draft".into(),
+                to: "review".into(),
+                condition: Some("ok".into()),
+            }],
+            max_model_calls: Some(1),
+            max_tool_calls: Some(1),
+            max_parallelism: Some(1),
+            max_iterations: Some(2),
+            timeout_millis: Some(1_000),
+            token_budget: Some(600),
+        }],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_agent_workflow_with_unknown_model_api_key_and_bad_budget() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("client", "client")],
+        agent_workflows: vec![AgentWorkflowPolicy {
+            id: "support-flow".into(),
+            name: "Support flow".into(),
+            version: 1,
+            enabled: true,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec!["missing-client".into()],
+            nodes: vec![AgentWorkflowNode {
+                id: "draft".into(),
+                kind: AgentWorkflowNodeKind::Model,
+                model: Some("missing-chat".into()),
+                tool: None,
+                max_iterations: None,
+                token_budget: None,
+            }],
+            edges: vec![],
+            max_model_calls: Some(0),
+            max_tool_calls: None,
+            max_parallelism: None,
+            max_iterations: None,
+            timeout_millis: None,
+            token_budget: None,
+        }],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("references unknown api key missing-client"));
+
+    let mut config = config;
+    config.agent_workflows[0].api_key_ids = vec!["client".into()];
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field agent_workflows[0].max_model_calls"));
+
+    config.agent_workflows[0].max_model_calls = Some(1);
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("references unknown model missing-chat"));
+}
+
+#[test]
+fn rejects_agent_workflow_with_bad_graph_references() {
+    let base_workflow = AgentWorkflowPolicy {
+        id: "support-flow".into(),
+        name: "Support flow".into(),
+        version: 1,
+        enabled: true,
+        organization_ids: vec![],
+        project_ids: vec![],
+        api_key_ids: vec![],
+        nodes: vec![AgentWorkflowNode {
+            id: "draft".into(),
+            kind: AgentWorkflowNodeKind::Model,
+            model: Some("fast-chat".into()),
+            tool: None,
+            max_iterations: None,
+            token_budget: None,
+        }],
+        edges: vec![AgentWorkflowEdge {
+            from: "draft".into(),
+            to: "missing".into(),
+            condition: None,
+        }],
+        max_model_calls: None,
+        max_tool_calls: None,
+        max_parallelism: None,
+        max_iterations: None,
+        timeout_millis: None,
+        token_budget: None,
+    };
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        agent_workflows: vec![base_workflow],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("edges[0].to: unknown node missing"));
+
+    let mut config = config;
+    config.agent_workflows[0].edges.clear();
+    config.agent_workflows[0].nodes.push(AgentWorkflowNode {
+        id: "draft".into(),
+        kind: AgentWorkflowNodeKind::Tool,
+        model: None,
+        tool: Some("tool.echo".into()),
+        max_iterations: None,
+        token_budget: None,
+    });
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("duplicate node id draft"));
+}
+
+#[test]
 fn accepts_builtin_extension_config_with_explicit_permissions() {
     let config = Config {
         plugins: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],

@@ -191,6 +191,9 @@ mod tests {
             request_id: "fg-test".into(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: TenantContext {

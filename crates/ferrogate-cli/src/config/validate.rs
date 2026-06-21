@@ -33,6 +33,7 @@ impl Config {
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_gateway_configs(&api_key_ids)?;
+        self.validate_agent_workflows(&api_key_ids, &model_names)?;
         self.validate_prompt_templates(&model_names)?;
         self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
         self.validate_plugins()?;
@@ -1021,6 +1022,136 @@ impl Config {
         Ok(())
     }
 
+    fn validate_agent_workflows(
+        &self,
+        api_key_ids: &HashSet<String>,
+        model_names: &HashSet<String>,
+    ) -> AnyResult<()> {
+        let mut workflow_versions = HashSet::new();
+        for (index, workflow) in self.agent_workflows.iter().enumerate() {
+            if workflow.id.trim().is_empty() {
+                bail!("field agent_workflows[{index}].id: cannot be empty");
+            }
+            if !workflow_versions.insert((workflow.id.as_str(), workflow.version)) {
+                bail!(
+                    "field agent_workflows[{index}]: duplicate workflow id/version {}@{}",
+                    workflow.id,
+                    workflow.version
+                );
+            }
+            if workflow.name.trim().is_empty() {
+                bail!("field agent_workflows[{index}].name: cannot be empty");
+            }
+            if workflow.version == 0 {
+                bail!("field agent_workflows[{index}].version: must be greater than zero");
+            }
+            if workflow.nodes.is_empty() {
+                bail!("field agent_workflows[{index}].nodes: at least one node is required");
+            }
+            for api_key_id in &workflow.api_key_ids {
+                if !api_key_ids.contains(api_key_id.as_str()) {
+                    bail!(
+                        "field agent_workflows[{index}].api_key_ids: workflow {} references unknown api key {}",
+                        workflow.id,
+                        api_key_id
+                    );
+                }
+            }
+            validate_positive_optional_u32(
+                workflow.max_model_calls,
+                &format!("field agent_workflows[{index}].max_model_calls"),
+            )?;
+            validate_positive_optional_u32(
+                workflow.max_tool_calls,
+                &format!("field agent_workflows[{index}].max_tool_calls"),
+            )?;
+            validate_positive_optional_u32(
+                workflow.max_parallelism,
+                &format!("field agent_workflows[{index}].max_parallelism"),
+            )?;
+            validate_positive_optional_u32(
+                workflow.max_iterations,
+                &format!("field agent_workflows[{index}].max_iterations"),
+            )?;
+            validate_positive_optional_u64(
+                workflow.timeout_millis,
+                &format!("field agent_workflows[{index}].timeout_millis"),
+            )?;
+            validate_positive_optional_u64(
+                workflow.token_budget,
+                &format!("field agent_workflows[{index}].token_budget"),
+            )?;
+
+            let mut node_ids = HashSet::new();
+            for (node_index, node) in workflow.nodes.iter().enumerate() {
+                if node.id.trim().is_empty() {
+                    bail!("field agent_workflows[{index}].nodes[{node_index}].id: cannot be empty");
+                }
+                if !node_ids.insert(node.id.as_str()) {
+                    bail!(
+                        "field agent_workflows[{index}].nodes[{node_index}].id: duplicate node id {}",
+                        node.id
+                    );
+                }
+                if let Some(model) = node.model.as_deref() {
+                    if model.trim().is_empty() {
+                        bail!(
+                            "field agent_workflows[{index}].nodes[{node_index}].model: cannot be empty"
+                        );
+                    }
+                    if !model_names.contains(model) {
+                        bail!(
+                            "field agent_workflows[{index}].nodes[{node_index}].model: workflow {} references unknown model {}",
+                            workflow.id,
+                            model
+                        );
+                    }
+                }
+                if node
+                    .tool
+                    .as_deref()
+                    .is_some_and(|tool| tool.trim().is_empty())
+                {
+                    bail!(
+                        "field agent_workflows[{index}].nodes[{node_index}].tool: cannot be empty"
+                    );
+                }
+                validate_positive_optional_u32(
+                    node.max_iterations,
+                    &format!("field agent_workflows[{index}].nodes[{node_index}].max_iterations"),
+                )?;
+                validate_positive_optional_u64(
+                    node.token_budget,
+                    &format!("field agent_workflows[{index}].nodes[{node_index}].token_budget"),
+                )?;
+            }
+            for (edge_index, edge) in workflow.edges.iter().enumerate() {
+                if !node_ids.contains(edge.from.as_str()) {
+                    bail!(
+                        "field agent_workflows[{index}].edges[{edge_index}].from: unknown node {}",
+                        edge.from
+                    );
+                }
+                if !node_ids.contains(edge.to.as_str()) {
+                    bail!(
+                        "field agent_workflows[{index}].edges[{edge_index}].to: unknown node {}",
+                        edge.to
+                    );
+                }
+                if edge
+                    .condition
+                    .as_deref()
+                    .is_some_and(|condition| condition.trim().is_empty())
+                {
+                    bail!(
+                        "field agent_workflows[{index}].edges[{edge_index}].condition: cannot be empty"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_prompt_templates(&self, model_names: &HashSet<String>) -> AnyResult<()> {
         let mut ids = HashSet::new();
         for (index, template) in self.prompt_templates.iter().enumerate() {
@@ -1859,6 +1990,20 @@ fn is_prompt_variable_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn validate_positive_optional_u32(value: Option<u32>, field: &str) -> AnyResult<()> {
+    if value == Some(0) {
+        bail!("{field}: must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_positive_optional_u64(value: Option<u64>, field: &str) -> AnyResult<()> {
+    if value == Some(0) {
+        bail!("{field}: must be greater than zero");
+    }
+    Ok(())
 }
 
 fn validate_builtin_plugin_shape(

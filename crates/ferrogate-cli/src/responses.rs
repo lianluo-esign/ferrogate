@@ -170,6 +170,26 @@ pub(crate) struct AdminGatewayConfigMutationResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminAgentWorkflow {
+    pub(crate) workflow: crate::config::AgentWorkflowPolicy,
+    pub(crate) counters: AdminAgentWorkflowCounters,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub(crate) struct AdminAgentWorkflowCounters {
+    pub(crate) request_count: u64,
+    pub(crate) error_count: u64,
+    pub(crate) billing_event_count: u64,
+    pub(crate) estimated_tokens: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminAgentWorkflowMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) agent_workflow: AdminAgentWorkflow,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AdminPlugin {
     pub(crate) id: String,
     pub(crate) kind: crate::config::ExtensionKind,

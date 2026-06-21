@@ -1069,7 +1069,13 @@ mod tests {
     fn request(request_id: &str, agent_run_id: Option<&str>) -> RequestContext {
         RequestContext {
             request_id: request_id.to_string(),
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             agent_run_id: agent_run_id.map(str::to_string),
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             ..RequestContext::default()
         }
     }

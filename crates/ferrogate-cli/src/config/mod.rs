@@ -25,7 +25,8 @@ pub(crate) use self::snapshot::config_snapshot_id;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
     AccessLogMode, AdminConfig, AgentRuntimeConfig, AgentRuntimeExternalConfig,
-    AgentRuntimeProvider, AgentRuntimeWasmConfig, AnalyticsConfig, AnalyticsProvider, ApiKey,
+    AgentRuntimeProvider, AgentRuntimeWasmConfig, AgentWorkflowEdge, AgentWorkflowNode,
+    AgentWorkflowNodeKind, AgentWorkflowPolicy, AnalyticsConfig, AnalyticsProvider, ApiKey,
     AuthServiceConfig, CacheConfig, CacheMode, ClusterConfig, Config, ExtensionConfig,
     ExtensionKind, ExtensionPermissions, GatewayConfigProfile, GuardrailEffect, GuardrailRule,
     GuardrailStage, HeaderMatcher, HeaderMutation, McpAuthType, McpHeaderConfig, McpServerConfig,

@@ -12,7 +12,9 @@ use tracing::{info, warn};
 
 use crate::{
     auth::{authenticate, authorize_external_rbac, AuthContext},
-    config::{GuardrailEffect, GuardrailStage, Provider},
+    config::{
+        AgentWorkflowNodeKind, AgentWorkflowPolicy, GuardrailEffect, GuardrailStage, Provider,
+    },
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         write_streaming_bytes_response, write_streaming_response,
@@ -73,6 +75,10 @@ impl AiEndpoint {
 const DEFAULT_COMPLETION_TOKEN_RESERVATION: u64 = 512;
 const GATEWAY_CONFIG_HEADER: &str = "x-ferrogate-config";
 const AGENT_RUN_ID_HEADER: &str = "x-ferrogate-agent-run-id";
+const WORKFLOW_ID_HEADER: &str = "x-ferrogate-workflow-id";
+const WORKFLOW_VERSION_HEADER: &str = "x-ferrogate-workflow-version";
+const WORKFLOW_NODE_ID_HEADER: &str = "x-ferrogate-workflow-node-id";
+const WORKFLOW_ITERATION_HEADER: &str = "x-ferrogate-workflow-iteration";
 
 impl FerroGateway {
     pub(super) async fn handle_chat_completions(
@@ -184,6 +190,10 @@ impl FerroGateway {
         let AiRequestPlan {
             auth,
             agent_run_id,
+            workflow_id,
+            workflow_version,
+            workflow_node_id,
+            workflow_iteration,
             gateway_config,
             request,
             body_json,
@@ -191,6 +201,54 @@ impl FerroGateway {
             routes,
             body_text,
         } = request_plan;
+        if let Err(rejection) = enforce_ai_workflow_policy(
+            &state,
+            AiWorkflowRequestContext {
+                auth: &auth,
+                workflow_id: workflow_id.as_deref(),
+                workflow_version,
+                workflow_node_id: workflow_node_id.as_deref(),
+                workflow_iteration,
+                logical_model: &request.model,
+                estimated_usage: &estimated_usage,
+            },
+        ) {
+            self.state.record_request_log(StoredRequestLog {
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                agent_run_id: Some(agent_run_id.clone()),
+                workflow_id: workflow_id.clone(),
+                workflow_version,
+                workflow_node_id: workflow_node_id.clone(),
+                cluster_id: None,
+                node_id: None,
+                tenant: auth.tenant_context(),
+                route: Some(endpoint.route().into()),
+                provider: None,
+                logical_model: Some(request.model.clone()),
+                provider_model: None,
+                gateway_config_id: gateway_config.as_ref().map(|profile| profile.id.clone()),
+                gateway_config_revision: gateway_config.as_ref().map(|profile| profile.revision),
+                status_code: rejection.status.as_u16(),
+                error_code: Some(rejection.code.to_string()),
+                prompt_recorded: false,
+                response_recorded: false,
+                prompt_body: None,
+                response_body: None,
+                cache_status: None,
+                started_at_unix: None,
+                completed_at_unix: None,
+            });
+            write_json_error(
+                session,
+                rejection.status,
+                rejection.code,
+                rejection.message,
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(());
+        }
         let route_count = routes.len();
         let dispatch_timeout = state.provider_dispatch_timeout();
         let max_dispatch_retries = state.provider_dispatch_max_retries();
@@ -283,6 +341,9 @@ impl FerroGateway {
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
                 agent_run_id: Some(agent_run_id.clone()),
+                workflow_id: workflow_id.clone(),
+                workflow_version,
+                workflow_node_id: workflow_node_id.clone(),
                 route: Some(endpoint.route().into()),
                 upstream: Some(provider.name.clone()),
                 tenant: auth.tenant_context(),
@@ -310,6 +371,9 @@ impl FerroGateway {
                     request_id: ctx.request_id.clone(),
                     trace_id: ctx.trace_id.clone(),
                     agent_run_id: Some(agent_run_id.clone()),
+                    workflow_id: workflow_id.clone(),
+                    workflow_version,
+                    workflow_node_id: workflow_node_id.clone(),
                     actor_api_key_id: auth.api_key_id.clone(),
                     tenant: auth.tenant_context(),
                     action: "guardrail.deny".into(),
@@ -384,6 +448,9 @@ impl FerroGateway {
                         request_id: ctx.request_id.clone(),
                         trace_id: ctx.trace_id.clone(),
                         agent_run_id: Some(agent_run_id.clone()),
+                        workflow_id: workflow_id.clone(),
+                        workflow_version,
+                        workflow_node_id: workflow_node_id.clone(),
                         cluster_id: None,
                         node_id: None,
                         tenant: policy_request.tenant.clone(),
@@ -731,6 +798,9 @@ impl FerroGateway {
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
                                                     agent_run_id: Some(agent_run_id.clone()),
+            workflow_id: workflow_id.clone(),
+            workflow_version,
+            workflow_node_id: workflow_node_id.clone(),
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.deny".into(),
@@ -761,6 +831,9 @@ impl FerroGateway {
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
                                                     agent_run_id: Some(agent_run_id.clone()),
+            workflow_id: workflow_id.clone(),
+            workflow_version,
+            workflow_node_id: workflow_node_id.clone(),
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.redact".into(),
@@ -780,6 +853,9 @@ impl FerroGateway {
                                     request_id: ctx.request_id.clone(),
                                     trace_id: ctx.trace_id.clone(),
                                     agent_run_id: Some(agent_run_id.clone()),
+                                    workflow_id: workflow_id.clone(),
+                                    workflow_version,
+                                    workflow_node_id: workflow_node_id.clone(),
                                     cluster_id: None,
                                     node_id: None,
                                     tenant: policy_request.tenant.clone(),
@@ -821,6 +897,9 @@ impl FerroGateway {
                                 request_id: ctx.request_id.clone(),
                                 trace_id: ctx.trace_id.clone(),
                                 agent_run_id: Some(agent_run_id.clone()),
+                                workflow_id: workflow_id.clone(),
+                                workflow_version,
+                                workflow_node_id: workflow_node_id.clone(),
                                 cluster_id: None,
                                 node_id: None,
                                 tenant: policy_request.tenant.clone(),
@@ -1075,6 +1154,9 @@ impl FerroGateway {
                                             request_id: ctx.request_id.clone(),
                                             trace_id: ctx.trace_id.clone(),
                                             agent_run_id: Some(agent_run_id.clone()),
+            workflow_id: workflow_id.clone(),
+            workflow_version,
+            workflow_node_id: workflow_node_id.clone(),
                                             actor_api_key_id: auth.api_key_id.clone(),
                                             tenant: auth.tenant_context(),
                                             action: "guardrail.deny".into(),
@@ -1105,6 +1187,9 @@ impl FerroGateway {
                                             request_id: ctx.request_id.clone(),
                                             trace_id: ctx.trace_id.clone(),
                                             agent_run_id: Some(agent_run_id.clone()),
+            workflow_id: workflow_id.clone(),
+            workflow_version,
+            workflow_node_id: workflow_node_id.clone(),
                                             actor_api_key_id: auth.api_key_id.clone(),
                                             tenant: auth.tenant_context(),
                                             action: "guardrail.redact".into(),
@@ -1126,6 +1211,9 @@ impl FerroGateway {
                             request_id: ctx.request_id.clone(),
                             trace_id: ctx.trace_id.clone(),
                             agent_run_id: Some(agent_run_id.clone()),
+                            workflow_id: workflow_id.clone(),
+                            workflow_version,
+                            workflow_node_id: workflow_node_id.clone(),
                             cluster_id: None,
                             node_id: None,
                             tenant: policy_request.tenant.clone(),
@@ -1247,6 +1335,9 @@ impl FerroGateway {
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: log.tenant,
@@ -1292,6 +1383,10 @@ struct AiErrorLog<'a> {
 struct AiRequestPlan {
     auth: AuthContext,
     agent_run_id: String,
+    workflow_id: Option<String>,
+    workflow_version: Option<u32>,
+    workflow_node_id: Option<String>,
+    workflow_iteration: Option<u32>,
     gateway_config: Option<GatewayConfigUse>,
     request: ChatCompletionRequest,
     body_json: serde_json::Value,
@@ -1304,6 +1399,10 @@ struct AiRequestPlan {
 struct AiIngressPlan {
     auth: AuthContext,
     agent_run_id: String,
+    workflow_id: Option<String>,
+    workflow_version: Option<u32>,
+    workflow_node_id: Option<String>,
+    workflow_iteration: Option<u32>,
     gateway_config: Option<GatewayConfigUse>,
 }
 
@@ -1375,6 +1474,61 @@ fn build_ai_ingress_plan(
         })
     })?;
 
+    let workflow_id =
+        requested_optional_id_header(headers, WORKFLOW_ID_HEADER).map_err(|message| {
+            reject_ai_request(AiRequestRejection {
+                tenant: tenant.clone(),
+                logical_model: None,
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_workflow_header",
+                message,
+            })
+        })?;
+    let workflow_version = requested_optional_u32_header(headers, WORKFLOW_VERSION_HEADER)
+        .map_err(|message| {
+            reject_ai_request(AiRequestRejection {
+                tenant: tenant.clone(),
+                logical_model: None,
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_workflow_header",
+                message,
+            })
+        })?;
+    let workflow_node_id =
+        requested_optional_id_header(headers, WORKFLOW_NODE_ID_HEADER).map_err(|message| {
+            reject_ai_request(AiRequestRejection {
+                tenant: tenant.clone(),
+                logical_model: None,
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_workflow_header",
+                message,
+            })
+        })?;
+    let workflow_iteration = requested_optional_u32_header(headers, WORKFLOW_ITERATION_HEADER)
+        .map_err(|message| {
+            reject_ai_request(AiRequestRejection {
+                tenant: tenant.clone(),
+                logical_model: None,
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_workflow_header",
+                message,
+            })
+        })?;
+
+    if workflow_id.is_none()
+        && (workflow_version.is_some()
+            || workflow_node_id.is_some()
+            || workflow_iteration.is_some())
+    {
+        return Err(reject_ai_request(AiRequestRejection {
+            tenant: tenant.clone(),
+            logical_model: None,
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_workflow_header",
+            message: format!("{WORKFLOW_ID_HEADER} is required when workflow version, node, or iteration headers are set"),
+        }));
+    }
+
     let gateway_config = requested_gateway_config_id(headers)
         .map_err(|message| {
             reject_ai_request(AiRequestRejection {
@@ -1413,6 +1567,10 @@ fn build_ai_ingress_plan(
     Ok(AiIngressPlan {
         auth,
         agent_run_id,
+        workflow_id: workflow_id.map(ToOwned::to_owned),
+        workflow_version,
+        workflow_node_id: workflow_node_id.map(ToOwned::to_owned),
+        workflow_iteration,
         gateway_config,
     })
 }
@@ -1426,6 +1584,10 @@ fn build_ai_request_plan(
     let AiIngressPlan {
         auth,
         agent_run_id,
+        workflow_id,
+        workflow_version,
+        workflow_node_id,
+        workflow_iteration,
         gateway_config,
     } = ingress;
 
@@ -1515,6 +1677,10 @@ fn build_ai_request_plan(
     Ok(AiRequestPlan {
         auth,
         agent_run_id,
+        workflow_id,
+        workflow_version,
+        workflow_node_id,
+        workflow_iteration,
         gateway_config,
         request,
         body_json,
@@ -1668,6 +1834,230 @@ fn requested_agent_run_id(headers: &HeaderMap, request_id: &str) -> Result<Strin
         ));
     }
     Ok(value.to_string())
+}
+
+fn requested_optional_id_header<'a>(
+    headers: &'a HeaderMap,
+    header: &'static str,
+) -> Result<Option<&'a str>, String> {
+    let Some(value) = headers.get(header) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| format!("{header} must be valid visible ASCII/UTF-8 header text"))?
+        .trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 128 {
+        return Err(format!("{header} must be at most 128 characters"));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    {
+        return Err(format!(
+            "{header} may only contain letters, numbers, _, -, ., or :"
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn requested_optional_u32_header(
+    headers: &HeaderMap,
+    header: &'static str,
+) -> Result<Option<u32>, String> {
+    let Some(value) = headers.get(header) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| format!("{header} must be valid visible ASCII/UTF-8 header text"))?
+        .trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| format!("{header} must be an unsigned integer"))?;
+    if parsed == 0 {
+        return Err(format!("{header} must be greater than zero"));
+    }
+    Ok(Some(parsed))
+}
+
+struct AiWorkflowRequestContext<'a> {
+    auth: &'a AuthContext,
+    workflow_id: Option<&'a str>,
+    workflow_version: Option<u32>,
+    workflow_node_id: Option<&'a str>,
+    workflow_iteration: Option<u32>,
+    logical_model: &'a str,
+    estimated_usage: &'a BillingTokenUsage,
+}
+
+struct AiWorkflowRejection {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
+fn enforce_ai_workflow_policy(
+    state: &AppState,
+    request: AiWorkflowRequestContext<'_>,
+) -> Result<(), AiWorkflowRejection> {
+    let Some(workflow_id) = request.workflow_id else {
+        return Ok(());
+    };
+    let Some(workflow) = crate::state::select_agent_workflow(
+        &state.config.agent_workflows,
+        workflow_id,
+        request.workflow_version,
+    ) else {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::BAD_REQUEST,
+            code: "workflow_not_found",
+            message: match request.workflow_version {
+                Some(version) => format!("agent workflow {workflow_id}@{version} was not found"),
+                None => format!("agent workflow {workflow_id} was not found"),
+            },
+        });
+    };
+    if !workflow.enabled {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::FORBIDDEN,
+            code: "workflow_disabled",
+            message: format!(
+                "agent workflow {}@{} is disabled",
+                workflow.id, workflow.version
+            ),
+        });
+    }
+    if !can_use_workflow(request.auth, workflow) {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::FORBIDDEN,
+            code: "workflow_not_allowed",
+            message: format!(
+                "API key or tenant is not allowed to use agent workflow {}@{}",
+                workflow.id, workflow.version
+            ),
+        });
+    }
+    let Some(node_id) = request.workflow_node_id else {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::BAD_REQUEST,
+            code: "workflow_node_required",
+            message: format!(
+                "{WORKFLOW_NODE_ID_HEADER} is required when {WORKFLOW_ID_HEADER} is set"
+            ),
+        });
+    };
+    let Some(node) = workflow.nodes.iter().find(|node| node.id == node_id) else {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::BAD_REQUEST,
+            code: "workflow_node_not_found",
+            message: format!(
+                "agent workflow {}@{} does not contain node {}",
+                workflow.id, workflow.version, node_id
+            ),
+        });
+    };
+    if node.kind != AgentWorkflowNodeKind::Model {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::FORBIDDEN,
+            code: "workflow_node_not_model",
+            message: format!("workflow node {node_id} is not allowed to dispatch model traffic"),
+        });
+    }
+    if node
+        .model
+        .as_deref()
+        .is_some_and(|model| model != request.logical_model)
+    {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::FORBIDDEN,
+            code: "workflow_model_not_allowed",
+            message: format!(
+                "workflow node {node_id} is not allowed to use model {}",
+                request.logical_model
+            ),
+        });
+    }
+    if workflow.max_model_calls.is_some_and(|limit| limit < 1) {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "workflow_model_call_limit_exceeded",
+            message: format!(
+                "agent workflow {}@{} model call limit is exhausted",
+                workflow.id, workflow.version
+            ),
+        });
+    }
+    if let Some(iteration) = request.workflow_iteration {
+        if workflow
+            .max_iterations
+            .or(node.max_iterations)
+            .is_some_and(|limit| iteration > limit)
+        {
+            return Err(AiWorkflowRejection {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "workflow_iteration_limit_exceeded",
+                message: format!(
+                    "agent workflow {}@{} iteration {} exceeds configured limit",
+                    workflow.id, workflow.version, iteration
+                ),
+            });
+        }
+    }
+    if workflow
+        .token_budget
+        .or(node.token_budget)
+        .is_some_and(|budget| request.estimated_usage.total_tokens > budget)
+    {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "workflow_token_budget_exceeded",
+            message: format!(
+                "agent workflow {}@{} token budget cannot cover the estimated request usage",
+                workflow.id, workflow.version
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn can_use_workflow(auth: &AuthContext, workflow: &AgentWorkflowPolicy) -> bool {
+    if !workflow.api_key_ids.is_empty()
+        && !auth
+            .api_key_id
+            .as_deref()
+            .is_some_and(|api_key_id| workflow.api_key_ids.iter().any(|id| id == api_key_id))
+    {
+        return false;
+    }
+    if !workflow.organization_ids.is_empty()
+        && !auth
+            .organization_id
+            .as_deref()
+            .is_some_and(|organization_id| {
+                workflow
+                    .organization_ids
+                    .iter()
+                    .any(|id| id == organization_id)
+            })
+    {
+        return false;
+    }
+    if !workflow.project_ids.is_empty()
+        && !auth
+            .project_id
+            .as_deref()
+            .is_some_and(|project_id| workflow.project_ids.iter().any(|id| id == project_id))
+    {
+        return false;
+    }
+    true
 }
 
 fn gateway_config_error_response(

@@ -25,6 +25,12 @@ pub struct RequestContext {
     pub trace_id: Option<String>,
     #[serde(default)]
     pub agent_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    pub workflow_version: Option<u32>,
+    #[serde(default)]
+    pub workflow_node_id: Option<String>,
     pub route: Option<String>,
     pub upstream: Option<String>,
     pub tenant: TenantContext,

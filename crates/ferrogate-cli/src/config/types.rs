@@ -35,6 +35,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) gateway_configs: Vec<GatewayConfigProfile>,
     #[serde(default)]
+    pub(crate) agent_workflows: Vec<AgentWorkflowPolicy>,
+    #[serde(default)]
     pub(crate) prompt_templates: Vec<PromptTemplate>,
     #[serde(default)]
     pub(crate) guardrails: Vec<GuardrailRule>,
@@ -394,6 +396,74 @@ pub(crate) struct GatewayConfigProfile {
     pub(crate) api_key_ids: Vec<String>,
     #[serde(default)]
     pub(crate) cache_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentWorkflowPolicy {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(default = "default_gateway_config_revision")]
+    pub(crate) version: u32,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) organization_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) project_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) api_key_ids: Vec<String>,
+    pub(crate) nodes: Vec<AgentWorkflowNode>,
+    #[serde(default)]
+    pub(crate) edges: Vec<AgentWorkflowEdge>,
+    #[serde(default)]
+    pub(crate) max_model_calls: Option<u32>,
+    #[serde(default)]
+    pub(crate) max_tool_calls: Option<u32>,
+    #[serde(default)]
+    pub(crate) max_parallelism: Option<u32>,
+    #[serde(default)]
+    pub(crate) max_iterations: Option<u32>,
+    #[serde(default)]
+    pub(crate) timeout_millis: Option<u64>,
+    #[serde(default)]
+    pub(crate) token_budget: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentWorkflowNode {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) kind: AgentWorkflowNodeKind,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) tool: Option<String>,
+    #[serde(default)]
+    pub(crate) max_iterations: Option<u32>,
+    #[serde(default)]
+    pub(crate) token_budget: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentWorkflowNodeKind {
+    #[default]
+    Model,
+    Tool,
+    Router,
+    Human,
+    Checkpoint,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentWorkflowEdge {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    #[serde(default)]
+    pub(crate) condition: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1339,6 +1409,7 @@ impl Default for Config {
             api_keys: Vec::new(),
             policies: Vec::new(),
             gateway_configs: Vec::new(),
+            agent_workflows: Vec::new(),
             prompt_templates: Vec::new(),
             guardrails: Vec::new(),
             plugins: Vec::new(),

@@ -39,6 +39,8 @@ EXPECTED_ADMIN_METHODS = {
     "/admin/v1/tenants": {"get"},
     "/admin/v1/policies": {"get", "post"},
     "/admin/v1/policies/{name}": {"get", "put", "patch", "delete"},
+    "/admin/v1/agent-workflows": {"get", "post"},
+    "/admin/v1/agent-workflows/{id}": {"get", "put", "patch", "delete"},
     "/admin/v1/request-logs": {"get"},
     "/admin/v1/billing-events": {"get"},
     "/admin/v1/usage-aggregates": {"get"},

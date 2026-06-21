@@ -2366,6 +2366,178 @@
         }
       }
     },
+    "/admin/v1/agent-workflows": {
+      "get": {
+        "operationId": "listAdminAgentWorkflows",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List configured agent workflow policies with runtime counters.",
+        "responses": {
+          "200": {
+            "description": "Agent workflow policy list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentWorkflowList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAdminAgentWorkflow",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create an agent workflow policy and apply it through process-local reload.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminAgentWorkflowMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminAgentWorkflowMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/agent-workflows/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/AgentWorkflowId"
+        }
+      ],
+      "get": {
+        "operationId": "getAdminAgentWorkflow",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one agent workflow policy with runtime counters.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAgentWorkflowMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminAgentWorkflow",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Replace or create an agent workflow policy by id.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminAgentWorkflowMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAgentWorkflowMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminAgentWorkflow",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Upsert an agent workflow policy by id.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminAgentWorkflowMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAgentWorkflowMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminAgentWorkflow",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete an agent workflow policy and apply the change through process-local reload.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteAgentWorkflowOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
     "/admin/v1/prompt-templates": {
       "get": {
         "operationId": "listAdminPromptTemplates",
@@ -2620,6 +2792,14 @@
           "type": "string"
         }
       },
+      "AgentWorkflowId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
       "Offset": {
         "name": "offset",
         "in": "query",
@@ -2753,6 +2933,42 @@
                     "key_dev"
                   ],
                   "cache_enabled": false
+                }
+              }
+            }
+          }
+        }
+      },
+      "AdminAgentWorkflowMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AgentWorkflowPolicy"
+            },
+            "examples": {
+              "supportFlow": {
+                "summary": "Bind one model node to an API key and token budget.",
+                "value": {
+                  "id": "support-flow",
+                  "name": "Support flow",
+                  "version": 1,
+                  "enabled": true,
+                  "api_key_ids": [
+                    "key_dev"
+                  ],
+                  "nodes": [
+                    {
+                      "id": "draft",
+                      "kind": "model",
+                      "model": "fast-chat",
+                      "token_budget": 600
+                    }
+                  ],
+                  "edges": [],
+                  "max_model_calls": 1,
+                  "max_iterations": 2,
+                  "token_budget": 600
                 }
               }
             }
@@ -2942,6 +3158,16 @@
           }
         }
       },
+      "AdminAgentWorkflowMutationOk": {
+        "description": "Agent workflow mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminAgentWorkflowMutationResponse"
+            }
+          }
+        }
+      },
       "AdminMcpServerMutationOk": {
         "description": "MCP server mutation response.",
         "content": {
@@ -2988,6 +3214,16 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/DeleteGatewayConfigResponse"
+            }
+          }
+        }
+      },
+      "DeleteAgentWorkflowOk": {
+        "description": "Agent workflow delete response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteAgentWorkflowResponse"
             }
           }
         }
@@ -4872,6 +5108,231 @@
         },
         "additionalProperties": false
       },
+      "AgentWorkflowPolicy": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "nodes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "organization_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "project_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "api_key_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentWorkflowNode"
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentWorkflowEdge"
+            },
+            "default": []
+          },
+          "max_model_calls": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "max_tool_calls": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "max_parallelism": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "max_iterations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "timeout_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "token_budget": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentWorkflowNode": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AgentWorkflowNodeKind"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_iterations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "token_budget": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentWorkflowNodeKind": {
+        "type": "string",
+        "enum": [
+          "model",
+          "tool",
+          "router",
+          "human",
+          "checkpoint"
+        ],
+        "default": "model"
+      },
+      "AgentWorkflowEdge": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentWorkflow": {
+        "type": "object",
+        "required": [
+          "workflow",
+          "counters"
+        ],
+        "properties": {
+          "workflow": {
+            "$ref": "#/components/schemas/AgentWorkflowPolicy"
+          },
+          "counters": {
+            "$ref": "#/components/schemas/AdminAgentWorkflowCounters"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentWorkflowCounters": {
+        "type": "object",
+        "required": [
+          "request_count",
+          "error_count",
+          "billing_event_count",
+          "estimated_tokens"
+        ],
+        "properties": {
+          "request_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "error_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "billing_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "estimated_tokens": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentWorkflowMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "agent_workflow"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_workflow"
+          },
+          "agent_workflow": {
+            "$ref": "#/components/schemas/AdminAgentWorkflow"
+          }
+        },
+        "additionalProperties": false
+      },
       "DeleteApiKeyResponse": {
         "allOf": [
           {
@@ -4912,6 +5373,21 @@
             "properties": {
               "object": {
                 "const": "gateway_config"
+              }
+            }
+          }
+        ]
+      },
+      "DeleteAgentWorkflowResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeleteResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "object": {
+                "const": "agent_workflow"
               }
             }
           }
@@ -6899,6 +7375,29 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AdminGatewayConfigProfile"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentWorkflowList": {
+        "$ref": "#/components/schemas/AdminList_AdminAgentWorkflow"
+      },
+      "AdminList_AdminAgentWorkflow": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminAgentWorkflow"
             }
           }
         },

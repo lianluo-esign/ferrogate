@@ -652,6 +652,56 @@ impl SharedAppState {
         result
     }
 
+    pub(crate) fn upsert_agent_workflow(
+        &self,
+        workflow: crate::config::AgentWorkflowPolicy,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let result = (|| {
+            active.repositories.upsert_control_plane_agent_workflow(
+                workflow_resource_id(&workflow),
+                serde_json::to_string(&workflow)?,
+            )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(self.reload_process_local(candidate))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
+    pub(crate) fn delete_agent_workflow(
+        &self,
+        id: &str,
+        version: Option<u32>,
+    ) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        let Some(workflow) = select_agent_workflow(&active.config.agent_workflows, id, version)
+        else {
+            return Ok(None);
+        };
+        let resource_id = workflow_resource_id(workflow);
+        if !active
+            .repositories
+            .delete_control_plane_agent_workflow(&resource_id)?
+        {
+            return Ok(None);
+        }
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(Some(self.reload_process_local(candidate)))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
     pub(crate) fn upsert_prompt_template(
         &self,
         template: PromptTemplate,
@@ -921,6 +971,9 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         serialize_control_plane_documents(&config.policies, |policy| policy.name.clone());
     let gateway_configs =
         serialize_control_plane_documents(&config.gateway_configs, |profile| profile.id.clone());
+    let agent_workflows = serialize_control_plane_documents(&config.agent_workflows, |workflow| {
+        workflow_resource_id(workflow)
+    });
     let prompt_templates =
         serialize_control_plane_documents(&config.prompt_templates, |template| template.id.clone());
     let plugin_registrations =
@@ -946,6 +999,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             tenants,
             policies,
             gateway_configs,
+            agent_workflows,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -991,6 +1045,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             tenants,
             policies,
             gateway_configs,
+            agent_workflows,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -1022,6 +1077,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             tenants,
             policies,
             gateway_configs,
+            agent_workflows,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -1042,6 +1098,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             tenants,
             policies,
             gateway_configs,
+            agent_workflows,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -1193,6 +1250,22 @@ fn deserialize_control_plane_documents<T: for<'de> Deserialize<'de>>(
         })
 }
 
+fn workflow_resource_id(workflow: &crate::config::AgentWorkflowPolicy) -> String {
+    format!("{}@{}", workflow.id, workflow.version)
+}
+
+pub(crate) fn select_agent_workflow<'a>(
+    workflows: &'a [crate::config::AgentWorkflowPolicy],
+    id: &str,
+    version: Option<u32>,
+) -> Option<&'a crate::config::AgentWorkflowPolicy> {
+    workflows
+        .iter()
+        .filter(|workflow| workflow.id == id)
+        .filter(|workflow| version.is_none_or(|version| workflow.version == version))
+        .max_by_key(|workflow| workflow.version)
+}
+
 fn tenant_refs_from_api_keys(api_keys: &[ApiKey]) -> Vec<crate::responses::AdminTenantRef> {
     api_keys
         .iter()
@@ -1261,6 +1334,7 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
         deserialize_control_plane_documents(snapshot.tenants)?;
     config.policies = deserialize_control_plane_documents(snapshot.policies)?;
     config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
+    config.agent_workflows = deserialize_control_plane_documents(snapshot.agent_workflows)?;
     config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
     config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
     config.extensions.clear();
@@ -1312,6 +1386,9 @@ pub(crate) struct AdminAuditEventDraft {
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
     pub(crate) agent_run_id: Option<String>,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_version: Option<u32>,
+    pub(crate) workflow_node_id: Option<String>,
     pub(crate) actor_api_key_id: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) action: String,
@@ -1470,6 +1547,9 @@ impl RequestLogExportRecord {
             request_id: log.request_id,
             trace_id: log.trace_id,
             agent_run_id: log.agent_run_id,
+            workflow_id: log.workflow_id,
+            workflow_version: log.workflow_version,
+            workflow_node_id: log.workflow_node_id,
             tenant: log.tenant,
             route: log.route,
             logical_model: log.logical_model,
@@ -1669,6 +1749,9 @@ pub(crate) struct RequestLogExportRecord {
     pub(crate) request_id: String,
     pub(crate) trace_id: Option<String>,
     pub(crate) agent_run_id: Option<String>,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_version: Option<u32>,
+    pub(crate) workflow_node_id: Option<String>,
     pub(crate) tenant: ferrogate_core::TenantContext,
     pub(crate) route: Option<String>,
     pub(crate) logical_model: Option<String>,
@@ -2612,6 +2695,9 @@ impl AppState {
             request_id: request_id.clone(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             route: Some("/v1/mcp/tool/execute".into()),
             upstream: Some(format!("mcp:{server_name}")),
             tenant: tenant.clone(),
@@ -2746,6 +2832,9 @@ impl AppState {
             serialize_control_plane_documents(&config.gateway_configs, |profile| {
                 profile.id.clone()
             }),
+            serialize_control_plane_documents(&config.agent_workflows, |workflow| {
+                workflow_resource_id(workflow)
+            }),
             serialize_control_plane_documents(&config.prompt_templates, |template| {
                 template.id.clone()
             }),
@@ -2764,6 +2853,7 @@ impl AppState {
             deserialize_control_plane_documents(snapshot.tenants)?;
         config.policies = deserialize_control_plane_documents(snapshot.policies)?;
         config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
+        config.agent_workflows = deserialize_control_plane_documents(snapshot.agent_workflows)?;
         config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
         config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
         config.extensions.clear();
@@ -3555,6 +3645,9 @@ impl AppState {
             request_id: draft.request.request_id.clone(),
             trace_id: draft.request.trace_id.clone(),
             agent_run_id: draft.request.agent_run_id.clone(),
+            workflow_id: draft.request.workflow_id.clone(),
+            workflow_version: draft.request.workflow_version,
+            workflow_node_id: draft.request.workflow_node_id.clone(),
             cluster_id: Some(self.cluster_identity.cluster_id.clone()),
             node_id: Some(self.cluster_identity.node_id.clone()),
             tenant: draft.request.tenant.clone(),
@@ -3723,6 +3816,9 @@ impl AppState {
             request_id: event.request_id,
             trace_id: event.trace_id,
             agent_run_id: event.agent_run_id,
+            workflow_id: event.workflow_id,
+            workflow_version: event.workflow_version,
+            workflow_node_id: event.workflow_node_id,
             cluster_id: Some(self.cluster_identity.cluster_id.clone()),
             node_id: Some(self.cluster_identity.node_id.clone()),
             actor_api_key_id: event.actor_api_key_id,
@@ -3747,6 +3843,9 @@ impl AppState {
             request_id: request_id.into(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: Some(self.cluster_identity.cluster_id.clone()),
             node_id: Some(self.cluster_identity.node_id.clone()),
             tenant: tenant.clone(),
@@ -6402,6 +6501,9 @@ mod tests {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext {
@@ -6451,6 +6553,9 @@ mod tests {
             request_id: "fg-estimated".into(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext {
@@ -6487,6 +6592,9 @@ mod tests {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext::default(),
@@ -6556,6 +6664,9 @@ mod tests {
             request_id: "fg-export-1".into(),
             trace_id: Some("trace-export".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext {
@@ -6584,6 +6695,9 @@ mod tests {
             request_id: "fg-export-2".into(),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext {
@@ -6645,6 +6759,9 @@ mod tests {
                 request_id: format!("fg-{index}"),
                 trace_id: None,
                 agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
                 cluster_id: None,
                 node_id: None,
                 tenant: ferrogate_core::TenantContext::default(),
@@ -6668,6 +6785,9 @@ mod tests {
                 request_id: format!("fg-{index}"),
                 trace_id: None,
                 agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
                 actor_api_key_id: None,
                 tenant: ferrogate_core::TenantContext::default(),
                 action: "config.validate".into(),
@@ -6681,6 +6801,9 @@ mod tests {
                         request_id: format!("fg-{index}"),
                         trace_id: None,
                         agent_run_id: None,
+                        workflow_id: None,
+                        workflow_version: None,
+                        workflow_node_id: None,
                         route: None,
                         upstream: None,
                         tenant: ferrogate_core::TenantContext::default(),
@@ -6795,6 +6918,9 @@ mod tests {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext::default(),
@@ -6804,6 +6930,9 @@ mod tests {
             request_id: "fg-test".into(),
             trace_id: Some("trace-test".into()),
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext::default(),
@@ -6944,6 +7073,9 @@ mod tests {
             request_id: format!("fg-{provider}-{status_code}-{completed_at_unix}"),
             trace_id: None,
             agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
             cluster_id: None,
             node_id: None,
             tenant: ferrogate_core::TenantContext::default(),

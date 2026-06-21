@@ -266,6 +266,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/agent-workflows" || path.starts_with("/admin/v1/agent-workflows/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_agent_workflows(session, ctx, &headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/prompt-templates" || path.starts_with("/admin/v1/prompt-templates/") {
             let headers = req.headers.clone();
             let method = req.method.clone();
