@@ -1984,7 +1984,9 @@ fn enforce_ai_workflow_policy(
             ),
         });
     }
-    if workflow.max_model_calls.is_some_and(|limit| limit < 1) {
+    if workflow.max_model_calls.is_some_and(|limit| {
+        workflow_model_call_count(state, &workflow.id, workflow.version) >= u64::from(limit)
+    }) {
         return Err(AiWorkflowRejection {
             status: StatusCode::TOO_MANY_REQUESTS,
             code: "workflow_model_call_limit_exceeded",
@@ -2010,11 +2012,11 @@ fn enforce_ai_workflow_policy(
             });
         }
     }
-    if workflow
-        .token_budget
-        .or(node.token_budget)
-        .is_some_and(|budget| request.estimated_usage.total_tokens > budget)
-    {
+    if workflow.token_budget.is_some_and(|budget| {
+        workflow_token_usage(state, &workflow.id, workflow.version, None)
+            .saturating_add(request.estimated_usage.total_tokens)
+            > budget
+    }) {
         return Err(AiWorkflowRejection {
             status: StatusCode::TOO_MANY_REQUESTS,
             code: "workflow_token_budget_exceeded",
@@ -2024,7 +2026,51 @@ fn enforce_ai_workflow_policy(
             ),
         });
     }
+    if node.token_budget.is_some_and(|budget| {
+        workflow_token_usage(state, &workflow.id, workflow.version, Some(node_id))
+            .saturating_add(request.estimated_usage.total_tokens)
+            > budget
+    }) {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "workflow_token_budget_exceeded",
+            message: format!(
+                "workflow node {node_id} token budget cannot cover the estimated request usage"
+            ),
+        });
+    }
     Ok(())
+}
+
+fn workflow_model_call_count(state: &AppState, workflow_id: &str, workflow_version: u32) -> u64 {
+    state
+        .metering_events()
+        .into_iter()
+        .filter(|event| {
+            event.workflow_id.as_deref() == Some(workflow_id)
+                && event.workflow_version == Some(workflow_version)
+        })
+        .count() as u64
+}
+
+fn workflow_token_usage(
+    state: &AppState,
+    workflow_id: &str,
+    workflow_version: u32,
+    workflow_node_id: Option<&str>,
+) -> u64 {
+    state
+        .metering_events()
+        .into_iter()
+        .filter(|event| {
+            event.workflow_id.as_deref() == Some(workflow_id)
+                && event.workflow_version == Some(workflow_version)
+                && workflow_node_id
+                    .is_none_or(|node_id| event.workflow_node_id.as_deref() == Some(node_id))
+        })
+        .fold(0_u64, |total, event| {
+            total.saturating_add(event.usage.total_tokens)
+        })
 }
 
 fn can_use_workflow(auth: &AuthContext, workflow: &AgentWorkflowPolicy) -> bool {

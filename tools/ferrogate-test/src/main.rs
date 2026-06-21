@@ -861,6 +861,32 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     )?;
     case.expect_json(
         "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"budget-flow","name":"Budget flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"draft","kind":"model","model":"fast-chat","token_budget":600}],"edges":[],"max_model_calls":10,"max_iterations":2,"token_budget":600}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "budget-flow");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"tool-flow","name":"Tool flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"echo","kind":"tool","tool":"tool.echo","max_iterations":2}],"edges":[],"max_tool_calls":1,"max_iterations":2}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "tool-flow");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
         "/v1/chat/completions",
         &[CLIENT_AUTH, JSON_CONTENT],
         r#"{"model":"fast-chat","messages":[{"role":"user","content":"gateway coverage client-secret"}]}"#,
@@ -897,7 +923,7 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         &[
             CLIENT_AUTH,
             JSON_CONTENT,
-            "x-ferrogate-workflow-id: support-flow",
+            "x-ferrogate-workflow-id: budget-flow",
             "x-ferrogate-workflow-version: 1",
             "x-ferrogate-workflow-node-id: draft",
             "x-ferrogate-workflow-iteration: 1",
@@ -906,6 +932,24 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         429,
         |body| {
             assert_eq!(body["error"]["code"], "workflow_token_budget_exceeded");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-workflow-id: support-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: draft",
+            "x-ferrogate-workflow-iteration: 1",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow model call limit"}]}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "workflow_model_call_limit_exceeded");
             Ok(())
         },
     )?;
@@ -1149,7 +1193,27 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         &[
             CLIENT_AUTH,
             JSON_CONTENT,
+            "x-ferrogate-workflow-id: tool-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: echo",
+        ],
+        r#"{"input":"run the denied harness","max_turns":3,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"first"}},{"name":"tool.echo","arguments":{"message":"second"}}]}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "workflow_tool_call_limit_exceeded");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/agent-runs",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
             "x-ferrogate-agent-run-id: agent-run-harness",
+            "x-ferrogate-workflow-id: tool-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: echo",
         ],
         r#"{"input":"run the bounded harness","max_turns":3,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"from ferrogate-test"},"session_id":"agent-harness-tool-session"}]}"#,
         201,
@@ -1202,6 +1266,9 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
                         && event["target"] == "tool_session:agent-harness-tool-session"
                         && event["outcome"] == "success"
                         && event["agent_run_id"] == "agent-run-harness"
+                        && event["workflow_id"] == "tool-flow"
+                        && event["workflow_version"] == 1
+                        && event["workflow_node_id"] == "echo"
                 }));
             assert!(body["audit_events"]
                 .as_array()
@@ -1210,7 +1277,25 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
                 .any(|event| {
                     event["action"] == "agent.run_completed"
                         && event["agent_run_id"] == "agent-run-harness"
+                        && event["workflow_id"] == "tool-flow"
+                        && event["workflow_node_id"] == "echo"
                 }));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-workflows/tool-flow",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "tool-flow");
+            assert_eq!(body["agent_workflow"]["counters"]["request_count"], 0);
+            assert_eq!(body["agent_workflow"]["counters"]["billing_event_count"], 0);
+            assert_eq!(body["agent_workflow"]["counters"]["audit_event_count"], 7);
             assert_secret_redacted(&body.to_string());
             Ok(())
         },

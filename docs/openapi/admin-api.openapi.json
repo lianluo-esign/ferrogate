@@ -5294,6 +5294,7 @@
           "request_count",
           "error_count",
           "billing_event_count",
+          "audit_event_count",
           "estimated_tokens"
         ],
         "properties": {
@@ -5306,6 +5307,10 @@
             "minimum": 0
           },
           "billing_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "audit_event_count": {
             "type": "integer",
             "minimum": 0
           },

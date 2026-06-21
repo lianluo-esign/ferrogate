@@ -180,6 +180,7 @@ pub(crate) struct AdminAgentWorkflowCounters {
     pub(crate) request_count: u64,
     pub(crate) error_count: u64,
     pub(crate) billing_event_count: u64,
+    pub(crate) audit_event_count: u64,
     pub(crate) estimated_tokens: u64,
 }
 

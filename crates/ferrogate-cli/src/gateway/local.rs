@@ -53,6 +53,14 @@ pub(super) enum ToolExecuteBackend {
     Mcp,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct ToolExecutionContext<'a> {
+    pub(super) agent_run_id: Option<&'a str>,
+    pub(super) workflow_id: Option<&'a str>,
+    pub(super) workflow_version: Option<u32>,
+    pub(super) workflow_node_id: Option<&'a str>,
+}
+
 #[derive(Debug)]
 pub(super) struct ToolExecutionHttpError {
     pub(super) status: StatusCode,
@@ -2201,7 +2209,13 @@ impl FerroGateway {
             }
         };
         match self
-            .execute_tool_request_with_governance(ctx, &auth, None, request, backend)
+            .execute_tool_request_with_governance(
+                ctx,
+                &auth,
+                ToolExecutionContext::default(),
+                request,
+                backend,
+            )
             .await
         {
             Ok(response) => {
@@ -2224,7 +2238,7 @@ impl FerroGateway {
         &self,
         ctx: &ProxyContext,
         auth: &AuthContext,
-        agent_run_id: Option<&str>,
+        execution: ToolExecutionContext<'_>,
         request: ToolExecutionRequest,
         backend: ToolExecuteBackend,
     ) -> Result<ToolExecutionResponse, ToolExecutionHttpError> {
@@ -2270,7 +2284,7 @@ impl FerroGateway {
             state.record_admin_audit_event(tool_audit_event_draft_for_target(
                 ctx,
                 auth,
-                agent_run_id,
+                execution,
                 "tool.execute",
                 audit_target,
                 "error",
@@ -2307,7 +2321,7 @@ impl FerroGateway {
                     state.record_admin_audit_event(tool_audit_event_draft_for_target(
                         ctx,
                         auth,
-                        agent_run_id,
+                        execution,
                         "tool.approval_requested",
                         format!("tool:{}", request.name),
                         "error",
@@ -2323,7 +2337,7 @@ impl FerroGateway {
             state.record_admin_audit_event(tool_audit_event_draft_for_target(
                 ctx,
                 auth,
-                agent_run_id,
+                execution,
                 "tool.approval_requested",
                 format!("tool_approval:{}", approval.id),
                 "pending",
@@ -2337,7 +2351,7 @@ impl FerroGateway {
                     state.record_admin_audit_event(tool_audit_event_draft_for_target(
                         ctx,
                         auth,
-                        agent_run_id,
+                        execution,
                         "tool.approval_granted",
                         format!("tool_approval:{}", resolved.id),
                         "approved",
@@ -2357,7 +2371,7 @@ impl FerroGateway {
                     state.record_admin_audit_event(tool_audit_event_draft_for_target(
                         ctx,
                         auth,
-                        agent_run_id,
+                        execution,
                         action,
                         format!("tool_approval:{}", latest.id),
                         "rejected",
@@ -2405,7 +2419,7 @@ impl FerroGateway {
                 state.record_admin_audit_event(tool_audit_event_draft_for_target(
                     ctx,
                     auth,
-                    agent_run_id,
+                    execution,
                     "tool.execute",
                     audit_target,
                     "success",
@@ -2422,7 +2436,7 @@ impl FerroGateway {
                 state.record_admin_audit_event(tool_audit_event_draft_for_target(
                     ctx,
                     auth,
-                    agent_run_id,
+                    execution,
                     "tool.execute",
                     audit_target,
                     "error",
@@ -4830,12 +4844,21 @@ fn admin_agent_workflow(
                 tokens.saturating_add(event.usage.total_tokens),
             )
         });
+    let audit_event_count = state
+        .audit_events()
+        .into_iter()
+        .filter(|event| {
+            event.workflow_id.as_deref() == Some(workflow.id.as_str())
+                && event.workflow_version == Some(workflow.version)
+        })
+        .count() as u64;
     AdminAgentWorkflow {
         workflow: workflow.clone(),
         counters: AdminAgentWorkflowCounters {
             request_count: request_count.0,
             error_count: request_count.1,
             billing_event_count: billing.0,
+            audit_event_count,
             estimated_tokens: billing.1,
         },
     }
@@ -5511,13 +5534,16 @@ fn admin_audit_event_draft_for_target(
 fn tool_audit_event_draft_for_target(
     ctx: &ProxyContext,
     auth: &crate::auth::AuthContext,
-    agent_run_id: Option<&str>,
+    execution: ToolExecutionContext<'_>,
     action: impl Into<String>,
     target: impl Into<String>,
     outcome: &str,
     message: impl Into<String>,
 ) -> AdminAuditEventDraft {
     let mut event = admin_audit_event_draft_for_target(ctx, auth, action, target, outcome, message);
-    event.agent_run_id = agent_run_id.map(str::to_string);
+    event.agent_run_id = execution.agent_run_id.map(str::to_string);
+    event.workflow_id = execution.workflow_id.map(str::to_string);
+    event.workflow_version = execution.workflow_version;
+    event.workflow_node_id = execution.workflow_node_id.map(str::to_string);
     event
 }

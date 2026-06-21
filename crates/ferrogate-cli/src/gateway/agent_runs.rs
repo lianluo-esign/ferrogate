@@ -26,7 +26,7 @@ use crate::{
     auth::{authenticate, AuthContext},
     config::{
         AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider,
-        AgentRuntimeWasmConfig,
+        AgentRuntimeWasmConfig, AgentWorkflowNodeKind, AgentWorkflowPolicy,
     },
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
@@ -36,11 +36,14 @@ use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
 
 use super::{
     body::read_request_body,
-    local::{ToolExecuteBackend, ToolExecutionHttpError},
+    local::{ToolExecuteBackend, ToolExecutionContext, ToolExecutionHttpError},
     FerroGateway, ProxyContext,
 };
 
 const AGENT_RUN_ID_HEADER: &str = "x-ferrogate-agent-run-id";
+const WORKFLOW_ID_HEADER: &str = "x-ferrogate-workflow-id";
+const WORKFLOW_VERSION_HEADER: &str = "x-ferrogate-workflow-version";
+const WORKFLOW_NODE_ID_HEADER: &str = "x-ferrogate-workflow-node-id";
 const AGENT_RUN_BODY_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +79,13 @@ struct AgentRunCreateResponse {
     output: Option<String>,
     tool_results: Vec<ToolResult>,
     request_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct AgentWorkflowUse {
+    id: String,
+    version: u32,
+    node_id: String,
 }
 
 impl FerroGateway {
@@ -192,6 +202,13 @@ impl FerroGateway {
             .await;
         }
 
+        let workflow_use = match agent_workflow_use(&state, &headers, &auth, &request) {
+            Ok(workflow_use) => workflow_use,
+            Err((status, code, message)) => {
+                return write_json_error(session, status, code, message, &ctx.request_id).await;
+            }
+        };
+
         let harness_config = match harness_config(&state, &request) {
             Ok(config) => config,
             Err((code, message)) => {
@@ -223,9 +240,11 @@ impl FerroGateway {
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
             agent_run_id: Some(run_id.clone()),
-            workflow_id: None,
-            workflow_version: None,
-            workflow_node_id: None,
+            workflow_id: workflow_use.as_ref().map(|workflow| workflow.id.clone()),
+            workflow_version: workflow_use.as_ref().map(|workflow| workflow.version),
+            workflow_node_id: workflow_use
+                .as_ref()
+                .map(|workflow| workflow.node_id.clone()),
             route: Some("agent.run".to_string()),
             upstream: None,
             tenant: auth.tenant_context(),
@@ -253,6 +272,7 @@ impl FerroGateway {
             ctx,
             auth.clone(),
             run_id.clone(),
+            workflow_use.clone(),
         ) {
             Ok(provider) => provider,
             Err((code, message)) => {
@@ -278,9 +298,14 @@ impl FerroGateway {
                 .await;
             }
         };
-        let mut dispatcher =
-            GatewayAgentToolDispatcher::new(self.clone(), ctx, auth.clone(), tool_calls);
-        let mut event_sink = AuditEventSink::new(state.clone(), ctx, &auth);
+        let mut dispatcher = GatewayAgentToolDispatcher::new(
+            self.clone(),
+            ctx,
+            auth.clone(),
+            tool_calls,
+            workflow_use.clone(),
+        );
+        let mut event_sink = AuditEventSink::new(state.clone(), ctx, &auth, workflow_use.clone());
         let outcome = match harness.run(
             AgentRunInput::new(request_context),
             provider.as_mut(),
@@ -306,6 +331,7 @@ impl FerroGateway {
                     ctx,
                     &auth,
                     Some(run_id),
+                    workflow_use.as_ref(),
                     "agent.run_failed",
                     "agent_run",
                     "error",
@@ -374,6 +400,219 @@ fn requested_agent_run_id(
     Ok(value.to_string())
 }
 
+fn requested_optional_id_header<'a>(
+    headers: &'a HeaderMap,
+    header: &'static str,
+) -> Result<Option<&'a str>, String> {
+    let Some(value) = headers.get(header) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| format!("{header} must be valid visible ASCII/UTF-8 header text"))?
+        .trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 128 {
+        return Err(format!("{header} must be at most 128 characters"));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    {
+        return Err(format!(
+            "{header} may only contain letters, numbers, _, -, ., or :"
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn requested_optional_u32_header(
+    headers: &HeaderMap,
+    header: &'static str,
+) -> Result<Option<u32>, String> {
+    let Some(value) = headers.get(header) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| format!("{header} must be valid visible ASCII/UTF-8 header text"))?
+        .trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| format!("{header} must be an unsigned integer"))?;
+    if parsed == 0 {
+        return Err(format!("{header} must be greater than zero"));
+    }
+    Ok(Some(parsed))
+}
+
+fn agent_workflow_use(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth: &AuthContext,
+    request: &AgentRunCreateRequest,
+) -> Result<Option<AgentWorkflowUse>, (StatusCode, &'static str, String)> {
+    let workflow_id = requested_optional_id_header(headers, WORKFLOW_ID_HEADER)
+        .map_err(|message| (StatusCode::BAD_REQUEST, "invalid_workflow_header", message))?;
+    let workflow_version = requested_optional_u32_header(headers, WORKFLOW_VERSION_HEADER)
+        .map_err(|message| (StatusCode::BAD_REQUEST, "invalid_workflow_header", message))?;
+    let workflow_node_id = requested_optional_id_header(headers, WORKFLOW_NODE_ID_HEADER)
+        .map_err(|message| (StatusCode::BAD_REQUEST, "invalid_workflow_header", message))?;
+
+    if workflow_id.is_none() && (workflow_version.is_some() || workflow_node_id.is_some()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid_workflow_header",
+            format!(
+                "{WORKFLOW_ID_HEADER} is required when workflow version or node headers are set"
+            ),
+        ));
+    }
+    let Some(workflow_id) = workflow_id else {
+        return Ok(None);
+    };
+    let Some(workflow) = crate::state::select_agent_workflow(
+        &state.config.agent_workflows,
+        workflow_id,
+        workflow_version,
+    ) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "workflow_not_found",
+            match workflow_version {
+                Some(version) => format!("agent workflow {workflow_id}@{version} was not found"),
+                None => format!("agent workflow {workflow_id} was not found"),
+            },
+        ));
+    };
+    if !workflow.enabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "workflow_disabled",
+            format!(
+                "agent workflow {}@{} is disabled",
+                workflow.id, workflow.version
+            ),
+        ));
+    }
+    if !can_use_workflow(auth, workflow) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "workflow_not_allowed",
+            format!(
+                "API key or tenant is not allowed to use agent workflow {}@{}",
+                workflow.id, workflow.version
+            ),
+        ));
+    }
+    let Some(node_id) = workflow_node_id else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "workflow_node_required",
+            format!("{WORKFLOW_NODE_ID_HEADER} is required when {WORKFLOW_ID_HEADER} is set"),
+        ));
+    };
+    let Some(node) = workflow.nodes.iter().find(|node| node.id == node_id) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "workflow_node_not_found",
+            format!(
+                "agent workflow {}@{} does not contain node {}",
+                workflow.id, workflow.version, node_id
+            ),
+        ));
+    };
+    if !request.tool_calls.is_empty() {
+        if node.kind != AgentWorkflowNodeKind::Tool {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "workflow_node_not_tool",
+                format!("workflow node {node_id} is not allowed to dispatch tool traffic"),
+            ));
+        }
+        if let Some(tool) = node.tool.as_deref() {
+            if request.tool_calls.iter().any(|call| call.name != tool) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "workflow_tool_not_allowed",
+                    format!("workflow node {node_id} is not allowed to use requested tool"),
+                ));
+            }
+        }
+    }
+    if workflow
+        .max_tool_calls
+        .is_some_and(|limit| request.tool_calls.len() as u32 > limit)
+    {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "workflow_tool_call_limit_exceeded",
+            format!(
+                "agent workflow {}@{} tool call limit is exhausted",
+                workflow.id, workflow.version
+            ),
+        ));
+    }
+    let required_turns = request.tool_calls.len().saturating_add(1) as u32;
+    if workflow
+        .max_iterations
+        .or(node.max_iterations)
+        .is_some_and(|limit| required_turns > limit)
+    {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "workflow_iteration_limit_exceeded",
+            format!(
+                "agent workflow {}@{} requires {} turn(s), exceeding configured iteration limit",
+                workflow.id, workflow.version, required_turns
+            ),
+        ));
+    }
+    Ok(Some(AgentWorkflowUse {
+        id: workflow.id.clone(),
+        version: workflow.version,
+        node_id: node_id.to_string(),
+    }))
+}
+
+fn can_use_workflow(auth: &AuthContext, workflow: &AgentWorkflowPolicy) -> bool {
+    if !workflow.api_key_ids.is_empty()
+        && !auth
+            .api_key_id
+            .as_deref()
+            .is_some_and(|api_key_id| workflow.api_key_ids.iter().any(|id| id == api_key_id))
+    {
+        return false;
+    }
+    if !workflow.organization_ids.is_empty()
+        && !auth
+            .organization_id
+            .as_deref()
+            .is_some_and(|organization_id| {
+                workflow
+                    .organization_ids
+                    .iter()
+                    .any(|id| id == organization_id)
+            })
+    {
+        return false;
+    }
+    if !workflow.project_ids.is_empty()
+        && !auth
+            .project_id
+            .as_deref()
+            .is_some_and(|project_id| workflow.project_ids.iter().any(|id| id == project_id))
+    {
+        return false;
+    }
+    true
+}
+
 fn harness_config(
     state: &AppState,
     request: &AgentRunCreateRequest,
@@ -434,6 +673,7 @@ fn agent_provider(
     ctx: &ProxyContext,
     auth: AuthContext,
     run_id: String,
+    workflow_use: Option<AgentWorkflowUse>,
 ) -> Result<Box<dyn AgentProvider + Send>, (&'static str, String)> {
     match config.provider {
         AgentRuntimeProvider::Wasm if config.wasm.module_path.is_some() => wasm_agent_provider(
@@ -444,6 +684,7 @@ fn agent_provider(
             ctx,
             auth,
             run_id,
+            workflow_use,
             tool_calls,
         )
         .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
@@ -463,6 +704,7 @@ fn wasm_agent_provider(
     ctx: &ProxyContext,
     auth: AuthContext,
     run_id: String,
+    workflow_use: Option<AgentWorkflowUse>,
     tool_calls: Vec<AgentRunToolCallRequest>,
 ) -> Result<WasmAgentProvider, AgentRuntimeError> {
     let module_path = config.module_path.clone().ok_or_else(|| {
@@ -470,7 +712,7 @@ fn wasm_agent_provider(
     })?;
     let host = config
         .host_abi
-        .then(|| WasmAgentHost::new(gateway, ctx, auth, run_id, tool_calls));
+        .then(|| WasmAgentHost::new(gateway, ctx, auth, run_id, workflow_use, tool_calls));
     WasmAgentProvider::new(
         module_path,
         config.export_name.clone(),
@@ -611,6 +853,7 @@ struct WasmAgentHost {
     ctx: ProxyContext,
     auth: AuthContext,
     run_id: String,
+    workflow_use: Option<AgentWorkflowUse>,
     state: BTreeMap<i32, i32>,
     tool_calls: Vec<AgentRunToolCallRequest>,
 }
@@ -621,6 +864,7 @@ impl WasmAgentHost {
         ctx: &ProxyContext,
         auth: AuthContext,
         run_id: String,
+        workflow_use: Option<AgentWorkflowUse>,
         tool_calls: Vec<AgentRunToolCallRequest>,
     ) -> Self {
         Self {
@@ -628,6 +872,7 @@ impl WasmAgentHost {
             ctx: ctx.clone(),
             auth,
             run_id,
+            workflow_use,
             state: BTreeMap::new(),
             tool_calls,
         }
@@ -641,6 +886,7 @@ impl WasmAgentHost {
                 &self.ctx,
                 &self.auth,
                 Some(self.run_id.clone()),
+                self.workflow_use.as_ref(),
                 action,
                 target,
                 outcome,
@@ -711,7 +957,7 @@ impl WasmHostAbi for WasmAgentHost {
         match block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
             &self.ctx,
             &self.auth,
-            Some(&self.run_id),
+            tool_execution_context(&self.run_id, self.workflow_use.as_ref()),
             tool_request,
             ToolExecuteBackend::Extension,
         )) {
@@ -754,6 +1000,7 @@ struct GatewayAgentToolDispatcher {
     ctx: ProxyContext,
     auth: AuthContext,
     scripted_tool_calls: Vec<AgentRunToolCallRequest>,
+    workflow_use: Option<AgentWorkflowUse>,
 }
 
 impl GatewayAgentToolDispatcher {
@@ -762,12 +1009,14 @@ impl GatewayAgentToolDispatcher {
         ctx: &ProxyContext,
         auth: AuthContext,
         scripted_tool_calls: Vec<AgentRunToolCallRequest>,
+        workflow_use: Option<AgentWorkflowUse>,
     ) -> Self {
         Self {
             gateway,
             ctx: ctx.clone(),
             auth,
             scripted_tool_calls,
+            workflow_use,
         }
     }
 }
@@ -797,7 +1046,7 @@ impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
             block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
                 &self.ctx,
                 &self.auth,
-                Some(request.run_id),
+                tool_execution_context(request.run_id, self.workflow_use.as_ref()),
                 tool_request,
                 ToolExecuteBackend::Extension,
             ))
@@ -837,22 +1086,41 @@ fn tool_dispatch_error(error: ToolExecutionHttpError) -> AgentRuntimeError {
     AgentRuntimeError::ToolDispatch(format!("{}: {}", error.code, error.message))
 }
 
+fn tool_execution_context<'a>(
+    run_id: &'a str,
+    workflow_use: Option<&'a AgentWorkflowUse>,
+) -> ToolExecutionContext<'a> {
+    ToolExecutionContext {
+        agent_run_id: Some(run_id),
+        workflow_id: workflow_use.map(|workflow| workflow.id.as_str()),
+        workflow_version: workflow_use.map(|workflow| workflow.version),
+        workflow_node_id: workflow_use.map(|workflow| workflow.node_id.as_str()),
+    }
+}
+
 struct AuditEventSink {
     state: AppState,
     request_id: String,
     trace_id: Option<String>,
     actor_api_key_id: Option<String>,
     tenant: ferrogate_core::TenantContext,
+    workflow_use: Option<AgentWorkflowUse>,
 }
 
 impl AuditEventSink {
-    fn new(state: AppState, ctx: &ProxyContext, auth: &AuthContext) -> Self {
+    fn new(
+        state: AppState,
+        ctx: &ProxyContext,
+        auth: &AuthContext,
+        workflow_use: Option<AgentWorkflowUse>,
+    ) -> Self {
         Self {
             state,
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
             actor_api_key_id: auth.api_key_id.clone(),
             tenant: auth.tenant_context(),
+            workflow_use,
         }
     }
 }
@@ -897,9 +1165,15 @@ impl AgentRunEventSink for AuditEventSink {
             request_id: self.request_id.clone(),
             trace_id: self.trace_id.clone(),
             agent_run_id: Some(event.run_id),
-            workflow_id: None,
-            workflow_version: None,
-            workflow_node_id: None,
+            workflow_id: self
+                .workflow_use
+                .as_ref()
+                .map(|workflow| workflow.id.clone()),
+            workflow_version: self.workflow_use.as_ref().map(|workflow| workflow.version),
+            workflow_node_id: self
+                .workflow_use
+                .as_ref()
+                .map(|workflow| workflow.node_id.clone()),
             actor_api_key_id: self.actor_api_key_id.clone(),
             tenant: self.tenant.clone(),
             action: action.to_string(),
@@ -921,6 +1195,7 @@ fn agent_audit_event(
     ctx: &ProxyContext,
     auth: &AuthContext,
     agent_run_id: Option<String>,
+    workflow_use: Option<&AgentWorkflowUse>,
     action: impl Into<String>,
     target: impl Into<String>,
     outcome: impl Into<String>,
@@ -930,9 +1205,9 @@ fn agent_audit_event(
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
         agent_run_id,
-        workflow_id: None,
-        workflow_version: None,
-        workflow_node_id: None,
+        workflow_id: workflow_use.map(|workflow| workflow.id.clone()),
+        workflow_version: workflow_use.map(|workflow| workflow.version),
+        workflow_node_id: workflow_use.map(|workflow| workflow.node_id.clone()),
         actor_api_key_id: auth.api_key_id.clone(),
         tenant: auth.tenant_context(),
         action: action.into(),
