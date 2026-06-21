@@ -1266,6 +1266,7 @@ name = "ferrogate-runtime"
 version = "2026.6.7"
 dependencies = [
  "ferrogate-core",
+ "serde_json",
  "wasmtime",
  "wat",
 ]

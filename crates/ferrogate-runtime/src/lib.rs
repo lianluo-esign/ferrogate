@@ -6,10 +6,17 @@
 
 //! Pingora runtime boundary.
 
+mod agent;
 mod reload;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+pub use agent::{
+    AgentCancellation, AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider,
+    AgentRunEvent, AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome,
+    AgentRunStatus, AgentRuntimeError, AgentRuntimeResult, AgentStep, AgentToolDispatchRequest,
+    GovernedAgentToolDispatcher,
+};
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 
 /// Runtime lifecycle commands exposed by the CLI and future control plane.

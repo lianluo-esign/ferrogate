@@ -14,7 +14,7 @@ permalink: /roadmap/
 
 # FerroGate Roadmap
 
-Last reviewed: 2026-06-20.
+Last reviewed: 2026-06-21.
 
 This roadmap describes where FerroGate is going and how current GitHub issues
 map to that direction. It is a planning document, not a release promise. The
@@ -87,6 +87,9 @@ These areas are implemented in the current open-source gateway:
   visibility.
 - Durable storage provider abstraction plus Turso/libSQL, PostgreSQL, and MySQL
   control-plane storage wiring for configured control-plane resources.
+- Opt-in agent runtime primitives in `ferrogate-runtime`: a deny-by-default
+  Wasmtime sandbox executor and a bounded harness/provider boundary. These are
+  not wired into default gateway endpoints yet.
 - Automatic HTTPS with manual TLS, ACME HTTP-01, ACME DNS-01 through
   Cloudflare, certificate renewal, and graceful-upgrade handoff.
 - Docker, Kubernetes, Helm examples, cluster identity, shared file state, Redis
@@ -97,6 +100,7 @@ These areas are implemented in the current open-source gateway:
 | Theme | Goal | Tracking |
 | --- | --- | --- |
 | Agent run evidence | Move from retained evidence aggregation to durable `agent_run` and `agent_run_event` records, lifecycle events, checkpoint/resume evidence, cancellation events, and tenant/API-key filters. | [#49](https://github.com/lianluo-esign/ferrogate/issues/49) |
+| Sandboxed runtime | Continue the opt-in WASM sandboxed agent runtime without moving the loop into the gateway hot path: request opt-in, governed tool ABI, provider adapters, and durable run timeline remain the next slices. | [#59](https://github.com/lianluo-esign/ferrogate/issues/59) |
 | Durable control plane | Close the full durable control-plane boundary for API keys, policies, gateway configs, prompt templates, plugin registrations, MCP servers, tool approvals, and agent run records. | [#12](https://github.com/lianluo-esign/ferrogate/issues/12), [#66](https://github.com/lianluo-esign/ferrogate/issues/66), [#67](https://github.com/lianluo-esign/ferrogate/issues/67), [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#69](https://github.com/lianluo-esign/ferrogate/issues/69) |
 | Prompt workflows | Complete versioned prompt template management and render APIs as first-class agent workflow inputs. | [#44](https://github.com/lianluo-esign/ferrogate/issues/44) |
 
@@ -115,7 +119,6 @@ These areas are implemented in the current open-source gateway:
 
 | Theme | Goal | Tracking |
 | --- | --- | --- |
-| Sandboxed runtime | Evaluate an opt-in WASM sandboxed agent runtime only after gateway evidence, storage, and policy boundaries are solid. The gateway must not become an opaque scheduler by accident. | [#59](https://github.com/lianluo-esign/ferrogate/issues/59) |
 | Semantic caching | Add semantic/vector cache matching after exact-match caching, billing evidence, and redaction policy remain reliable. | Backlog |
 | Hosted control plane | Expand hosted Admin API and dashboard workflows after the self-hosted durable control-plane contract is stable. | Backlog |
 | DNS provider expansion | Add DNS providers beyond the current Cloudflare ACME DNS-01 implementation and external hook boundary. | Backlog |
