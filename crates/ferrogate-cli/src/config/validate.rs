@@ -503,6 +503,29 @@ impl Config {
                 )?;
             }
         }
+        if self.storage.provider == ferrogate_storage::StorageProviderKind::Mysql {
+            let has_inline_dsn = self
+                .storage
+                .mysql_dsn
+                .as_deref()
+                .is_some_and(|dsn| !dsn.trim().is_empty());
+            let has_dsn_env = self
+                .storage
+                .mysql_dsn_env
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty());
+            if !has_inline_dsn && !has_dsn_env {
+                bail!(
+                    "field storage.mysql_dsn_env: required when storage.provider is mysql unless storage.mysql_dsn is set"
+                );
+            }
+            if self.storage.mysql_pool_size == 0 {
+                bail!("field storage.mysql_pool_size: must be greater than zero");
+            }
+            if self.storage.mysql_connect_timeout_secs == 0 {
+                bail!("field storage.mysql_connect_timeout_secs: must be greater than zero");
+            }
+        }
         if self.storage.required && !self.storage.provider.is_durable() {
             bail!("field storage.required: durable storage requires a non-memory provider");
         }

@@ -329,6 +329,42 @@ storage:
 }
 
 #[test]
+fn parses_yaml_storage_mysql_operational_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.yaml");
+    std::fs::write(
+        &path,
+        r#"
+listen: "127.0.0.1:8080"
+storage:
+  provider: mysql
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  mysql_dsn_env: FERROGATE_MYSQL_DSN
+  mysql_pool_size: 3
+  mysql_connect_timeout_secs: 7
+  migration_mode: auto
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert_eq!(
+        config.storage.provider,
+        ferrogate_storage::StorageProviderKind::Mysql
+    );
+    assert_eq!(
+        config.storage.mysql_dsn_env.as_deref(),
+        Some("FERROGATE_MYSQL_DSN")
+    );
+    assert_eq!(config.storage.mysql_pool_size, 3);
+    assert_eq!(config.storage.mysql_connect_timeout_secs, 7);
+}
+
+#[test]
 fn parses_yaml_storage_libsql_file_config_without_token() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("ferrogate-control-plane.db");

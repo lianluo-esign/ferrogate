@@ -714,6 +714,14 @@ pub(crate) struct StorageConfig {
     pub(crate) postgres_schema: Option<String>,
     #[serde(default)]
     pub(crate) postgres_search_path: Vec<String>,
+    #[serde(default)]
+    pub(crate) mysql_dsn: Option<String>,
+    #[serde(default)]
+    pub(crate) mysql_dsn_env: Option<String>,
+    #[serde(default = "default_mysql_pool_size")]
+    pub(crate) mysql_pool_size: usize,
+    #[serde(default = "default_mysql_connect_timeout_secs")]
+    pub(crate) mysql_connect_timeout_secs: u64,
     #[serde(default = "default_storage_migration_mode")]
     pub(crate) migration_mode: StorageMigrationMode,
     #[serde(default = "default_admin_list_limit")]
@@ -1006,7 +1014,15 @@ fn default_postgres_pool_size() -> usize {
     4
 }
 
+fn default_mysql_pool_size() -> usize {
+    4
+}
+
 fn default_postgres_connect_timeout_secs() -> u64 {
+    5
+}
+
+fn default_mysql_connect_timeout_secs() -> u64 {
     5
 }
 
@@ -1124,6 +1140,10 @@ impl Default for StorageConfig {
             postgres_statement_timeout_millis: default_postgres_statement_timeout_millis(),
             postgres_schema: None,
             postgres_search_path: Vec::new(),
+            mysql_dsn: None,
+            mysql_dsn_env: None,
+            mysql_pool_size: default_mysql_pool_size(),
+            mysql_connect_timeout_secs: default_mysql_connect_timeout_secs(),
             migration_mode: default_storage_migration_mode(),
             admin_list_default_limit: default_admin_list_limit(),
             admin_list_max_limit: default_admin_list_max_limit(),

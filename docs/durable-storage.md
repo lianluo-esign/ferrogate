@@ -8,7 +8,7 @@
 
 ---
 title: Durable Control-Plane Storage
-description: Turso/libSQL and PostgreSQL storage guidance for FerroGate control-plane state.
+description: Turso/libSQL, PostgreSQL, and MySQL storage guidance for FerroGate control-plane state.
 permalink: /durable-storage/
 ---
 
@@ -43,10 +43,9 @@ The default commercial provider order is fixed in config validation:
 provider_order = ["turso_libsql", "postgres", "mysql"]
 ```
 
-`turso_libsql` is the default commercial cloud provider. PostgreSQL is also
-implemented for self-hosted/enterprise relational deployments. MySQL remains a
-follow-up provider and must implement the same repository contract instead of
-changing gateway control-plane code.
+`turso_libsql` is the default commercial cloud provider. PostgreSQL and MySQL
+are also implemented for self-hosted/enterprise relational deployments behind
+the same repository contract instead of gateway-core special cases.
 
 ## Turso Cloud / Remote libSQL
 
@@ -132,6 +131,44 @@ Runtime behavior:
 The schema file is
 [`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
 
+## MySQL
+
+Use a MySQL URL through an environment variable so passwords do not appear in
+checked-in config:
+
+```yaml
+storage:
+  provider: mysql
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  mysql_dsn_env: "FERROGATE_MYSQL_DSN"
+  mysql_pool_size: 4
+  mysql_connect_timeout_secs: 5
+  migration_mode: auto
+```
+
+For local development:
+
+```bash
+export FERROGATE_MYSQL_DSN='mysql://root:mysql@127.0.0.1:3306/ferrogate?prefer_socket=false'
+```
+
+Runtime behavior:
+
+- `storage.required: true` fails closed if MySQL cannot be initialized.
+- `migration_mode: auto` runs the checked-in MySQL schema at startup.
+- Admin/status evidence reports `provider: mysql` without returning the DSN.
+- Control-plane resources use the same document-store contract as libSQL and
+  PostgreSQL.
+- `mysql_pool_size` configures the maximum MySQL client pool size for Admin API
+  control-plane mutations and restart restore.
+- `mysql_connect_timeout_secs` is applied to MySQL TCP connection attempts.
+
+The schema file is [`sql/001_init_mysql.sql`](../sql/001_init_mysql.sql).
+
 ## Local File-Backed libSQL
 
 For deterministic local development and CI-safe durability tests, the same
@@ -174,6 +211,12 @@ Run the Docker-backed PostgreSQL restart test:
 ./target/debug/ferrogate-test postgres-restart
 ```
 
+Run the Docker-backed MySQL restart test:
+
+```bash
+./target/debug/ferrogate-test mysql-restart
+```
+
 This starts real FerroGate gateway processes against the same local libSQL
 database file and verifies through the Admin API that these resources survive
 restart:
@@ -188,7 +231,7 @@ It then deletes or archives those resources, restarts again, and verifies the
 post-cleanup state.
 
 `ferrogate-test ci` includes the local libSQL restart, local libSQL server
-restart, and PostgreSQL restart tests:
+restart, PostgreSQL restart, PostgreSQL TLS restart, and MySQL restart tests:
 
 ```bash
 ./target/debug/ferrogate-test ci
@@ -215,6 +258,9 @@ state into the analytics warehouse.
 For PostgreSQL, use your managed PostgreSQL backup/PITR workflow for the
 database behind `storage.postgres_dsn_env`.
 
+For MySQL, use your managed MySQL backup/PITR workflow for the database behind
+`storage.mysql_dsn_env`.
+
 For local `file://` databases, snapshot the database file only when the gateway
 is stopped or when your filesystem/database tooling can provide a consistent
 snapshot. Treat the file as control-plane state and protect it like API-key and
@@ -233,6 +279,10 @@ policy data.
   search-path identifiers fail config validation.
 - Invalid `storage.postgres_tls_ca_cert_path` values fail startup instead of
   silently falling back to the system trust store.
+- Missing `storage.mysql_dsn` and `storage.mysql_dsn_env` fails config
+  validation when `provider: mysql`.
+- Invalid `storage.mysql_pool_size` and `storage.mysql_connect_timeout_secs`
+  fail config validation.
 - With `storage.required: true`, initialization errors prevent startup instead
   of falling back to memory.
 - Admin mutations that fail to persist are rejected or rolled back before the

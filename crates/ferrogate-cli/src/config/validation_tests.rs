@@ -1465,6 +1465,69 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
 
     let config = Config {
         storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Mysql,
+            required: true,
+            mysql_dsn: Some(
+                "mysql://root:mysql@127.0.0.1:3306/ferrogate?prefer_socket=false".into(),
+            ),
+            mysql_pool_size: 2,
+            mysql_connect_timeout_secs: 5,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Mysql,
+            required: true,
+            mysql_dsn_env: Some("FERROGATE_MYSQL_DSN".into()),
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Mysql,
+            required: true,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.mysql_dsn_env"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Mysql,
+            required: true,
+            mysql_dsn_env: Some("FERROGATE_MYSQL_DSN".into()),
+            mysql_pool_size: 0,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.mysql_pool_size"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Mysql,
+            required: true,
+            mysql_dsn_env: Some("FERROGATE_MYSQL_DSN".into()),
+            mysql_connect_timeout_secs: 0,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.mysql_connect_timeout_secs"));
+
+    let config = Config {
+        storage: StorageConfig {
             provider: ferrogate_storage::StorageProviderKind::Postgres,
             required: true,
             postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),

@@ -118,10 +118,10 @@ Validated end-to-end:
 
 Still intentionally scoped as next-stage production work:
 
-- Additional durable database providers beyond the implemented Turso/libSQL
-  and PostgreSQL control-plane providers. MySQL must follow the same storage
-  contract. High-write request logs, traces, usage metrics, billing analytics,
-  and dashboard aggregates stay under the analytics delivery boundary.
+- Production hardening beyond the implemented Turso/libSQL, PostgreSQL, and
+  MySQL control-plane providers. High-write request logs, traces, usage
+  metrics, billing analytics, and dashboard aggregates stay under the analytics
+  delivery boundary.
 - Full hosted Admin API control plane beyond the current API key, policy,
   gateway config, prompt template, plugin registration, MCP server, tool approval,
   config-validation, reload, and drain resources.
@@ -296,6 +296,14 @@ provider_order = ["turso_libsql", "postgres", "mysql"]
 # postgres_schema = "ferrogate_control"
 # postgres_search_path = ["public"]
 # migration_mode = "auto"
+
+# For MySQL:
+# provider = "mysql"
+# required = true
+# mysql_dsn_env = "FERROGATE_MYSQL_DSN"
+# mysql_pool_size = 4
+# mysql_connect_timeout_secs = 5
+# migration_mode = "auto"
 admin_list_default_limit = 100
 admin_list_max_limit = 1000
 
@@ -401,12 +409,12 @@ storage:
   migration_mode: auto
 ```
 
-The initialization schema lives under `sql/`. The libSQL and PostgreSQL
-control-plane migrations are `sql/001_init_libsql.sql` and
-`sql/001_init_postgres.sql`; both use resource-oriented tables for
-control-plane documents, including API keys, policies, gateway config profiles,
-prompt templates, plugin registrations, MCP server registrations, and tool
-approval records. Analytics warehouse schema starts in
+The initialization schema lives under `sql/`. The libSQL, PostgreSQL, and
+MySQL control-plane migrations are `sql/001_init_libsql.sql`,
+`sql/001_init_postgres.sql`, and `sql/001_init_mysql.sql`; they use
+resource-oriented tables for control-plane documents, including API keys,
+policies, gateway config profiles, prompt templates, plugin registrations, MCP
+server registrations, and tool approval records. Analytics warehouse schema starts in
 `sql/clickhouse/001_init_analytics.sql` for request logs, traces, usage
 metrics, billing/metering analytics, and dashboard aggregates.
 

@@ -31,6 +31,8 @@ const LIBSQL_CONTAINER: &str = "ferrogate-e2e-libsql";
 const LIBSQL_SERVER_IMAGE: &str = "ghcr.io/tursodatabase/libsql-server:latest";
 const POSTGRES_CONTAINER: &str = "ferrogate-e2e-postgres";
 const POSTGRES_IMAGE: &str = "postgres:16-alpine";
+const MYSQL_CONTAINER: &str = "ferrogate-e2e-mysql";
+const MYSQL_IMAGE: &str = "mysql:8.4";
 const GATEWAY_A_CONTAINER: &str = "ferrogate-e2e-gateway-a";
 const GATEWAY_B_CONTAINER: &str = "ferrogate-e2e-gateway-b";
 const GATEWAY_A_PORT: u16 = 18080;
@@ -42,7 +44,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, postgres-restart, postgres-tls-restart, turso-libsql-restart (opt-in)"
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, postgres-restart, postgres-tls-restart, mysql-restart, turso-libsql-restart (opt-in)"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -64,6 +66,7 @@ fn main() -> Result<()> {
         Commands::LibsqlServerRestart(args) => run_libsql_server_restart(&args),
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
+        Commands::MysqlRestart(args) => run_mysql_restart(&args),
         Commands::TursoLibsqlRestart(args) => run_turso_libsql_restart(&args),
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
@@ -72,7 +75,8 @@ fn main() -> Result<()> {
             run_libsql_file_restart(&args.local)?;
             run_libsql_server_restart(&args.local)?;
             run_postgres_restart(&args.local)?;
-            run_postgres_tls_restart(&args.local)
+            run_postgres_tls_restart(&args.local)?;
+            run_mysql_restart(&args.local)
         }
     }
 }
@@ -122,6 +126,8 @@ enum Commands {
     PostgresRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
     PostgresTlsRestart(LocalArgs),
+    /// Run local Docker-backed MySQL restart durability coverage.
+    MysqlRestart(LocalArgs),
     /// Opt-in live Turso/libSQL restart durability scenario.
     TursoLibsqlRestart(TursoLibsqlRestartArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
@@ -1298,6 +1304,30 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
     Ok(())
 }
 
+fn run_mysql_restart(args: &LocalArgs) -> Result<()> {
+    let host_port = free_port()?;
+    let _cleanup = MySqlCleanup;
+    stop_mysql_container();
+    docker_args([
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        MYSQL_CONTAINER.to_string(),
+        "-e".to_string(),
+        "MYSQL_ROOT_PASSWORD=mysql".to_string(),
+        "-e".to_string(),
+        "MYSQL_DATABASE=ferrogate".to_string(),
+        "-p".to_string(),
+        format!("127.0.0.1:{host_port}:3306"),
+        MYSQL_IMAGE.to_string(),
+    ])?;
+    wait_for_mysql_server()?;
+    let dsn = format!("mysql://root:mysql@127.0.0.1:{host_port}/ferrogate?prefer_socket=false");
+    run_control_plane_mysql_restart(&args.ferrogate_bin, &dsn, "ferrogate-mysql-test", true)?;
+    println!("mysql-restart scenario passed");
+    Ok(())
+}
+
 struct PostgresTlsFiles {
     ca_cert_path: PathBuf,
 }
@@ -1371,6 +1401,20 @@ fn run_control_plane_postgres_restart(
     )
 }
 
+fn run_control_plane_mysql_restart(
+    ferrogate_bin: &Path,
+    mysql_dsn: &str,
+    resource_prefix: &str,
+    verify_deleted_after_restart: bool,
+) -> Result<()> {
+    run_control_plane_restart(
+        ferrogate_bin,
+        ControlPlaneRestartStorage::Mysql { dsn: mysql_dsn },
+        resource_prefix,
+        verify_deleted_after_restart,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct PostgresRestartTls<'a> {
     mode: &'a str,
@@ -1386,6 +1430,9 @@ enum ControlPlaneRestartStorage<'a> {
     Postgres {
         dsn: &'a str,
         tls: PostgresRestartTls<'a>,
+    },
+    Mysql {
+        dsn: &'a str,
     },
 }
 
@@ -2793,6 +2840,7 @@ impl ControlPlaneRestartStorage<'_> {
         match self {
             ControlPlaneRestartStorage::Libsql { .. } => "turso_libsql",
             ControlPlaneRestartStorage::Postgres { .. } => "postgres",
+            ControlPlaneRestartStorage::Mysql { .. } => "mysql",
         }
     }
 
@@ -2806,6 +2854,9 @@ impl ControlPlaneRestartStorage<'_> {
             }
             ControlPlaneRestartStorage::Postgres { dsn, .. } => {
                 command.env("FERROGATE_POSTGRES_DSN", dsn);
+            }
+            ControlPlaneRestartStorage::Mysql { dsn } => {
+                command.env("FERROGATE_MYSQL_DSN", dsn);
             }
             ControlPlaneRestartStorage::Libsql {
                 auth_token: None, ..
@@ -2864,6 +2915,18 @@ impl ControlPlaneRestartStorage<'_> {
                     ca_cert_path = ca_cert_path
                 )
             }
+            ControlPlaneRestartStorage::Mysql { .. } => r#"storage:
+  provider: mysql
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  mysql_dsn_env: FERROGATE_MYSQL_DSN
+  mysql_pool_size: 2
+  mysql_connect_timeout_secs: 5
+  migration_mode: auto"#
+                .to_string(),
         }
     }
 
@@ -5346,6 +5409,47 @@ fn wait_for_postgres_server() -> Result<()> {
     bail!("timed out waiting for local PostgreSQL server; logs: {logs}");
 }
 
+fn wait_for_mysql_server() -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(60) {
+        if Command::new("docker")
+            .args([
+                "exec",
+                MYSQL_CONTAINER,
+                "mysqladmin",
+                "ping",
+                "--protocol=tcp",
+                "-h127.0.0.1",
+                "-P3306",
+                "-uroot",
+                "-pmysql",
+                "--silent",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    let logs = Command::new("docker")
+        .args(["logs", MYSQL_CONTAINER, "--tail", "160"])
+        .output()
+        .ok()
+        .map(|output| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+        .unwrap_or_default();
+    bail!("timed out waiting for local MySQL server; logs: {logs}");
+}
+
 fn wait_for_http(host_port: u16, path: &str, expected_status: u16) -> Result<()> {
     let started = Instant::now();
     let mut last = String::new();
@@ -5504,6 +5608,14 @@ fn stop_postgres_container() {
         .status();
 }
 
+fn stop_mysql_container() {
+    let _ = Command::new("docker")
+        .args(["rm", "-f", MYSQL_CONTAINER])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 fn cleanup_containers() {
     let _ = Command::new("docker")
         .args([
@@ -5517,6 +5629,7 @@ fn cleanup_containers() {
             VECTOR_CONTAINER,
             LIBSQL_CONTAINER,
             POSTGRES_CONTAINER,
+            MYSQL_CONTAINER,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -5547,6 +5660,17 @@ impl Drop for PostgresCleanup {
             return;
         }
         stop_postgres_container();
+    }
+}
+
+struct MySqlCleanup;
+
+impl Drop for MySqlCleanup {
+    fn drop(&mut self) {
+        if env::var("FERROGATE_TEST_KEEP_CONTAINERS").is_ok_and(|value| value == "1") {
+            return;
+        }
+        stop_mysql_container();
     }
 }
 

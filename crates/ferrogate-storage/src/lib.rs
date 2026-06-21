@@ -21,6 +21,8 @@ use std::{
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
 use libsql::Builder as LibsqlBuilder;
+use mysql::prelude::Queryable;
+use mysql::{params, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, TxOpts};
 use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
 use postgres::config::SslMode as PostgresSslMode;
 use postgres::{Client as PostgresClient, NoTls};
@@ -68,6 +70,7 @@ impl StorageProviderKind {
             StorageProviderKind::Memory
                 | StorageProviderKind::TursoLibsql
                 | StorageProviderKind::Postgres
+                | StorageProviderKind::Mysql
         )
     }
 }
@@ -120,6 +123,13 @@ pub struct PostgresStorageConfig {
     pub statement_timeout_millis: u64,
     pub schema: Option<String>,
     pub search_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MySqlStorageConfig {
+    pub dsn: String,
+    pub pool_size: usize,
+    pub connect_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +200,7 @@ pub enum StorageError {
     },
     Libsql(String),
     Postgres(String),
+    Mysql(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -204,6 +215,7 @@ impl std::fmt::Display for StorageError {
             }
             StorageError::Libsql(error) => write!(formatter, "libsql storage error: {error}"),
             StorageError::Postgres(error) => write!(formatter, "postgres storage error: {error}"),
+            StorageError::Mysql(error) => write!(formatter, "mysql storage error: {error}"),
         }
     }
 }
@@ -270,6 +282,10 @@ struct LibsqlControlPlaneStore {
 
 struct PostgresControlPlaneStore {
     pool: Arc<PostgresClientPool>,
+}
+
+struct MySqlControlPlaneStore {
+    pool: Pool,
 }
 
 struct PostgresClientPool {
@@ -690,6 +706,221 @@ impl PostgresClientPool {
     }
 }
 
+impl std::fmt::Debug for MySqlControlPlaneStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MySqlControlPlaneStore")
+            .field("pool", &"<redacted>")
+            .finish()
+    }
+}
+
+impl MySqlControlPlaneStore {
+    fn connect(
+        config: MySqlStorageConfig,
+        bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_tenants: Vec<(String, String)>,
+        bootstrap_policies: Vec<(String, String)>,
+        bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_prompt_templates: Vec<(String, String)>,
+        bootstrap_plugin_registrations: Vec<(String, String)>,
+        bootstrap_mcp_servers: Vec<(String, String)>,
+        initialize_schema: bool,
+    ) -> Result<Self, StorageError> {
+        let opts = mysql_opts(&config)?;
+        let pool = Pool::new(opts).map_err(mysql_error)?;
+        let store = Self { pool };
+        store.with_conn(|conn| {
+            conn.query_drop("SELECT 1")?;
+            Ok(())
+        })?;
+        if initialize_schema {
+            store.initialize_schema()?;
+        }
+        store.seed_missing_resources("api_key", bootstrap_api_keys)?;
+        store.seed_missing_resources("tenant", bootstrap_tenants)?;
+        store.seed_missing_resources("policy", bootstrap_policies)?;
+        store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
+        store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
+        store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
+        store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
+        Ok(store)
+    }
+
+    fn initialize_schema(&self) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            for statement in include_str!("../../../sql/001_init_mysql.sql")
+                .split(';')
+                .map(str::trim)
+                .filter(|statement| !statement.is_empty())
+            {
+                conn.query_drop(statement)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn seed_missing_resources(
+        &self,
+        kind: &'static str,
+        records: Vec<(String, String)>,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            for (id, document_json) in records {
+                conn.exec_drop(
+                    "INSERT IGNORE INTO control_plane_resources \
+                     (resource_kind, resource_id, document_json) \
+                     VALUES (:kind, :id, :document_json)",
+                    params! {
+                        "kind" => kind,
+                        "id" => id,
+                        "document_json" => document_json,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
+        Ok(ControlPlaneSnapshot {
+            api_keys: self.list_documents("api_key")?,
+            tenants: self.list_documents("tenant")?,
+            policies: self.list_documents("policy")?,
+            gateway_configs: self.list_documents("gateway_config")?,
+            prompt_templates: self.list_documents("prompt_template")?,
+            plugin_registrations: self.list_documents("plugin_registration")?,
+            mcp_servers: self.list_documents("mcp_server")?,
+        })
+    }
+
+    fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_map(
+                "SELECT CAST(document_json AS CHAR) FROM control_plane_resources \
+                 WHERE resource_kind = :kind ORDER BY resource_id ASC",
+                params! {
+                    "kind" => kind,
+                },
+                |document_json: String| document_json,
+            )
+        })
+    }
+
+    fn get_document(&self, kind: &'static str, id: String) -> Result<Option<String>, StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_first(
+                "SELECT CAST(document_json AS CHAR) FROM control_plane_resources \
+                 WHERE resource_kind = :kind AND resource_id = :id",
+                params! {
+                    "kind" => kind,
+                    "id" => id,
+                },
+            )
+        })
+    }
+
+    fn upsert(
+        &self,
+        kind: &'static str,
+        id: String,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_drop(
+                "INSERT INTO control_plane_resources \
+                 (resource_kind, resource_id, document_json, revision, updated_at_unix) \
+                 VALUES (:kind, :id, :document_json, 1, UNIX_TIMESTAMP()) \
+                 ON DUPLICATE KEY UPDATE \
+                 document_json = VALUES(document_json), \
+                 revision = revision + 1, \
+                 updated_at_unix = UNIX_TIMESTAMP()",
+                params! {
+                    "kind" => kind,
+                    "id" => id,
+                    "document_json" => document_json,
+                },
+            )?;
+            Ok(())
+        })
+    }
+
+    fn replace_kind(
+        &self,
+        kind: &'static str,
+        records: Vec<(String, String)>,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            let mut transaction = conn.start_transaction(TxOpts::default())?;
+            transaction.exec_drop(
+                "DELETE FROM control_plane_resources WHERE resource_kind = :kind",
+                params! {
+                    "kind" => kind,
+                },
+            )?;
+            for (id, document_json) in records {
+                transaction.exec_drop(
+                    "INSERT INTO control_plane_resources \
+                     (resource_kind, resource_id, document_json) \
+                     VALUES (:kind, :id, :document_json)",
+                    params! {
+                        "kind" => kind,
+                        "id" => id,
+                        "document_json" => document_json,
+                    },
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    fn delete(&self, kind: &'static str, id: String) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_drop(
+                "DELETE FROM control_plane_resources \
+                 WHERE resource_kind = :kind AND resource_id = :id",
+                params! {
+                    "kind" => kind,
+                    "id" => id,
+                },
+            )?;
+            Ok(conn.affected_rows() > 0)
+        })
+    }
+
+    fn with_conn<T: Send>(
+        &self,
+        action: impl FnOnce(&mut PooledConn) -> Result<T, mysql::Error> + Send,
+    ) -> Result<T, StorageError> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut conn = self.pool.get_conn().map_err(mysql_error)?;
+                    action(&mut conn).map_err(mysql_error)
+                })
+                .join()
+                .map_err(|_| StorageError::Mysql("mysql storage thread panicked".into()))?
+        })
+    }
+}
+
+fn mysql_opts(config: &MySqlStorageConfig) -> Result<Opts, StorageError> {
+    let opts =
+        Opts::from_url(&config.dsn).map_err(|error| StorageError::Mysql(error.to_string()))?;
+    let constraints = PoolConstraints::new(0, config.pool_size).ok_or_else(|| {
+        StorageError::Mysql(format!(
+            "invalid storage.mysql_pool_size {}",
+            config.pool_size
+        ))
+    })?;
+    let pool_opts = PoolOpts::default().with_constraints(constraints);
+    Ok(OptsBuilder::from_opts(opts)
+        .pool_opts(Some(pool_opts))
+        .tcp_connect_timeout(Some(Duration::from_secs(config.connect_timeout_secs)))
+        .into())
+}
+
 fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {
     let mut pg_config = postgres::Config::from_str(&config.dsn).map_err(postgres_error)?;
     pg_config.connect_timeout(Duration::from_secs(config.connect_timeout_secs));
@@ -845,6 +1076,7 @@ enum RuntimeControlPlaneBackend {
     Memory(Mutex<RuntimeControlPlaneState>),
     Libsql(Arc<LibsqlControlPlaneStore>),
     Postgres(Arc<PostgresControlPlaneStore>),
+    Mysql(Arc<MySqlControlPlaneStore>),
 }
 
 impl RuntimeControlPlaneState {
@@ -1512,6 +1744,54 @@ impl RuntimeStorageRepositories {
         })
     }
 
+    pub fn mysql(
+        provider_order: Vec<StorageProviderKind>,
+        required: bool,
+        config: MySqlStorageConfig,
+        initialize_schema: bool,
+        bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_tenants: Vec<(String, String)>,
+        bootstrap_policies: Vec<(String, String)>,
+        bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_prompt_templates: Vec<(String, String)>,
+        bootstrap_plugin_registrations: Vec<(String, String)>,
+        bootstrap_mcp_servers: Vec<(String, String)>,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Result<Self, StorageError> {
+        let backend =
+            RuntimeStorageBackend::new(StorageProviderKind::Mysql, required, provider_order)?;
+        let control_plane = std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    MySqlControlPlaneStore::connect(
+                        config,
+                        bootstrap_api_keys,
+                        bootstrap_tenants,
+                        bootstrap_policies,
+                        bootstrap_gateway_configs,
+                        bootstrap_prompt_templates,
+                        bootstrap_plugin_registrations,
+                        bootstrap_mcp_servers,
+                        initialize_schema,
+                    )
+                })
+                .join()
+                .map_err(|_| StorageError::Mysql("mysql storage connect thread panicked".into()))?
+        })?;
+        Ok(Self {
+            backend,
+            control_plane: RuntimeControlPlaneBackend::Mysql(Arc::new(control_plane)),
+            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                request_log_retention_records,
+            )),
+            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                audit_event_retention_records,
+            )),
+            usage_aggregates: Mutex::new(InMemoryRepository::new()),
+        })
+    }
+
     pub fn backend_evidence(&self) -> StorageBackendEvidence {
         self.backend.evidence()
     }
@@ -1534,6 +1814,7 @@ impl RuntimeStorageRepositories {
                 block_on_storage(control_plane.snapshot())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.snapshot(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.snapshot(),
         }
     }
 
@@ -1590,6 +1871,16 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("mcp_server", mcp_servers)?;
                 Ok(())
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.replace_kind("api_key", api_keys)?;
+                control_plane.replace_kind("tenant", tenants)?;
+                control_plane.replace_kind("policy", policies)?;
+                control_plane.replace_kind("gateway_config", gateway_configs)?;
+                control_plane.replace_kind("prompt_template", prompt_templates)?;
+                control_plane.replace_kind("plugin_registration", plugin_registrations)?;
+                control_plane.replace_kind("mcp_server", mcp_servers)?;
+                Ok(())
+            }
         }
     }
 
@@ -1611,6 +1902,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("api_key", id.into(), document_json)
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("api_key", id.into(), document_json)
+            }
         }
     }
 
@@ -1624,6 +1918,9 @@ impl RuntimeStorageRepositories {
                 block_on_storage(control_plane.delete("api_key", id.to_string()))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("api_key", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("api_key", id.to_string())
             }
         }
@@ -1647,6 +1944,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("policy", id.into(), document_json)
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("policy", id.into(), document_json)
+            }
         }
     }
 
@@ -1660,6 +1960,9 @@ impl RuntimeStorageRepositories {
                 block_on_storage(control_plane.delete("policy", id.to_string()))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("policy", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("policy", id.to_string())
             }
         }
@@ -1683,6 +1986,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("gateway_config", id.into(), document_json)
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("gateway_config", id.into(), document_json)
+            }
         }
     }
 
@@ -1696,6 +2002,9 @@ impl RuntimeStorageRepositories {
                 block_on_storage(control_plane.delete("gateway_config", id.to_string()))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("gateway_config", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("gateway_config", id.to_string())
             }
         }
@@ -1719,6 +2028,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("prompt_template", id.into(), document_json)
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("prompt_template", id.into(), document_json)
+            }
         }
     }
 
@@ -1740,6 +2052,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("plugin_registration", id.into(), document_json)
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("plugin_registration", id.into(), document_json)
+            }
         }
     }
 
@@ -1753,6 +2068,9 @@ impl RuntimeStorageRepositories {
                 block_on_storage(control_plane.delete("plugin_registration", id.to_string()))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("plugin_registration", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("plugin_registration", id.to_string())
             }
         }
@@ -1776,6 +2094,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("mcp_server", id.into(), document_json)
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("mcp_server", id.into(), document_json)
+            }
         }
     }
 
@@ -1789,6 +2110,9 @@ impl RuntimeStorageRepositories {
                 block_on_storage(control_plane.delete("mcp_server", id.to_string()))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("mcp_server", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("mcp_server", id.to_string())
             }
         }
@@ -1812,6 +2136,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("tool_approval", id.into(), document_json)
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("tool_approval", id.into(), document_json)
+            }
         }
     }
 
@@ -1827,6 +2154,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_document("tool_approval", id.to_string())
             }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.get_document("tool_approval", id.to_string())
+            }
         }
     }
 
@@ -1840,6 +2170,9 @@ impl RuntimeStorageRepositories {
                 block_on_storage(control_plane.list_documents("tool_approval"))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_documents("tool_approval")
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.list_documents("tool_approval")
             }
         }
@@ -1963,6 +2296,10 @@ fn libsql_error(error: libsql::Error) -> StorageError {
 
 fn postgres_error(error: postgres::Error) -> StorageError {
     StorageError::Postgres(error.to_string())
+}
+
+fn mysql_error(error: mysql::Error) -> StorageError {
+    StorageError::Mysql(error.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2224,12 +2561,10 @@ mod tests {
         assert!(postgres_backend.evidence().durable);
         assert!(postgres_backend.evidence().implemented);
 
-        let error =
-            RuntimeStorageBackend::new(StorageProviderKind::Mysql, true, Vec::new()).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "storage provider mysql is not implemented yet (required=true)"
-        );
+        let mysql_backend =
+            RuntimeStorageBackend::new(StorageProviderKind::Mysql, true, Vec::new()).unwrap();
+        assert!(mysql_backend.evidence().durable);
+        assert!(mysql_backend.evidence().implemented);
     }
 
     #[test]
