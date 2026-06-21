@@ -1355,6 +1355,7 @@ fn run_control_plane_libsql_restart(
         case.expect_prompt_template(&prompt_template_id, "active")?;
         case.expect_restored_prompt_template_render(&resource_id, &prompt_template_id)?;
         case.expect_restored_api_key_models_access(&resource_id)?;
+        case.expect_restored_gateway_config_selected(&resource_id, &gateway_config_id)?;
         case.expect_json(
             "PATCH",
             &format!("/admin/v1/policies/{policy_name}"),
@@ -1735,6 +1736,31 @@ impl TursoRestartHarness {
                 assert_eq!(body["gateway_config"]["revision"], 7);
                 assert_eq!(body["gateway_config"]["cache_enabled"], false);
                 assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_restored_gateway_config_selected(
+        &self,
+        api_key_id: &str,
+        profile_id: &str,
+    ) -> Result<()> {
+        let auth = format!("Authorization: Bearer {api_key_id}-secret");
+        let profile = format!("x-ferrogate-config: {profile_id}");
+        self.expect_json(
+            "POST",
+            "/v1/chat/completions",
+            &[auth.as_str(), JSON_CONTENT, profile.as_str()],
+            r#"{"model":"fast-chat","messages":[{"role":"user","content":"durable gateway config check"}]}"#,
+            502,
+            |body| {
+                assert_eq!(body["error"]["code"], "provider_dispatch_error");
+                let rendered = body.to_string();
+                assert!(!rendered.contains("gateway_config_not_found"), "{rendered}");
+                assert!(!rendered.contains("gateway_config_not_allowed"), "{rendered}");
+                assert!(!rendered.contains("invalid_api_key"), "{rendered}");
+                assert_secret_redacted(&rendered);
                 Ok(())
             },
         )
