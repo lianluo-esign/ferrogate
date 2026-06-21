@@ -55,8 +55,8 @@ use ferrogate_providers::{
 };
 use ferrogate_storage::{
     MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState, RuntimeStorageBackend,
-    RuntimeStorageRepositories, StorageBackendEvidence, StoredAuditEvent, StoredRequestLog,
-    StoredUsageAggregate,
+    RuntimeStorageRepositories, StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent,
+    StoredAuditEvent, StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -1496,32 +1496,54 @@ fn non_empty(value: String) -> Option<String> {
 
 fn summarize_agent_run(
     id: String,
+    run: Option<&StoredAgentRun>,
+    agent_events: &[StoredAgentRunEvent],
     requests: &[StoredRequestLog],
     billing_events: &[BillingEvent],
     audit_events: &[StoredAuditEvent],
 ) -> AgentRunSummary {
-    let tenant = requests
-        .iter()
-        .map(|log| log.tenant.clone())
+    let tenant = run
+        .into_iter()
+        .map(|run| run.tenant.clone())
+        .chain(agent_events.iter().map(|event| event.tenant.clone()))
+        .chain(requests.iter().map(|log| log.tenant.clone()))
         .chain(billing_events.iter().map(|event| event.tenant.clone()))
         .chain(audit_events.iter().map(|event| event.tenant.clone()))
         .next()
         .unwrap_or_default();
-    let first_seen_unix = requests
+    let first_seen_unix = run
         .iter()
-        .flat_map(|log| [log.started_at_unix, log.completed_at_unix])
+        .flat_map(|run| [run.started_at_unix, run.completed_at_unix])
+        .chain(agent_events.iter().map(|event| event.occurred_at_unix))
+        .chain(
+            requests
+                .iter()
+                .flat_map(|log| [log.started_at_unix, log.completed_at_unix]),
+        )
         .chain(billing_events.iter().map(|event| event.occurred_at_unix))
         .chain(audit_events.iter().map(|event| event.occurred_at_unix))
         .flatten()
         .min();
-    let last_seen_unix = requests
+    let last_seen_unix = run
         .iter()
-        .flat_map(|log| [log.started_at_unix, log.completed_at_unix])
+        .flat_map(|run| [run.started_at_unix, run.completed_at_unix])
+        .chain(agent_events.iter().map(|event| event.occurred_at_unix))
+        .chain(
+            requests
+                .iter()
+                .flat_map(|log| [log.started_at_unix, log.completed_at_unix]),
+        )
         .chain(billing_events.iter().map(|event| event.occurred_at_unix))
         .chain(audit_events.iter().map(|event| event.occurred_at_unix))
         .flatten()
         .max();
-    let status = if requests
+    let status = if let Some(run) = run {
+        match run.status.as_str() {
+            "completed" => "completed",
+            "failed" | "timed_out" => "failed",
+            _ => "blocked",
+        }
+    } else if requests
         .iter()
         .any(|log| log.status_code >= 500 || log.error_code.is_some())
     {
@@ -1539,6 +1561,7 @@ fn summarize_agent_run(
         request_count: requests.len(),
         billing_event_count: billing_events.len(),
         audit_event_count: audit_events.len(),
+        agent_event_count: agent_events.len(),
         first_seen_unix,
         last_seen_unix,
     }
@@ -1672,6 +1695,7 @@ pub(crate) struct AgentRunSummary {
     pub(crate) request_count: usize,
     pub(crate) billing_event_count: usize,
     pub(crate) audit_event_count: usize,
+    pub(crate) agent_event_count: usize,
     pub(crate) first_seen_unix: Option<u64>,
     pub(crate) last_seen_unix: Option<u64>,
 }
@@ -1680,7 +1704,9 @@ pub(crate) struct AgentRunSummary {
 pub(crate) struct AgentRunTimeline {
     pub(crate) object: &'static str,
     pub(crate) id: String,
+    pub(crate) run: Option<StoredAgentRun>,
     pub(crate) summary: AgentRunSummary,
+    pub(crate) agent_events: Vec<StoredAgentRunEvent>,
     pub(crate) requests: Vec<StoredRequestLog>,
     pub(crate) billing_events: Vec<BillingEvent>,
     pub(crate) audit_events: Vec<StoredAuditEvent>,
@@ -4095,6 +4121,14 @@ impl AppState {
         id: &str,
         filter: AgentRunFilter,
     ) -> Option<AgentRunTimeline> {
+        let run = self.repositories.agent_run(id);
+        let agent_events = self
+            .repositories
+            .agent_run_events()
+            .into_iter()
+            .filter(|event| event.run_id == id)
+            .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
+            .collect::<Vec<_>>();
         let requests = self
             .repositories
             .request_logs()
@@ -4116,15 +4150,28 @@ impl AppState {
             .filter(|event| event.agent_run_id.as_deref() == Some(id))
             .filter(|event| agent_run_matches_filter(&event.request_id, &event.tenant, &filter))
             .collect::<Vec<_>>();
-        if requests.is_empty() && billing_events.is_empty() && audit_events.is_empty() {
+        if run.is_none()
+            && agent_events.is_empty()
+            && requests.is_empty()
+            && billing_events.is_empty()
+            && audit_events.is_empty()
+        {
             return None;
         }
-        let summary =
-            summarize_agent_run(id.to_string(), &requests, &billing_events, &audit_events);
+        let summary = summarize_agent_run(
+            id.to_string(),
+            run.as_ref(),
+            &agent_events,
+            &requests,
+            &billing_events,
+            &audit_events,
+        );
         Some(AgentRunTimeline {
             object: "agent_run_timeline",
             id: id.to_string(),
+            run,
             summary,
+            agent_events,
             requests,
             billing_events,
             audit_events,
@@ -4132,12 +4179,16 @@ impl AppState {
     }
 
     fn agent_run_summaries(&self, filter: &AgentRunFilter) -> Vec<AgentRunSummary> {
+        let runs = self.repositories.agent_runs();
+        let agent_events = self.repositories.agent_run_events();
         let requests = self.repositories.request_logs();
         let billing_events = self.metering_events.list();
         let audit_events = self.repositories.audit_events();
-        let mut run_ids = requests
+        let mut run_ids = runs
             .iter()
-            .filter_map(|log| log.agent_run_id.clone())
+            .map(|run| run.id.clone())
+            .chain(agent_events.iter().map(|event| event.run_id.clone()))
+            .chain(requests.iter().filter_map(|log| log.agent_run_id.clone()))
             .chain(
                 billing_events
                     .iter()
@@ -4153,7 +4204,16 @@ impl AppState {
         run_ids.dedup();
         run_ids
             .into_iter()
-            .map(|id| {
+            .filter_map(|id| {
+                let run = runs.iter().find(|run| run.id == id).cloned();
+                let run_agent_events = agent_events
+                    .iter()
+                    .filter(|event| event.run_id == id)
+                    .filter(|event| {
+                        agent_run_matches_filter(&event.request_id, &event.tenant, filter)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let run_requests = requests
                     .iter()
                     .filter(|log| log.agent_run_id.as_deref() == Some(id.as_str()))
@@ -4176,7 +4236,9 @@ impl AppState {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if run_requests.is_empty()
+                if run.is_none()
+                    && run_agent_events.is_empty()
+                    && run_requests.is_empty()
                     && run_billing_events.is_empty()
                     && run_audit_events.is_empty()
                 {
@@ -4184,13 +4246,26 @@ impl AppState {
                 }
                 Some(summarize_agent_run(
                     id,
+                    run.as_ref(),
+                    &run_agent_events,
                     &run_requests,
                     &run_billing_events,
                     &run_audit_events,
                 ))
             })
-            .flatten()
             .collect()
+    }
+
+    pub(crate) fn record_agent_run(&self, run: StoredAgentRun) {
+        if let Err(error) = self.repositories.upsert_agent_run(run) {
+            warn!("failed to persist agent run record: {error}");
+        }
+    }
+
+    pub(crate) fn record_agent_run_event(&self, event: StoredAgentRunEvent) {
+        if let Err(error) = self.repositories.append_agent_run_event(event) {
+            warn!("failed to persist agent run event record: {error}");
+        }
     }
 
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {

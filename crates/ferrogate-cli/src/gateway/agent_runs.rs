@@ -4,7 +4,7 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ferrogate_core::{RequestContext, ToolResult};
 use ferrogate_runtime::{
@@ -21,6 +21,7 @@ use crate::{
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AppState},
 };
+use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
 
 use super::{body::read_request_body, FerroGateway, ProxyContext};
 
@@ -183,6 +184,19 @@ impl FerroGateway {
             upstream: None,
             tenant: auth.tenant_context(),
         };
+        let started_at_unix = now_unix_seconds();
+        state.record_agent_run(StoredAgentRun {
+            id: run_id.clone(),
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            tenant: auth.tenant_context(),
+            status: "running".to_string(),
+            provider: "ferrogate.default".to_string(),
+            turns_executed: 0,
+            output_recorded: false,
+            started_at_unix: Some(started_at_unix),
+            completed_at_unix: None,
+        });
         let mut provider = EchoAgentProvider::new(request.input);
         let mut dispatcher = FailClosedToolDispatcher;
         let mut event_sink = AuditEventSink::new(state.clone(), ctx, &auth);
@@ -195,6 +209,18 @@ impl FerroGateway {
             Ok(outcome) => outcome,
             Err(AgentRuntimeError::RunFailed { outcome, .. }) => *outcome,
             Err(error) => {
+                state.record_agent_run(StoredAgentRun {
+                    id: run_id.clone(),
+                    request_id: ctx.request_id.clone(),
+                    trace_id: ctx.trace_id.clone(),
+                    tenant: auth.tenant_context(),
+                    status: "failed".to_string(),
+                    provider: "ferrogate.default".to_string(),
+                    turns_executed: 0,
+                    output_recorded: false,
+                    started_at_unix: Some(started_at_unix),
+                    completed_at_unix: Some(now_unix_seconds()),
+                });
                 state.record_admin_audit_event(agent_audit_event(
                     ctx,
                     &auth,
@@ -216,6 +242,18 @@ impl FerroGateway {
         };
 
         let status_code = outcome_status_code(&outcome);
+        state.record_agent_run(StoredAgentRun {
+            id: outcome.run_id.clone(),
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            tenant: auth.tenant_context(),
+            status: agent_status(&outcome.status).to_string(),
+            provider: "ferrogate.default".to_string(),
+            turns_executed: outcome.turns_executed,
+            output_recorded: outcome.output.is_some(),
+            started_at_unix: Some(started_at_unix),
+            completed_at_unix: Some(now_unix_seconds()),
+        });
         let response = AgentRunCreateResponse {
             object: "agent_run",
             id: outcome.run_id,
@@ -366,6 +404,20 @@ impl AgentRunEventSink for AuditEventSink {
                 event.turn
             )
         });
+        self.state.record_agent_run_event(StoredAgentRunEvent {
+            id: event.id,
+            run_id: event.run_id.clone(),
+            request_id: self.request_id.clone(),
+            trace_id: self.trace_id.clone(),
+            tenant: self.tenant.clone(),
+            turn: event.turn,
+            kind: agent_event_kind(&event.kind).to_string(),
+            target: target.clone(),
+            outcome: outcome.to_string(),
+            tool_call_id: event.tool_call_id,
+            message: Some(message.clone()),
+            occurred_at_unix: Some(now_unix_seconds()),
+        });
         self.state.record_admin_audit_event(AdminAuditEventDraft {
             request_id: self.request_id.clone(),
             trace_id: self.trace_id.clone(),
@@ -378,6 +430,13 @@ impl AgentRunEventSink for AuditEventSink {
             message,
         });
     }
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn agent_audit_event(

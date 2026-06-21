@@ -1054,6 +1054,20 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["id"], "agent-run-harness");
             assert_eq!(body["summary"]["request_count"], 0);
             assert_eq!(body["summary"]["audit_event_count"], 3);
+            assert_eq!(body["summary"]["agent_event_count"], 3);
+            assert_eq!(body["run"]["id"], "agent-run-harness");
+            assert_eq!(body["run"]["status"], "completed");
+            assert_eq!(body["run"]["provider"], "ferrogate.default");
+            assert_eq!(body["agent_events"].as_array().unwrap().len(), 3);
+            assert!(body["agent_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["kind"] == "run_completed"
+                        && event["run_id"] == "agent-run-harness"
+                        && event["outcome"] == "success"
+                }));
             assert!(body["audit_events"]
                 .as_array()
                 .unwrap()

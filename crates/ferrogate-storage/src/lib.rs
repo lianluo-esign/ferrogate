@@ -226,6 +226,7 @@ pub enum StorageError {
     Libsql(String),
     Postgres(String),
     Mysql(String),
+    Serialization(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -241,6 +242,9 @@ impl std::fmt::Display for StorageError {
             StorageError::Libsql(error) => write!(formatter, "libsql storage error: {error}"),
             StorageError::Postgres(error) => write!(formatter, "postgres storage error: {error}"),
             StorageError::Mysql(error) => write!(formatter, "mysql storage error: {error}"),
+            StorageError::Serialization(error) => {
+                write!(formatter, "storage serialization error: {error}")
+            }
         }
     }
 }
@@ -266,6 +270,10 @@ pub trait BillingEventRepository: AppendRepository<BillingEvent> {}
 
 pub trait UsageAggregateRepository: Repository<StoredUsageAggregate> {}
 
+pub trait AgentRunRepository: Repository<StoredAgentRun> {}
+
+pub trait AgentRunEventRepository: AppendRepository<StoredAgentRunEvent> {}
+
 pub trait AppendRepository<T> {
     fn append(&mut self, record: T);
     fn list(&self) -> Vec<T>;
@@ -287,6 +295,36 @@ pub struct ControlPlaneSnapshot {
     pub prompt_templates: Vec<String>,
     pub plugin_registrations: Vec<String>,
     pub mcp_servers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAgentRun {
+    pub id: String,
+    pub request_id: String,
+    pub trace_id: Option<String>,
+    pub tenant: TenantContext,
+    pub status: String,
+    pub provider: String,
+    pub turns_executed: u32,
+    pub output_recorded: bool,
+    pub started_at_unix: Option<u64>,
+    pub completed_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAgentRunEvent {
+    pub id: String,
+    pub run_id: String,
+    pub request_id: String,
+    pub trace_id: Option<String>,
+    pub tenant: TenantContext,
+    pub turn: u32,
+    pub kind: String,
+    pub target: String,
+    pub outcome: String,
+    pub tool_call_id: Option<String>,
+    pub message: Option<String>,
+    pub occurred_at_unix: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1582,6 +1620,8 @@ impl PolicyRepository for InMemoryRepository<StoredPolicyRule> {}
 
 impl UsageAggregateRepository for InMemoryRepository<StoredUsageAggregate> {}
 
+impl AgentRunRepository for InMemoryRepository<StoredAgentRun> {}
+
 #[derive(Debug, Default)]
 pub struct InMemoryAppendRepository<T> {
     records: VecDeque<T>,
@@ -1662,6 +1702,8 @@ impl AuditLogRepository for InMemoryAppendRepository<StoredAuditEvent> {}
 
 impl BillingEventRepository for InMemoryAppendRepository<BillingEvent> {}
 
+impl AgentRunEventRepository for InMemoryAppendRepository<StoredAgentRunEvent> {}
+
 #[derive(Debug)]
 pub struct RuntimeStorageRepositories {
     backend: RuntimeStorageBackend,
@@ -1669,6 +1711,8 @@ pub struct RuntimeStorageRepositories {
     request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
     audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
+    agent_runs: Mutex<InMemoryRepository<StoredAgentRun>>,
+    agent_run_events: Mutex<InMemoryAppendRepository<StoredAgentRunEvent>>,
 }
 
 impl RuntimeStorageRepositories {
@@ -1688,6 +1732,8 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
+            agent_runs: Mutex::new(InMemoryRepository::new()),
+            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
         }
     }
 
@@ -1745,6 +1791,8 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
+            agent_runs: Mutex::new(InMemoryRepository::new()),
+            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
         })
     }
 
@@ -1795,6 +1843,8 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
+            agent_runs: Mutex::new(InMemoryRepository::new()),
+            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
         })
     }
 
@@ -1843,6 +1893,8 @@ impl RuntimeStorageRepositories {
                 audit_event_retention_records,
             )),
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
+            agent_runs: Mutex::new(InMemoryRepository::new()),
+            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
         })
     }
 
@@ -2320,6 +2372,137 @@ impl RuntimeStorageRepositories {
             .map(|aggregates| aggregates.list())
             .unwrap_or_default()
     }
+
+    pub fn upsert_agent_run(&self, run: StoredAgentRun) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut runs) = self.agent_runs.lock() {
+                    runs.insert(run.id.clone(), run);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(
+                control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?),
+            ),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?)
+            }
+        }
+    }
+
+    pub fn agent_run(&self, id: &str) -> Option<StoredAgentRun> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                self.agent_runs.lock().ok().and_then(|runs| runs.get(id))
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.get_document("agent_run", id.to_string()))
+                    .ok()
+                    .flatten()
+                    .and_then(|document| serde_json::from_str(&document).ok())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .get_document("agent_run", id.to_string())
+                .ok()
+                .flatten()
+                .and_then(|document| serde_json::from_str(&document).ok()),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .get_document("agent_run", id.to_string())
+                .ok()
+                .flatten()
+                .and_then(|document| serde_json::from_str(&document).ok()),
+        }
+    }
+
+    pub fn agent_runs(&self) -> Vec<StoredAgentRun> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .agent_runs
+                .lock()
+                .map(|runs| runs.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.list_documents("agent_run"))
+                    .map(deserialize_storage_records)
+                    .unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .list_documents("agent_run")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("agent_run")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn append_agent_run_event(&self, event: StoredAgentRunEvent) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut events) = self.agent_run_events.lock() {
+                    events.append(event);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert(
+                    "agent_run_event",
+                    event.id.clone(),
+                    serialize_storage_record(&event)?,
+                ))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert(
+                "agent_run_event",
+                event.id.clone(),
+                serialize_storage_record(&event)?,
+            ),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "agent_run_event",
+                event.id.clone(),
+                serialize_storage_record(&event)?,
+            ),
+        }
+    }
+
+    pub fn agent_run_events(&self) -> Vec<StoredAgentRunEvent> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .agent_run_events
+                .lock()
+                .map(|events| events.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.list_documents("agent_run_event"))
+                    .map(deserialize_storage_records)
+                    .unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .list_documents("agent_run_event")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("agent_run_event")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+fn serialize_storage_record<T: Serialize>(record: &T) -> Result<String, StorageError> {
+    serde_json::to_string(record).map_err(|error| {
+        StorageError::Serialization(format!("failed to serialize storage record: {error}"))
+    })
+}
+
+fn deserialize_storage_records<T: for<'de> Deserialize<'de>>(documents: Vec<String>) -> Vec<T> {
+    documents
+        .into_iter()
+        .filter_map(|document| serde_json::from_str(&document).ok())
+        .collect()
 }
 
 fn block_on_storage<T: Send>(
@@ -2830,6 +3013,93 @@ mod tests {
             .unwrap()
             .iter()
             .any(|document| document.contains("\"tool_name\":\"github.search\"")));
+    }
+
+    #[test]
+    fn libsql_file_store_persists_agent_run_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ferrogate-agent-runs.db");
+        let url = format!("file://{}", db_path.display());
+        let tenant = TenantContext {
+            organization_id: Some("org_demo".into()),
+            project_id: Some("project_gateway".into()),
+            api_key_id: Some("agent-client".into()),
+            ..TenantContext::default()
+        };
+
+        let repositories = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url.clone(),
+            None,
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            10,
+            10,
+        ))
+        .unwrap();
+        repositories
+            .upsert_agent_run(StoredAgentRun {
+                id: "agent-run-1".into(),
+                request_id: "fg-1".into(),
+                trace_id: Some("fg-1".into()),
+                tenant: tenant.clone(),
+                status: "completed".into(),
+                provider: "ferrogate.default".into(),
+                turns_executed: 1,
+                output_recorded: true,
+                started_at_unix: Some(10),
+                completed_at_unix: Some(11),
+            })
+            .unwrap();
+        repositories
+            .append_agent_run_event(StoredAgentRunEvent {
+                id: "agent-run-1:0001:run-completed".into(),
+                run_id: "agent-run-1".into(),
+                request_id: "fg-1".into(),
+                trace_id: Some("fg-1".into()),
+                tenant,
+                turn: 1,
+                kind: "run_completed".into(),
+                target: "agent_run:agent-run-1".into(),
+                outcome: "success".into(),
+                tool_call_id: None,
+                message: Some("agent run completed".into()),
+                occurred_at_unix: Some(11),
+            })
+            .unwrap();
+
+        let reopened = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url,
+            None,
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            10,
+            10,
+        ))
+        .unwrap();
+
+        let run = reopened.agent_run("agent-run-1").unwrap();
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.tenant.api_key_id.as_deref(), Some("agent-client"));
+        let events = reopened.agent_run_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].run_id, "agent-run-1");
+        assert_eq!(events[0].kind, "run_completed");
     }
 
     #[test]

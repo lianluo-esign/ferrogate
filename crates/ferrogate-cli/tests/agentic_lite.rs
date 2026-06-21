@@ -198,6 +198,22 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
     assert_eq!(timeline["summary"]["status"], "completed");
     assert_eq!(timeline["summary"]["request_count"], 0);
     assert_eq!(timeline["summary"]["audit_event_count"], 3);
+    assert_eq!(timeline["summary"]["agent_event_count"], 3);
+    assert_eq!(timeline["run"]["id"], "agent-run-direct");
+    assert_eq!(timeline["run"]["status"], "completed");
+    assert_eq!(timeline["run"]["provider"], "ferrogate.default");
+    assert_eq!(timeline["run"]["turns_executed"], 1);
+    assert_eq!(timeline["run"]["output_recorded"], true);
+    assert_eq!(timeline["agent_events"].as_array().unwrap().len(), 3);
+    assert!(timeline["agent_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event["kind"] == "run_completed"
+                && event["run_id"] == "agent-run-direct"
+                && event["outcome"] == "success"
+        }));
     let events = timeline["audit_events"].as_array().unwrap();
     assert!(events.iter().any(|event| {
         event["action"] == "agent.run_started"

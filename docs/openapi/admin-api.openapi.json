@@ -5639,7 +5639,8 @@
           "status",
           "request_count",
           "billing_event_count",
-          "audit_event_count"
+          "audit_event_count",
+          "agent_event_count"
         ],
         "properties": {
           "object": {
@@ -5672,6 +5673,10 @@
             "type": "integer",
             "minimum": 0
           },
+          "agent_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
           "first_seen_unix": {
             "type": [
               "integer",
@@ -5694,7 +5699,9 @@
         "required": [
           "object",
           "id",
+          "run",
           "summary",
+          "agent_events",
           "requests",
           "billing_events",
           "audit_events"
@@ -5707,8 +5714,24 @@
           "id": {
             "type": "string"
           },
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StoredAgentRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "summary": {
             "$ref": "#/components/schemas/AgentRunSummary"
+          },
+          "agent_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredAgentRunEvent"
+            }
           },
           "requests": {
             "type": "array",
@@ -5727,6 +5750,129 @@
             "items": {
               "$ref": "#/components/schemas/StoredAuditEvent"
             }
+          }
+        },
+        "additionalProperties": false
+      },
+      "StoredAgentRun": {
+        "type": "object",
+        "required": [
+          "id",
+          "request_id",
+          "tenant",
+          "status",
+          "provider",
+          "turns_executed",
+          "output_recorded"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "status": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "turns_executed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "output_recorded": {
+            "type": "boolean"
+          },
+          "started_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "completed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "StoredAgentRunEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "run_id",
+          "request_id",
+          "tenant",
+          "turn",
+          "kind",
+          "target",
+          "outcome"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "turn": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurred_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         },
         "additionalProperties": false

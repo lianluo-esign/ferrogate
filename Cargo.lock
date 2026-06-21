@@ -1283,6 +1283,7 @@ dependencies = [
  "postgres",
  "postgres-native-tls",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
