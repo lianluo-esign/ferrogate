@@ -3241,6 +3241,63 @@ scopes = ["admin.read", "admin.write"]
         "{plugins_after_denied_network}"
     );
 
+    let invalid_manifest_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "tool.health_check",
+            "kind": "tool_provider",
+            "version": "1.0.0",
+            "manifest": {
+                "name": "Health check",
+                "capabilities": ["bad capability"]
+            },
+            "enabled": true,
+            "source": "builtin",
+            "order": 20,
+            "permissions": {
+                "tools": ["tool.health_check"],
+                "network": [],
+                "filesystem": false,
+                "shell": false
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        invalid_manifest_plugin.contains("400 Bad Request"),
+        "{invalid_manifest_plugin}"
+    );
+    assert!(
+        invalid_manifest_plugin.contains("invalid_plugin"),
+        "{invalid_manifest_plugin}"
+    );
+    assert!(
+        invalid_manifest_plugin.contains("manifest.capabilities"),
+        "{invalid_manifest_plugin}"
+    );
+    assert!(
+        invalid_manifest_plugin.contains("must contain only letters"),
+        "{invalid_manifest_plugin}"
+    );
+
+    let plugins_after_invalid_manifest = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        !plugins_after_invalid_manifest.contains("\"id\":\"tool.health_check\""),
+        "{plugins_after_invalid_manifest}"
+    );
+
     let duplicate_update = http_request(
         &gateway_addr,
         "PATCH",
