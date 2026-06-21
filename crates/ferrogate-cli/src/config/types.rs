@@ -498,6 +498,8 @@ pub(crate) struct PluginManifest {
     #[serde(default)]
     pub(crate) capabilities: Vec<String>,
     #[serde(default)]
+    pub(crate) required_permissions: ExtensionPermissions,
+    #[serde(default)]
     pub(crate) hooks: Vec<String>,
     #[serde(default)]
     pub(crate) config_schema: Option<toml::Value>,

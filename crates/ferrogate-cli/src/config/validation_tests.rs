@@ -376,6 +376,7 @@ fn validates_plugin_manifest_and_compatibility_contract() {
     plugin.manifest.name = Some("Echo tools".into());
     plugin.manifest.description = Some("Safe local echo plugin".into());
     plugin.manifest.capabilities = vec!["tool_provider".into(), "safe:echo".into()];
+    plugin.manifest.required_permissions.tools = vec!["tool.echo".into()];
     plugin.manifest.hooks = vec!["tool.execute".into()];
     plugin.manifest.config_schema = Some(toml::Value::Table(toml::map::Map::new()));
     plugin.compatibility.min_gateway_version = Some("0.1.0".into());
@@ -385,6 +386,26 @@ fn validates_plugin_manifest_and_compatibility_contract() {
         ..Config::default()
     };
     config.validate().unwrap();
+
+    let mut plugin = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    plugin.permissions.tools.clear();
+    plugin.manifest.required_permissions.tools = vec!["tool.echo".into()];
+    let config = Config {
+        plugins: vec![plugin],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("manifest.required_permissions.tools value tool.echo"));
+
+    let mut plugin = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    plugin.manifest.required_permissions.secrets = true;
+    let config = Config {
+        plugins: vec![plugin],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("permissions.secrets"));
+    assert!(error.contains("manifest.required_permissions.secrets"));
 
     let mut plugin = extension("tool.echo", ExtensionKind::ToolProvider, 10);
     plugin.version = "not-a-version".into();

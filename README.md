@@ -810,7 +810,9 @@ their own typed permission declarations for tools, network, filesystem, shell,
 tenant scope, secrets, and admin mutation. Plugin tenant/API-key/route
 allowlists require `permissions.tenant_scope = true`; secret-shaped plugin
 config is rejected unless the plugin explicitly declares
-`permissions.secrets = true`.
+`permissions.secrets = true`. Plugin manifests can also declare
+`manifest.required_permissions`; the granted registration permissions must cover
+those requirements before the plugin is accepted.
 
 ## Tenant and RBAC Service
 

@@ -3999,6 +3999,9 @@
           "capabilities": {
             "$ref": "#/components/schemas/StringList"
           },
+          "required_permissions": {
+            "$ref": "#/components/schemas/ExtensionPermissions"
+          },
           "hooks": {
             "$ref": "#/components/schemas/StringList"
           },

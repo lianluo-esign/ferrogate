@@ -1474,6 +1474,19 @@ fn validate_plugin_manifest(
         "manifest.capabilities",
         &extension.manifest.capabilities,
     )?;
+    validate_extension_permission_names(
+        section,
+        extension_index,
+        "manifest.required_permissions.tools",
+        &extension.manifest.required_permissions.tools,
+    )?;
+    validate_extension_permission_names(
+        section,
+        extension_index,
+        "manifest.required_permissions.network",
+        &extension.manifest.required_permissions.network,
+    )?;
+    validate_plugin_required_permissions(section, extension_index, extension)?;
     validate_plugin_manifest_names(
         section,
         extension_index,
@@ -1484,6 +1497,89 @@ fn validate_plugin_manifest(
         if !matches!(schema, toml::Value::Table(_)) {
             bail!("field {section}[{extension_index}].manifest.config_schema: must be an object");
         }
+    }
+    Ok(())
+}
+
+fn validate_plugin_required_permissions(
+    section: &str,
+    extension_index: usize,
+    extension: &super::ExtensionConfig,
+) -> AnyResult<()> {
+    let required = &extension.manifest.required_permissions;
+    let granted = &extension.permissions;
+
+    for tool in &required.tools {
+        if !permission_list_covers(&granted.tools, tool) {
+            bail!(
+                "field {section}[{extension_index}].permissions.tools: must grant manifest.required_permissions.tools value {tool}"
+            );
+        }
+    }
+    for host in &required.network {
+        if !permission_list_covers(&granted.network, host) {
+            bail!(
+                "field {section}[{extension_index}].permissions.network: must grant manifest.required_permissions.network value {host}"
+            );
+        }
+    }
+
+    validate_required_bool_permission(
+        section,
+        extension_index,
+        "filesystem",
+        required.filesystem,
+        granted.filesystem,
+    )?;
+    validate_required_bool_permission(
+        section,
+        extension_index,
+        "shell",
+        required.shell,
+        granted.shell,
+    )?;
+    validate_required_bool_permission(
+        section,
+        extension_index,
+        "tenant_scope",
+        required.tenant_scope,
+        granted.tenant_scope,
+    )?;
+    validate_required_bool_permission(
+        section,
+        extension_index,
+        "secrets",
+        required.secrets,
+        granted.secrets,
+    )?;
+    validate_required_bool_permission(
+        section,
+        extension_index,
+        "admin_mutation",
+        required.admin_mutation,
+        granted.admin_mutation,
+    )?;
+
+    Ok(())
+}
+
+fn permission_list_covers(granted: &[String], required: &str) -> bool {
+    granted
+        .iter()
+        .any(|value| value == "*" || value == required)
+}
+
+fn validate_required_bool_permission(
+    section: &str,
+    extension_index: usize,
+    permission: &str,
+    required: bool,
+    granted: bool,
+) -> AnyResult<()> {
+    if required && !granted {
+        bail!(
+            "field {section}[{extension_index}].permissions.{permission}: must be true because manifest.required_permissions.{permission} is true"
+        );
     }
     Ok(())
 }

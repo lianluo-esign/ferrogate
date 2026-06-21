@@ -3188,6 +3188,53 @@ scopes = ["admin.read", "admin.write"]
         "{plugins_after_denied_tenant_scope}"
     );
 
+    let denied_required_permission_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "tool.echo",
+            "kind": "tool_provider",
+            "version": "1.0.0",
+            "manifest": {
+                "name": "Echo tools",
+                "required_permissions": {
+                    "tools": ["tool.echo"],
+                    "secrets": true
+                }
+            },
+            "enabled": true,
+            "source": "builtin",
+            "order": 10,
+            "permissions": {
+                "tools": ["tool.echo"],
+                "network": [],
+                "filesystem": false,
+                "shell": false,
+                "tenant_scope": false,
+                "secrets": false,
+                "admin_mutation": false
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        denied_required_permission_plugin.contains("400 Bad Request"),
+        "{denied_required_permission_plugin}"
+    );
+    assert!(
+        denied_required_permission_plugin.contains("invalid_plugin"),
+        "{denied_required_permission_plugin}"
+    );
+    assert!(
+        denied_required_permission_plugin.contains("manifest.required_permissions.secrets"),
+        "{denied_required_permission_plugin}"
+    );
+
     let create_body = serde_json::json!({
         "id": "tool.echo",
         "kind": "tool_provider",
@@ -3196,6 +3243,11 @@ scopes = ["admin.read", "admin.write"]
             "name": "Echo tools",
             "description": "Safe echo fixture",
             "capabilities": ["tool_provider", "safe:echo"],
+            "required_permissions": {
+                "tools": ["tool.echo"],
+                "tenant_scope": true,
+                "secrets": true
+            },
             "hooks": ["tool.execute"],
             "config_schema": {
                 "type": "object"
@@ -3244,6 +3296,8 @@ scopes = ["admin.read", "admin.write"]
     assert!(created.contains("\"version\":\"1.2.3\""), "{created}");
     assert!(created.contains("\"name\":\"Echo tools\""), "{created}");
     assert!(created.contains("\"safe:echo\""), "{created}");
+    assert!(created.contains("\"required_permissions\""), "{created}");
+    assert!(created.contains("\"tenant_scope\":true"), "{created}");
     assert!(
         created.contains("\"min_gateway_version\":\"0.1.0\""),
         "{created}"
