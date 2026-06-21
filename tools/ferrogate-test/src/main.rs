@@ -24,6 +24,8 @@ const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
 const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
 const CLICKHOUSE_CONTAINER: &str = "ferrogate-e2e-clickhouse";
 const VECTOR_CONTAINER: &str = "ferrogate-e2e-vector";
+const LIBSQL_CONTAINER: &str = "ferrogate-e2e-libsql";
+const LIBSQL_SERVER_IMAGE: &str = "ghcr.io/tursodatabase/libsql-server:latest";
 const GATEWAY_A_CONTAINER: &str = "ferrogate-e2e-gateway-a";
 const GATEWAY_B_CONTAINER: &str = "ferrogate-e2e-gateway-b";
 const GATEWAY_A_PORT: u16 = 18080;
@@ -35,7 +37,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, turso-libsql-restart (opt-in)"
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, turso-libsql-restart (opt-in)"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -54,12 +56,14 @@ fn main() -> Result<()> {
         Commands::AuthApi(args) => run_auth_api(&args),
         Commands::GatewayApi(args) => run_gateway_api(&args),
         Commands::LibsqlFileRestart(args) => run_libsql_file_restart(&args),
+        Commands::LibsqlServerRestart(args) => run_libsql_server_restart(&args),
         Commands::TursoLibsqlRestart(args) => run_turso_libsql_restart(&args),
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
             run_gateway_api(&args.local)?;
-            run_libsql_file_restart(&args.local)
+            run_libsql_file_restart(&args.local)?;
+            run_libsql_server_restart(&args.local)
         }
     }
 }
@@ -103,6 +107,8 @@ enum Commands {
     GatewayApi(LocalArgs),
     /// Run deterministic local file-backed libSQL restart durability coverage.
     LibsqlFileRestart(LocalArgs),
+    /// Run local Docker-backed libSQL server protocol restart durability coverage.
+    LibsqlServerRestart(LocalArgs),
     /// Opt-in live Turso/libSQL restart durability scenario.
     TursoLibsqlRestart(TursoLibsqlRestartArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
@@ -1162,6 +1168,36 @@ fn run_libsql_file_restart(args: &LocalArgs) -> Result<()> {
         true,
     )?;
     println!("libsql-file-restart scenario passed");
+    Ok(())
+}
+
+fn run_libsql_server_restart(args: &LocalArgs) -> Result<()> {
+    let host_port = free_port()?;
+    let _cleanup = LibsqlServerCleanup;
+    stop_libsql_server_container();
+    docker_args([
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        LIBSQL_CONTAINER.to_string(),
+        "-p".to_string(),
+        format!("{host_port}:8080"),
+        "-e".to_string(),
+        "SQLD_HTTP_LISTEN_ADDR=0.0.0.0:8080".to_string(),
+        "-e".to_string(),
+        "SQLD_GRPC_LISTEN_ADDR=0.0.0.0:5001".to_string(),
+        LIBSQL_SERVER_IMAGE.to_string(),
+    ])?;
+    wait_for_libsql_server(host_port)?;
+    let libsql_url = format!("http://127.0.0.1:{host_port}");
+    run_control_plane_libsql_restart(
+        &args.ferrogate_bin,
+        &libsql_url,
+        None,
+        "ferrogate-libsql-server-test",
+        true,
+    )?;
+    println!("libsql-server-restart scenario passed");
     Ok(())
 }
 
@@ -2656,6 +2692,11 @@ bindings:
 fn free_addr() -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     Ok(listener.local_addr()?.to_string())
+}
+
+fn free_port() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
 }
 
 fn spawn_local_provider_upstream(
@@ -4904,6 +4945,30 @@ fn wait_for_redis() -> Result<()> {
     bail!("redis did not start responding to PING")
 }
 
+fn wait_for_libsql_server(host_port: u16) -> Result<()> {
+    let started = Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < Duration::from_secs(30) {
+        match http_request(host_port, "GET", "/", &[], "") {
+            Ok(response) => {
+                last = response.raw;
+                if matches!(response.status, 200 | 404 | 405) {
+                    return Ok(());
+                }
+            }
+            Err(error) => last = error.to_string(),
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    let logs = Command::new("docker")
+        .args(["logs", LIBSQL_CONTAINER, "--tail", "120"])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
+        .unwrap_or_default();
+    bail!("timed out waiting for local libSQL server; last response: {last}; logs: {logs}");
+}
+
 fn wait_for_http(host_port: u16, path: &str, expected_status: u16) -> Result<()> {
     let started = Instant::now();
     let mut last = String::new();
@@ -5046,6 +5111,14 @@ where
     Ok(())
 }
 
+fn stop_libsql_server_container() {
+    let _ = Command::new("docker")
+        .args(["rm", "-f", LIBSQL_CONTAINER])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 fn cleanup_containers() {
     let _ = Command::new("docker")
         .args([
@@ -5057,6 +5130,7 @@ fn cleanup_containers() {
             REDIS_CONTAINER,
             CLICKHOUSE_CONTAINER,
             VECTOR_CONTAINER,
+            LIBSQL_CONTAINER,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -5066,6 +5140,17 @@ fn cleanup_containers() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+struct LibsqlServerCleanup;
+
+impl Drop for LibsqlServerCleanup {
+    fn drop(&mut self) {
+        if env::var("FERROGATE_TEST_KEEP_CONTAINERS").is_ok_and(|value| value == "1") {
+            return;
+        }
+        stop_libsql_server_container();
+    }
 }
 
 struct Cleanup;

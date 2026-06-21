@@ -84,6 +84,9 @@ fn config_model_supports_serde_roundtrip() {
         plugins: vec![ExtensionConfig {
             id: "tool.echo".into(),
             kind: ExtensionKind::ToolProvider,
+            version: "0.1.0".into(),
+            manifest: PluginManifest::default(),
+            compatibility: PluginCompatibility::default(),
             enabled: true,
             source: "builtin".into(),
             order: 10,

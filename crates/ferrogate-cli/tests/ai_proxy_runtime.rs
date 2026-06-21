@@ -1203,13 +1203,15 @@ fn mcp_server_admin_write_and_restart_restore_work() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
+    let db_path = dir.path().join("control-plane.db");
+    let db_url = format!("file://{}", db_path.display());
     std::fs::write(
         &config,
         format!(
             r#"
 listen = "{gateway_addr}"
 
-storage = {{ provider = "local" }}
+storage = {{ provider = "turso_libsql", libsql_url = "{db_url}" }}
 
 [[providers]]
 name = "openai"
@@ -1236,7 +1238,7 @@ scopes = ["admin.read", "admin.write"]
 
     let mut gateway = start_gateway(&config);
     wait_for_gateway(&gateway_addr);
-    let mcp_name = "dbhttp-restart-test";
+    let mcp_name = "dbhttprestarttest";
     let create = http_request(
         &gateway_addr,
         "POST",
@@ -3078,6 +3080,20 @@ scopes = ["admin.read", "admin.write"]
     let create_body = serde_json::json!({
         "id": "tool.echo",
         "kind": "tool_provider",
+        "version": "1.2.3",
+        "manifest": {
+            "name": "Echo tools",
+            "description": "Safe echo fixture",
+            "capabilities": ["tool_provider", "safe:echo"],
+            "hooks": ["tool.execute"],
+            "config_schema": {
+                "type": "object"
+            }
+        },
+        "compatibility": {
+            "min_gateway_version": "0.1.0",
+            "max_gateway_version": "9999.0.0"
+        },
         "enabled": true,
         "source": "builtin",
         "order": 10,
@@ -3110,6 +3126,13 @@ scopes = ["admin.read", "admin.write"]
     assert!(created.contains("\"object\":\"plugin\""), "{created}");
     assert!(created.contains("\"id\":\"tool.echo\""), "{created}");
     assert!(created.contains("\"kind\":\"tool_provider\""), "{created}");
+    assert!(created.contains("\"version\":\"1.2.3\""), "{created}");
+    assert!(created.contains("\"name\":\"Echo tools\""), "{created}");
+    assert!(created.contains("\"safe:echo\""), "{created}");
+    assert!(
+        created.contains("\"min_gateway_version\":\"0.1.0\""),
+        "{created}"
+    );
     assert!(created.contains("\"enabled\":true"), "{created}");
     assert!(created.contains("\"active\":true"), "{created}");
     assert!(created.contains("\"health\":\"ok\""), "{created}");
@@ -3147,6 +3170,8 @@ scopes = ["admin.read", "admin.write"]
     assert!(fetched.contains("200 OK"), "{fetched}");
     assert!(fetched.contains("\"id\":\"tool.echo\""), "{fetched}");
     assert!(fetched.contains("\"kind\":\"tool_provider\""), "{fetched}");
+    assert!(fetched.contains("\"version\":\"1.2.3\""), "{fetched}");
+    assert!(fetched.contains("\"name\":\"Echo tools\""), "{fetched}");
     assert!(fetched.contains("\"active\":true"), "{fetched}");
     assert!(fetched.contains("\"health\":\"ok\""), "{fetched}");
 
@@ -3211,6 +3236,49 @@ scopes = ["admin.read", "admin.write"]
     );
     assert!(delete.contains("200 OK"), "{delete}");
     assert!(delete.contains("\"deleted\":true"), "{delete}");
+
+    let incompatible = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "tool.health_check",
+            "kind": "tool_provider",
+            "version": "1.0.0",
+            "manifest": {
+                "name": "Health check",
+                "capabilities": ["tool_provider"]
+            },
+            "compatibility": {
+                "min_gateway_version": "9999.0.0"
+            },
+            "enabled": true,
+            "source": "builtin",
+            "order": 20,
+            "permissions": {
+                "tools": ["tool.health_check"],
+                "network": [],
+                "filesystem": false,
+                "shell": false
+            }
+        })
+        .to_string(),
+    );
+    assert!(incompatible.contains("201 Created"), "{incompatible}");
+    assert!(
+        incompatible.contains("\"health\":\"version_incompatible\""),
+        "{incompatible}"
+    );
+    assert!(incompatible.contains("\"active\":false"), "{incompatible}");
+    assert!(
+        incompatible.contains("requires gateway version &gt;= 9999.0.0")
+            || incompatible.contains("requires gateway version >= 9999.0.0"),
+        "{incompatible}"
+    );
 
     let missing = http_request(
         &gateway_addr,

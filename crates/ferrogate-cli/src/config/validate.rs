@@ -435,13 +435,15 @@ impl Config {
             }
             if !(url.starts_with("libsql://")
                 || url.starts_with("https://")
+                || url.starts_with("http://")
                 || url.starts_with("file://"))
             {
                 bail!(
-                    "field storage.libsql_url: must start with libsql://, https://, or file:// for turso_libsql"
+                    "field storage.libsql_url: must start with libsql://, https://, http://, or file:// for turso_libsql"
                 );
             }
-            let remote_url = !url.starts_with("file://");
+            let remote_url_requires_token =
+                !(url.starts_with("file://") || is_local_libsql_server_url(url));
             let has_inline_token = self
                 .storage
                 .libsql_auth_token
@@ -452,7 +454,7 @@ impl Config {
                 .libsql_auth_token_env
                 .as_deref()
                 .is_some_and(|name| !name.trim().is_empty());
-            if remote_url && !has_inline_token && !has_token_env {
+            if remote_url_requires_token && !has_inline_token && !has_token_env {
                 bail!(
                     "field storage.libsql_auth_token_env: required when storage.provider is turso_libsql unless storage.libsql_auth_token is set"
                 );
@@ -1137,6 +1139,7 @@ impl Config {
                 "permissions.network",
                 &extension.permissions.network,
             )?;
+            validate_plugin_manifest(section, index, extension)?;
             let _ = extension.approval_policy;
             validate_builtin_plugin_shape(section, index, extension)?;
         }
@@ -1320,6 +1323,139 @@ fn validate_extension_permission_names(
         }
     }
     Ok(())
+}
+
+fn is_local_libsql_server_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("http")) {
+        return false;
+    }
+    uri.authority()
+        .map(|authority| matches!(authority.host(), "127.0.0.1" | "localhost" | "::1"))
+        .unwrap_or(false)
+}
+
+fn validate_plugin_manifest(
+    section: &str,
+    extension_index: usize,
+    extension: &super::ExtensionConfig,
+) -> AnyResult<()> {
+    validate_plugin_version(
+        section,
+        extension_index,
+        "version",
+        extension.version.as_str(),
+    )?;
+    validate_optional_plugin_version(
+        section,
+        extension_index,
+        "compatibility.min_gateway_version",
+        extension.compatibility.min_gateway_version.as_deref(),
+    )?;
+    validate_optional_plugin_version(
+        section,
+        extension_index,
+        "compatibility.max_gateway_version",
+        extension.compatibility.max_gateway_version.as_deref(),
+    )?;
+    if let (Some(min), Some(max)) = (
+        extension.compatibility.min_gateway_version.as_deref(),
+        extension.compatibility.max_gateway_version.as_deref(),
+    ) {
+        if compare_version_parts(min, max) == std::cmp::Ordering::Greater {
+            bail!(
+                "field {section}[{extension_index}].compatibility: min_gateway_version must be <= max_gateway_version"
+            );
+        }
+    }
+    validate_plugin_manifest_names(
+        section,
+        extension_index,
+        "manifest.capabilities",
+        &extension.manifest.capabilities,
+    )?;
+    validate_plugin_manifest_names(
+        section,
+        extension_index,
+        "manifest.hooks",
+        &extension.manifest.hooks,
+    )?;
+    if let Some(schema) = &extension.manifest.config_schema {
+        if !matches!(schema, toml::Value::Table(_)) {
+            bail!("field {section}[{extension_index}].manifest.config_schema: must be an object");
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_plugin_version(
+    section: &str,
+    extension_index: usize,
+    field: &str,
+    value: Option<&str>,
+) -> AnyResult<()> {
+    if let Some(value) = value {
+        validate_plugin_version(section, extension_index, field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_plugin_version(
+    section: &str,
+    extension_index: usize,
+    field: &str,
+    value: &str,
+) -> AnyResult<()> {
+    if version_parts(value).is_none() {
+        bail!("field {section}[{extension_index}].{field}: must be a semantic version");
+    }
+    Ok(())
+}
+
+fn validate_plugin_manifest_names(
+    section: &str,
+    extension_index: usize,
+    field: &str,
+    names: &[String],
+) -> AnyResult<()> {
+    let mut seen = HashSet::new();
+    for (index, name) in names.iter().enumerate() {
+        if !is_plugin_manifest_name(name) {
+            bail!(
+                "field {section}[{extension_index}].{field}[{index}]: must contain only letters, numbers, dot, underscore, colon, or dash"
+            );
+        }
+        if !seen.insert(name.as_str()) {
+            bail!("field {section}[{extension_index}].{field}[{index}]: duplicate value {name}");
+        }
+    }
+    Ok(())
+}
+
+fn is_plugin_manifest_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn compare_version_parts(left: &str, right: &str) -> std::cmp::Ordering {
+    version_parts(left)
+        .unwrap_or([0, 0, 0])
+        .cmp(&version_parts(right).unwrap_or([0, 0, 0]))
+}
+
+fn version_parts(value: &str) -> Option<[u64; 3]> {
+    let mut parts = value.trim_start_matches('v').split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some([major, minor, patch])
 }
 
 fn validate_prompt_message_role(

@@ -436,17 +436,31 @@ async fn build_libsql_database(
             .map_err(libsql_error);
     }
 
-    let auth_token = auth_token
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| {
-            StorageError::Libsql(
+    let auth_token = match auth_token.filter(|token| !token.trim().is_empty()) {
+        Some(token) => token,
+        None if is_local_libsql_server_url(&url) => String::new(),
+        None => {
+            return Err(StorageError::Libsql(
                 "field storage.libsql_auth_token_env is required for remote libSQL URLs".into(),
-            )
-        })?;
+            ));
+        }
+    };
     LibsqlBuilder::new_remote(url, auth_token)
         .build()
         .await
         .map_err(libsql_error)
+}
+
+fn is_local_libsql_server_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = authority
+        .strip_prefix('[')
+        .and_then(|value| value.split_once(']').map(|(host, _)| host))
+        .unwrap_or_else(|| authority.split(':').next().unwrap_or_default());
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 #[derive(Debug)]

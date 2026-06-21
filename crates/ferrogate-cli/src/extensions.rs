@@ -20,10 +20,13 @@ use serde_json::{json, Value};
 
 use crate::config::{ExtensionConfig, ExtensionKind};
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct ExtensionStatus {
     pub(crate) id: String,
     pub(crate) kind: ExtensionKind,
+    pub(crate) version: String,
+    pub(crate) manifest: crate::config::PluginManifest,
+    pub(crate) compatibility: crate::config::PluginCompatibility,
     pub(crate) source: String,
     pub(crate) capabilities: Vec<String>,
     pub(crate) tools: Vec<String>,
@@ -134,6 +137,16 @@ impl ExtensionRegistry {
         for extension in sorted {
             if !extension.enabled {
                 statuses.push(status(extension, Vec::new(), false, "disabled", None));
+                continue;
+            }
+            if let Some(error) = plugin_compatibility_error(extension) {
+                statuses.push(status(
+                    extension,
+                    Vec::new(),
+                    false,
+                    "version_incompatible",
+                    Some(error),
+                ));
                 continue;
             }
 
@@ -423,6 +436,9 @@ fn status(
     ExtensionStatus {
         id: extension.id.clone(),
         kind: extension.kind.clone(),
+        version: extension.version.clone(),
+        manifest: extension.manifest.clone(),
+        compatibility: extension.compatibility.clone(),
         source: extension.source.clone(),
         capabilities: plugin_capabilities(extension),
         tools,
@@ -457,6 +473,43 @@ fn plugin_capabilities(extension: &ExtensionConfig) -> Vec<String> {
         capabilities.push("shell".into());
     }
     capabilities
+}
+
+fn plugin_compatibility_error(extension: &ExtensionConfig) -> Option<String> {
+    let current = env!("CARGO_PKG_VERSION");
+    if let Some(min) = extension.compatibility.min_gateway_version.as_deref() {
+        if compare_semverish(current, min) == std::cmp::Ordering::Less {
+            return Some(format!(
+                "plugin {} requires gateway version >= {min}; current version is {current}",
+                extension.id
+            ));
+        }
+    }
+    if let Some(max) = extension.compatibility.max_gateway_version.as_deref() {
+        if compare_semverish(current, max) == std::cmp::Ordering::Greater {
+            return Some(format!(
+                "plugin {} requires gateway version <= {max}; current version is {current}",
+                extension.id
+            ));
+        }
+    }
+    None
+}
+
+fn compare_semverish(left: &str, right: &str) -> std::cmp::Ordering {
+    semverish_parts(left).cmp(&semverish_parts(right))
+}
+
+fn semverish_parts(version: &str) -> Vec<u64> {
+    version
+        .trim_start_matches('v')
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .take(3)
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .chain(std::iter::repeat(0))
+        .take(3)
+        .collect()
 }
 
 enum BuiltinExtension {
@@ -998,6 +1051,9 @@ mod tests {
         ExtensionConfig {
             id: id.into(),
             kind,
+            version: "0.1.0".into(),
+            manifest: crate::config::PluginManifest::default(),
+            compatibility: crate::config::PluginCompatibility::default(),
             enabled: true,
             source: "builtin".into(),
             order: 10,

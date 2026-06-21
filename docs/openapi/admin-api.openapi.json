@@ -3848,6 +3848,9 @@
         "required": [
           "id",
           "kind",
+          "version",
+          "manifest",
+          "compatibility",
           "source",
           "capabilities",
           "tools",
@@ -3868,6 +3871,16 @@
               "tool_provider",
               "event_sink"
             ]
+          },
+          "version": {
+            "type": "string",
+            "description": "Plugin manifest version."
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/PluginManifest"
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/PluginCompatibility"
           },
           "source": {
             "type": "string"
@@ -3927,6 +3940,16 @@
               "event_sink"
             ]
           },
+          "version": {
+            "type": "string",
+            "description": "Plugin manifest version."
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/PluginManifest"
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/PluginCompatibility"
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -3946,6 +3969,55 @@
           "config": {
             "type": "object",
             "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "PluginManifest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "hooks": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "config_schema": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "PluginCompatibility": {
+        "type": "object",
+        "properties": {
+          "min_gateway_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_gateway_version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

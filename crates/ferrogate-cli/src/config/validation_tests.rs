@@ -299,6 +299,52 @@ fn validates_builtin_extension_kind_and_mcp_network_boundary() {
 }
 
 #[test]
+fn validates_plugin_manifest_and_compatibility_contract() {
+    let mut plugin = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    plugin.version = "1.2.3".into();
+    plugin.manifest.name = Some("Echo tools".into());
+    plugin.manifest.description = Some("Safe local echo plugin".into());
+    plugin.manifest.capabilities = vec!["tool_provider".into(), "safe:echo".into()];
+    plugin.manifest.hooks = vec!["tool.execute".into()];
+    plugin.manifest.config_schema = Some(toml::Value::Table(toml::map::Map::new()));
+    plugin.compatibility.min_gateway_version = Some("0.1.0".into());
+    plugin.compatibility.max_gateway_version = Some("9999.0.0".into());
+    let config = Config {
+        plugins: vec![plugin],
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let mut plugin = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    plugin.version = "not-a-version".into();
+    let config = Config {
+        plugins: vec![plugin],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("plugins[0].version"));
+
+    let mut plugin = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    plugin.manifest.capabilities = vec!["bad capability".into()];
+    let config = Config {
+        plugins: vec![plugin],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("plugins[0].manifest.capabilities[0]"));
+
+    let mut plugin = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    plugin.compatibility.min_gateway_version = Some("2.0.0".into());
+    plugin.compatibility.max_gateway_version = Some("1.0.0".into());
+    let config = Config {
+        plugins: vec![plugin],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("min_gateway_version must be <= max_gateway_version"));
+}
+
+#[test]
 fn validates_optional_metering_export_boundary() {
     let config = Config::default();
     assert_eq!(
@@ -1648,6 +1694,9 @@ fn extension(id: &str, kind: ExtensionKind, order: u32) -> ExtensionConfig {
     ExtensionConfig {
         id: id.into(),
         kind,
+        version: "0.1.0".into(),
+        manifest: PluginManifest::default(),
+        compatibility: PluginCompatibility::default(),
         enabled: true,
         source: "builtin".into(),
         order,

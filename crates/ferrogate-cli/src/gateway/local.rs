@@ -4426,6 +4426,9 @@ fn admin_plugin(
     let status = status.unwrap_or(crate::extensions::ExtensionStatus {
         id: plugin.id.clone(),
         kind: plugin.kind.clone(),
+        version: plugin.version.clone(),
+        manifest: plugin.manifest.clone(),
+        compatibility: plugin.compatibility.clone(),
         source: plugin.source.clone(),
         capabilities: Vec::new(),
         tools: Vec::new(),
@@ -4438,6 +4441,9 @@ fn admin_plugin(
     AdminPlugin {
         id: plugin.id.clone(),
         kind: plugin.kind.clone(),
+        version: status.version.clone(),
+        manifest: status.manifest.clone(),
+        compatibility: status.compatibility.clone(),
         enabled: plugin.enabled,
         source: plugin.source.clone(),
         order: plugin.order,
@@ -4656,6 +4662,9 @@ fn plugin_from_mutation(
     Ok(crate::config::PluginConfig {
         id,
         kind: payload.kind,
+        version: payload.version.unwrap_or_else(|| "0.1.0".into()),
+        manifest: payload.manifest.unwrap_or_default(),
+        compatibility: payload.compatibility.unwrap_or_default(),
         enabled: payload.enabled.unwrap_or(true),
         source: payload.source.unwrap_or_else(|| "builtin".into()),
         order: payload.order.unwrap_or(10),

@@ -978,7 +978,7 @@ fn storage_libsql_auth_token(
     storage: &StorageConfig,
     libsql_url: &str,
 ) -> anyhow::Result<Option<String>> {
-    if libsql_url.trim().starts_with("file://") {
+    if libsql_url.trim().starts_with("file://") || is_local_libsql_server_url(libsql_url.trim()) {
         return Ok(None);
     }
     if let Some(token) = storage
@@ -998,6 +998,18 @@ fn storage_libsql_auth_token(
             "field storage.libsql_auth_token_env: environment variable {env_name} is not set"
         )
     })
+}
+
+fn is_local_libsql_server_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("http")) {
+        return false;
+    }
+    uri.authority()
+        .map(|authority| matches!(authority.host(), "127.0.0.1" | "localhost" | "::1"))
+        .unwrap_or(false)
 }
 
 fn block_on_runtime_storage<T: Send>(

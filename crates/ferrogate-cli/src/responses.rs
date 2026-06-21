@@ -173,6 +173,9 @@ pub(crate) struct AdminGatewayConfigMutationResponse {
 pub(crate) struct AdminPlugin {
     pub(crate) id: String,
     pub(crate) kind: crate::config::ExtensionKind,
+    pub(crate) version: String,
+    pub(crate) manifest: crate::config::PluginManifest,
+    pub(crate) compatibility: crate::config::PluginCompatibility,
     pub(crate) enabled: bool,
     pub(crate) source: String,
     pub(crate) order: u32,
@@ -191,6 +194,12 @@ pub(crate) struct AdminPlugin {
 pub(crate) struct AdminPluginMutation {
     pub(crate) id: Option<String>,
     pub(crate) kind: crate::config::ExtensionKind,
+    #[serde(default)]
+    pub(crate) version: Option<String>,
+    #[serde(default)]
+    pub(crate) manifest: Option<crate::config::PluginManifest>,
+    #[serde(default)]
+    pub(crate) compatibility: Option<crate::config::PluginCompatibility>,
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
     #[serde(default)]

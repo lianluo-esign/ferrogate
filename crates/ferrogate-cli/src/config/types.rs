@@ -467,6 +467,12 @@ pub(crate) enum ExtensionKind {
 pub(crate) struct ExtensionConfig {
     pub(crate) id: String,
     pub(crate) kind: ExtensionKind,
+    #[serde(default = "default_plugin_manifest_version")]
+    pub(crate) version: String,
+    #[serde(default)]
+    pub(crate) manifest: PluginManifest,
+    #[serde(default)]
+    pub(crate) compatibility: PluginCompatibility,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
     #[serde(default = "default_extension_source")]
@@ -482,6 +488,28 @@ pub(crate) struct ExtensionConfig {
 }
 
 pub(crate) type PluginConfig = ExtensionConfig;
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PluginManifest {
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<String>,
+    #[serde(default)]
+    pub(crate) hooks: Vec<String>,
+    #[serde(default)]
+    pub(crate) config_schema: Option<toml::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct PluginCompatibility {
+    #[serde(default)]
+    pub(crate) min_gateway_version: Option<String>,
+    #[serde(default)]
+    pub(crate) max_gateway_version: Option<String>,
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct ExtensionPermissions {
@@ -866,6 +894,10 @@ fn default_extension_source() -> String {
 
 fn default_extension_order() -> u32 {
     100
+}
+
+fn default_plugin_manifest_version() -> String {
+    "0.1.0".to_string()
 }
 
 fn default_access_log_sample_rate() -> u64 {
