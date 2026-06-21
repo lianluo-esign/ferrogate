@@ -96,6 +96,7 @@ fn config_model_supports_serde_roundtrip() {
                 network: vec![],
                 filesystem: false,
                 shell: false,
+                tenant_scope: false,
                 secrets: false,
                 admin_mutation: false,
             },

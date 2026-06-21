@@ -282,6 +282,44 @@ fn rejects_invalid_extension_permission_values() {
         ..Config::default()
     };
     config.validate().unwrap();
+
+    let mut extension_config = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    extension_config.config.insert(
+        "tenant_allowlist".into(),
+        toml::Value::Array(vec![toml::Value::String("org-demo".into())]),
+    );
+    let config = Config {
+        extensions: vec![extension_config],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("permissions.tenant_scope = true"));
+
+    let mut extension_config = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    extension_config.permissions.tenant_scope = true;
+    extension_config.config.insert(
+        "tenant_allowlist".into(),
+        toml::Value::Array(vec![toml::Value::String("org-demo".into())]),
+    );
+    let config = Config {
+        extensions: vec![extension_config],
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let mut extension_config = extension("tool.echo", ExtensionKind::ToolProvider, 10);
+    extension_config.permissions.tenant_scope = true;
+    extension_config.config.insert(
+        "route_allowlist".into(),
+        toml::Value::Array(vec![toml::Value::String(String::new())]),
+    );
+    let config = Config {
+        extensions: vec![extension_config],
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("config.route_allowlist[0]: cannot be empty"));
 }
 
 #[test]
@@ -1739,6 +1777,7 @@ fn extension(id: &str, kind: ExtensionKind, order: u32) -> ExtensionConfig {
             network: vec![],
             filesystem: false,
             shell: false,
+            tenant_scope: false,
             secrets: false,
             admin_mutation: false,
         },

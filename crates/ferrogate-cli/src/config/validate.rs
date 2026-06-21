@@ -1139,6 +1139,7 @@ impl Config {
                 "permissions.network",
                 &extension.permissions.network,
             )?;
+            validate_plugin_tenant_scope_permission(section, index, extension)?;
             validate_plugin_secret_permission(section, index, extension)?;
             validate_plugin_manifest(section, index, extension)?;
             let _ = extension.approval_policy;
@@ -1338,6 +1339,46 @@ fn validate_plugin_secret_permission(
     if let Some(path) = first_secret_config_path(&extension.config) {
         bail!(
             "field {section}[{extension_index}].config.{path}: secret-shaped plugin config requires permissions.secrets = true"
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_plugin_tenant_scope_permission(
+    section: &str,
+    extension_index: usize,
+    extension: &super::ExtensionConfig,
+) -> AnyResult<()> {
+    let mut uses_tenant_scope = false;
+
+    for field in ["tenant_allowlist", "api_key_allowlist", "route_allowlist"] {
+        let Some(value) = extension.config.get(field) else {
+            continue;
+        };
+        let values = value.as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "field {section}[{extension_index}].config.{field}: must be an array of strings"
+            )
+        })?;
+        for (value_index, value) in values.iter().enumerate() {
+            let Some(value) = value.as_str() else {
+                bail!(
+                    "field {section}[{extension_index}].config.{field}[{value_index}]: must be a string"
+                );
+            };
+            if value.trim().is_empty() {
+                bail!(
+                    "field {section}[{extension_index}].config.{field}[{value_index}]: cannot be empty"
+                );
+            }
+        }
+        uses_tenant_scope |= !values.is_empty();
+    }
+
+    if uses_tenant_scope && !extension.permissions.tenant_scope {
+        bail!(
+            "field {section}[{extension_index}].config: tenant/api-key/route scoped plugin config requires permissions.tenant_scope = true"
         );
     }
 

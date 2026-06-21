@@ -896,6 +896,7 @@ tools = ["tool.echo"]
 network = []
 filesystem = false
 shell = false
+tenant_scope = true
 
 [extensions.config]
 tenant_allowlist = ["org_demo"]

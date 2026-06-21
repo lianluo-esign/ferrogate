@@ -3134,6 +3134,60 @@ scopes = ["admin.read", "admin.write"]
         "{plugins_after_denied_secret}"
     );
 
+    let denied_tenant_scope_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "tool.echo",
+            "kind": "tool_provider",
+            "enabled": true,
+            "source": "builtin",
+            "order": 10,
+            "permissions": {
+                "tools": ["tool.echo"],
+                "network": [],
+                "filesystem": false,
+                "shell": false,
+                "tenant_scope": false,
+                "secrets": false,
+                "admin_mutation": false
+            },
+            "config": {
+                "tenant_allowlist": ["org-demo"]
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        denied_tenant_scope_plugin.contains("400 Bad Request"),
+        "{denied_tenant_scope_plugin}"
+    );
+    assert!(
+        denied_tenant_scope_plugin.contains("invalid_plugin"),
+        "{denied_tenant_scope_plugin}"
+    );
+    assert!(
+        denied_tenant_scope_plugin.contains("permissions.tenant_scope = true"),
+        "{denied_tenant_scope_plugin}"
+    );
+
+    let plugins_after_denied_tenant_scope = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        !plugins_after_denied_tenant_scope.contains("\"id\":\"tool.echo\""),
+        "{plugins_after_denied_tenant_scope}"
+    );
+
     let create_body = serde_json::json!({
         "id": "tool.echo",
         "kind": "tool_provider",
@@ -3159,12 +3213,14 @@ scopes = ["admin.read", "admin.write"]
             "network": [],
             "filesystem": false,
             "shell": false,
+            "tenant_scope": true,
             "secrets": true,
             "admin_mutation": false
         },
         "config": {
             "timeout_ms": 30000,
             "api_token": "plugin-secret-token",
+            "tenant_allowlist": ["*"],
             "headers": {
                 "authorization": "Bearer plugin-secret-token"
             }
@@ -3196,6 +3252,11 @@ scopes = ["admin.read", "admin.write"]
     assert!(created.contains("\"active\":true"), "{created}");
     assert!(created.contains("\"health\":\"ok\""), "{created}");
     assert!(created.contains("\"tools\":[\"tool.echo\"]"), "{created}");
+    assert!(created.contains("\"tenant_scope\":true"), "{created}");
+    assert!(
+        created.contains("\"tenant_allowlist\":[\"*\"]"),
+        "{created}"
+    );
     assert!(created.contains("\"secrets\":true"), "{created}");
     assert!(created.contains("\"admin_mutation\":false"), "{created}");
     assert!(created.contains("\"timeout_ms\":30000"), "{created}");
@@ -3439,12 +3500,14 @@ scopes = ["admin.read", "admin.write"]
                 "network": [],
                 "filesystem": false,
                 "shell": false,
+                "tenant_scope": true,
                 "secrets": true,
                 "admin_mutation": false
             },
             "config": {
                 "timeout_ms": 15000,
                 "mode": "updated",
+                "tenant_allowlist": ["*"],
                 "client_secret": "updated-plugin-secret"
             }
         })

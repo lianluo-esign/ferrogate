@@ -4052,6 +4052,9 @@
           "shell": {
             "type": "boolean"
           },
+          "tenant_scope": {
+            "type": "boolean"
+          },
           "secrets": {
             "type": "boolean"
           },

@@ -522,6 +522,8 @@ pub(crate) struct ExtensionPermissions {
     #[serde(default)]
     pub(crate) shell: bool,
     #[serde(default)]
+    pub(crate) tenant_scope: bool,
+    #[serde(default)]
     pub(crate) secrets: bool,
     #[serde(default)]
     pub(crate) admin_mutation: bool,

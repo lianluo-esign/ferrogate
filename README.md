@@ -48,7 +48,8 @@ The project is developed as the open-source gateway foundation behind
   bundle and tools are the executable actions exposed to agents and APIs. Built-in
   plugins cover request hooks, tool providers, event sinks, `GET /v1/tools`,
   `POST /v1/tools/execute`, admin plugin/tool views, explicit tool/network/
-  secret/admin-mutation permission declarations, tool sessions, and audit events.
+  tenant-scope/secret/admin-mutation permission declarations, tool sessions, and
+  audit events.
 - **Caddy-style config file compatibility** through `Ferrogate/Caddyfile`
   parsing for familiar reverse-proxy routes, matchers, TLS, logging, and
   gateway settings, alongside structured TOML configuration.
@@ -806,8 +807,10 @@ completions require `chat.completions`, Responses API requests require
 `responses.create`, prompt rendering requires `prompts.render`, and config
 validation and reload require `admin.write`. Plugin registrations also carry
 their own typed permission declarations for tools, network, filesystem, shell,
-secrets, and admin mutation; secret-shaped plugin config is rejected unless the
-plugin explicitly declares `permissions.secrets = true`.
+tenant scope, secrets, and admin mutation. Plugin tenant/API-key/route
+allowlists require `permissions.tenant_scope = true`; secret-shaped plugin
+config is rejected unless the plugin explicitly declares
+`permissions.secrets = true`.
 
 ## Tenant and RBAC Service
 

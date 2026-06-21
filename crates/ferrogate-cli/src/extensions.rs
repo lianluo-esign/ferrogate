@@ -472,6 +472,9 @@ fn plugin_capabilities(extension: &ExtensionConfig) -> Vec<String> {
     if extension.permissions.shell {
         capabilities.push("shell".into());
     }
+    if extension.permissions.tenant_scope {
+        capabilities.push("tenant_scope".into());
+    }
     if extension.permissions.secrets {
         capabilities.push("secrets".into());
     }
@@ -1069,6 +1072,7 @@ mod tests {
                 network: vec![],
                 filesystem: false,
                 shell: false,
+                tenant_scope: false,
                 secrets: false,
                 admin_mutation: false,
             },
