@@ -1219,7 +1219,7 @@ fn run_control_plane_libsql_restart(
         "id": resource_id,
         "name": "Turso restart test key",
         "key": format!("{resource_id}-secret"),
-        "scopes": ["models.read", "chat.completions"],
+        "scopes": ["models.read", "chat.completions", "prompts.render"],
         "allowed_models": ["fast-chat"],
         "organization_id": "org_turso_e2e",
         "project_id": "project_restart"
@@ -1353,6 +1353,7 @@ fn run_control_plane_libsql_restart(
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_policy(&policy_name)?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
+        case.expect_restored_prompt_template_render(&resource_id, &prompt_template_id)?;
         case.expect_restored_api_key_models_access(&resource_id)?;
         case.expect_json(
             "PATCH",
@@ -1829,6 +1830,29 @@ impl TursoRestartHarness {
                 assert_eq!(body["prompt_template"]["name"], "Turso restart prompt");
                 assert_eq!(body["prompt_template"]["status"], status);
                 assert_eq!(body["prompt_template"]["active_revision"], 1);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_restored_prompt_template_render(
+        &self,
+        api_key_id: &str,
+        template_id: &str,
+    ) -> Result<()> {
+        let auth = format!("Authorization: Bearer {api_key_id}-secret");
+        self.expect_json(
+            "POST",
+            &format!("/v1/prompts/{template_id}/render"),
+            &[auth.as_str(), JSON_CONTENT],
+            r#"{"variables":{"topic":"durable storage"}}"#,
+            200,
+            |body| {
+                assert_eq!(body["model"], "fast-chat");
+                assert_eq!(body["temperature"], 0.1);
+                assert_eq!(body["messages"][0]["role"], "user");
+                assert_eq!(body["messages"][0]["content"], "Summarize durable storage");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
