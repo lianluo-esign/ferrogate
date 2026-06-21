@@ -3185,6 +3185,62 @@ scopes = ["admin.read", "admin.write"]
     assert!(tools.contains("200 OK"), "{tools}");
     assert!(tools.contains("\"name\":\"tool.echo\""), "{tools}");
 
+    let denied_network_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        &serde_json::json!({
+            "id": "mcp.http",
+            "kind": "tool_provider",
+            "enabled": true,
+            "source": "builtin",
+            "order": 20,
+            "permissions": {
+                "tools": ["search"],
+                "network": [],
+                "filesystem": false,
+                "shell": false
+            },
+            "config": {
+                "endpoint": "http://127.0.0.1:1/mcp",
+                "timeout_ms": 100
+            }
+        })
+        .to_string(),
+    );
+    assert!(
+        denied_network_plugin.contains("400 Bad Request"),
+        "{denied_network_plugin}"
+    );
+    assert!(
+        denied_network_plugin.contains("invalid_plugin"),
+        "{denied_network_plugin}"
+    );
+    assert!(
+        denied_network_plugin.contains("permissions.network"),
+        "{denied_network_plugin}"
+    );
+    assert!(
+        denied_network_plugin.contains("must allow MCP host 127.0.0.1"),
+        "{denied_network_plugin}"
+    );
+
+    let plugins_after_denied_network = http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/plugins",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    );
+    assert!(
+        !plugins_after_denied_network.contains("\"id\":\"mcp.http\""),
+        "{plugins_after_denied_network}"
+    );
+
     let duplicate_update = http_request(
         &gateway_addr,
         "PATCH",
