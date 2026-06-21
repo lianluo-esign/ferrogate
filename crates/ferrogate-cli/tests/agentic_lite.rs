@@ -363,6 +363,102 @@ fn agent_run_endpoint_can_execute_configured_wasm_provider() {
 }
 
 #[test]
+fn wasm_agent_host_abi_dispatches_tools_through_gateway_governance() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let module_path = dir.path().join("agent-host.wasm");
+    std::fs::write(
+        &module_path,
+        wat::parse_str(
+            r#"
+            (module
+              (import "ferrogate" "log" (func $log (param i32)))
+              (import "ferrogate" "state_get" (func $state_get (param i32) (result i32)))
+              (import "ferrogate" "state_set" (func $state_set (param i32 i32) (result i32)))
+              (import "ferrogate" "tool_dispatch" (func $tool_dispatch (param i32) (result i32)))
+              (func (export "run") (result i32)
+                i32.const 7
+                call $log
+                i32.const 3
+                i32.const 35
+                call $state_set
+                drop
+                i32.const 3
+                call $state_get
+                i32.const 1
+                call $tool_dispatch
+                i32.add))
+            "#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        wasm_agent_host_abi_config(&gateway_addr, module_path.to_str().unwrap()),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let created = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-agent-run-id: agent-run-wasm-host",
+        ],
+        r#"{"input":"wasm-host-agent-input","max_turns":2,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"from-wasm-host"},"session_id":"wasm-host-tool-session"}]}"#,
+    ));
+    assert_eq!(created["object"], "agent_run");
+    assert_eq!(created["status"], "completed");
+    assert_eq!(created["output"], "wasm:run result=35");
+
+    let timeline = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-runs/agent-run-wasm-host",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert_eq!(timeline["run"]["provider"], "ferrogate.wasm");
+    let events = timeline["audit_events"].as_array().unwrap();
+    assert!(events.iter().any(|event| {
+        event["action"] == "agent.wasm.log"
+            && event["agent_run_id"] == "agent-run-wasm-host"
+            && event["outcome"] == "recorded"
+    }));
+    assert!(events.iter().any(|event| {
+        event["action"] == "agent.wasm.state_set"
+            && event["target"] == "agent_run:agent-run-wasm-host/state:3"
+            && event["outcome"] == "success"
+    }));
+    assert!(events.iter().any(|event| {
+        event["action"] == "agent.wasm.state_get"
+            && event["target"] == "agent_run:agent-run-wasm-host/state:3"
+            && event["outcome"] == "success"
+    }));
+    assert!(events.iter().any(|event| {
+        event["action"] == "tool.execute"
+            && event["target"] == "tool_session:wasm-host-tool-session"
+            && event["outcome"] == "success"
+            && event["agent_run_id"] == "agent-run-wasm-host"
+    }));
+    assert!(events.iter().any(|event| {
+        event["action"] == "agent.wasm.tool_dispatch"
+            && event["target"] == "agent_run:agent-run-wasm-host/tool_handle:1"
+            && event["outcome"] == "success"
+    }));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
     let (mcp_addr, mcp_handle) = spawn_mcp_server(2);
     let gateway_addr = free_addr();
@@ -1268,6 +1364,58 @@ key = "agent-secret"
 scopes = ["agent.runs.create", "tools.execute"]
 organization_id = "org_demo"
 project_id = "project_gateway"
+"#
+    )
+}
+
+fn wasm_agent_host_abi_config(gateway_addr: &str, module_path: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[agent_runtime]
+enabled = true
+provider = "wasm"
+max_turns = 3
+timeout_millis = 5000
+
+[agent_runtime.wasm]
+max_fuel = 100000
+module_path = "{module_path}"
+export_name = "run"
+host_abi = true
+allow_wasi = false
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
+id = "agent-client"
+name = "Agent client"
+key = "agent-secret"
+scopes = ["agent.runs.create", "tools.execute"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[extensions]]
+id = "tool.echo"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+
+[extensions.permissions]
+tools = ["tool.echo"]
+network = []
+filesystem = false
+shell = false
+tenant_scope = true
+
+[extensions.config]
+tenant_allowlist = ["org_demo"]
 "#
     )
 }

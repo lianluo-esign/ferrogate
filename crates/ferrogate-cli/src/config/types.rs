@@ -133,6 +133,8 @@ pub(crate) struct AgentRuntimeWasmConfig {
     #[serde(default = "default_agent_runtime_wasm_export_name")]
     pub(crate) export_name: String,
     #[serde(default)]
+    pub(crate) host_abi: bool,
+    #[serde(default)]
     pub(crate) allow_wasi: bool,
 }
 
@@ -1279,6 +1281,7 @@ impl Default for AgentRuntimeWasmConfig {
             max_fuel: default_agent_runtime_wasm_max_fuel(),
             module_path: None,
             export_name: default_agent_runtime_wasm_export_name(),
+            host_abi: false,
             allow_wasi: false,
         }
     }

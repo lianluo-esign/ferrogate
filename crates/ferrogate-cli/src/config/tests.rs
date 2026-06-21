@@ -295,6 +295,7 @@ agent_runtime:
     max_fuel: 2000000
     module_path: /tmp/agent.wasm
     export_name: start
+    host_abi: true
     allow_wasi: false
 "#,
     )
@@ -311,6 +312,7 @@ agent_runtime:
         Some("/tmp/agent.wasm")
     );
     assert_eq!(config.agent_runtime.wasm.export_name, "start");
+    assert!(config.agent_runtime.wasm.host_abi);
     assert!(!config.agent_runtime.wasm.allow_wasi);
 }
 

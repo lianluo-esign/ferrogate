@@ -19,7 +19,10 @@ pub use agent::{
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 #[cfg(feature = "wasm")]
-pub use wasm::{WasmRunOutcome, WasmSandboxConfig, WasmSandboxError, WasmSandboxExecutor};
+pub use wasm::{
+    WasmHostAbi, WasmHostRunOutcome, WasmRunOutcome, WasmSandboxConfig, WasmSandboxError,
+    WasmSandboxExecutor,
+};
 
 /// Runtime lifecycle commands exposed by the CLI and future control plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

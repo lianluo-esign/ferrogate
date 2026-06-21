@@ -4,14 +4,17 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use ferrogate_core::{RequestContext, ToolCall, ToolResult};
 use ferrogate_runtime::{
     AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider, AgentRunEvent,
     AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome, AgentRunStatus,
     AgentRuntimeError, AgentStep, AgentToolDispatchRequest, ExternalAgentProvider,
-    ExternalAgentProviderConfig, GovernedAgentToolDispatcher, WasmSandboxConfig,
+    ExternalAgentProviderConfig, GovernedAgentToolDispatcher, WasmHostAbi, WasmSandboxConfig,
     WasmSandboxExecutor,
 };
 use http::{HeaderMap, Method, StatusCode};
@@ -243,6 +246,10 @@ impl FerroGateway {
             &state.config.agent_runtime,
             request.input,
             tool_calls.clone(),
+            self.clone(),
+            ctx,
+            auth.clone(),
+            run_id.clone(),
         ) {
             Ok(provider) => provider,
             Err((code, message)) => {
@@ -420,13 +427,24 @@ fn agent_provider(
     config: &AgentRuntimeConfig,
     input: String,
     tool_calls: Vec<AgentRunToolCallRequest>,
+    gateway: FerroGateway,
+    ctx: &ProxyContext,
+    auth: AuthContext,
+    run_id: String,
 ) -> Result<Box<dyn AgentProvider + Send>, (&'static str, String)> {
     match config.provider {
-        AgentRuntimeProvider::Wasm if config.wasm.module_path.is_some() => {
-            wasm_agent_provider(&config.wasm, input, config.timeout_millis)
-                .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
-                .map_err(|error| ("invalid_agent_runtime_provider", error.to_string()))
-        }
+        AgentRuntimeProvider::Wasm if config.wasm.module_path.is_some() => wasm_agent_provider(
+            &config.wasm,
+            input,
+            config.timeout_millis,
+            gateway,
+            ctx,
+            auth,
+            run_id,
+            tool_calls,
+        )
+        .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
+        .map_err(|error| ("invalid_agent_runtime_provider", error.to_string())),
         AgentRuntimeProvider::Wasm => Ok(Box::new(DefaultAgentProvider::new(input, tool_calls))),
         AgentRuntimeProvider::External => external_agent_provider(&config.external, input)
             .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
@@ -438,16 +456,25 @@ fn wasm_agent_provider(
     config: &AgentRuntimeWasmConfig,
     input: String,
     timeout_millis: u64,
+    gateway: FerroGateway,
+    ctx: &ProxyContext,
+    auth: AuthContext,
+    run_id: String,
+    tool_calls: Vec<AgentRunToolCallRequest>,
 ) -> Result<WasmAgentProvider, AgentRuntimeError> {
     let module_path = config.module_path.clone().ok_or_else(|| {
         AgentRuntimeError::InvalidConfig("agent_runtime.wasm.module_path is required".into())
     })?;
+    let host = config
+        .host_abi
+        .then(|| WasmAgentHost::new(gateway, ctx, auth, run_id, tool_calls));
     WasmAgentProvider::new(
         module_path,
         config.export_name.clone(),
         config.max_fuel,
         timeout_millis,
         input,
+        host,
     )
 }
 
@@ -508,6 +535,7 @@ struct WasmAgentProvider {
     max_fuel: u64,
     timeout: Option<Duration>,
     pending: bool,
+    host: Option<WasmAgentHost>,
 }
 
 impl WasmAgentProvider {
@@ -517,6 +545,7 @@ impl WasmAgentProvider {
         max_fuel: u64,
         timeout_millis: u64,
         _input: String,
+        host: Option<WasmAgentHost>,
     ) -> Result<Self, AgentRuntimeError> {
         if module_path.trim().is_empty() {
             return Err(AgentRuntimeError::InvalidConfig(
@@ -534,6 +563,7 @@ impl WasmAgentProvider {
             max_fuel,
             timeout: Some(Duration::from_millis(timeout_millis)),
             pending: true,
+            host,
         })
     }
 }
@@ -555,12 +585,164 @@ impl AgentProvider for WasmAgentProvider {
             timeout: self.timeout,
         })
         .map_err(|error| AgentRuntimeError::Provider(error.to_string()))?;
-        let outcome = executor
-            .execute_export_i32(&module, &self.export_name)
-            .map_err(|error| AgentRuntimeError::Provider(error.to_string()))?;
+        let outcome = match self.host.take() {
+            Some(host) => {
+                let run = executor
+                    .execute_export_i32_with_host(&module, &self.export_name, host)
+                    .map_err(|error| AgentRuntimeError::Provider(error.to_string()))?;
+                self.host = Some(run.host);
+                run.outcome
+            }
+            None => executor
+                .execute_export_i32(&module, &self.export_name)
+                .map_err(|error| AgentRuntimeError::Provider(error.to_string()))?,
+        };
         Ok(AgentStep::Finish {
             output: format!("wasm:{} result={}", outcome.export_name, outcome.result),
         })
+    }
+}
+
+struct WasmAgentHost {
+    gateway: FerroGateway,
+    ctx: ProxyContext,
+    auth: AuthContext,
+    run_id: String,
+    state: BTreeMap<i32, i32>,
+    tool_calls: Vec<AgentRunToolCallRequest>,
+}
+
+impl WasmAgentHost {
+    fn new(
+        gateway: FerroGateway,
+        ctx: &ProxyContext,
+        auth: AuthContext,
+        run_id: String,
+        tool_calls: Vec<AgentRunToolCallRequest>,
+    ) -> Self {
+        Self {
+            gateway,
+            ctx: ctx.clone(),
+            auth,
+            run_id,
+            state: BTreeMap::new(),
+            tool_calls,
+        }
+    }
+
+    fn record(&self, action: &str, target: String, outcome: &str, message: String) {
+        self.gateway
+            .state
+            .current()
+            .record_admin_audit_event(agent_audit_event(
+                &self.ctx,
+                &self.auth,
+                Some(self.run_id.clone()),
+                action,
+                target,
+                outcome,
+                message,
+            ));
+    }
+}
+
+impl WasmHostAbi for WasmAgentHost {
+    fn log(&mut self, code: i32) {
+        self.record(
+            "agent.wasm.log",
+            format!("agent_run:{}", self.run_id),
+            "recorded",
+            format!("wasm log code={code}"),
+        );
+    }
+
+    fn state_get(&mut self, key: i32) -> i32 {
+        let value = self.state.get(&key).copied().unwrap_or_default();
+        self.record(
+            "agent.wasm.state_get",
+            format!("agent_run:{}/state:{key}", self.run_id),
+            "success",
+            format!("wasm state get key={key} value={value}"),
+        );
+        value
+    }
+
+    fn state_set(&mut self, key: i32, value: i32) -> i32 {
+        self.state.insert(key, value);
+        self.record(
+            "agent.wasm.state_set",
+            format!("agent_run:{}/state:{key}", self.run_id),
+            "success",
+            format!("wasm state set key={key} value={value}"),
+        );
+        0
+    }
+
+    fn tool_dispatch(&mut self, tool_handle: i32) -> i32 {
+        if tool_handle <= 0 {
+            self.record(
+                "agent.wasm.tool_dispatch",
+                format!("agent_run:{}/tool_handle:{tool_handle}", self.run_id),
+                "error",
+                format!("invalid wasm tool handle {tool_handle}"),
+            );
+            return -1;
+        }
+        let Some(tool_call) = self.tool_calls.get((tool_handle - 1) as usize).cloned() else {
+            self.record(
+                "agent.wasm.tool_dispatch",
+                format!("agent_run:{}/tool_handle:{tool_handle}", self.run_id),
+                "error",
+                format!("wasm tool handle {tool_handle} is not mapped"),
+            );
+            return -1;
+        };
+        let tool_request = ToolExecutionRequest {
+            name: tool_call.name,
+            arguments: tool_call.arguments,
+            route: tool_call.route,
+            session_id: tool_call
+                .session_id
+                .or_else(|| Some(format!("agent_run:{}", self.run_id))),
+        };
+        match block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
+            &self.ctx,
+            &self.auth,
+            Some(&self.run_id),
+            tool_request,
+            ToolExecuteBackend::Extension,
+        )) {
+            Ok(response) if !response.is_error => {
+                self.record(
+                    "agent.wasm.tool_dispatch",
+                    format!("agent_run:{}/tool_handle:{tool_handle}", self.run_id),
+                    "success",
+                    format!("wasm tool handle {tool_handle} executed {}", response.name),
+                );
+                0
+            }
+            Ok(response) => {
+                self.record(
+                    "agent.wasm.tool_dispatch",
+                    format!("agent_run:{}/tool_handle:{tool_handle}", self.run_id),
+                    "error",
+                    format!(
+                        "wasm tool handle {tool_handle} returned tool error {}",
+                        response.name
+                    ),
+                );
+                -1
+            }
+            Err(error) => {
+                self.record(
+                    "agent.wasm.tool_dispatch",
+                    format!("agent_run:{}/tool_handle:{tool_handle}", self.run_id),
+                    "error",
+                    format!("wasm tool handle {tool_handle} failed: {}", error.message),
+                );
+                -1
+            }
+        }
     }
 }
 
