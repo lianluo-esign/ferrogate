@@ -6340,6 +6340,42 @@
               "null"
             ],
             "minimum": 1
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentRunToolCallRequest"
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentRunToolCallRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "arguments": {
+            "type": "object",
+            "default": {}
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

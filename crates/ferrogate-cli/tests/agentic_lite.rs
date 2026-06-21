@@ -177,14 +177,18 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
             "Content-Type: application/json",
             "x-ferrogate-agent-run-id: agent-run-direct",
         ],
-        r#"{"input":"produce a bounded agent result","max_turns":2,"timeout_millis":1000}"#,
+        r#"{"input":"produce a bounded agent result","max_turns":3,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"from agent"},"session_id":"agent-tool-session"}]}"#,
     ));
     assert_eq!(created["object"], "agent_run");
     assert_eq!(created["id"], "agent-run-direct");
     assert_eq!(created["status"], "completed");
-    assert_eq!(created["turns_executed"], 1);
+    assert_eq!(created["turns_executed"], 2);
     assert_eq!(created["output"], "produce a bounded agent result");
-    assert_eq!(created["tool_results"].as_array().unwrap().len(), 0);
+    assert_eq!(created["tool_results"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        created["tool_results"][0]["content"]["echo"]["message"],
+        "from agent"
+    );
 
     let timeline = response_json(http_request(
         &gateway_addr,
@@ -197,20 +201,20 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
     assert_eq!(timeline["id"], "agent-run-direct");
     assert_eq!(timeline["summary"]["status"], "completed");
     assert_eq!(timeline["summary"]["request_count"], 0);
-    assert_eq!(timeline["summary"]["audit_event_count"], 3);
-    assert_eq!(timeline["summary"]["agent_event_count"], 3);
+    assert_eq!(timeline["summary"]["audit_event_count"], 7);
+    assert_eq!(timeline["summary"]["agent_event_count"], 6);
     assert_eq!(timeline["run"]["id"], "agent-run-direct");
     assert_eq!(timeline["run"]["status"], "completed");
     assert_eq!(timeline["run"]["provider"], "ferrogate.default");
-    assert_eq!(timeline["run"]["turns_executed"], 1);
+    assert_eq!(timeline["run"]["turns_executed"], 2);
     assert_eq!(timeline["run"]["output_recorded"], true);
-    assert_eq!(timeline["agent_events"].as_array().unwrap().len(), 3);
+    assert_eq!(timeline["agent_events"].as_array().unwrap().len(), 6);
     assert!(timeline["agent_events"]
         .as_array()
         .unwrap()
         .iter()
         .any(|event| {
-            event["kind"] == "run_completed"
+            event["kind"] == "tool_call_completed"
                 && event["run_id"] == "agent-run-direct"
                 && event["outcome"] == "success"
         }));
@@ -227,6 +231,12 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
         event["action"] == "agent.run_completed"
             && event["outcome"] == "success"
             && event["message"] == "agent run completed"
+    }));
+    assert!(events.iter().any(|event| {
+        event["action"] == "tool.execute"
+            && event["target"] == "tool_session:agent-tool-session"
+            && event["outcome"] == "success"
+            && event["agent_run_id"] == "agent-run-direct"
     }));
 
     let no_scope = response_json(http_request(
@@ -1061,9 +1071,26 @@ scopes = ["admin.read"]
 id = "agent-client"
 name = "Agent client"
 key = "agent-secret"
-scopes = ["agent.runs.create"]
+scopes = ["agent.runs.create", "tools.execute"]
 organization_id = "org_demo"
 project_id = "project_gateway"
+
+[[extensions]]
+id = "tool.echo"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+
+[extensions.permissions]
+tools = ["tool.echo"]
+network = []
+filesystem = false
+shell = false
+tenant_scope = true
+
+[extensions.config]
+tenant_allowlist = ["org_demo"]
 "#
     )
 }

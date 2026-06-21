@@ -6,7 +6,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ferrogate_core::{RequestContext, ToolResult};
+use ferrogate_core::{RequestContext, ToolCall, ToolResult};
 use ferrogate_runtime::{
     AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider, AgentRunEvent,
     AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome, AgentRunStatus,
@@ -15,15 +15,21 @@ use ferrogate_runtime::{
 use http::{HeaderMap, Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     auth::{authenticate, AuthContext},
+    extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AppState},
 };
 use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
 
-use super::{body::read_request_body, FerroGateway, ProxyContext};
+use super::{
+    body::read_request_body,
+    local::{ToolExecuteBackend, ToolExecutionHttpError},
+    FerroGateway, ProxyContext,
+};
 
 const AGENT_RUN_ID_HEADER: &str = "x-ferrogate-agent-run-id";
 const AGENT_RUN_BODY_MAX_BYTES: usize = 64 * 1024;
@@ -37,6 +43,19 @@ struct AgentRunCreateRequest {
     max_turns: Option<u32>,
     #[serde(default)]
     timeout_millis: Option<u64>,
+    #[serde(default)]
+    tool_calls: Vec<AgentRunToolCallRequest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgentRunToolCallRequest {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+    #[serde(default)]
+    route: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +168,21 @@ impl FerroGateway {
                     .await;
                 }
             };
+        if let Some(tool_call) = request
+            .tool_calls
+            .iter()
+            .find(|tool_call| tool_call.name.trim().is_empty())
+        {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_agent_tool_call",
+                format!("agent tool call name must not be empty: {:?}", tool_call),
+                &ctx.request_id,
+            )
+            .await;
+        }
+
         let harness_config = match harness_config(&state, &request) {
             Ok(config) => config,
             Err((code, message)) => {
@@ -197,8 +231,10 @@ impl FerroGateway {
             started_at_unix: Some(started_at_unix),
             completed_at_unix: None,
         });
-        let mut provider = EchoAgentProvider::new(request.input);
-        let mut dispatcher = FailClosedToolDispatcher;
+        let tool_calls = request.tool_calls;
+        let mut provider = DefaultAgentProvider::new(request.input, tool_calls.clone());
+        let mut dispatcher =
+            GatewayAgentToolDispatcher::new(self.clone(), ctx, auth.clone(), tool_calls);
         let mut event_sink = AuditEventSink::new(state.clone(), ctx, &auth);
         let outcome = match harness.run(
             AgentRunInput::new(request_context),
@@ -309,6 +345,16 @@ fn harness_config(
             ),
         ));
     }
+    let required_turns = request.tool_calls.len().saturating_add(1);
+    if required_turns > max_turns as usize {
+        return Err((
+            "invalid_agent_run_max_turns",
+            format!(
+                "agent run max_turns must allow {} scripted tool call(s) plus one final turn",
+                request.tool_calls.len()
+            ),
+        ));
+    }
     let timeout_millis = request
         .timeout_millis
         .unwrap_or(state.config.agent_runtime.timeout_millis);
@@ -327,39 +373,128 @@ fn harness_config(
     })
 }
 
-struct EchoAgentProvider {
+struct DefaultAgentProvider {
     output: Option<String>,
+    tool_calls: Vec<AgentRunToolCallRequest>,
+    next_tool_call: usize,
 }
 
-impl EchoAgentProvider {
-    fn new(input: String) -> Self {
+impl DefaultAgentProvider {
+    fn new(input: String, tool_calls: Vec<AgentRunToolCallRequest>) -> Self {
         Self {
             output: Some(input),
+            tool_calls,
+            next_tool_call: 0,
         }
     }
 }
 
-impl AgentProvider for EchoAgentProvider {
-    fn next_step(&mut self, _context: &AgentContext<'_>) -> Result<AgentStep, AgentRuntimeError> {
-        Ok(match self.output.take() {
-            Some(output) => AgentStep::Finish { output },
-            None => AgentStep::Continue,
-        })
+impl AgentProvider for DefaultAgentProvider {
+    fn next_step(&mut self, context: &AgentContext<'_>) -> Result<AgentStep, AgentRuntimeError> {
+        if let Some(tool_call) = self.tool_calls.get(self.next_tool_call).cloned() {
+            self.next_tool_call += 1;
+            return Ok(AgentStep::ToolCall(ToolCall {
+                id: format!("{}:tool-call-{}", context.run_id, self.next_tool_call),
+                name: tool_call.name,
+                arguments: tool_call.arguments,
+            }));
+        }
+        let output = self.output.take().unwrap_or_else(|| {
+            format!(
+                "agent run completed after {} governed tool result(s)",
+                context.tool_results.len()
+            )
+        });
+        Ok(AgentStep::Finish { output })
     }
 }
 
-struct FailClosedToolDispatcher;
+struct GatewayAgentToolDispatcher {
+    gateway: FerroGateway,
+    ctx: ProxyContext,
+    auth: AuthContext,
+    scripted_tool_calls: Vec<AgentRunToolCallRequest>,
+}
 
-impl GovernedAgentToolDispatcher for FailClosedToolDispatcher {
+impl GatewayAgentToolDispatcher {
+    fn new(
+        gateway: FerroGateway,
+        ctx: &ProxyContext,
+        auth: AuthContext,
+        scripted_tool_calls: Vec<AgentRunToolCallRequest>,
+    ) -> Self {
+        Self {
+            gateway,
+            ctx: ctx.clone(),
+            auth,
+            scripted_tool_calls,
+        }
+    }
+}
+
+impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
     fn dispatch_tool(
         &mut self,
         request: AgentToolDispatchRequest<'_>,
     ) -> Result<ToolResult, AgentRuntimeError> {
-        Err(AgentRuntimeError::ToolDispatch(format!(
-            "agent run {} turn {} requested tool {}, but gateway tool dispatch bridge is not enabled",
-            request.run_id, request.turn, request.tool_call.name
-        )))
+        if !self.auth.has_scope("tools.execute") {
+            return Err(AgentRuntimeError::ToolDispatch(
+                "scope_denied: API key does not have required scope tools.execute".to_string(),
+            ));
+        }
+        let scripted = self
+            .scripted_tool_calls
+            .get(request.turn.saturating_sub(1) as usize);
+        let tool_request = ToolExecutionRequest {
+            name: request.tool_call.name.clone(),
+            arguments: request.tool_call.arguments.clone(),
+            route: scripted.and_then(|tool_call| tool_call.route.clone()),
+            session_id: scripted
+                .and_then(|tool_call| tool_call.session_id.clone())
+                .or_else(|| Some(format!("agent_run:{}", request.run_id))),
+        };
+        let response =
+            block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
+                &self.ctx,
+                &self.auth,
+                Some(request.run_id),
+                tool_request,
+                ToolExecuteBackend::Extension,
+            ))
+            .map_err(tool_dispatch_error)?;
+        Ok(ToolResult {
+            tool_call_id: request.tool_call.id.clone(),
+            content: response.content,
+            is_error: response.is_error,
+        })
     }
+}
+
+fn block_on_agent_tool_dispatch<T>(future: impl std::future::Future<Output = T> + Send) -> T
+where
+    T: Send,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(|| handle.block_on(future));
+        }
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("agent tool dispatch runtime should build")
+                    .block_on(future)
+            })
+            .join()
+            .expect("agent tool dispatch runtime thread should not panic")
+    })
+}
+
+fn tool_dispatch_error(error: ToolExecutionHttpError) -> AgentRuntimeError {
+    AgentRuntimeError::ToolDispatch(format!("{}: {}", error.code, error.message))
 }
 
 struct AuditEventSink {

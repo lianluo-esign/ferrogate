@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 
 use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
-    auth::authenticate,
+    auth::{authenticate, AuthContext},
     config::{
         config_snapshot_id, ApiKey, Config, PolicyRule, PromptTemplate, PromptTemplateStatus,
         PromptTemplateTarget, PromptTemplateVersion, PromptTemplateVersionStatus, Provider,
     },
-    extensions::ToolExecutionRequest,
+    extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
         write_empty_response, write_json_error, write_json_error_and_close, write_json_response,
         write_raw_response, AdminAcmeStatus, AdminApiKey, AdminApiKeyMutation,
@@ -46,9 +46,16 @@ const PROVIDER_CATALOG_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const SERVICE_NAME: &str = "ferrogate";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolExecuteBackend {
+pub(super) enum ToolExecuteBackend {
     Extension,
     Mcp,
+}
+
+#[derive(Debug)]
+pub(super) struct ToolExecutionHttpError {
+    pub(super) status: StatusCode,
+    pub(super) code: &'static str,
+    pub(super) message: String,
 }
 
 impl FerroGateway {
@@ -1850,6 +1857,35 @@ impl FerroGateway {
                 .await;
             }
         };
+        match self
+            .execute_tool_request_with_governance(ctx, &auth, None, request, backend)
+            .await
+        {
+            Ok(response) => {
+                write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn execute_tool_request_with_governance(
+        &self,
+        ctx: &ProxyContext,
+        auth: &AuthContext,
+        agent_run_id: Option<&str>,
+        request: ToolExecutionRequest,
+        backend: ToolExecuteBackend,
+    ) -> Result<ToolExecutionResponse, ToolExecutionHttpError> {
+        let state = self.state.current();
         let mcp_audit_details = (backend == ToolExecuteBackend::Mcp)
             .then(|| mcp_rpc::tool_audit_details(&request.name))
             .flatten();
@@ -1888,9 +1924,10 @@ impl FerroGateway {
                         format!("tool {} is not registered", request.name),
                     )
                 };
-            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            state.record_admin_audit_event(tool_audit_event_draft_for_target(
                 ctx,
-                &auth,
+                auth,
+                agent_run_id,
                 "tool.execute",
                 audit_target,
                 "error",
@@ -1901,7 +1938,11 @@ impl FerroGateway {
                     &message,
                 ),
             ));
-            return write_json_error(session, status, code, message, &ctx.request_id).await;
+            return Err(ToolExecutionHttpError {
+                status,
+                code,
+                message,
+            });
         };
 
         if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
@@ -1920,27 +1961,26 @@ impl FerroGateway {
             ) {
                 Ok(approval) => approval,
                 Err(error) => {
-                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
                         ctx,
-                        &auth,
+                        auth,
+                        agent_run_id,
                         "tool.approval_requested",
                         format!("tool:{}", request.name),
                         "error",
                         format!("tool approval persistence failed: {error}"),
                     ));
-                    return write_json_error(
-                        session,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "tool_approval_storage_unavailable",
-                        "tool approval could not be persisted",
-                        &ctx.request_id,
-                    )
-                    .await;
+                    return Err(ToolExecutionHttpError {
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        code: "tool_approval_storage_unavailable",
+                        message: "tool approval could not be persisted".to_string(),
+                    });
                 }
             };
-            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            state.record_admin_audit_event(tool_audit_event_draft_for_target(
                 ctx,
-                &auth,
+                auth,
+                agent_run_id,
                 "tool.approval_requested",
                 format!("tool_approval:{}", approval.id),
                 "pending",
@@ -1951,9 +1991,10 @@ impl FerroGateway {
             ));
             match state.wait_for_tool_approval(&approval).await {
                 Ok(resolved) => {
-                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
                         ctx,
-                        &auth,
+                        auth,
+                        agent_run_id,
                         "tool.approval_granted",
                         format!("tool_approval:{}", resolved.id),
                         "approved",
@@ -1970,9 +2011,10 @@ impl FerroGateway {
                         ApprovalStatus::Expired => "tool.approval_expired",
                         _ => "tool.approval_rejected",
                     };
-                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
                         ctx,
-                        &auth,
+                        auth,
+                        agent_run_id,
                         action,
                         format!("tool_approval:{}", latest.id),
                         "rejected",
@@ -1984,14 +2026,11 @@ impl FerroGateway {
                             error.message()
                         ),
                     ));
-                    return write_json_error(
-                        session,
-                        error.status(),
-                        error.code(),
-                        error.message(),
-                        &ctx.request_id,
-                    )
-                    .await;
+                    return Err(ToolExecutionHttpError {
+                        status: error.status(),
+                        code: error.code(),
+                        message: error.message().to_string(),
+                    });
                 }
             }
         }
@@ -2020,9 +2059,10 @@ impl FerroGateway {
 
         match result {
             Ok(response) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(tool_audit_event_draft_for_target(
                     ctx,
-                    &auth,
+                    auth,
+                    agent_run_id,
                     "tool.execute",
                     audit_target,
                     "success",
@@ -2033,12 +2073,13 @@ impl FerroGateway {
                         Some(response.latency_ms),
                     ),
                 ));
-                write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+                Ok(response)
             }
             Err(error) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                state.record_admin_audit_event(tool_audit_event_draft_for_target(
                     ctx,
-                    &auth,
+                    auth,
+                    agent_run_id,
                     "tool.execute",
                     audit_target,
                     "error",
@@ -2049,14 +2090,11 @@ impl FerroGateway {
                         error.message(),
                     ),
                 ));
-                write_json_error(
-                    session,
-                    error.status(),
-                    error.code(),
-                    error.message(),
-                    &ctx.request_id,
-                )
-                .await
+                Err(ToolExecutionHttpError {
+                    status: error.status(),
+                    code: error.code(),
+                    message: error.message().to_string(),
+                })
             }
         }
     }
@@ -5081,4 +5119,18 @@ fn admin_audit_event_draft_for_target(
         outcome: outcome.into(),
         message: message.into(),
     }
+}
+
+fn tool_audit_event_draft_for_target(
+    ctx: &ProxyContext,
+    auth: &crate::auth::AuthContext,
+    agent_run_id: Option<&str>,
+    action: impl Into<String>,
+    target: impl Into<String>,
+    outcome: &str,
+    message: impl Into<String>,
+) -> AdminAuditEventDraft {
+    let mut event = admin_audit_event_draft_for_target(ctx, auth, action, target, outcome, message);
+    event.agent_run_id = agent_run_id.map(str::to_string);
+    event
 }

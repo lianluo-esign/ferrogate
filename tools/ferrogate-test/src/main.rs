@@ -1030,15 +1030,19 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             JSON_CONTENT,
             "x-ferrogate-agent-run-id: agent-run-harness",
         ],
-        r#"{"input":"run the bounded harness","max_turns":2,"timeout_millis":1000}"#,
+        r#"{"input":"run the bounded harness","max_turns":3,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"from ferrogate-test"},"session_id":"agent-harness-tool-session"}]}"#,
         201,
         |body| {
             assert_eq!(body["object"], "agent_run");
             assert_eq!(body["id"], "agent-run-harness");
             assert_eq!(body["status"], "completed");
-            assert_eq!(body["turns_executed"], 1);
+            assert_eq!(body["turns_executed"], 2);
             assert_eq!(body["output"], "run the bounded harness");
-            assert_eq!(body["tool_results"].as_array().unwrap().len(), 0);
+            assert_eq!(body["tool_results"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                body["tool_results"][0]["content"]["echo"]["message"],
+                "from ferrogate-test"
+            );
             assert_secret_redacted(&body.to_string());
             Ok(())
         },
@@ -1053,20 +1057,30 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["object"], "agent_run_timeline");
             assert_eq!(body["id"], "agent-run-harness");
             assert_eq!(body["summary"]["request_count"], 0);
-            assert_eq!(body["summary"]["audit_event_count"], 3);
-            assert_eq!(body["summary"]["agent_event_count"], 3);
+            assert_eq!(body["summary"]["audit_event_count"], 7);
+            assert_eq!(body["summary"]["agent_event_count"], 6);
             assert_eq!(body["run"]["id"], "agent-run-harness");
             assert_eq!(body["run"]["status"], "completed");
             assert_eq!(body["run"]["provider"], "ferrogate.default");
-            assert_eq!(body["agent_events"].as_array().unwrap().len(), 3);
+            assert_eq!(body["agent_events"].as_array().unwrap().len(), 6);
             assert!(body["agent_events"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|event| {
-                    event["kind"] == "run_completed"
+                    event["kind"] == "tool_call_completed"
                         && event["run_id"] == "agent-run-harness"
                         && event["outcome"] == "success"
+                }));
+            assert!(body["audit_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["action"] == "tool.execute"
+                        && event["target"] == "tool_session:agent-harness-tool-session"
+                        && event["outcome"] == "success"
+                        && event["agent_run_id"] == "agent-run-harness"
                 }));
             assert!(body["audit_events"]
                 .as_array()
@@ -2890,6 +2904,23 @@ mcp_dispatch_max_concurrency = 4
 enabled = true
 max_turns = 3
 timeout_millis = 5000
+
+[[extensions]]
+id = "tool.echo"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+
+[extensions.permissions]
+tools = ["tool.echo"]
+network = []
+filesystem = false
+shell = false
+tenant_scope = true
+
+[extensions.config]
+tenant_allowlist = ["org_demo"]
 
 [[providers]]
 name = "openai"
