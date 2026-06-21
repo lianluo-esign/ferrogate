@@ -112,6 +112,8 @@ pub(crate) struct AgentRuntimeConfig {
     pub(crate) timeout_millis: u64,
     #[serde(default)]
     pub(crate) wasm: AgentRuntimeWasmConfig,
+    #[serde(default)]
+    pub(crate) external: AgentRuntimeExternalConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -119,6 +121,7 @@ pub(crate) struct AgentRuntimeConfig {
 pub(crate) enum AgentRuntimeProvider {
     #[default]
     Wasm,
+    External,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -127,6 +130,16 @@ pub(crate) struct AgentRuntimeWasmConfig {
     pub(crate) max_fuel: u64,
     #[serde(default)]
     pub(crate) allow_wasi: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentRuntimeExternalConfig {
+    #[serde(default)]
+    pub(crate) command: String,
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
+    #[serde(default)]
+    pub(crate) timeout_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1247,6 +1260,7 @@ impl Default for AgentRuntimeConfig {
             max_turns: default_agent_runtime_max_turns(),
             timeout_millis: default_agent_runtime_timeout_millis(),
             wasm: AgentRuntimeWasmConfig::default(),
+            external: AgentRuntimeExternalConfig::default(),
         }
     }
 }

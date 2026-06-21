@@ -24,14 +24,15 @@ pub(crate) use self::secrets::resolve_env_placeholders;
 pub(crate) use self::snapshot::config_snapshot_id;
 #[allow(unused_imports)]
 pub(crate) use self::types::{
-    AccessLogMode, AdminConfig, AgentRuntimeConfig, AgentRuntimeProvider, AgentRuntimeWasmConfig,
-    AnalyticsConfig, AnalyticsProvider, ApiKey, CacheConfig, CacheMode, ClusterConfig, Config,
-    ExtensionConfig, ExtensionKind, ExtensionPermissions, GatewayConfigProfile, GuardrailEffect,
-    GuardrailRule, GuardrailStage, HeaderMatcher, HeaderMutation, McpAuthType, McpHeaderConfig,
-    McpServerConfig, McpTlsConfig, McpTransport, MeteringConfig, MeteringExportProvider,
-    MeteringExportSubject, Model, ModelFallback, ObservabilityConfig, ObservabilityProvider,
-    PluginCompatibility, PluginConfig, PluginManifest, PolicyRule, PromptTemplate,
-    PromptTemplateMessage, PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVariable,
-    PromptTemplateVersion, PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule,
-    StorageConfig, StorageMigrationMode, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    AccessLogMode, AdminConfig, AgentRuntimeConfig, AgentRuntimeExternalConfig,
+    AgentRuntimeProvider, AgentRuntimeWasmConfig, AnalyticsConfig, AnalyticsProvider, ApiKey,
+    CacheConfig, CacheMode, ClusterConfig, Config, ExtensionConfig, ExtensionKind,
+    ExtensionPermissions, GatewayConfigProfile, GuardrailEffect, GuardrailRule, GuardrailStage,
+    HeaderMatcher, HeaderMutation, McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig,
+    McpTransport, MeteringConfig, MeteringExportProvider, MeteringExportSubject, Model,
+    ModelFallback, ObservabilityConfig, ObservabilityProvider, PluginCompatibility, PluginConfig,
+    PluginManifest, PolicyRule, PromptTemplate, PromptTemplateMessage, PromptTemplateStatus,
+    PromptTemplateTarget, PromptTemplateVariable, PromptTemplateVersion,
+    PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule, StorageConfig,
+    StorageMigrationMode, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
 };

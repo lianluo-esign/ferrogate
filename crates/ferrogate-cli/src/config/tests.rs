@@ -308,6 +308,41 @@ agent_runtime:
 }
 
 #[test]
+fn parses_yaml_external_agent_runtime_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.yaml");
+    std::fs::write(
+        &path,
+        r#"
+listen: "127.0.0.1:8080"
+agent_runtime:
+  enabled: true
+  provider: external
+  max_turns: 4
+  timeout_millis: 15000
+  external:
+    command: sh
+    args: ["-c", "printf 'finish\\tfrom-config\\n'"]
+    timeout_millis: 1000
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert!(config.agent_runtime.enabled);
+    assert_eq!(
+        config.agent_runtime.provider,
+        AgentRuntimeProvider::External
+    );
+    assert_eq!(config.agent_runtime.external.command, "sh");
+    assert_eq!(
+        config.agent_runtime.external.args,
+        ["-c", "printf 'finish\\tfrom-config\\n'"]
+    );
+    assert_eq!(config.agent_runtime.external.timeout_millis, Some(1000));
+}
+
+#[test]
 fn parses_yaml_storage_postgres_operational_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.yaml");

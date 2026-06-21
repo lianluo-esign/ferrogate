@@ -630,6 +630,14 @@ impl Config {
         if self.agent_runtime.wasm.allow_wasi {
             bail!("field agent_runtime.wasm.allow_wasi: WASI host capabilities are not implemented yet");
         }
+        if self.agent_runtime.provider == crate::config::AgentRuntimeProvider::External {
+            if self.agent_runtime.external.command.trim().is_empty() {
+                bail!("field agent_runtime.external.command: must not be empty when provider is external");
+            }
+            if self.agent_runtime.external.timeout_millis == Some(0) {
+                bail!("field agent_runtime.external.timeout_millis: must be greater than zero");
+            }
+        }
         Ok(())
     }
 

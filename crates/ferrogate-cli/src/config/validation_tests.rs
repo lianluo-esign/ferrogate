@@ -1340,6 +1340,22 @@ fn accepts_agent_runtime_opt_in_config() {
 }
 
 #[test]
+fn rejects_external_agent_runtime_without_command() {
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            provider: AgentRuntimeProvider::External,
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+
+    assert!(error.contains("field agent_runtime.external.command"));
+}
+
+#[test]
 fn rejects_zero_provider_response_body_max_bytes() {
     let config = Config {
         reliability: ReliabilityConfig {

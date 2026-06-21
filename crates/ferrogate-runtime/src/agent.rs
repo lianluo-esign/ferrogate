@@ -146,18 +146,33 @@ impl ExternalAgentProviderConfig {
 #[derive(Debug, Clone)]
 pub struct ExternalAgentProvider {
     config: ExternalAgentProviderConfig,
+    input: Option<String>,
 }
 
 impl ExternalAgentProvider {
     pub fn new(config: ExternalAgentProviderConfig) -> AgentRuntimeResult<Self> {
         config.validate()?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            input: None,
+        })
+    }
+
+    pub fn with_input(
+        config: ExternalAgentProviderConfig,
+        input: impl Into<String>,
+    ) -> AgentRuntimeResult<Self> {
+        config.validate()?;
+        Ok(Self {
+            config,
+            input: Some(input.into()),
+        })
     }
 }
 
 impl AgentProvider for ExternalAgentProvider {
     fn next_step(&mut self, context: &AgentContext<'_>) -> AgentRuntimeResult<AgentStep> {
-        let output = invoke_external_agent_provider(&self.config, context)?;
+        let output = invoke_external_agent_provider(&self.config, self.input.as_deref(), context)?;
         if !output.status.success() {
             return Err(AgentRuntimeError::Provider(format!(
                 "external agent provider exited with status {}: {}",
@@ -249,7 +264,7 @@ impl AgentHarness {
         event_sink: &mut S,
     ) -> AgentRuntimeResult<AgentRunOutcome>
     where
-        P: AgentProvider,
+        P: AgentProvider + ?Sized,
         D: GovernedAgentToolDispatcher,
         S: AgentRunEventSink,
     {
@@ -443,6 +458,7 @@ impl AgentHarness {
 
 fn invoke_external_agent_provider(
     config: &ExternalAgentProviderConfig,
+    input: Option<&str>,
     context: &AgentContext<'_>,
 ) -> AgentRuntimeResult<Output> {
     let mut child = Command::new(&config.command)
@@ -474,6 +490,7 @@ fn invoke_external_agent_provider(
             "turn": context.turn,
             "request_id": context.request.request_id,
             "trace_id": context.request.trace_id,
+            "input": input,
             "tool_result_count": context.tool_results.len(),
         })
         .to_string();

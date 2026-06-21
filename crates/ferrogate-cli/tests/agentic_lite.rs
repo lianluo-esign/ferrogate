@@ -256,6 +256,55 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
 }
 
 #[test]
+fn agent_run_endpoint_can_use_external_provider_adapter() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, external_agent_run_config(&gateway_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let created = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-agent-run-id: agent-run-external",
+        ],
+        r#"{"input":"external-agent-input","max_turns":2,"timeout_millis":1000}"#,
+    ));
+    assert_eq!(created["object"], "agent_run");
+    assert_eq!(created["id"], "agent-run-external");
+    assert_eq!(created["status"], "completed");
+    assert_eq!(created["output"], "external-provider-ok");
+    assert_eq!(created["tool_results"].as_array().unwrap().len(), 0);
+
+    let timeline = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-runs/agent-run-external",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert_eq!(timeline["object"], "agent_run_timeline");
+    assert_eq!(timeline["run"]["id"], "agent-run-external");
+    assert_eq!(timeline["run"]["provider"], "ferrogate.external");
+    assert_eq!(timeline["summary"]["status"], "completed");
+    assert!(timeline["audit_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["action"] == "agent.run_completed"
+            && event["agent_run_id"] == "agent-run-external"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
     let (mcp_addr, mcp_handle) = spawn_mcp_server(2);
     let gateway_addr = free_addr();
@@ -1091,6 +1140,42 @@ tenant_scope = true
 
 [extensions.config]
 tenant_allowlist = ["org_demo"]
+"#
+    )
+}
+
+fn external_agent_run_config(gateway_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[agent_runtime]
+enabled = true
+provider = "external"
+max_turns = 3
+timeout_millis = 5000
+
+[agent_runtime.external]
+command = "sh"
+args = [
+  "-c",
+  "payload=$(cat); case \"$payload\" in *external-agent-input*) printf 'finish\\texternal-provider-ok\\n' ;; *) printf 'unexpected input\\n' >&2; exit 7 ;; esac"
+]
+timeout_millis = 1000
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
+id = "agent-client"
+name = "Agent client"
+key = "agent-secret"
+scopes = ["agent.runs.create", "tools.execute"]
+organization_id = "org_demo"
+project_id = "project_gateway"
 "#
     )
 }

@@ -10,7 +10,8 @@ use ferrogate_core::{RequestContext, ToolCall, ToolResult};
 use ferrogate_runtime::{
     AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider, AgentRunEvent,
     AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome, AgentRunStatus,
-    AgentRuntimeError, AgentStep, AgentToolDispatchRequest, GovernedAgentToolDispatcher,
+    AgentRuntimeError, AgentStep, AgentToolDispatchRequest, ExternalAgentProvider,
+    ExternalAgentProviderConfig, GovernedAgentToolDispatcher,
 };
 use http::{HeaderMap, Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
@@ -19,6 +20,7 @@ use serde_json::Value;
 
 use crate::{
     auth::{authenticate, AuthContext},
+    config::{AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider},
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AppState},
@@ -219,26 +221,55 @@ impl FerroGateway {
             tenant: auth.tenant_context(),
         };
         let started_at_unix = now_unix_seconds();
+        let provider_name = agent_provider_name(&state.config.agent_runtime).to_string();
         state.record_agent_run(StoredAgentRun {
             id: run_id.clone(),
             request_id: ctx.request_id.clone(),
             trace_id: ctx.trace_id.clone(),
             tenant: auth.tenant_context(),
             status: "running".to_string(),
-            provider: "ferrogate.default".to_string(),
+            provider: provider_name.clone(),
             turns_executed: 0,
             output_recorded: false,
             started_at_unix: Some(started_at_unix),
             completed_at_unix: None,
         });
         let tool_calls = request.tool_calls;
-        let mut provider = DefaultAgentProvider::new(request.input, tool_calls.clone());
+        let mut provider = match agent_provider(
+            &state.config.agent_runtime,
+            request.input,
+            tool_calls.clone(),
+        ) {
+            Ok(provider) => provider,
+            Err((code, message)) => {
+                state.record_agent_run(StoredAgentRun {
+                    id: run_id.clone(),
+                    request_id: ctx.request_id.clone(),
+                    trace_id: ctx.trace_id.clone(),
+                    tenant: auth.tenant_context(),
+                    status: "failed".to_string(),
+                    provider: provider_name,
+                    turns_executed: 0,
+                    output_recorded: false,
+                    started_at_unix: Some(started_at_unix),
+                    completed_at_unix: Some(now_unix_seconds()),
+                });
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    code,
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
         let mut dispatcher =
             GatewayAgentToolDispatcher::new(self.clone(), ctx, auth.clone(), tool_calls);
         let mut event_sink = AuditEventSink::new(state.clone(), ctx, &auth);
         let outcome = match harness.run(
             AgentRunInput::new(request_context),
-            &mut provider,
+            provider.as_mut(),
             &mut dispatcher,
             &mut event_sink,
         ) {
@@ -251,7 +282,7 @@ impl FerroGateway {
                     trace_id: ctx.trace_id.clone(),
                     tenant: auth.tenant_context(),
                     status: "failed".to_string(),
-                    provider: "ferrogate.default".to_string(),
+                    provider: provider_name.clone(),
                     turns_executed: 0,
                     output_recorded: false,
                     started_at_unix: Some(started_at_unix),
@@ -284,7 +315,7 @@ impl FerroGateway {
             trace_id: ctx.trace_id.clone(),
             tenant: auth.tenant_context(),
             status: agent_status(&outcome.status).to_string(),
-            provider: "ferrogate.default".to_string(),
+            provider: provider_name,
             turns_executed: outcome.turns_executed,
             output_recorded: outcome.output.is_some(),
             started_at_unix: Some(started_at_unix),
@@ -371,6 +402,41 @@ fn harness_config(
         max_turns,
         timeout: Some(Duration::from_millis(timeout_millis)),
     })
+}
+
+fn agent_provider_name(config: &AgentRuntimeConfig) -> &'static str {
+    match config.provider {
+        AgentRuntimeProvider::Wasm => "ferrogate.default",
+        AgentRuntimeProvider::External => "ferrogate.external",
+    }
+}
+
+fn agent_provider(
+    config: &AgentRuntimeConfig,
+    input: String,
+    tool_calls: Vec<AgentRunToolCallRequest>,
+) -> Result<Box<dyn AgentProvider + Send>, (&'static str, String)> {
+    match config.provider {
+        AgentRuntimeProvider::Wasm => Ok(Box::new(DefaultAgentProvider::new(input, tool_calls))),
+        AgentRuntimeProvider::External => external_agent_provider(&config.external, input)
+            .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
+            .map_err(|error| ("invalid_agent_runtime_provider", error.to_string())),
+    }
+}
+
+fn external_agent_provider(
+    config: &AgentRuntimeExternalConfig,
+    input: String,
+) -> Result<ExternalAgentProvider, AgentRuntimeError> {
+    let timeout = config.timeout_millis.map(Duration::from_millis);
+    ExternalAgentProvider::with_input(
+        ExternalAgentProviderConfig {
+            command: config.command.clone(),
+            args: config.args.clone(),
+            timeout,
+        },
+        input,
+    )
 }
 
 struct DefaultAgentProvider {
