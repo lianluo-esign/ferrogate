@@ -129,6 +129,10 @@ pub(crate) struct AgentRuntimeWasmConfig {
     #[serde(default = "default_agent_runtime_wasm_max_fuel")]
     pub(crate) max_fuel: u64,
     #[serde(default)]
+    pub(crate) module_path: Option<String>,
+    #[serde(default = "default_agent_runtime_wasm_export_name")]
+    pub(crate) export_name: String,
+    #[serde(default)]
     pub(crate) allow_wasi: bool,
 }
 
@@ -918,6 +922,10 @@ fn default_agent_runtime_wasm_max_fuel() -> u64 {
     1_000_000
 }
 
+fn default_agent_runtime_wasm_export_name() -> String {
+    "run".to_string()
+}
+
 fn default_acme_directory_url() -> String {
     "https://acme-v02.api.letsencrypt.org/directory".to_string()
 }
@@ -1269,6 +1277,8 @@ impl Default for AgentRuntimeWasmConfig {
     fn default() -> Self {
         Self {
             max_fuel: default_agent_runtime_wasm_max_fuel(),
+            module_path: None,
+            export_name: default_agent_runtime_wasm_export_name(),
             allow_wasi: false,
         }
     }

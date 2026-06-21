@@ -305,6 +305,64 @@ fn agent_run_endpoint_can_use_external_provider_adapter() {
 }
 
 #[test]
+fn agent_run_endpoint_can_execute_configured_wasm_provider() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let module_path = dir.path().join("agent.wasm");
+    std::fs::write(
+        &module_path,
+        wat::parse_str(
+            r#"
+            (module
+              (func (export "run") (result i32)
+                i32.const 42))
+            "#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        wasm_agent_run_config(&gateway_addr, module_path.to_str().unwrap()),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let created = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-agent-run-id: agent-run-wasm",
+        ],
+        r#"{"input":"wasm-agent-input","max_turns":1,"timeout_millis":1000}"#,
+    ));
+    assert_eq!(created["object"], "agent_run");
+    assert_eq!(created["id"], "agent-run-wasm");
+    assert_eq!(created["status"], "completed");
+    assert_eq!(created["output"], "wasm:run result=42");
+
+    let timeline = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-runs/agent-run-wasm",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert_eq!(timeline["object"], "agent_run_timeline");
+    assert_eq!(timeline["run"]["provider"], "ferrogate.wasm");
+    assert_eq!(timeline["summary"]["status"], "completed");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn agentic_lite_mcp_http_provider_imports_and_executes_allowed_tools() {
     let (mcp_addr, mcp_handle) = spawn_mcp_server(2);
     let gateway_addr = free_addr();
@@ -1162,6 +1220,40 @@ args = [
   "payload=$(cat); case \"$payload\" in *external-agent-input*) printf 'finish\\texternal-provider-ok\\n' ;; *) printf 'unexpected input\\n' >&2; exit 7 ;; esac"
 ]
 timeout_millis = 1000
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
+id = "agent-client"
+name = "Agent client"
+key = "agent-secret"
+scopes = ["agent.runs.create", "tools.execute"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+"#
+    )
+}
+
+fn wasm_agent_run_config(gateway_addr: &str, module_path: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[agent_runtime]
+enabled = true
+provider = "wasm"
+max_turns = 3
+timeout_millis = 5000
+
+[agent_runtime.wasm]
+max_fuel = 100000
+module_path = "{module_path}"
+export_name = "run"
+allow_wasi = false
 
 [[api_keys]]
 id = "admin"

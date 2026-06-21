@@ -293,6 +293,8 @@ agent_runtime:
   timeout_millis: 15000
   wasm:
     max_fuel: 2000000
+    module_path: /tmp/agent.wasm
+    export_name: start
     allow_wasi: false
 "#,
     )
@@ -304,6 +306,11 @@ agent_runtime:
     assert_eq!(config.agent_runtime.max_turns, 6);
     assert_eq!(config.agent_runtime.timeout_millis, 15_000);
     assert_eq!(config.agent_runtime.wasm.max_fuel, 2_000_000);
+    assert_eq!(
+        config.agent_runtime.wasm.module_path.as_deref(),
+        Some("/tmp/agent.wasm")
+    );
+    assert_eq!(config.agent_runtime.wasm.export_name, "start");
     assert!(!config.agent_runtime.wasm.allow_wasi);
 }
 

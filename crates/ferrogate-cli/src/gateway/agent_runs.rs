@@ -11,7 +11,8 @@ use ferrogate_runtime::{
     AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider, AgentRunEvent,
     AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome, AgentRunStatus,
     AgentRuntimeError, AgentStep, AgentToolDispatchRequest, ExternalAgentProvider,
-    ExternalAgentProviderConfig, GovernedAgentToolDispatcher,
+    ExternalAgentProviderConfig, GovernedAgentToolDispatcher, WasmSandboxConfig,
+    WasmSandboxExecutor,
 };
 use http::{HeaderMap, Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
@@ -20,7 +21,10 @@ use serde_json::Value;
 
 use crate::{
     auth::{authenticate, AuthContext},
-    config::{AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider},
+    config::{
+        AgentRuntimeConfig, AgentRuntimeExternalConfig, AgentRuntimeProvider,
+        AgentRuntimeWasmConfig,
+    },
     extensions::ToolExecutionRequest,
     responses::{write_json_error, write_json_error_and_close, write_json_response},
     state::{AdminAuditEventDraft, AppState},
@@ -406,6 +410,7 @@ fn harness_config(
 
 fn agent_provider_name(config: &AgentRuntimeConfig) -> &'static str {
     match config.provider {
+        AgentRuntimeProvider::Wasm if config.wasm.module_path.is_some() => "ferrogate.wasm",
         AgentRuntimeProvider::Wasm => "ferrogate.default",
         AgentRuntimeProvider::External => "ferrogate.external",
     }
@@ -417,11 +422,33 @@ fn agent_provider(
     tool_calls: Vec<AgentRunToolCallRequest>,
 ) -> Result<Box<dyn AgentProvider + Send>, (&'static str, String)> {
     match config.provider {
+        AgentRuntimeProvider::Wasm if config.wasm.module_path.is_some() => {
+            wasm_agent_provider(&config.wasm, input, config.timeout_millis)
+                .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
+                .map_err(|error| ("invalid_agent_runtime_provider", error.to_string()))
+        }
         AgentRuntimeProvider::Wasm => Ok(Box::new(DefaultAgentProvider::new(input, tool_calls))),
         AgentRuntimeProvider::External => external_agent_provider(&config.external, input)
             .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
             .map_err(|error| ("invalid_agent_runtime_provider", error.to_string())),
     }
+}
+
+fn wasm_agent_provider(
+    config: &AgentRuntimeWasmConfig,
+    input: String,
+    timeout_millis: u64,
+) -> Result<WasmAgentProvider, AgentRuntimeError> {
+    let module_path = config.module_path.clone().ok_or_else(|| {
+        AgentRuntimeError::InvalidConfig("agent_runtime.wasm.module_path is required".into())
+    })?;
+    WasmAgentProvider::new(
+        module_path,
+        config.export_name.clone(),
+        config.max_fuel,
+        timeout_millis,
+        input,
+    )
 }
 
 fn external_agent_provider(
@@ -472,6 +499,68 @@ impl AgentProvider for DefaultAgentProvider {
             )
         });
         Ok(AgentStep::Finish { output })
+    }
+}
+
+struct WasmAgentProvider {
+    module_path: String,
+    export_name: String,
+    max_fuel: u64,
+    timeout: Option<Duration>,
+    pending: bool,
+}
+
+impl WasmAgentProvider {
+    fn new(
+        module_path: String,
+        export_name: String,
+        max_fuel: u64,
+        timeout_millis: u64,
+        _input: String,
+    ) -> Result<Self, AgentRuntimeError> {
+        if module_path.trim().is_empty() {
+            return Err(AgentRuntimeError::InvalidConfig(
+                "agent_runtime.wasm.module_path is required".into(),
+            ));
+        }
+        if export_name.trim().is_empty() {
+            return Err(AgentRuntimeError::InvalidConfig(
+                "agent_runtime.wasm.export_name must not be empty".into(),
+            ));
+        }
+        Ok(Self {
+            module_path,
+            export_name,
+            max_fuel,
+            timeout: Some(Duration::from_millis(timeout_millis)),
+            pending: true,
+        })
+    }
+}
+
+impl AgentProvider for WasmAgentProvider {
+    fn next_step(&mut self, _context: &AgentContext<'_>) -> Result<AgentStep, AgentRuntimeError> {
+        if !self.pending {
+            return Ok(AgentStep::Continue);
+        }
+        self.pending = false;
+        let module = std::fs::read(&self.module_path).map_err(|error| {
+            AgentRuntimeError::Provider(format!(
+                "failed to read WASM agent module {}: {error}",
+                self.module_path
+            ))
+        })?;
+        let executor = WasmSandboxExecutor::new(WasmSandboxConfig {
+            max_fuel: self.max_fuel,
+            timeout: self.timeout,
+        })
+        .map_err(|error| AgentRuntimeError::Provider(error.to_string()))?;
+        let outcome = executor
+            .execute_export_i32(&module, &self.export_name)
+            .map_err(|error| AgentRuntimeError::Provider(error.to_string()))?;
+        Ok(AgentStep::Finish {
+            output: format!("wasm:{} result={}", outcome.export_name, outcome.result),
+        })
     }
 }
 

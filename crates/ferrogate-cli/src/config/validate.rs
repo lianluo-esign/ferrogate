@@ -627,6 +627,22 @@ impl Config {
         if self.agent_runtime.wasm.max_fuel == 0 {
             bail!("field agent_runtime.wasm.max_fuel: must be greater than zero");
         }
+        if self
+            .agent_runtime
+            .wasm
+            .module_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            bail!("field agent_runtime.wasm.module_path: must not be empty");
+        }
+        if self.agent_runtime.wasm.module_path.is_some()
+            && self.agent_runtime.wasm.export_name.trim().is_empty()
+        {
+            bail!(
+                "field agent_runtime.wasm.export_name: must not be empty when module_path is set"
+            );
+        }
         if self.agent_runtime.wasm.allow_wasi {
             bail!("field agent_runtime.wasm.allow_wasi: WASI host capabilities are not implemented yet");
         }
