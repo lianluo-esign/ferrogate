@@ -20,6 +20,7 @@ use std::{
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
 use libsql::Builder as LibsqlBuilder;
+use postgres::{Client as PostgresClient, NoTls};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
@@ -60,7 +61,9 @@ impl StorageProviderKind {
     pub fn implemented(self) -> bool {
         matches!(
             self,
-            StorageProviderKind::Memory | StorageProviderKind::TursoLibsql
+            StorageProviderKind::Memory
+                | StorageProviderKind::TursoLibsql
+                | StorageProviderKind::Postgres
         )
     }
 }
@@ -147,6 +150,7 @@ pub enum StorageError {
         required: bool,
     },
     Libsql(String),
+    Postgres(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -160,6 +164,7 @@ impl std::fmt::Display for StorageError {
                 )
             }
             StorageError::Libsql(error) => write!(formatter, "libsql storage error: {error}"),
+            StorageError::Postgres(error) => write!(formatter, "postgres storage error: {error}"),
         }
     }
 }
@@ -222,6 +227,10 @@ pub struct RuntimeControlPlaneState {
 
 struct LibsqlControlPlaneStore {
     database: Arc<libsql::Database>,
+}
+
+struct PostgresControlPlaneStore {
+    client: Mutex<Option<PostgresClient>>,
 }
 
 impl std::fmt::Debug for LibsqlControlPlaneStore {
@@ -420,6 +429,196 @@ impl LibsqlControlPlaneStore {
     }
 }
 
+impl std::fmt::Debug for PostgresControlPlaneStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PostgresControlPlaneStore")
+            .field("client", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PostgresControlPlaneStore {
+    fn connect(
+        dsn: String,
+        bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_tenants: Vec<(String, String)>,
+        bootstrap_policies: Vec<(String, String)>,
+        bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_prompt_templates: Vec<(String, String)>,
+        bootstrap_plugin_registrations: Vec<(String, String)>,
+        bootstrap_mcp_servers: Vec<(String, String)>,
+        initialize_schema: bool,
+    ) -> Result<Self, StorageError> {
+        let client = PostgresClient::connect(&dsn, NoTls).map_err(postgres_error)?;
+        let store = Self {
+            client: Mutex::new(Some(client)),
+        };
+        if initialize_schema {
+            store.initialize_schema()?;
+        }
+        store.seed_missing_resources("api_key", bootstrap_api_keys)?;
+        store.seed_missing_resources("tenant", bootstrap_tenants)?;
+        store.seed_missing_resources("policy", bootstrap_policies)?;
+        store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
+        store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
+        store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
+        store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
+        Ok(store)
+    }
+
+    fn initialize_schema(&self) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.batch_execute(include_str!("../../../sql/001_init_postgres.sql"))
+        })?;
+        Ok(())
+    }
+
+    fn seed_missing_resources(
+        &self,
+        kind: &'static str,
+        records: Vec<(String, String)>,
+    ) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            for (id, document_json) in records {
+                client.execute(
+                    "INSERT INTO control_plane_resources \
+                     (resource_kind, resource_id, document_json) VALUES ($1, $2, $3) \
+                     ON CONFLICT (resource_kind, resource_id) DO NOTHING",
+                    &[&kind, &id, &document_json],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
+        Ok(ControlPlaneSnapshot {
+            api_keys: self.list_documents("api_key")?,
+            tenants: self.list_documents("tenant")?,
+            policies: self.list_documents("policy")?,
+            gateway_configs: self.list_documents("gateway_config")?,
+            prompt_templates: self.list_documents("prompt_template")?,
+            plugin_registrations: self.list_documents("plugin_registration")?,
+            mcp_servers: self.list_documents("mcp_server")?,
+        })
+    }
+
+    fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT document_json FROM control_plane_resources \
+                 WHERE resource_kind = $1 ORDER BY resource_id ASC",
+                &[&kind],
+            )?;
+            Ok(rows
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect())
+        })
+    }
+
+    fn get_document(&self, kind: &'static str, id: String) -> Result<Option<String>, StorageError> {
+        self.with_client(|client| {
+            let row = client.query_opt(
+                "SELECT document_json FROM control_plane_resources \
+                 WHERE resource_kind = $1 AND resource_id = $2",
+                &[&kind, &id],
+            )?;
+            Ok(row.map(|row| row.get::<_, String>(0)))
+        })
+    }
+
+    fn upsert(
+        &self,
+        kind: &'static str,
+        id: String,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO control_plane_resources \
+                 (resource_kind, resource_id, document_json, revision, updated_at_unix) \
+                 VALUES ($1, $2, $3, 1, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+                 ON CONFLICT (resource_kind, resource_id) DO UPDATE SET \
+                 document_json = EXCLUDED.document_json, \
+                 revision = control_plane_resources.revision + 1, \
+                 updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
+                &[&kind, &id, &document_json],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn replace_kind(
+        &self,
+        kind: &'static str,
+        records: Vec<(String, String)>,
+    ) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            let mut transaction = client.transaction()?;
+            transaction.execute(
+                "DELETE FROM control_plane_resources WHERE resource_kind = $1",
+                &[&kind],
+            )?;
+            for (id, document_json) in records {
+                transaction.execute(
+                    "INSERT INTO control_plane_resources \
+                     (resource_kind, resource_id, document_json) VALUES ($1, $2, $3)",
+                    &[&kind, &id, &document_json],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    fn delete(&self, kind: &'static str, id: String) -> Result<bool, StorageError> {
+        self.with_client(|client| {
+            let rows_changed = client.execute(
+                "DELETE FROM control_plane_resources \
+                 WHERE resource_kind = $1 AND resource_id = $2",
+                &[&kind, &id],
+            )?;
+            Ok(rows_changed > 0)
+        })
+    }
+
+    fn with_client<T: Send>(
+        &self,
+        action: impl FnOnce(&mut PostgresClient) -> Result<T, postgres::Error> + Send,
+    ) -> Result<T, StorageError> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut client = self.client.lock().map_err(|_| {
+                        StorageError::Postgres(
+                            "postgres control-plane client mutex is poisoned".into(),
+                        )
+                    })?;
+                    let client = client.as_mut().ok_or_else(|| {
+                        StorageError::Postgres("postgres control-plane client is closed".into())
+                    })?;
+                    action(client).map_err(postgres_error)
+                })
+                .join()
+                .map_err(|_| StorageError::Postgres("postgres storage thread panicked".into()))?
+        })
+    }
+}
+
+impl Drop for PostgresControlPlaneStore {
+    fn drop(&mut self) {
+        let Ok(mut client) = self.client.lock() else {
+            return;
+        };
+        let Some(client) = client.take() else {
+            return;
+        };
+        let _ = std::thread::spawn(move || drop(client)).join();
+    }
+}
+
 async fn build_libsql_database(
     url: String,
     auth_token: Option<String>,
@@ -467,6 +666,7 @@ fn is_local_libsql_server_url(url: &str) -> bool {
 enum RuntimeControlPlaneBackend {
     Memory(Mutex<RuntimeControlPlaneState>),
     Libsql(Arc<LibsqlControlPlaneStore>),
+    Postgres(Arc<PostgresControlPlaneStore>),
 }
 
 impl RuntimeControlPlaneState {
@@ -1084,6 +1284,56 @@ impl RuntimeStorageRepositories {
         })
     }
 
+    pub fn postgres(
+        provider_order: Vec<StorageProviderKind>,
+        required: bool,
+        dsn: String,
+        initialize_schema: bool,
+        bootstrap_api_keys: Vec<(String, String)>,
+        bootstrap_tenants: Vec<(String, String)>,
+        bootstrap_policies: Vec<(String, String)>,
+        bootstrap_gateway_configs: Vec<(String, String)>,
+        bootstrap_prompt_templates: Vec<(String, String)>,
+        bootstrap_plugin_registrations: Vec<(String, String)>,
+        bootstrap_mcp_servers: Vec<(String, String)>,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Result<Self, StorageError> {
+        let backend =
+            RuntimeStorageBackend::new(StorageProviderKind::Postgres, required, provider_order)?;
+        let control_plane = std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    PostgresControlPlaneStore::connect(
+                        dsn,
+                        bootstrap_api_keys,
+                        bootstrap_tenants,
+                        bootstrap_policies,
+                        bootstrap_gateway_configs,
+                        bootstrap_prompt_templates,
+                        bootstrap_plugin_registrations,
+                        bootstrap_mcp_servers,
+                        initialize_schema,
+                    )
+                })
+                .join()
+                .map_err(|_| {
+                    StorageError::Postgres("postgres storage connect thread panicked".into())
+                })?
+        })?;
+        Ok(Self {
+            backend,
+            control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
+            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                request_log_retention_records,
+            )),
+            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                audit_event_retention_records,
+            )),
+            usage_aggregates: Mutex::new(InMemoryRepository::new()),
+        })
+    }
+
     pub fn backend_evidence(&self) -> StorageBackendEvidence {
         self.backend.evidence()
     }
@@ -1105,6 +1355,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.snapshot())
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.snapshot(),
         }
     }
 
@@ -1151,6 +1402,16 @@ impl RuntimeStorageRepositories {
                     .await?;
                 Ok(())
             }),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.replace_kind("api_key", api_keys)?;
+                control_plane.replace_kind("tenant", tenants)?;
+                control_plane.replace_kind("policy", policies)?;
+                control_plane.replace_kind("gateway_config", gateway_configs)?;
+                control_plane.replace_kind("prompt_template", prompt_templates)?;
+                control_plane.replace_kind("plugin_registration", plugin_registrations)?;
+                control_plane.replace_kind("mcp_server", mcp_servers)?;
+                Ok(())
+            }
         }
     }
 
@@ -1169,6 +1430,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.upsert("api_key", id.into(), document_json))
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("api_key", id.into(), document_json)
+            }
         }
     }
 
@@ -1180,6 +1444,9 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.delete("api_key", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("api_key", id.to_string())
             }
         }
     }
@@ -1199,6 +1466,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.upsert("policy", id.into(), document_json))
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("policy", id.into(), document_json)
+            }
         }
     }
 
@@ -1210,6 +1480,9 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.delete("policy", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("policy", id.to_string())
             }
         }
     }
@@ -1229,6 +1502,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.upsert("gateway_config", id.into(), document_json))
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("gateway_config", id.into(), document_json)
+            }
         }
     }
 
@@ -1240,6 +1516,9 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.delete("gateway_config", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("gateway_config", id.to_string())
             }
         }
     }
@@ -1259,6 +1538,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.upsert("prompt_template", id.into(), document_json))
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("prompt_template", id.into(), document_json)
+            }
         }
     }
 
@@ -1277,6 +1559,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(
                 control_plane.upsert("plugin_registration", id.into(), document_json),
             ),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("plugin_registration", id.into(), document_json)
+            }
         }
     }
 
@@ -1288,6 +1573,9 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.delete("plugin_registration", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("plugin_registration", id.to_string())
             }
         }
     }
@@ -1307,6 +1595,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.upsert("mcp_server", id.into(), document_json))
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("mcp_server", id.into(), document_json)
+            }
         }
     }
 
@@ -1318,6 +1609,9 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.delete("mcp_server", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("mcp_server", id.to_string())
             }
         }
     }
@@ -1337,6 +1631,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.upsert("tool_approval", id.into(), document_json))
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("tool_approval", id.into(), document_json)
+            }
         }
     }
 
@@ -1349,6 +1646,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.get_document("tool_approval", id.to_string()))
             }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_document("tool_approval", id.to_string())
+            }
         }
     }
 
@@ -1360,6 +1660,9 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.list_documents("tool_approval"))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_documents("tool_approval")
             }
         }
     }
@@ -1478,6 +1781,10 @@ fn block_on_storage<T: Send>(
 
 fn libsql_error(error: libsql::Error) -> StorageError {
     StorageError::Libsql(error.to_string())
+}
+
+fn postgres_error(error: postgres::Error) -> StorageError {
+    StorageError::Postgres(error.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1734,11 +2041,16 @@ mod tests {
         assert!(turso_backend.evidence().durable);
         assert!(turso_backend.evidence().implemented);
 
-        let error = RuntimeStorageBackend::new(StorageProviderKind::Postgres, true, Vec::new())
-            .unwrap_err();
+        let postgres_backend =
+            RuntimeStorageBackend::new(StorageProviderKind::Postgres, true, Vec::new()).unwrap();
+        assert!(postgres_backend.evidence().durable);
+        assert!(postgres_backend.evidence().implemented);
+
+        let error =
+            RuntimeStorageBackend::new(StorageProviderKind::Mysql, true, Vec::new()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "storage provider postgres is not implemented yet (required=true)"
+            "storage provider mysql is not implemented yet (required=true)"
         );
     }
 

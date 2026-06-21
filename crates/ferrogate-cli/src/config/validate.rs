@@ -460,6 +460,23 @@ impl Config {
                 );
             }
         }
+        if self.storage.provider == ferrogate_storage::StorageProviderKind::Postgres {
+            let has_inline_dsn = self
+                .storage
+                .postgres_dsn
+                .as_deref()
+                .is_some_and(|dsn| !dsn.trim().is_empty());
+            let has_dsn_env = self
+                .storage
+                .postgres_dsn_env
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty());
+            if !has_inline_dsn && !has_dsn_env {
+                bail!(
+                    "field storage.postgres_dsn_env: required when storage.provider is postgres unless storage.postgres_dsn is set"
+                );
+            }
+        }
         if self.storage.required && !self.storage.provider.is_durable() {
             bail!("field storage.required: durable storage requires a non-memory provider");
         }

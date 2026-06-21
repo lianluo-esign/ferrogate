@@ -696,6 +696,10 @@ pub(crate) struct StorageConfig {
     pub(crate) libsql_auth_token: Option<String>,
     #[serde(default)]
     pub(crate) libsql_auth_token_env: Option<String>,
+    #[serde(default)]
+    pub(crate) postgres_dsn: Option<String>,
+    #[serde(default)]
+    pub(crate) postgres_dsn_env: Option<String>,
     #[serde(default = "default_storage_migration_mode")]
     pub(crate) migration_mode: StorageMigrationMode,
     #[serde(default = "default_admin_list_limit")]
@@ -1085,6 +1089,8 @@ impl Default for StorageConfig {
             libsql_url: None,
             libsql_auth_token: None,
             libsql_auth_token_env: None,
+            postgres_dsn: None,
+            postgres_dsn_env: None,
             migration_mode: default_storage_migration_mode(),
             admin_list_default_limit: default_admin_list_limit(),
             admin_list_max_limit: default_admin_list_max_limit(),

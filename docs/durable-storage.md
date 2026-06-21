@@ -8,7 +8,7 @@
 
 ---
 title: Durable Control-Plane Storage
-description: Turso/libSQL and local libSQL storage guidance for FerroGate control-plane state.
+description: Turso/libSQL and PostgreSQL storage guidance for FerroGate control-plane state.
 permalink: /durable-storage/
 ---
 
@@ -43,9 +43,10 @@ The default commercial provider order is fixed in config validation:
 provider_order = ["turso_libsql", "postgres", "mysql"]
 ```
 
-`turso_libsql` is the implemented durable provider today. PostgreSQL and MySQL
-are follow-up providers and must implement the same repository contract instead
-of changing gateway control-plane code.
+`turso_libsql` is the default commercial cloud provider. PostgreSQL is also
+implemented for self-hosted/enterprise relational deployments. MySQL remains a
+follow-up provider and must implement the same repository contract instead of
+changing gateway control-plane code.
 
 ## Turso Cloud / Remote libSQL
 
@@ -75,6 +76,39 @@ Runtime behavior:
 The schema file is [`sql/001_init_libsql.sql`](../sql/001_init_libsql.sql). It
 creates resource-oriented control-plane tables so new Admin API resource types
 can be added without creating a new hot-path coupling to one database vendor.
+
+## PostgreSQL
+
+Use a PostgreSQL DSN through an environment variable so passwords do not appear
+in the config file:
+
+```yaml
+storage:
+  provider: postgres
+  required: true
+  provider_order:
+    - turso_libsql
+    - postgres
+    - mysql
+  postgres_dsn_env: "FERROGATE_POSTGRES_DSN"
+  migration_mode: auto
+```
+
+For local development, a DSN can use keyword/value format:
+
+```bash
+export FERROGATE_POSTGRES_DSN='host=127.0.0.1 port=5432 user=postgres password=postgres dbname=ferrogate sslmode=disable'
+```
+
+Runtime behavior:
+
+- `storage.required: true` fails closed if PostgreSQL cannot be initialized.
+- `migration_mode: auto` runs the checked-in PostgreSQL schema at startup.
+- Admin/status evidence reports `provider: postgres` without returning the DSN.
+- Control-plane resources use the same document-store contract as libSQL.
+
+The schema file is
+[`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
 
 ## Local File-Backed libSQL
 
@@ -112,6 +146,12 @@ Run the deterministic local libSQL restart test:
 ./target/debug/ferrogate-test libsql-file-restart
 ```
 
+Run the Docker-backed PostgreSQL restart test:
+
+```bash
+./target/debug/ferrogate-test postgres-restart
+```
+
 This starts real FerroGate gateway processes against the same local libSQL
 database file and verifies through the Admin API that these resources survive
 restart:
@@ -125,7 +165,8 @@ restart:
 It then deletes or archives those resources, restarts again, and verifies the
 post-cleanup state.
 
-`ferrogate-test ci` includes this local restart test:
+`ferrogate-test ci` includes the local libSQL restart, local libSQL server
+restart, and PostgreSQL restart tests:
 
 ```bash
 ./target/debug/ferrogate-test ci
@@ -149,6 +190,9 @@ For Turso Cloud, use the provider's managed backup/export workflow for the
 database that backs `storage.libsql_url`. FerroGate does not copy control-plane
 state into the analytics warehouse.
 
+For PostgreSQL, use your managed PostgreSQL backup/PITR workflow for the
+database behind `storage.postgres_dsn_env`.
+
 For local `file://` databases, snapshot the database file only when the gateway
 is stopped or when your filesystem/database tooling can provide a consistent
 snapshot. Treat the file as control-plane state and protect it like API-key and
@@ -161,6 +205,8 @@ policy data.
 - Remote `libsql://` and `https://` URLs require either
   `storage.libsql_auth_token` or `storage.libsql_auth_token_env`.
 - Local `file://` URLs do not use a token.
+- Missing `storage.postgres_dsn` and `storage.postgres_dsn_env` fails config
+  validation when `provider: postgres`.
 - With `storage.required: true`, initialization errors prevent startup instead
   of falling back to memory.
 - Admin mutations that fail to persist are rejected or rolled back before the

@@ -85,8 +85,8 @@ These areas are implemented in the current open-source gateway:
   readiness, drain, API-key CRUD, policy CRUD, gateway-config CRUD, prompt
   template CRUD/render, tool approvals, request-log exports, and dashboard
   visibility.
-- Durable storage provider abstraction and Turso/libSQL control-plane storage
-  wiring for configured control-plane resources.
+- Durable storage provider abstraction plus Turso/libSQL and PostgreSQL
+  control-plane storage wiring for configured control-plane resources.
 - Automatic HTTPS with manual TLS, ACME HTTP-01, ACME DNS-01 through
   Cloudflare, certificate renewal, and graceful-upgrade handoff.
 - Docker, Kubernetes, Helm examples, cluster identity, shared file state, Redis
@@ -96,16 +96,15 @@ These areas are implemented in the current open-source gateway:
 
 | Theme | Goal | Tracking |
 | --- | --- | --- |
-| Plugin system | Finish the plugin model as a reusable capability bundle layer above raw tools: registration, permissions, admin visibility, tool exposure, event sinks, and durable control-plane wiring. | [#71](https://github.com/lianluo-esign/ferrogate/issues/71) |
 | Agent run evidence | Move from retained evidence aggregation to durable `agent_run` and `agent_run_event` records, lifecycle events, checkpoint/resume evidence, cancellation events, and tenant/API-key filters. | [#49](https://github.com/lianluo-esign/ferrogate/issues/49) |
-| Durable control plane | Close the full durable control-plane boundary for API keys, policies, gateway configs, prompt templates, plugin registrations, MCP servers, tool approvals, and agent run records. | [#12](https://github.com/lianluo-esign/ferrogate/issues/12), [#66](https://github.com/lianluo-esign/ferrogate/issues/66), [#67](https://github.com/lianluo-esign/ferrogate/issues/67) |
+| Durable control plane | Close the full durable control-plane boundary for API keys, policies, gateway configs, prompt templates, plugin registrations, MCP servers, tool approvals, and agent run records. | [#12](https://github.com/lianluo-esign/ferrogate/issues/12), [#66](https://github.com/lianluo-esign/ferrogate/issues/66), [#67](https://github.com/lianluo-esign/ferrogate/issues/67), [#69](https://github.com/lianluo-esign/ferrogate/issues/69) |
 | Prompt workflows | Complete versioned prompt template management and render APIs as first-class agent workflow inputs. | [#44](https://github.com/lianluo-esign/ferrogate/issues/44) |
 
 ## Next
 
 | Theme | Goal | Tracking |
 | --- | --- | --- |
-| Database providers | Add PostgreSQL and MySQL providers behind the same storage contract used by Turso/libSQL. | [#69](https://github.com/lianluo-esign/ferrogate/issues/69), [#68](https://github.com/lianluo-esign/ferrogate/issues/68) |
+| Database providers | Add MySQL behind the same storage contract used by Turso/libSQL and PostgreSQL. | [#68](https://github.com/lianluo-esign/ferrogate/issues/68) |
 | External service boundaries | Keep tenant RBAC and billing integrations behind explicit service/provider boundaries instead of moving that complexity into the gateway hot path. | [#54](https://github.com/lianluo-esign/ferrogate/issues/54) |
 | Agent graph governance | Add workflow graph policy and execution budgets so multi-step agent runs can be governed at graph/run level, not only per request. | [#50](https://github.com/lianluo-esign/ferrogate/issues/50) |
 | Agent protocol ingress | Add A2A and broader agent protocol ingress governance while reusing auth, policy, approvals, billing, and observability surfaces. | [#48](https://github.com/lianluo-esign/ferrogate/issues/48) |

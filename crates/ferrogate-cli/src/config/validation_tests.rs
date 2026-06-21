@@ -1446,6 +1446,41 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
 
     let config = Config {
         storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            postgres_dsn: Some(
+                "host=127.0.0.1 port=5432 user=postgres dbname=ferrogate sslmode=disable".into(),
+            ),
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.postgres_dsn_env"));
+
+    let config = Config {
+        storage: StorageConfig {
             provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
             required: true,
             libsql_url: Some("file:///tmp/ferrogate-control-plane.db".into()),

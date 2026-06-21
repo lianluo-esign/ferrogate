@@ -953,6 +953,26 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         ))
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
+    if storage.provider == ferrogate_storage::StorageProviderKind::Postgres {
+        let dsn = storage_postgres_dsn(storage)?;
+        let initialize_schema = storage.migration_mode == StorageMigrationMode::Auto;
+        return RuntimeStorageRepositories::postgres(
+            storage.provider_order.clone(),
+            storage.required,
+            dsn,
+            initialize_schema,
+            api_keys,
+            tenants,
+            policies,
+            gateway_configs,
+            prompt_templates,
+            plugin_registrations,
+            mcp_servers,
+            config.analytics.request_log_retention_records,
+            config.analytics.audit_event_retention_records,
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"));
+    }
     let backend = RuntimeStorageBackend::new(
         storage.provider,
         storage.required,
@@ -998,6 +1018,34 @@ fn storage_libsql_auth_token(
             "field storage.libsql_auth_token_env: environment variable {env_name} is not set"
         )
     })
+}
+
+fn storage_postgres_dsn(storage: &StorageConfig) -> anyhow::Result<String> {
+    if let Some(dsn) = storage
+        .postgres_dsn
+        .as_deref()
+        .map(str::trim)
+        .filter(|dsn| !dsn.is_empty())
+    {
+        return Ok(dsn.to_string());
+    }
+    let env_name = storage
+        .postgres_dsn_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("field storage.postgres_dsn_env is required"))?;
+    let dsn = env::var(env_name).map_err(|_| {
+        anyhow::anyhow!(
+            "field storage.postgres_dsn_env: environment variable {env_name} is not set"
+        )
+    })?;
+    if dsn.trim().is_empty() {
+        anyhow::bail!(
+            "field storage.postgres_dsn_env: environment variable {env_name} must not be empty"
+        );
+    }
+    Ok(dsn)
 }
 
 fn is_local_libsql_server_url(url: &str) -> bool {
