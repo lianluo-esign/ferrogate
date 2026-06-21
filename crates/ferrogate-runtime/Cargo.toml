@@ -17,10 +17,10 @@ authors.workspace = true
 
 [dependencies]
 ferrogate-core = { path = "../ferrogate-core" }
+serde_json.workspace = true
 wasmtime = { workspace = true, optional = true }
 
 [dev-dependencies]
-serde_json.workspace = true
 wat.workspace = true
 
 [features]

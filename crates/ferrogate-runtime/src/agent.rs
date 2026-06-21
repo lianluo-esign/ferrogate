@@ -9,10 +9,13 @@
 use std::{
     error::Error,
     fmt,
+    io::Write,
+    process::{Command, Output, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -115,6 +118,55 @@ pub enum AgentStep {
 
 pub trait AgentProvider {
     fn next_step(&mut self, context: &AgentContext<'_>) -> AgentRuntimeResult<AgentStep>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalAgentProviderConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub timeout: Option<Duration>,
+}
+
+impl ExternalAgentProviderConfig {
+    pub fn validate(&self) -> AgentRuntimeResult<()> {
+        if self.command.trim().is_empty() {
+            return Err(AgentRuntimeError::InvalidConfig(
+                "external agent provider command must not be empty".to_string(),
+            ));
+        }
+        if self.timeout == Some(Duration::ZERO) {
+            return Err(AgentRuntimeError::InvalidConfig(
+                "external agent provider timeout must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalAgentProvider {
+    config: ExternalAgentProviderConfig,
+}
+
+impl ExternalAgentProvider {
+    pub fn new(config: ExternalAgentProviderConfig) -> AgentRuntimeResult<Self> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+}
+
+impl AgentProvider for ExternalAgentProvider {
+    fn next_step(&mut self, context: &AgentContext<'_>) -> AgentRuntimeResult<AgentStep> {
+        let output = invoke_external_agent_provider(&self.config, context)?;
+        if !output.status.success() {
+            return Err(AgentRuntimeError::Provider(format!(
+                "external agent provider exited with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        parse_external_agent_step(&output.stdout)
+    }
 }
 
 #[derive(Debug)]
@@ -389,6 +441,143 @@ impl AgentHarness {
     }
 }
 
+fn invoke_external_agent_provider(
+    config: &ExternalAgentProviderConfig,
+    context: &AgentContext<'_>,
+) -> AgentRuntimeResult<Output> {
+    let mut child = Command::new(&config.command)
+        .args(&config.args)
+        .env("FERROGATE_AGENT_RUN_ID", context.run_id)
+        .env("FERROGATE_AGENT_TURN", context.turn.to_string())
+        .env(
+            "FERROGATE_AGENT_REQUEST_ID",
+            context.request.request_id.as_str(),
+        )
+        .env(
+            "FERROGATE_AGENT_TOOL_RESULT_COUNT",
+            context.tool_results.len().to_string(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            AgentRuntimeError::Provider(format!(
+                "failed to spawn external agent provider {}: {error}",
+                config.command
+            ))
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload = serde_json::json!({
+            "run_id": context.run_id,
+            "turn": context.turn,
+            "request_id": context.request.request_id,
+            "trace_id": context.request.trace_id,
+            "tool_result_count": context.tool_results.len(),
+        })
+        .to_string();
+        stdin.write_all(payload.as_bytes()).map_err(|error| {
+            AgentRuntimeError::Provider(format!(
+                "failed to write external agent provider context: {error}"
+            ))
+        })?;
+    }
+
+    wait_for_external_agent_provider(child, config.timeout)
+}
+
+fn wait_for_external_agent_provider(
+    mut child: std::process::Child,
+    timeout: Option<Duration>,
+) -> AgentRuntimeResult<Output> {
+    let Some(timeout) = timeout else {
+        return child.wait_with_output().map_err(|error| {
+            AgentRuntimeError::Provider(format!(
+                "failed to wait for external agent provider: {error}"
+            ))
+        });
+    };
+
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child.wait_with_output().map_err(|error| {
+                    AgentRuntimeError::Provider(format!(
+                        "failed to collect external agent provider output: {error}"
+                    ))
+                });
+            }
+            Ok(None) if started_at.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AgentRuntimeError::Provider(format!(
+                    "external agent provider timed out after {} ms",
+                    timeout.as_millis()
+                )));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(error) => {
+                return Err(AgentRuntimeError::Provider(format!(
+                    "failed to poll external agent provider: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn parse_external_agent_step(stdout: &[u8]) -> AgentRuntimeResult<AgentStep> {
+    let output = std::str::from_utf8(stdout).map_err(|error| {
+        AgentRuntimeError::Provider(format!(
+            "external agent provider stdout is not UTF-8: {error}"
+        ))
+    })?;
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| {
+            AgentRuntimeError::Provider(
+                "external agent provider returned no protocol line".to_string(),
+            )
+        })?;
+
+    if line == "continue" {
+        return Ok(AgentStep::Continue);
+    }
+    if let Some(output) = line.strip_prefix("finish\t") {
+        return Ok(AgentStep::Finish {
+            output: output.to_string(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("tool\t") {
+        let mut parts = rest.splitn(3, '\t');
+        let id = parts.next().unwrap_or_default();
+        let name = parts.next().unwrap_or_default();
+        let arguments = parts.next().unwrap_or("{}");
+        if id.trim().is_empty() || name.trim().is_empty() {
+            return Err(AgentRuntimeError::Provider(
+                "external agent provider tool line requires non-empty id and name".to_string(),
+            ));
+        }
+        let arguments = serde_json::from_str(arguments).map_err(|error| {
+            AgentRuntimeError::Provider(format!(
+                "external agent provider tool arguments are not valid JSON: {error}"
+            ))
+        })?;
+        return Ok(AgentStep::ToolCall(ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments,
+        }));
+    }
+
+    Err(AgentRuntimeError::Provider(format!(
+        "external agent provider returned unsupported protocol line: {line}"
+    )))
+}
+
 fn run_event(
     run_id: &str,
     turn: u32,
@@ -528,6 +717,129 @@ mod tests {
                 "run-2:0002:run-completed",
             ]
         );
+    }
+
+    #[test]
+    fn external_provider_finishes_from_out_of_process_adapter() {
+        let mut provider = ExternalAgentProvider::new(ExternalAgentProviderConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf 'finish\\t%s:%s:%s\\n' \"$FERROGATE_AGENT_RUN_ID\" \"$FERROGATE_AGENT_TURN\" \"$FERROGATE_AGENT_REQUEST_ID\""
+                    .to_string(),
+            ],
+            timeout: Some(Duration::from_secs(1)),
+        })
+        .unwrap();
+        let context = AgentContext {
+            run_id: "run-process",
+            request: &request("req-process", Some("run-process")),
+            turn: 2,
+            tool_results: &[],
+        };
+
+        let step = provider.next_step(&context).unwrap();
+
+        assert_eq!(
+            step,
+            AgentStep::Finish {
+                output: "run-process:2:req-process".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn external_provider_emits_tool_call_without_in_process_code() {
+        let mut provider = ExternalAgentProvider::new(ExternalAgentProviderConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'tool\\tcall-process\\ttool.echo\\t{\"message\":\"from-process\"}\\n'"
+                    .to_string(),
+            ],
+            timeout: Some(Duration::from_secs(1)),
+        })
+        .unwrap();
+        let context = AgentContext {
+            run_id: "run-tool-process",
+            request: &request("req-tool-process", Some("run-tool-process")),
+            turn: 1,
+            tool_results: &[],
+        };
+
+        let step = provider.next_step(&context).unwrap();
+
+        assert_eq!(
+            step,
+            AgentStep::ToolCall(ToolCall {
+                id: "call-process".to_string(),
+                name: "tool.echo".to_string(),
+                arguments: json!({"message": "from-process"}),
+            })
+        );
+    }
+
+    #[test]
+    fn external_provider_timeout_fails_closed() {
+        let mut provider = ExternalAgentProvider::new(ExternalAgentProviderConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 1".to_string()],
+            timeout: Some(Duration::from_millis(10)),
+        })
+        .unwrap();
+        let context = AgentContext {
+            run_id: "run-timeout",
+            request: &request("req-timeout", Some("run-timeout")),
+            turn: 1,
+            tool_results: &[],
+        };
+
+        let error = provider.next_step(&context).unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn external_provider_nonzero_exit_fails_closed() {
+        let mut provider = ExternalAgentProvider::new(ExternalAgentProviderConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'finish\\tbad\\n'; printf 'denied\\n' >&2; exit 7".to_string(),
+            ],
+            timeout: Some(Duration::from_secs(1)),
+        })
+        .unwrap();
+        let context = AgentContext {
+            run_id: "run-exit",
+            request: &request("req-exit", Some("run-exit")),
+            turn: 1,
+            tool_results: &[],
+        };
+
+        let error = provider.next_step(&context).unwrap_err();
+
+        assert!(error.to_string().contains("exited with status"));
+        assert!(error.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn external_provider_rejects_invalid_config() {
+        let error = ExternalAgentProvider::new(ExternalAgentProviderConfig {
+            command: " ".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        })
+        .unwrap_err();
+        assert!(matches!(error, AgentRuntimeError::InvalidConfig(_)));
+
+        let error = ExternalAgentProvider::new(ExternalAgentProviderConfig {
+            command: "sh".to_string(),
+            args: Vec::new(),
+            timeout: Some(Duration::ZERO),
+        })
+        .unwrap_err();
+        assert!(matches!(error, AgentRuntimeError::InvalidConfig(_)));
     }
 
     #[test]

@@ -15,7 +15,7 @@ pub use agent::{
     AgentCancellation, AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider,
     AgentRunEvent, AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome,
     AgentRunStatus, AgentRuntimeError, AgentRuntimeResult, AgentStep, AgentToolDispatchRequest,
-    GovernedAgentToolDispatcher,
+    ExternalAgentProvider, ExternalAgentProviderConfig, GovernedAgentToolDispatcher,
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 
