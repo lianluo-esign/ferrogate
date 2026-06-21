@@ -14,6 +14,17 @@ use ferrogate_providers::RoutingStrategy;
 
 use super::Config;
 
+struct WorkflowToolNames {
+    names: HashSet<String>,
+    wildcard: bool,
+}
+
+impl WorkflowToolNames {
+    fn contains(&self, name: &str) -> bool {
+        self.wildcard || self.names.contains(name)
+    }
+}
+
 impl Config {
     pub(crate) fn validate(&self) -> AnyResult<()> {
         self.listen
@@ -33,10 +44,11 @@ impl Config {
         let api_key_ids = self.validate_api_keys(&model_names, &provider_names)?;
         self.validate_policies(&api_key_ids, &model_names, &provider_names)?;
         self.validate_gateway_configs(&api_key_ids)?;
-        self.validate_agent_workflows(&api_key_ids, &model_names)?;
+        self.validate_plugins()?;
+        let tool_names = self.workflow_tool_names();
+        self.validate_agent_workflows(&api_key_ids, &model_names, &tool_names)?;
         self.validate_prompt_templates(&model_names)?;
         self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
-        self.validate_plugins()?;
         self.validate_tls()?;
         self.validate_telemetry()?;
         self.validate_observability()?;
@@ -1026,6 +1038,7 @@ impl Config {
         &self,
         api_key_ids: &HashSet<String>,
         model_names: &HashSet<String>,
+        tool_names: &WorkflowToolNames,
     ) -> AnyResult<()> {
         let mut workflow_versions = HashSet::new();
         for (index, workflow) in self.agent_workflows.iter().enumerate() {
@@ -1116,6 +1129,30 @@ impl Config {
                         "field agent_workflows[{index}].nodes[{node_index}].tool: cannot be empty"
                     );
                 }
+                match node.kind {
+                    super::AgentWorkflowNodeKind::Tool => {
+                        let Some(tool) = node.tool.as_deref() else {
+                            bail!(
+                                "field agent_workflows[{index}].nodes[{node_index}].tool: tool node {} must declare a tool",
+                                node.id
+                            );
+                        };
+                        if !tool_names.contains(tool) {
+                            bail!(
+                                "field agent_workflows[{index}].nodes[{node_index}].tool: workflow {} references unknown tool {}",
+                                workflow.id,
+                                tool
+                            );
+                        }
+                    }
+                    _ => {
+                        if node.tool.is_some() {
+                            bail!(
+                                "field agent_workflows[{index}].nodes[{node_index}].tool: only tool nodes may declare a tool"
+                            );
+                        }
+                    }
+                }
                 validate_positive_optional_u32(
                     node.max_iterations,
                     &format!("field agent_workflows[{index}].nodes[{node_index}].max_iterations"),
@@ -1150,6 +1187,33 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    fn workflow_tool_names(&self) -> WorkflowToolNames {
+        let mut names = HashSet::new();
+        let mut wildcard = false;
+        for (_, _, plugin) in self.plugin_registrations_for_validation() {
+            if !matches!(plugin.kind, super::ExtensionKind::ToolProvider) {
+                continue;
+            }
+            for tool in &plugin.permissions.tools {
+                if tool == "*" {
+                    wildcard = true;
+                } else {
+                    names.insert(tool.clone());
+                }
+            }
+        }
+        for server in &self.mcp_servers {
+            for tool in &server.tools_to_execute {
+                if tool == "*" {
+                    wildcard = true;
+                } else {
+                    names.insert(format!("{}-{tool}", server.name));
+                }
+            }
+        }
+        WorkflowToolNames { names, wildcard }
     }
 
     fn validate_prompt_templates(&self, model_names: &HashSet<String>) -> AnyResult<()> {

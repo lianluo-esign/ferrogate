@@ -876,6 +876,21 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/admin/v1/agent-workflows",
         &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"bad-tool-flow","name":"Bad tool flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"missing","kind":"tool","tool":"tool.missing"}],"edges":[],"max_tool_calls":1}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_agent_workflow");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("references unknown tool tool.missing")));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
         r#"{"id":"tool-flow","name":"Tool flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"echo","kind":"tool","tool":"tool.echo","max_iterations":2}],"edges":[],"max_tool_calls":1,"max_iterations":2}"#,
         201,
         |body| {

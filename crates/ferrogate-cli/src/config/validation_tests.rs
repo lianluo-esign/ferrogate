@@ -331,6 +331,121 @@ fn rejects_agent_workflow_with_bad_graph_references() {
 }
 
 #[test]
+fn accepts_agent_workflow_tool_nodes_with_registered_tools() {
+    let config = Config {
+        plugins: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
+        mcp_servers: vec![mcp_server()],
+        agent_workflows: vec![AgentWorkflowPolicy {
+            id: "tool-flow".into(),
+            name: "Tool flow".into(),
+            version: 1,
+            enabled: true,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec![],
+            nodes: vec![
+                AgentWorkflowNode {
+                    id: "echo".into(),
+                    kind: AgentWorkflowNodeKind::Tool,
+                    model: None,
+                    tool: Some("tool.echo".into()),
+                    max_iterations: Some(2),
+                    token_budget: None,
+                },
+                AgentWorkflowNode {
+                    id: "search".into(),
+                    kind: AgentWorkflowNodeKind::Tool,
+                    model: None,
+                    tool: Some("github-search".into()),
+                    max_iterations: None,
+                    token_budget: None,
+                },
+            ],
+            edges: vec![],
+            max_model_calls: None,
+            max_tool_calls: Some(2),
+            max_parallelism: Some(1),
+            max_iterations: Some(3),
+            timeout_millis: Some(1_000),
+            token_budget: None,
+        }],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_agent_workflow_tool_node_with_unknown_tool() {
+    let config = Config {
+        plugins: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
+        agent_workflows: vec![AgentWorkflowPolicy {
+            id: "tool-flow".into(),
+            name: "Tool flow".into(),
+            version: 1,
+            enabled: true,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec![],
+            nodes: vec![AgentWorkflowNode {
+                id: "missing".into(),
+                kind: AgentWorkflowNodeKind::Tool,
+                model: None,
+                tool: Some("tool.missing".into()),
+                max_iterations: None,
+                token_budget: None,
+            }],
+            edges: vec![],
+            max_model_calls: None,
+            max_tool_calls: Some(1),
+            max_parallelism: None,
+            max_iterations: None,
+            timeout_millis: None,
+            token_budget: None,
+        }],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("references unknown tool tool.missing"));
+}
+
+#[test]
+fn rejects_agent_workflow_non_tool_node_declaring_tool() {
+    let config = Config {
+        plugins: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
+        agent_workflows: vec![AgentWorkflowPolicy {
+            id: "bad-flow".into(),
+            name: "Bad flow".into(),
+            version: 1,
+            enabled: true,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec![],
+            nodes: vec![AgentWorkflowNode {
+                id: "draft".into(),
+                kind: AgentWorkflowNodeKind::Model,
+                model: None,
+                tool: Some("tool.echo".into()),
+                max_iterations: None,
+                token_budget: None,
+            }],
+            edges: vec![],
+            max_model_calls: None,
+            max_tool_calls: None,
+            max_parallelism: None,
+            max_iterations: None,
+            timeout_millis: None,
+            token_budget: None,
+        }],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("only tool nodes may declare a tool"));
+}
+
+#[test]
 fn accepts_builtin_extension_config_with_explicit_permissions() {
     let config = Config {
         plugins: vec![extension("tool.echo", ExtensionKind::ToolProvider, 10)],
