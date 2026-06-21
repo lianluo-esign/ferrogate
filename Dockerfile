@@ -15,7 +15,7 @@ COPY tools ./tools
 COPY Ferrogate ./Ferrogate
 COPY config ./config
 COPY sql ./sql
-RUN cargo build --release -p ferrogate-cli --locked
+RUN cargo build --release -p ferrogate-cli -p ferrogate-auth --locked
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.vendor="Token4AI Cloud" \
@@ -27,6 +27,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/ferrogate /usr/local/bin/ferrogate
+COPY --from=builder /app/target/release/ferrogate-auth /usr/local/bin/ferrogate-auth
 COPY --from=builder /app/Ferrogate/Caddyfile /etc/ferrogate/Caddyfile
 EXPOSE 8080
 ENV FERROGATE_CONFIG=/etc/ferrogate/Caddyfile
