@@ -57,6 +57,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) reliability: ReliabilityConfig,
     #[serde(default)]
+    pub(crate) agent_runtime: AgentRuntimeConfig,
+    #[serde(default)]
     pub(crate) cluster: ClusterConfig,
     #[serde(default)]
     pub(crate) upstreams: Vec<Upstream>,
@@ -96,6 +98,35 @@ pub(crate) struct ClusterConfig {
     pub(crate) heartbeat_interval_secs: u64,
     #[serde(default = "default_cluster_config_poll_interval_secs")]
     pub(crate) config_poll_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentRuntimeConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) provider: AgentRuntimeProvider,
+    #[serde(default = "default_agent_runtime_max_turns")]
+    pub(crate) max_turns: u32,
+    #[serde(default = "default_agent_runtime_timeout_millis")]
+    pub(crate) timeout_millis: u64,
+    #[serde(default)]
+    pub(crate) wasm: AgentRuntimeWasmConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentRuntimeProvider {
+    #[default]
+    Wasm,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentRuntimeWasmConfig {
+    #[serde(default = "default_agent_runtime_wasm_max_fuel")]
+    pub(crate) max_fuel: u64,
+    #[serde(default)]
+    pub(crate) allow_wasi: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -862,6 +893,18 @@ fn default_cluster_config_poll_interval_secs() -> u64 {
     5
 }
 
+fn default_agent_runtime_max_turns() -> u32 {
+    4
+}
+
+fn default_agent_runtime_timeout_millis() -> u64 {
+    30_000
+}
+
+fn default_agent_runtime_wasm_max_fuel() -> u64 {
+    1_000_000
+}
+
 fn default_acme_directory_url() -> String {
     "https://acme-v02.api.letsencrypt.org/directory".to_string()
 }
@@ -1196,6 +1239,27 @@ impl Default for ClusterConfig {
     }
 }
 
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: AgentRuntimeProvider::Wasm,
+            max_turns: default_agent_runtime_max_turns(),
+            timeout_millis: default_agent_runtime_timeout_millis(),
+            wasm: AgentRuntimeWasmConfig::default(),
+        }
+    }
+}
+
+impl Default for AgentRuntimeWasmConfig {
+    fn default() -> Self {
+        Self {
+            max_fuel: default_agent_runtime_wasm_max_fuel(),
+            allow_wasi: false,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1219,6 +1283,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             storage: StorageConfig::default(),
             reliability: ReliabilityConfig::default(),
+            agent_runtime: AgentRuntimeConfig::default(),
             cluster: ClusterConfig::default(),
             upstreams: Vec::new(),
             routes: Vec::new(),

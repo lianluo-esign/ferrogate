@@ -17,6 +17,11 @@ authors.workspace = true
 
 [dependencies]
 ferrogate-core = { path = "../ferrogate-core" }
+wasmtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+wat.workspace = true
 
 [features]
 default = []
+wasm = ["dep:wasmtime"]

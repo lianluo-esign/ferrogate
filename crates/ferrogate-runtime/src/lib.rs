@@ -7,6 +7,8 @@
 //! Pingora runtime boundary.
 
 mod reload;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 

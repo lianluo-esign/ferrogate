@@ -16,6 +16,12 @@ fn default_config_uses_localhost_8080() {
     assert!(config.api_keys.is_empty());
     assert!(config.upstreams.is_empty());
     assert!(config.routes.is_empty());
+    assert!(!config.agent_runtime.enabled);
+    assert_eq!(config.agent_runtime.provider, AgentRuntimeProvider::Wasm);
+    assert_eq!(config.agent_runtime.max_turns, 4);
+    assert_eq!(config.agent_runtime.timeout_millis, 30_000);
+    assert_eq!(config.agent_runtime.wasm.max_fuel, 1_000_000);
+    assert!(!config.agent_runtime.wasm.allow_wasi);
 }
 
 #[test]
@@ -270,6 +276,35 @@ storage:
         config.storage.libsql_auth_token.as_deref(),
         Some("test-token")
     );
+}
+
+#[test]
+fn parses_yaml_agent_runtime_opt_in_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.yaml");
+    std::fs::write(
+        &path,
+        r#"
+listen: "127.0.0.1:8080"
+agent_runtime:
+  enabled: true
+  provider: wasm
+  max_turns: 6
+  timeout_millis: 15000
+  wasm:
+    max_fuel: 2000000
+    allow_wasi: false
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert!(config.agent_runtime.enabled);
+    assert_eq!(config.agent_runtime.provider, AgentRuntimeProvider::Wasm);
+    assert_eq!(config.agent_runtime.max_turns, 6);
+    assert_eq!(config.agent_runtime.timeout_millis, 15_000);
+    assert_eq!(config.agent_runtime.wasm.max_fuel, 2_000_000);
+    assert!(!config.agent_runtime.wasm.allow_wasi);
 }
 
 #[test]

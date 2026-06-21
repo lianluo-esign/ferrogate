@@ -190,6 +190,7 @@ mod tests {
         RequestContext {
             request_id: "fg-test".into(),
             trace_id: None,
+            agent_run_id: None,
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: TenantContext {

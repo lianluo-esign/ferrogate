@@ -1266,6 +1266,80 @@ fn rejects_invalid_mcp_dispatch_limits() {
 }
 
 #[test]
+fn rejects_invalid_agent_runtime_limits() {
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            max_turns: 0,
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field agent_runtime.max_turns"));
+
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            timeout_millis: 0,
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field agent_runtime.timeout_millis"));
+
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            wasm: AgentRuntimeWasmConfig {
+                max_fuel: 0,
+                ..AgentRuntimeWasmConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field agent_runtime.wasm.max_fuel"));
+}
+
+#[test]
+fn rejects_wasi_until_agent_runtime_host_abi_exists() {
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            wasm: AgentRuntimeWasmConfig {
+                allow_wasi: true,
+                ..AgentRuntimeWasmConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+
+    assert!(error.contains("field agent_runtime.wasm.allow_wasi"));
+}
+
+#[test]
+fn accepts_agent_runtime_opt_in_config() {
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            max_turns: 3,
+            timeout_millis: 5_000,
+            wasm: AgentRuntimeWasmConfig {
+                max_fuel: 500_000,
+                allow_wasi: false,
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
 fn rejects_zero_provider_response_body_max_bytes() {
     let config = Config {
         reliability: ReliabilityConfig {

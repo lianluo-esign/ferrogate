@@ -43,6 +43,7 @@ impl Config {
         self.validate_cache()?;
         self.validate_storage()?;
         self.validate_reliability()?;
+        self.validate_agent_runtime()?;
         self.validate_cluster()?;
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
@@ -613,6 +614,22 @@ impl Config {
             bail!("field reliability.graceful_upgrade_sock_retries: must be greater than zero");
         }
 
+        Ok(())
+    }
+
+    fn validate_agent_runtime(&self) -> AnyResult<()> {
+        if self.agent_runtime.max_turns == 0 {
+            bail!("field agent_runtime.max_turns: must be greater than zero");
+        }
+        if self.agent_runtime.timeout_millis == 0 {
+            bail!("field agent_runtime.timeout_millis: must be greater than zero");
+        }
+        if self.agent_runtime.wasm.max_fuel == 0 {
+            bail!("field agent_runtime.wasm.max_fuel: must be greater than zero");
+        }
+        if self.agent_runtime.wasm.allow_wasi {
+            bail!("field agent_runtime.wasm.allow_wasi: WASI host capabilities are not implemented yet");
+        }
         Ok(())
     }
 

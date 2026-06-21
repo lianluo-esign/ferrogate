@@ -166,6 +166,7 @@ impl Config {
             cache: crate::config::CacheConfig::default(),
             storage: crate::config::StorageConfig::default(),
             reliability: crate::config::ReliabilityConfig::default(),
+            agent_runtime: crate::config::AgentRuntimeConfig::default(),
             cluster: crate::config::ClusterConfig::default(),
             upstreams: config
                 .upstreams
