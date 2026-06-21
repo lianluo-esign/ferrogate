@@ -54,8 +54,9 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_storage::{
-    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageRepositories,
-    StorageBackendEvidence, StoredAuditEvent, StoredRequestLog, StoredUsageAggregate,
+    PostgresStorageConfig, RuntimeControlPlaneState, RuntimeStorageBackend,
+    RuntimeStorageRepositories, StorageBackendEvidence, StoredAuditEvent, StoredRequestLog,
+    StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -959,7 +960,26 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         return RuntimeStorageRepositories::postgres(
             storage.provider_order.clone(),
             storage.required,
-            dsn,
+            PostgresStorageConfig {
+                dsn,
+                pool_size: storage.postgres_pool_size,
+                tls_mode: storage.postgres_tls_mode,
+                connect_timeout_secs: storage.postgres_connect_timeout_secs,
+                statement_timeout_millis: storage.postgres_statement_timeout_millis,
+                schema: storage
+                    .postgres_schema
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|schema| !schema.is_empty())
+                    .map(ToOwned::to_owned),
+                search_path: storage
+                    .postgres_search_path
+                    .iter()
+                    .map(|item| item.trim())
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            },
             initialize_schema,
             api_keys,
             tenants,

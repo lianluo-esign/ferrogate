@@ -91,6 +91,13 @@ storage:
     - postgres
     - mysql
   postgres_dsn_env: "FERROGATE_POSTGRES_DSN"
+  postgres_pool_size: 4
+  postgres_tls_mode: disable
+  postgres_connect_timeout_secs: 5
+  postgres_statement_timeout_millis: 30000
+  postgres_schema: ferrogate_control
+  postgres_search_path:
+    - public
   migration_mode: auto
 ```
 
@@ -106,6 +113,18 @@ Runtime behavior:
 - `migration_mode: auto` runs the checked-in PostgreSQL schema at startup.
 - Admin/status evidence reports `provider: postgres` without returning the DSN.
 - Control-plane resources use the same document-store contract as libSQL.
+- `postgres_pool_size` opens a small fixed connection pool for Admin API
+  control-plane mutations and restart restore.
+- `postgres_connect_timeout_secs` is applied to each PostgreSQL connection
+  attempt.
+- `postgres_statement_timeout_millis` sets the session statement timeout on
+  every pooled PostgreSQL connection.
+- `postgres_schema` is created if missing and prepended to the session
+  `search_path`; `postgres_search_path` appends additional schemas.
+- `postgres_tls_mode` accepts `disable`, `prefer`, `require`, `verify_ca`, and
+  `verify_full`. This build uses the synchronous `postgres` client without a
+  TLS connector, so `require`, `verify_ca`, and `verify_full` fail closed until
+  a TLS connector is wired in. Use `disable` for local Docker tests.
 
 The schema file is
 [`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
@@ -207,6 +226,10 @@ policy data.
 - Local `file://` URLs do not use a token.
 - Missing `storage.postgres_dsn` and `storage.postgres_dsn_env` fails config
   validation when `provider: postgres`.
+- Invalid `storage.postgres_pool_size`, PostgreSQL timeout values, schema, or
+  search-path identifiers fail config validation.
+- PostgreSQL TLS modes that require a TLS connector fail startup instead of
+  silently falling back to plaintext.
 - With `storage.required: true`, initialization errors prevent startup instead
   of falling back to memory.
 - Admin mutations that fail to persist are rejected or rolled back before the

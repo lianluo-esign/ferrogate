@@ -13,13 +13,15 @@
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
-    sync::Arc,
-    sync::Mutex,
+    str::FromStr,
+    sync::{Arc, Condvar, Mutex},
+    time::Duration,
 };
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
 use libsql::Builder as LibsqlBuilder;
+use postgres::config::SslMode as PostgresSslMode;
 use postgres::{Client as PostgresClient, NoTls};
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +83,40 @@ impl StorageProviderConfig {
             required: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresTlsMode {
+    #[default]
+    Disable,
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
+impl PostgresTlsMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PostgresTlsMode::Disable => "disable",
+            PostgresTlsMode::Prefer => "prefer",
+            PostgresTlsMode::Require => "require",
+            PostgresTlsMode::VerifyCa => "verify_ca",
+            PostgresTlsMode::VerifyFull => "verify_full",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresStorageConfig {
+    pub dsn: String,
+    pub pool_size: usize,
+    pub tls_mode: PostgresTlsMode,
+    pub connect_timeout_secs: u64,
+    pub statement_timeout_millis: u64,
+    pub schema: Option<String>,
+    pub search_path: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,7 +266,12 @@ struct LibsqlControlPlaneStore {
 }
 
 struct PostgresControlPlaneStore {
-    client: Mutex<Option<PostgresClient>>,
+    pool: Arc<PostgresClientPool>,
+}
+
+struct PostgresClientPool {
+    clients: Mutex<Vec<PostgresClient>>,
+    available: Condvar,
 }
 
 impl std::fmt::Debug for LibsqlControlPlaneStore {
@@ -440,7 +481,7 @@ impl std::fmt::Debug for PostgresControlPlaneStore {
 
 impl PostgresControlPlaneStore {
     fn connect(
-        dsn: String,
+        config: PostgresStorageConfig,
         bootstrap_api_keys: Vec<(String, String)>,
         bootstrap_tenants: Vec<(String, String)>,
         bootstrap_policies: Vec<(String, String)>,
@@ -450,9 +491,15 @@ impl PostgresControlPlaneStore {
         bootstrap_mcp_servers: Vec<(String, String)>,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
-        let client = PostgresClient::connect(&dsn, NoTls).map_err(postgres_error)?;
+        let mut clients = Vec::with_capacity(config.pool_size);
+        for _ in 0..config.pool_size {
+            clients.push(connect_postgres_client(&config)?);
+        }
         let store = Self {
-            client: Mutex::new(Some(client)),
+            pool: Arc::new(PostgresClientPool {
+                clients: Mutex::new(clients),
+                available: Condvar::new(),
+            }),
         };
         if initialize_schema {
             store.initialize_schema()?;
@@ -591,15 +638,10 @@ impl PostgresControlPlaneStore {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    let mut client = self.client.lock().map_err(|_| {
-                        StorageError::Postgres(
-                            "postgres control-plane client mutex is poisoned".into(),
-                        )
-                    })?;
-                    let client = client.as_mut().ok_or_else(|| {
-                        StorageError::Postgres("postgres control-plane client is closed".into())
-                    })?;
-                    action(client).map_err(postgres_error)
+                    let mut client = self.pool.acquire()?;
+                    let result = action(&mut client).map_err(postgres_error);
+                    self.pool.release(client);
+                    result
                 })
                 .join()
                 .map_err(|_| StorageError::Postgres("postgres storage thread panicked".into()))?
@@ -609,14 +651,111 @@ impl PostgresControlPlaneStore {
 
 impl Drop for PostgresControlPlaneStore {
     fn drop(&mut self) {
-        let Ok(mut client) = self.client.lock() else {
+        let Ok(mut clients) = self.pool.clients.lock() else {
             return;
         };
-        let Some(client) = client.take() else {
+        let clients = std::mem::take(&mut *clients);
+        if clients.is_empty() {
             return;
-        };
-        let _ = std::thread::spawn(move || drop(client)).join();
+        }
+        let _ = std::thread::spawn(move || drop(clients)).join();
     }
+}
+
+impl PostgresClientPool {
+    fn acquire(&self) -> Result<PostgresClient, StorageError> {
+        let mut clients = self.clients.lock().map_err(|_| {
+            StorageError::Postgres("postgres control-plane client pool mutex is poisoned".into())
+        })?;
+        loop {
+            if let Some(client) = clients.pop() {
+                return Ok(client);
+            }
+            clients = self.available.wait(clients).map_err(|_| {
+                StorageError::Postgres(
+                    "postgres control-plane client pool mutex is poisoned".into(),
+                )
+            })?;
+        }
+    }
+
+    fn release(&self, client: PostgresClient) {
+        if let Ok(mut clients) = self.clients.lock() {
+            clients.push(client);
+            self.available.notify_one();
+        }
+    }
+}
+
+fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {
+    if !matches!(
+        config.tls_mode,
+        PostgresTlsMode::Disable | PostgresTlsMode::Prefer
+    ) {
+        return Err(StorageError::Postgres(format!(
+            "storage.postgres_tls_mode={} requires a PostgreSQL TLS connector; this build currently supports disable and prefer",
+            config.tls_mode.as_str()
+        )));
+    }
+
+    let mut pg_config = postgres::Config::from_str(&config.dsn).map_err(postgres_error)?;
+    pg_config.connect_timeout(Duration::from_secs(config.connect_timeout_secs));
+    pg_config.ssl_mode(match config.tls_mode {
+        PostgresTlsMode::Disable => PostgresSslMode::Disable,
+        PostgresTlsMode::Prefer => PostgresSslMode::Prefer,
+        PostgresTlsMode::Require => PostgresSslMode::Require,
+        PostgresTlsMode::VerifyCa | PostgresTlsMode::VerifyFull => PostgresSslMode::Require,
+    });
+
+    let mut client = pg_config.connect(NoTls).map_err(postgres_error)?;
+    initialize_postgres_session(&mut client, config)?;
+    Ok(client)
+}
+
+fn initialize_postgres_session(
+    client: &mut PostgresClient,
+    config: &PostgresStorageConfig,
+) -> Result<(), StorageError> {
+    client
+        .batch_execute(&format!(
+            "SET statement_timeout = {}",
+            config.statement_timeout_millis
+        ))
+        .map_err(postgres_error)?;
+
+    if let Some(schema) = config.schema.as_deref() {
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA IF NOT EXISTS {}; SET search_path TO {};",
+                quote_postgres_identifier(schema),
+                postgres_search_path_sql(config)
+            ))
+            .map_err(postgres_error)?;
+    } else if !config.search_path.is_empty() {
+        client
+            .batch_execute(&format!(
+                "SET search_path TO {};",
+                postgres_search_path_sql(config)
+            ))
+            .map_err(postgres_error)?;
+    }
+    Ok(())
+}
+
+fn postgres_search_path_sql(config: &PostgresStorageConfig) -> String {
+    let mut path = Vec::new();
+    if let Some(schema) = config.schema.as_deref() {
+        path.push(schema.to_string());
+    }
+    path.extend(config.search_path.iter().cloned());
+    path.into_iter()
+        .map(|item| quote_postgres_identifier(&item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn quote_postgres_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 async fn build_libsql_database(
@@ -1287,7 +1426,7 @@ impl RuntimeStorageRepositories {
     pub fn postgres(
         provider_order: Vec<StorageProviderKind>,
         required: bool,
-        dsn: String,
+        config: PostgresStorageConfig,
         initialize_schema: bool,
         bootstrap_api_keys: Vec<(String, String)>,
         bootstrap_tenants: Vec<(String, String)>,
@@ -1305,7 +1444,7 @@ impl RuntimeStorageRepositories {
             scope
                 .spawn(move || {
                     PostgresControlPlaneStore::connect(
-                        dsn,
+                        config,
                         bootstrap_api_keys,
                         bootstrap_tenants,
                         bootstrap_policies,
@@ -2052,6 +2191,37 @@ mod tests {
             error.to_string(),
             "storage provider mysql is not implemented yet (required=true)"
         );
+    }
+
+    #[test]
+    fn postgres_tls_modes_without_connector_fail_closed_before_connecting() {
+        let error = RuntimeStorageRepositories::postgres(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            PostgresStorageConfig {
+                dsn: "host=127.0.0.1 port=1 user=postgres dbname=ferrogate".into(),
+                pool_size: 1,
+                tls_mode: PostgresTlsMode::Require,
+                connect_timeout_secs: 1,
+                statement_timeout_millis: 1_000,
+                schema: None,
+                search_path: Vec::new(),
+            },
+            false,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            10,
+            10,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires a PostgreSQL TLS connector"));
     }
 
     #[test]

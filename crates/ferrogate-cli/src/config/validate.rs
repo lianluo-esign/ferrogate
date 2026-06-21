@@ -476,6 +476,24 @@ impl Config {
                     "field storage.postgres_dsn_env: required when storage.provider is postgres unless storage.postgres_dsn is set"
                 );
             }
+            if self.storage.postgres_pool_size == 0 {
+                bail!("field storage.postgres_pool_size: must be greater than zero");
+            }
+            if self.storage.postgres_connect_timeout_secs == 0 {
+                bail!("field storage.postgres_connect_timeout_secs: must be greater than zero");
+            }
+            if self.storage.postgres_statement_timeout_millis == 0 {
+                bail!("field storage.postgres_statement_timeout_millis: must be greater than zero");
+            }
+            if let Some(schema) = self.storage.postgres_schema.as_deref() {
+                validate_postgres_identifier("storage.postgres_schema", schema)?;
+            }
+            for (index, item) in self.storage.postgres_search_path.iter().enumerate() {
+                validate_postgres_identifier(
+                    &format!("storage.postgres_search_path[{index}]"),
+                    item,
+                )?;
+            }
         }
         if self.storage.required && !self.storage.provider.is_durable() {
             bail!("field storage.required: durable storage requires a non-memory provider");
@@ -1281,6 +1299,24 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_postgres_identifier(field: &str, value: &str) -> AnyResult<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("field {field}: must not be empty");
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        bail!("field {field}: must not be empty");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        bail!("field {field}: must start with an ASCII letter or underscore");
+    }
+    if !chars.all(|character| character == '_' || character.is_ascii_alphanumeric()) {
+        bail!("field {field}: must contain only ASCII letters, digits, or underscores");
+    }
+    Ok(())
 }
 
 fn validate_manual_tls_files(cert_path: &str, key_path: &str) -> AnyResult<()> {

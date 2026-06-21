@@ -2727,6 +2727,13 @@ impl ControlPlaneRestartStorage<'_> {
     - postgres
     - mysql
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
+  postgres_pool_size: 2
+  postgres_tls_mode: disable
+  postgres_connect_timeout_secs: 5
+  postgres_statement_timeout_millis: 30000
+  postgres_schema: ferrogate_control
+  postgres_search_path:
+    - public
   migration_mode: auto"#
                 .to_string(),
         }

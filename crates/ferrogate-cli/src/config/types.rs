@@ -12,7 +12,7 @@ pub(crate) use ferrogate_mcp::{
     McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
 use ferrogate_providers::RoutingStrategy;
-use ferrogate_storage::StorageProviderKind;
+use ferrogate_storage::{PostgresTlsMode, StorageProviderKind};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Config {
@@ -700,6 +700,18 @@ pub(crate) struct StorageConfig {
     pub(crate) postgres_dsn: Option<String>,
     #[serde(default)]
     pub(crate) postgres_dsn_env: Option<String>,
+    #[serde(default = "default_postgres_pool_size")]
+    pub(crate) postgres_pool_size: usize,
+    #[serde(default)]
+    pub(crate) postgres_tls_mode: PostgresTlsMode,
+    #[serde(default = "default_postgres_connect_timeout_secs")]
+    pub(crate) postgres_connect_timeout_secs: u64,
+    #[serde(default = "default_postgres_statement_timeout_millis")]
+    pub(crate) postgres_statement_timeout_millis: u64,
+    #[serde(default)]
+    pub(crate) postgres_schema: Option<String>,
+    #[serde(default)]
+    pub(crate) postgres_search_path: Vec<String>,
     #[serde(default = "default_storage_migration_mode")]
     pub(crate) migration_mode: StorageMigrationMode,
     #[serde(default = "default_admin_list_limit")]
@@ -988,6 +1000,18 @@ fn default_storage_migration_mode() -> StorageMigrationMode {
     StorageMigrationMode::Auto
 }
 
+fn default_postgres_pool_size() -> usize {
+    4
+}
+
+fn default_postgres_connect_timeout_secs() -> u64 {
+    5
+}
+
+fn default_postgres_statement_timeout_millis() -> u64 {
+    30_000
+}
+
 fn default_request_log_retention_records() -> usize {
     10_000
 }
@@ -1091,6 +1115,12 @@ impl Default for StorageConfig {
             libsql_auth_token_env: None,
             postgres_dsn: None,
             postgres_dsn_env: None,
+            postgres_pool_size: default_postgres_pool_size(),
+            postgres_tls_mode: PostgresTlsMode::default(),
+            postgres_connect_timeout_secs: default_postgres_connect_timeout_secs(),
+            postgres_statement_timeout_millis: default_postgres_statement_timeout_millis(),
+            postgres_schema: None,
+            postgres_search_path: Vec::new(),
             migration_mode: default_storage_migration_mode(),
             admin_list_default_limit: default_admin_list_limit(),
             admin_list_max_limit: default_admin_list_max_limit(),

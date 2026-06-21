@@ -1451,6 +1451,12 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
             postgres_dsn: Some(
                 "host=127.0.0.1 port=5432 user=postgres dbname=ferrogate sslmode=disable".into(),
             ),
+            postgres_pool_size: 2,
+            postgres_tls_mode: ferrogate_storage::PostgresTlsMode::Prefer,
+            postgres_connect_timeout_secs: 5,
+            postgres_statement_timeout_millis: 5_000,
+            postgres_schema: Some("ferrogate_control".into()),
+            postgres_search_path: vec!["public".into()],
             ..StorageConfig::default()
         },
         ..Config::default()
@@ -1478,6 +1484,58 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
     };
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field storage.postgres_dsn_env"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),
+            postgres_pool_size: 0,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.postgres_pool_size"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),
+            postgres_connect_timeout_secs: 0,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.postgres_connect_timeout_secs"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),
+            postgres_statement_timeout_millis: 0,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.postgres_statement_timeout_millis"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),
+            postgres_schema: Some("bad-schema".into()),
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.postgres_schema"));
 
     let config = Config {
         storage: StorageConfig {
