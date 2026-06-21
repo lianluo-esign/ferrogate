@@ -54,6 +54,7 @@ fn main() -> Result<()> {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
             run_gateway_external_auth_api(&args.local, &args.auth)?;
+            run_gateway_third_party_auth_api(&args.local)?;
             run_gateway_api(&args.local)?;
             if args.include_docker {
                 run_all_docker_scenarios(&args.image)?;
@@ -74,6 +75,7 @@ fn main() -> Result<()> {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
             run_gateway_external_auth_api(&args.local, &args.auth)?;
+            run_gateway_third_party_auth_api(&args.local)?;
             run_gateway_api(&args.local)?;
             run_libsql_file_restart(&args.local)?;
             run_libsql_server_restart(&args.local)?;
@@ -1269,6 +1271,55 @@ fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthArgs) -> Res
     Ok(())
 }
 
+fn run_gateway_third_party_auth_api(local: &LocalArgs) -> Result<()> {
+    let auth = spawn_mock_third_party_auth_server(5)?;
+    let case = LocalHarness::start_with_external_auth(&local.ferrogate_bin, 1, &auth.addr)?;
+
+    case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
+        assert!(list_contains(&body, "id", "fast-chat"));
+        Ok(())
+    })?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"third party allow"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"blocked-chat","messages":[{"role":"user","content":"third party deny"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "rbac_denied");
+            Ok(())
+        },
+    )?;
+
+    let requests = auth.join()?;
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("POST /v1/auth/resolve-api-key ")),
+        "third-party auth mock did not receive resolve-api-key request"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("POST /v1/auth/authorize ")),
+        "third-party auth mock did not receive authorize request"
+    );
+
+    println!("gateway-third-party-auth-api scenario passed");
+    Ok(())
+}
+
 fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
     if !args.libsql_url.starts_with("libsql://") {
         bail!("--libsql-url must use the libsql:// protocol");
@@ -1855,6 +1906,11 @@ struct MockOtlpServer {
     addr: String,
     received: mpsc::Receiver<String>,
     handle: Option<JoinHandle<()>>,
+}
+
+struct MockThirdPartyAuthServer {
+    addr: String,
+    handle: Option<JoinHandle<Vec<String>>>,
 }
 
 struct AuthHarness {
@@ -2894,6 +2950,26 @@ impl Drop for LocalHarness {
     }
 }
 
+impl MockThirdPartyAuthServer {
+    fn join(mut self) -> Result<Vec<String>> {
+        let handle = self
+            .handle
+            .take()
+            .context("third-party auth mock join handle missing")?;
+        handle
+            .join()
+            .map_err(|_| anyhow!("third-party auth mock thread panicked"))
+    }
+}
+
+impl Drop for MockThirdPartyAuthServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn local_gateway_config(
     gateway_addr: &str,
     provider_addr: &str,
@@ -3601,6 +3677,72 @@ fn spawn_mock_otlp_server() -> Result<MockOtlpServer> {
         received: rx,
         handle: Some(handle),
     })
+}
+
+fn spawn_mock_third_party_auth_server(
+    expected_requests: usize,
+) -> Result<MockThirdPartyAuthServer> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?.to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let started = Instant::now();
+        while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(5) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let body = third_party_auth_response_body(&request);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    requests.push(request);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        requests
+    });
+    Ok(MockThirdPartyAuthServer {
+        addr,
+        handle: Some(handle),
+    })
+}
+
+fn third_party_auth_response_body(request: &str) -> String {
+    if request.contains("POST /v1/auth/resolve-api-key ") {
+        return r#"{"tenant":{"organization_id":"org_demo","team_id":null,"project_id":"project_gateway","user_id":null,"api_key_id":"client"},"subject":{"type":"api_key","api_key_id":"client"},"scopes":["models.read","chat.completions","responses.create"]}"#.to_string();
+    }
+    if request.contains("POST /v1/auth/authorize ") {
+        let allowed = http_request_body(request)
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(body).ok())
+            .and_then(|body| {
+                body.get("resource")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .is_some_and(|resource| resource == "model:fast-chat");
+        let reason = if allowed {
+            "third_party_policy_allow"
+        } else {
+            "third_party_policy_deny"
+        };
+        return format!(
+            r#"{{"allowed":{allowed},"tenant":{{"organization_id":"org_demo","team_id":null,"project_id":"project_gateway","user_id":null,"api_key_id":"client"}},"reason":"{reason}"}}"#
+        );
+    }
+    r#"{"error":{"code":"not_found","message":"third-party auth mock endpoint not found"}}"#
+        .to_string()
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<String> {
