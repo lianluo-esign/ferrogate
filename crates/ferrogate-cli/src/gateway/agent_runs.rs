@@ -1129,6 +1129,8 @@ fn tool_execution_context<'a>(
         workflow_id: workflow_use.map(|workflow| workflow.id.as_str()),
         workflow_version: workflow_use.map(|workflow| workflow.version),
         workflow_node_id: workflow_use.map(|workflow| workflow.node_id.as_str()),
+        skill_package_id: None,
+        skill_package_version: None,
     }
 }
 

@@ -1005,6 +1005,72 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         Ok(())
     })?;
     case.expect_json(
+        "POST",
+        "/v1/tools/execute",
+        &[CLIENT_AUTH, JSON_CONTENT, SUPPORT_SKILL_HEADER],
+        r#"{"name":"tool.echo","arguments":{"message":"skill-governed-tool"},"session_id":"skill-tool-session"}"#,
+        200,
+        |body| {
+            assert_eq!(body["name"], "tool.echo");
+            assert_eq!(body["is_error"], false);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/mcp/tool/execute",
+        &[CLIENT_AUTH, JSON_CONTENT, SUPPORT_SKILL_HEADER],
+        r#"{"name":"http-search","arguments":{"query":"skill-mcp"},"session_id":"skill-mcp-session"}"#,
+        200,
+        |body| {
+            assert_eq!(body["name"], "http-search");
+            assert_eq!(body["is_error"], false);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT, SUPPORT_SKILL_HEADER],
+        r#"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"http-search","arguments":{"query":"skill-native-mcp"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["content"][0]["text"], "ferrogate-result");
+            assert_eq!(body["result"]["isError"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/tools/execute",
+        &[OBSERVER_AUTH, JSON_CONTENT, SUPPORT_SKILL_HEADER],
+        r#"{"name":"tool.echo","arguments":{"message":"blocked"}}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "skill_package_not_allowed");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/audit-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let raw = body.to_string();
+            assert!(raw.contains("skill_package:support-skill@1.0.0/tool_session:skill-tool-session"));
+            assert!(raw.contains("skill_package:support-skill@1.0.0/tool_session:skill-mcp-session/mcp:http/tool:search"));
+            assert!(raw.contains("skill_package:support-skill@1.0.0/mcp:http/tool:search"));
+            assert!(raw.contains("skill_package=support-skill@1.0.0"));
+            assert_secret_redacted(&raw);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
         "PUT",
         "/admin/v1/skill-packages/support-skill",
         &[ADMIN_AUTH, JSON_CONTENT],
@@ -2311,6 +2377,7 @@ const CLIENT_AUTH: &str = "Authorization: Bearer client-secret";
 const OBSERVER_AUTH: &str = "Authorization: Bearer observer-secret";
 const AUTH_TEST_CLIENT_2: &str = "Authorization: Bearer test-secret-2";
 const JSON_CONTENT: &str = "Content-Type: application/json";
+const SUPPORT_SKILL_HEADER: &str = "x-ferrogate-skill-package: support-skill";
 
 struct LocalHarness {
     _dir: tempfile::TempDir,
@@ -3557,7 +3624,7 @@ log_bodies = true
 id = "observer"
 name = "Observer"
 key = "observer-secret"
-scopes = ["tools.read"]
+scopes = ["tools.read", "tools.execute"]
 organization_id = "org_observer"
 project_id = "project_observer"
 

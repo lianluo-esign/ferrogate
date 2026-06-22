@@ -145,7 +145,15 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SkillPackageHeader"
+          },
+          {
+            "$ref": "#/components/parameters/SkillPackageVersionHeader"
+          }
+        ]
       }
     },
     "/v1/agent-runs": {
@@ -244,7 +252,15 @@
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SkillPackageHeader"
+          },
+          {
+            "$ref": "#/components/parameters/SkillPackageVersionHeader"
+          }
+        ]
       }
     },
     "/admin/v1/status": {
@@ -3051,6 +3067,24 @@
           "type": "string"
         },
         "description": "Stable prompt template id."
+      },
+      "SkillPackageHeader": {
+        "name": "x-ferrogate-skill-package",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional skill package id that must be visible to the authenticated API key. When set, tool/MCP execution is allowed only if the package declares the requested capability, and audit evidence is linked to the package."
+      },
+      "SkillPackageVersionHeader": {
+        "name": "x-ferrogate-skill-package-version",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional skill package version. Requires x-ferrogate-skill-package and must match the registered package version."
       }
     },
     "requestBodies": {

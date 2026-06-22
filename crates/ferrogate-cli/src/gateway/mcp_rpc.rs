@@ -15,6 +15,8 @@ use crate::{
     state::{AdminAuditEventDraft, AppState},
 };
 
+use super::local::{validate_skill_tool_capability, SkillExecutionContext, ToolExecuteBackend};
+
 #[derive(Debug, Deserialize)]
 pub(super) struct McpJsonRpcRequest {
     #[serde(default)]
@@ -55,13 +57,14 @@ pub(super) async fn handle_request(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    skill_context: Option<&SkillExecutionContext>,
     rpc: McpJsonRpcRequest,
 ) -> McpJsonRpcResponse {
     match rpc.method.as_str() {
         "initialize" => result(rpc.id, initialize_result()),
         "ping" => result(rpc.id, json!({})),
-        "tools/list" => tools_list(state, ctx, auth, rpc.id),
-        "tools/call" => tools_call(state, ctx, auth, rpc.id, &rpc.params).await,
+        "tools/list" => tools_list(state, ctx, auth, skill_context, rpc.id),
+        "tools/call" => tools_call(state, ctx, auth, skill_context, rpc.id, &rpc.params).await,
         _ => error(
             rpc.id,
             -32601,
@@ -115,6 +118,7 @@ fn tools_list(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    skill_context: Option<&SkillExecutionContext>,
     id: Option<Value>,
 ) -> McpJsonRpcResponse {
     let tools = state.mcp_tools_for(
@@ -125,6 +129,7 @@ fn tools_list(
     state.record_admin_audit_event(audit_event(
         ctx,
         auth,
+        skill_context,
         "tool.list",
         "mcp",
         "success",
@@ -154,6 +159,7 @@ async fn tools_call(
     state: &AppState,
     ctx: &ProxyContext,
     auth: &AuthContext,
+    skill_context: Option<&SkillExecutionContext>,
     id: Option<Value>,
     params: &Value,
 ) -> McpJsonRpcResponse {
@@ -175,6 +181,29 @@ async fn tools_call(
         .as_ref()
         .map(|(server_name, tool_name)| tool_audit_target(server_name, tool_name))
         .unwrap_or_else(|| request.name.clone());
+    if let Some(skill_context) = skill_context {
+        if let Err(error_response) = validate_skill_tool_capability(
+            state,
+            skill_context,
+            ToolExecuteBackend::Mcp,
+            &request.name,
+        ) {
+            state.record_admin_audit_event(audit_event(
+                ctx,
+                auth,
+                Some(skill_context),
+                "tool.execute",
+                audit_target,
+                "rejected",
+                error_response.message.clone(),
+            ));
+            return error(
+                id,
+                mcp_error_code(error_response.code),
+                error_response.message,
+            );
+        }
+    }
     let Some(tool) = state.tool_by_name(&request.name) else {
         let (code, message) = if audit_details.is_some() {
             (
@@ -190,6 +219,7 @@ async fn tools_call(
         state.record_admin_audit_event(audit_event(
             ctx,
             auth,
+            skill_context,
             "tool.execute",
             audit_target,
             "error",
@@ -217,6 +247,7 @@ async fn tools_call(
                 state.record_admin_audit_event(audit_event(
                     ctx,
                     auth,
+                    skill_context,
                     "tool.approval_requested",
                     format!("tool:{name}"),
                     "error",
@@ -232,6 +263,7 @@ async fn tools_call(
         state.record_admin_audit_event(audit_event(
             ctx,
             auth,
+            skill_context,
             "tool.approval_requested",
             format!("tool_approval:{}", approval.id),
             "pending",
@@ -245,6 +277,7 @@ async fn tools_call(
                 state.record_admin_audit_event(audit_event(
                     ctx,
                     auth,
+                    skill_context,
                     "tool.approval_granted",
                     format!("tool_approval:{}", resolved.id),
                     "approved",
@@ -264,6 +297,7 @@ async fn tools_call(
                 state.record_admin_audit_event(audit_event(
                     ctx,
                     auth,
+                    skill_context,
                     action,
                     format!("tool_approval:{}", latest.id),
                     "rejected",
@@ -291,6 +325,7 @@ async fn tools_call(
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
+                skill_context,
                 "tool.execute",
                 audit_target,
                 "success",
@@ -318,6 +353,7 @@ async fn tools_call(
             state.record_admin_audit_event(audit_event(
                 ctx,
                 auth,
+                skill_context,
                 "tool.execute",
                 audit_target,
                 "error",
@@ -399,11 +435,13 @@ pub(super) fn tool_audit_failure_message(
 fn audit_event(
     ctx: &ProxyContext,
     auth: &AuthContext,
+    skill_context: Option<&SkillExecutionContext>,
     action: impl Into<String>,
     target: impl Into<String>,
     outcome: &str,
     message: impl Into<String>,
 ) -> AdminAuditEventDraft {
+    let (target, message) = decorate_skill_audit(skill_context, target.into(), message.into());
     AdminAuditEventDraft {
         request_id: ctx.request_id.clone(),
         trace_id: ctx.trace_id.clone(),
@@ -414,10 +452,25 @@ fn audit_event(
         actor_api_key_id: auth.api_key_id.clone(),
         tenant: auth.tenant_context(),
         action: action.into(),
-        target: target.into(),
+        target,
         outcome: outcome.into(),
-        message: message.into(),
+        message,
     }
+}
+
+fn decorate_skill_audit(
+    skill_context: Option<&SkillExecutionContext>,
+    target: String,
+    message: String,
+) -> (String, String) {
+    let Some(skill_context) = skill_context else {
+        return (target, message);
+    };
+    let skill = format!("{}@{}", skill_context.id, skill_context.version);
+    (
+        format!("skill_package:{skill}/{target}"),
+        format!("skill_package={skill} {message}"),
+    )
 }
 
 fn mcp_error_code(code: &str) -> i64 {

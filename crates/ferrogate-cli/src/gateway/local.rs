@@ -17,7 +17,7 @@ use crate::{
     config::{
         config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, PolicyRule, PromptTemplate,
         PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
-        PromptTemplateVersionStatus, Provider, SkillPackage,
+        PromptTemplateVersionStatus, Provider, SkillPackage, SkillPackageCapabilityKind,
     },
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
@@ -46,6 +46,8 @@ use super::{FerroGateway, ProxyContext};
 const PROVIDER_CATALOG_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 const SERVICE_NAME: &str = "ferrogate";
+const SKILL_PACKAGE_HEADER: &str = "x-ferrogate-skill-package";
+const SKILL_PACKAGE_VERSION_HEADER: &str = "x-ferrogate-skill-package-version";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolExecuteBackend {
@@ -59,6 +61,14 @@ pub(super) struct ToolExecutionContext<'a> {
     pub(super) workflow_id: Option<&'a str>,
     pub(super) workflow_version: Option<u32>,
     pub(super) workflow_node_id: Option<&'a str>,
+    pub(super) skill_package_id: Option<&'a str>,
+    pub(super) skill_package_version: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct SkillExecutionContext {
+    pub(super) id: String,
+    pub(super) version: String,
 }
 
 #[derive(Debug)]
@@ -2555,12 +2565,26 @@ impl FerroGateway {
                 .await;
             }
         };
+        let skill_context = match resolve_visible_skill_context(&state, &auth, &headers) {
+            Ok(context) => context,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
 
         if rpc.id.is_none() {
             return write_empty_response(session, StatusCode::ACCEPTED, &ctx.request_id).await;
         }
 
-        let response = mcp_rpc::handle_request(&state, ctx, &auth, rpc).await;
+        let response =
+            mcp_rpc::handle_request(&state, ctx, &auth, skill_context.as_ref(), rpc).await;
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
     }
 
@@ -2627,14 +2651,34 @@ impl FerroGateway {
                 .await;
             }
         };
+        let skill_context = match resolve_skill_execution_context(
+            &state,
+            &auth,
+            &headers,
+            backend,
+            &request.name,
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let execution = ToolExecutionContext {
+            skill_package_id: skill_context.as_ref().map(|context| context.id.as_str()),
+            skill_package_version: skill_context
+                .as_ref()
+                .map(|context| context.version.as_str()),
+            ..ToolExecutionContext::default()
+        };
         match self
-            .execute_tool_request_with_governance(
-                ctx,
-                &auth,
-                ToolExecutionContext::default(),
-                request,
-                backend,
-            )
+            .execute_tool_request_with_governance(ctx, &auth, execution, request, backend)
             .await
         {
             Ok(response) => {
@@ -5320,6 +5364,166 @@ fn skill_package_visible_to_auth(package: &SkillPackage, auth: &AuthContext) -> 
             .is_some_and(|api_key_id| package.api_key_ids.iter().any(|id| id == api_key_id))
 }
 
+fn resolve_visible_skill_context(
+    state: &crate::state::AppState,
+    auth: &AuthContext,
+    headers: &http::HeaderMap,
+) -> Result<Option<SkillExecutionContext>, ToolExecutionHttpError> {
+    let Some(skill_id) = requested_optional_header(headers, SKILL_PACKAGE_HEADER)? else {
+        if requested_optional_header(headers, SKILL_PACKAGE_VERSION_HEADER)?.is_some() {
+            return Err(ToolExecutionHttpError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_skill_package_header",
+                message: format!(
+                    "{SKILL_PACKAGE_HEADER} is required when {SKILL_PACKAGE_VERSION_HEADER} is set"
+                ),
+            });
+        }
+        return Ok(None);
+    };
+    let requested_version = requested_optional_header(headers, SKILL_PACKAGE_VERSION_HEADER)?;
+    let Some(package) = state
+        .config
+        .skill_packages
+        .iter()
+        .find(|package| package.id == skill_id)
+    else {
+        return Err(ToolExecutionHttpError {
+            status: StatusCode::NOT_FOUND,
+            code: "skill_package_not_found",
+            message: format!("skill package {skill_id} was not found"),
+        });
+    };
+    if requested_version
+        .as_deref()
+        .is_some_and(|version| version != package.version)
+    {
+        return Err(ToolExecutionHttpError {
+            status: StatusCode::NOT_FOUND,
+            code: "skill_package_not_found",
+            message: format!(
+                "skill package {skill_id}@{} was not found",
+                requested_version.unwrap_or_default()
+            ),
+        });
+    }
+    if !package.enabled {
+        return Err(ToolExecutionHttpError {
+            status: StatusCode::FORBIDDEN,
+            code: "skill_package_disabled",
+            message: format!("skill package {skill_id}@{} is disabled", package.version),
+        });
+    }
+    if !skill_package_visible_to_auth(package, auth) {
+        return Err(ToolExecutionHttpError {
+            status: StatusCode::FORBIDDEN,
+            code: "skill_package_not_allowed",
+            message: format!(
+                "API key or tenant is not allowed to use skill package {skill_id}@{}",
+                package.version
+            ),
+        });
+    }
+    Ok(Some(SkillExecutionContext {
+        id: package.id.clone(),
+        version: package.version.clone(),
+    }))
+}
+
+fn resolve_skill_execution_context(
+    state: &crate::state::AppState,
+    auth: &AuthContext,
+    headers: &http::HeaderMap,
+    backend: ToolExecuteBackend,
+    tool_name: &str,
+) -> Result<Option<SkillExecutionContext>, ToolExecutionHttpError> {
+    let Some(context) = resolve_visible_skill_context(state, auth, headers)? else {
+        return Ok(None);
+    };
+    validate_skill_tool_capability(state, &context, backend, tool_name)?;
+    Ok(Some(context))
+}
+
+pub(super) fn validate_skill_tool_capability(
+    state: &crate::state::AppState,
+    context: &SkillExecutionContext,
+    backend: ToolExecuteBackend,
+    tool_name: &str,
+) -> Result<(), ToolExecutionHttpError> {
+    let Some(package) = state
+        .config
+        .skill_packages
+        .iter()
+        .find(|package| package.id == context.id && package.version == context.version)
+    else {
+        return Err(ToolExecutionHttpError {
+            status: StatusCode::NOT_FOUND,
+            code: "skill_package_not_found",
+            message: format!(
+                "skill package {}@{} was not found",
+                context.id, context.version
+            ),
+        });
+    };
+    let allowed = match backend {
+        ToolExecuteBackend::Extension => {
+            package.capabilities.iter().any(|capability| {
+                capability.kind == SkillPackageCapabilityKind::Tool && capability.id == tool_name
+            }) || state.tool_by_name(tool_name).is_some_and(|tool| {
+                package.capabilities.iter().any(|capability| {
+                    capability.kind == SkillPackageCapabilityKind::Plugin
+                        && capability.id == tool.extension_id
+                })
+            })
+        }
+        ToolExecuteBackend::Mcp => {
+            let details = mcp_rpc::tool_audit_details(tool_name);
+            package.capabilities.iter().any(|capability| {
+                (capability.kind == SkillPackageCapabilityKind::McpTool
+                    && capability.id == tool_name)
+                    || details.as_ref().is_some_and(|(server_name, _)| {
+                        capability.kind == SkillPackageCapabilityKind::McpServer
+                            && capability.id == *server_name
+                    })
+            })
+        }
+    };
+    if !allowed {
+        return Err(ToolExecutionHttpError {
+            status: StatusCode::FORBIDDEN,
+            code: "skill_package_capability_not_allowed",
+            message: format!(
+                "skill package {}@{} does not expose tool {}",
+                context.id, context.version, tool_name
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn requested_optional_header(
+    headers: &http::HeaderMap,
+    name: &'static str,
+) -> Result<Option<String>, ToolExecutionHttpError> {
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| ToolExecutionHttpError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_skill_package_header",
+        message: format!("{name} must be valid ASCII"),
+    })?;
+    let value = value.trim();
+    if value.is_empty() || value.contains('/') {
+        return Err(ToolExecutionHttpError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_skill_package_header",
+            message: format!("{name} must be a non-empty id without '/'"),
+        });
+    }
+    Ok(Some(value.to_string()))
+}
+
 fn admin_plugin(
     plugin: &crate::config::PluginConfig,
     status: Option<crate::extensions::ExtensionStatus>,
@@ -6001,5 +6205,12 @@ fn tool_audit_event_draft_for_target(
     event.workflow_id = execution.workflow_id.map(str::to_string);
     event.workflow_version = execution.workflow_version;
     event.workflow_node_id = execution.workflow_node_id.map(str::to_string);
+    if let (Some(skill_package_id), Some(skill_package_version)) =
+        (execution.skill_package_id, execution.skill_package_version)
+    {
+        let skill = format!("{skill_package_id}@{skill_package_version}");
+        event.target = format!("skill_package:{skill}/{}", event.target);
+        event.message = format!("skill_package={skill} {}", event.message);
+    }
     event
 }
