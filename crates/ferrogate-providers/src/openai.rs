@@ -605,6 +605,56 @@ mod tests {
     }
 
     #[test]
+    fn preserves_responses_tools_tool_choice_and_images_for_openai_compatible_providers() {
+        let adapter = OpenAiCompatibleAdapter;
+        let prepared = adapter
+            .prepare_responses(
+                provider(None),
+                ResponsesPlan {
+                    logical_model: "fast-chat".into(),
+                    provider_model: "gpt-4.1-mini".into(),
+                    stream: false,
+                    body: json!({
+                        "model": "fast-chat",
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}}
+                                }
+                            }
+                        }],
+                        "tool_choice": {"type": "function", "function": {"name": "lookup_weather"}},
+                        "input": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "look"},
+                                {"type": "input_image", "image_url": "https://example.com/a.png"}
+                            ]
+                        }]
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.body["model"], "gpt-4.1-mini");
+        assert_eq!(
+            prepared.body["tools"][0]["function"]["name"],
+            "lookup_weather"
+        );
+        assert_eq!(
+            prepared.body["tool_choice"]["function"]["name"],
+            "lookup_weather"
+        );
+        assert_eq!(
+            prepared.body["input"][0]["content"][1]["image_url"],
+            "https://example.com/a.png"
+        );
+    }
+
+    #[test]
     fn injects_openai_tools_and_round_trips_tool_calls() {
         let adapter = OpenAiCompatibleAdapter;
         let body = adapter

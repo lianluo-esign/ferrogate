@@ -45,29 +45,12 @@ impl ProviderAdapter for AnthropicAdapter {
             anthropic_body["system"] = system.clone();
         }
 
-        let mut headers = vec![
-            ProviderHeader {
-                name: "content-type".into(),
-                value: SecretValue::new("application/json"),
-            },
-            ProviderHeader {
-                name: "anthropic-version".into(),
-                value: SecretValue::new("2023-06-01"),
-            },
-        ];
-        if let Some(api_key) = provider.api_key.filter(|value| !value.trim().is_empty()) {
-            headers.push(ProviderHeader {
-                name: "x-api-key".into(),
-                value: SecretValue::new(api_key),
-            });
-        }
-
         Ok(ProviderHttpRequest {
             provider: provider.name,
             endpoint: messages_endpoint(&provider.base_url),
             body: anthropic_body,
             stream: request.stream,
-            headers,
+            headers: anthropic_headers(provider.api_key),
         })
     }
 
@@ -76,16 +59,37 @@ impl ProviderAdapter for AnthropicAdapter {
         provider: ProviderConfig,
         request: ResponsesPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
-        self.prepare_chat_completions(
-            provider,
-            ChatCompletionPlan {
-                logical_model: request.logical_model,
-                provider_model: request.provider_model,
-                stream: request.stream,
-                body: CanonicalAiRequest::from_responses_body(request.body)?
-                    .into_chat_body_with_system_field(),
-            },
-        )
+        validate_kind(&provider.kind)?;
+        let body = CanonicalAiRequest::from_responses_body(request.body)?.into_anthropic_body();
+        let messages = body.get("messages").cloned().unwrap_or_else(|| json!([]));
+        let max_tokens = body
+            .get("max_tokens")
+            .cloned()
+            .unwrap_or_else(|| json!(1024));
+
+        let mut anthropic_body = json!({
+            "model": request.provider_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": request.stream,
+        });
+        if let Some(system) = body.get("system") {
+            anthropic_body["system"] = system.clone();
+        }
+        if let Some(tools) = body.get("tools") {
+            anthropic_body["tools"] = tools.clone();
+        }
+        if let Some(tool_choice) = body.get("tool_choice") {
+            anthropic_body["tool_choice"] = tool_choice.clone();
+        }
+
+        Ok(ProviderHttpRequest {
+            provider: provider.name.clone(),
+            endpoint: messages_endpoint(&provider.base_url),
+            body: anthropic_body,
+            stream: request.stream,
+            headers: anthropic_headers(provider.api_key),
+        })
     }
 
     fn normalize_error_response(
@@ -215,6 +219,26 @@ impl ProviderAdapter for AnthropicAdapter {
         }));
         Ok(body)
     }
+}
+
+fn anthropic_headers(api_key: Option<String>) -> Vec<ProviderHeader> {
+    let mut headers = vec![
+        ProviderHeader {
+            name: "content-type".into(),
+            value: SecretValue::new("application/json"),
+        },
+        ProviderHeader {
+            name: "anthropic-version".into(),
+            value: SecretValue::new("2023-06-01"),
+        },
+    ];
+    if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
+        headers.push(ProviderHeader {
+            name: "x-api-key".into(),
+            value: SecretValue::new(api_key),
+        });
+    }
+    headers
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {
@@ -369,6 +393,50 @@ mod tests {
         assert_eq!(prepared.body["system"], "be concise");
         assert_eq!(prepared.body["max_tokens"], 256);
         assert_eq!(prepared.body["stream"], false);
+    }
+
+    #[test]
+    fn converts_responses_plan_with_tool_choice_and_image_inputs_to_anthropic_messages_request() {
+        let adapter = AnthropicAdapter;
+        let prepared = adapter
+            .prepare_responses(
+                provider(None),
+                ResponsesPlan {
+                    logical_model: "claude-chat".into(),
+                    provider_model: "claude-3-5-sonnet-latest".into(),
+                    stream: false,
+                    body: json!({
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}}
+                                }
+                            }
+                        }],
+                        "tool_choice": {"type": "tool", "name": "lookup_weather"},
+                        "input": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "look"},
+                                {"type": "input_image", "image_url": "https://example.com/a.png"}
+                            ]
+                        }]
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.body["tools"][0]["name"], "lookup_weather");
+        assert_eq!(prepared.body["tool_choice"]["type"], "tool");
+        assert_eq!(prepared.body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(prepared.body["messages"][0]["content"][1]["type"], "image");
+        assert_eq!(
+            prepared.body["messages"][0]["content"][1]["source"]["type"],
+            "url"
+        );
     }
 
     #[test]

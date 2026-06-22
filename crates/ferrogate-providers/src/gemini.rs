@@ -38,17 +38,6 @@ impl ProviderAdapter for GeminiAdapter {
             gemini_body["generationConfig"] = generation_config;
         }
 
-        let mut headers = vec![ProviderHeader {
-            name: "content-type".into(),
-            value: SecretValue::new("application/json"),
-        }];
-        if let Some(api_key) = provider.api_key.filter(|value| !value.trim().is_empty()) {
-            headers.push(ProviderHeader {
-                name: "x-goog-api-key".into(),
-                value: SecretValue::new(api_key),
-            });
-        }
-
         Ok(ProviderHttpRequest {
             provider: provider.name,
             endpoint: generate_content_endpoint(
@@ -58,7 +47,7 @@ impl ProviderAdapter for GeminiAdapter {
             ),
             body: gemini_body,
             stream: request.stream,
-            headers,
+            headers: gemini_headers(provider.api_key),
         })
     }
 
@@ -67,16 +56,36 @@ impl ProviderAdapter for GeminiAdapter {
         provider: ProviderConfig,
         request: ResponsesPlan,
     ) -> Result<ProviderHttpRequest, AdapterError> {
-        self.prepare_chat_completions(
-            provider,
-            ChatCompletionPlan {
-                logical_model: request.logical_model,
-                provider_model: request.provider_model,
-                stream: request.stream,
-                body: CanonicalAiRequest::from_responses_body(request.body)?
-                    .into_chat_body_with_system_message(),
-            },
-        )
+        validate_kind(&provider.kind)?;
+        let body = CanonicalAiRequest::from_responses_body(request.body)?.into_gemini_body();
+
+        let mut gemini_body = json!({
+            "contents": body.get("contents").cloned().unwrap_or_else(|| json!([])),
+        });
+        if let Some(system_instruction) = body.get("systemInstruction") {
+            gemini_body["systemInstruction"] = system_instruction.clone();
+        }
+        if let Some(generation_config) = body.get("generationConfig") {
+            gemini_body["generationConfig"] = generation_config.clone();
+        }
+        if let Some(tools) = body.get("tools") {
+            gemini_body["tools"] = tools.clone();
+        }
+        if let Some(tool_config) = body.get("toolConfig") {
+            gemini_body["toolConfig"] = tool_config.clone();
+        }
+
+        Ok(ProviderHttpRequest {
+            provider: provider.name.clone(),
+            endpoint: generate_content_endpoint(
+                &provider.base_url,
+                &request.provider_model,
+                request.stream,
+            ),
+            body: gemini_body,
+            stream: request.stream,
+            headers: gemini_headers(provider.api_key),
+        })
     }
 
     fn normalize_error_response(
@@ -137,6 +146,20 @@ impl ProviderAdapter for GeminiAdapter {
             || extracted.total_tokens.is_some())
         .then_some(extracted)
     }
+}
+
+fn gemini_headers(api_key: Option<String>) -> Vec<ProviderHeader> {
+    let mut headers = vec![ProviderHeader {
+        name: "content-type".into(),
+        value: SecretValue::new("application/json"),
+    }];
+    if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
+        headers.push(ProviderHeader {
+            name: "x-goog-api-key".into(),
+            value: SecretValue::new(api_key),
+        });
+    }
+    headers
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {
@@ -395,6 +418,56 @@ mod tests {
         assert_eq!(prepared.body["contents"][0]["role"], "user");
         assert_eq!(prepared.body["contents"][0]["parts"][0]["text"], "hello");
         assert_eq!(prepared.body["generationConfig"]["maxOutputTokens"], 64);
+    }
+
+    #[test]
+    fn converts_responses_plan_with_tool_choice_and_image_inputs_to_gemini_generate_content_request(
+    ) {
+        let adapter = GeminiAdapter;
+        let prepared = adapter
+            .prepare_responses(
+                provider(None),
+                ResponsesPlan {
+                    logical_model: "flash-chat".into(),
+                    provider_model: "gemini-2.5-flash".into(),
+                    stream: false,
+                    body: json!({
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}}
+                                }
+                            }
+                        }],
+                        "tool_choice": {"type": "tool", "name": "lookup_weather"},
+                        "input": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "look"},
+                                {"type": "input_image", "image_url": "https://example.com/a.png"}
+                            ]
+                        }]
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            prepared.body["tools"][0]["functionDeclarations"][0]["name"],
+            "lookup_weather"
+        );
+        assert_eq!(
+            prepared.body["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"][0],
+            "lookup_weather"
+        );
+        assert_eq!(prepared.body["contents"][0]["parts"][0]["text"], "look");
+        assert_eq!(
+            prepared.body["contents"][0]["parts"][1]["fileData"]["fileUri"],
+            "https://example.com/a.png"
+        );
     }
 
     #[test]
