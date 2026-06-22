@@ -960,6 +960,75 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    let support_skill = r#"{"id":"support-skill","name":"Support skill","version":"1.0.0","description":"Pi-compatible support skill package","enabled":true,"api_key_ids":["client"],"compatibility":{"agent_runtimes":["pi-agent","codex","claude-code"]},"permissions":{"tools":["tool.echo"],"network":[],"filesystem":false,"shell":false,"tenant_scope":true,"secrets":false,"admin_mutation":false},"capabilities":[{"kind":"plugin","id":"tool.echo","description":"governed builtin echo plugin"},{"kind":"tool","id":"tool.echo","description":"echo tool through FerroGate tool governance"},{"kind":"mcp_server","id":"http","description":"HTTP MCP server binding"},{"kind":"mcp_tool","id":"http-search","description":"MCP search tool through FerroGate MCP governance"},{"kind":"agent_workflow","id":"support-flow","description":"bounded support workflow"}],"metadata":{"display":"Support","token":"client-secret"}}"#;
+    case.expect_json(
+        "POST",
+        "/admin/v1/skill-packages",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        support_skill,
+        201,
+        |body| {
+            assert_eq!(body["object"], "skill_package");
+            assert_eq!(body["skill_package"]["id"], "support-skill");
+            assert_eq!(body["skill_package"]["version"], "1.0.0");
+            assert_eq!(body["skill_package"]["capabilities"][1]["kind"], "tool");
+            assert_eq!(body["skill_package"]["metadata"]["token"], "[redacted]");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/skill-packages/support-skill",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "skill_package");
+            assert_eq!(body["skill_package"]["id"], "support-skill");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json("GET", "/v1/skills", &[CLIENT_AUTH], "", 200, |body| {
+        let skill = admin_list_item(&body, "id", "support-skill")
+            .context("support skill was not visible to owning client")?;
+        assert_eq!(skill["name"], "Support skill");
+        assert_eq!(skill["compatibility"]["agent_runtimes"][0], "pi-agent");
+        assert!(skill.get("metadata").is_none());
+        assert_secret_redacted(&body.to_string());
+        Ok(())
+    })?;
+    case.expect_json("GET", "/v1/skills", &[OBSERVER_AUTH], "", 200, |body| {
+        assert!(!list_contains(&body, "id", "support-skill"));
+        assert_secret_redacted(&body.to_string());
+        Ok(())
+    })?;
+    case.expect_json(
+        "PUT",
+        "/admin/v1/skill-packages/support-skill",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"support-skill","name":"Support skill","version":"1.0.0","description":"Pi-compatible support skill package","enabled":false,"api_key_ids":["client"],"compatibility":{"agent_runtimes":["pi-agent","codex","claude-code"]},"permissions":{"tools":["tool.echo"],"network":[],"filesystem":false,"shell":false,"tenant_scope":true,"secrets":false,"admin_mutation":false},"capabilities":[{"kind":"plugin","id":"tool.echo"},{"kind":"tool","id":"tool.echo"},{"kind":"mcp_server","id":"http"},{"kind":"mcp_tool","id":"http-search"},{"kind":"agent_workflow","id":"support-flow"}],"metadata":{"display":"Support","token":"client-secret"}}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "skill_package");
+            assert_eq!(body["skill_package"]["enabled"], false);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/v1/skills/support-skill",
+        &[CLIENT_AUTH],
+        "",
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], "skill_package_not_found");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "POST",
         "/v1/chat/completions",
@@ -2239,6 +2308,7 @@ fn run_control_plane_restart(
 
 const ADMIN_AUTH: &str = "Authorization: Bearer admin-secret";
 const CLIENT_AUTH: &str = "Authorization: Bearer client-secret";
+const OBSERVER_AUTH: &str = "Authorization: Bearer observer-secret";
 const AUTH_TEST_CLIENT_2: &str = "Authorization: Bearer test-secret-2";
 const JSON_CONTENT: &str = "Content-Type: application/json";
 
@@ -3482,6 +3552,14 @@ allowed_models = ["fast-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
 log_bodies = true
+
+[[api_keys]]
+id = "observer"
+name = "Observer"
+key = "observer-secret"
+scopes = ["tools.read"]
+organization_id = "org_observer"
+project_id = "project_observer"
 
 [[api_keys]]
 id = "admin"

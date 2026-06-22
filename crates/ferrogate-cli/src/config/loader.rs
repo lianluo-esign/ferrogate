@@ -157,6 +157,7 @@ impl Config {
             policies: Vec::new(),
             gateway_configs: Vec::new(),
             agent_workflows: Vec::new(),
+            skill_packages: Vec::new(),
             prompt_templates: Vec::new(),
             plugins: Vec::new(),
             extensions: Vec::new(),

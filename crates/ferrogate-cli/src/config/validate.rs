@@ -48,6 +48,7 @@ impl Config {
         let tool_names = self.workflow_tool_names();
         self.validate_agent_workflows(&api_key_ids, &model_names, &provider_names, &tool_names)?;
         self.validate_prompt_templates(&model_names)?;
+        self.validate_skill_packages(&api_key_ids, &tool_names)?;
         self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
         self.validate_tls()?;
         self.validate_telemetry()?;
@@ -1246,6 +1247,148 @@ impl Config {
             }
         }
         WorkflowToolNames { names, wildcard }
+    }
+
+    fn validate_skill_packages(
+        &self,
+        api_key_ids: &HashSet<String>,
+        tool_names: &WorkflowToolNames,
+    ) -> AnyResult<()> {
+        let plugin_ids = self
+            .plugin_registrations_for_validation()
+            .map(|(_, _, plugin)| plugin.id.as_str())
+            .collect::<HashSet<_>>();
+        let mcp_server_names = self
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<HashSet<_>>();
+        let prompt_template_ids = self
+            .prompt_templates
+            .iter()
+            .map(|template| template.id.as_str())
+            .collect::<HashSet<_>>();
+        let agent_workflow_ids = self
+            .agent_workflows
+            .iter()
+            .map(|workflow| workflow.id.as_str())
+            .collect::<HashSet<_>>();
+
+        let mut ids = HashSet::new();
+        for (index, package) in self.skill_packages.iter().enumerate() {
+            if package.id.trim().is_empty() {
+                bail!("field skill_packages[{index}].id: cannot be empty");
+            }
+            if !ids.insert(package.id.as_str()) {
+                bail!(
+                    "field skill_packages[{index}].id: duplicate skill package id {}",
+                    package.id
+                );
+            }
+            if package.name.trim().is_empty() {
+                bail!("field skill_packages[{index}].name: cannot be empty");
+            }
+            if package.version.trim().is_empty() {
+                bail!("field skill_packages[{index}].version: cannot be empty");
+            }
+            if package.capabilities.is_empty() {
+                bail!("field skill_packages[{index}].capabilities: at least one capability is required");
+            }
+            for api_key_id in &package.api_key_ids {
+                if !api_key_ids.contains(api_key_id.as_str()) {
+                    bail!(
+                        "field skill_packages[{index}].api_key_ids: skill package {} references unknown api key {}",
+                        package.id,
+                        api_key_id
+                    );
+                }
+            }
+            validate_extension_permission_names(
+                "skill_packages",
+                index,
+                "permissions.tools",
+                &package.permissions.tools,
+            )?;
+            validate_extension_permission_names(
+                "skill_packages",
+                index,
+                "permissions.network",
+                &package.permissions.network,
+            )?;
+            for (runtime_index, runtime) in package.compatibility.agent_runtimes.iter().enumerate()
+            {
+                if runtime.trim().is_empty() {
+                    bail!(
+                        "field skill_packages[{index}].compatibility.agent_runtimes[{runtime_index}]: cannot be empty"
+                    );
+                }
+            }
+            for (capability_index, capability) in package.capabilities.iter().enumerate() {
+                if capability.id.trim().is_empty() {
+                    bail!(
+                        "field skill_packages[{index}].capabilities[{capability_index}].id: cannot be empty"
+                    );
+                }
+                match capability.kind {
+                    super::SkillPackageCapabilityKind::Plugin => {
+                        if !plugin_ids.contains(capability.id.as_str()) {
+                            bail!(
+                                "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown plugin {}",
+                                package.id,
+                                capability.id
+                            );
+                        }
+                    }
+                    super::SkillPackageCapabilityKind::Tool => {
+                        if !tool_names.contains(&capability.id) {
+                            bail!(
+                                "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown tool {}",
+                                package.id,
+                                capability.id
+                            );
+                        }
+                    }
+                    super::SkillPackageCapabilityKind::McpServer => {
+                        if !mcp_server_names.contains(capability.id.as_str()) {
+                            bail!(
+                                "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown MCP server {}",
+                                package.id,
+                                capability.id
+                            );
+                        }
+                    }
+                    super::SkillPackageCapabilityKind::McpTool => {
+                        if !tool_names.contains(&capability.id) {
+                            bail!(
+                                "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown MCP tool {}",
+                                package.id,
+                                capability.id
+                            );
+                        }
+                    }
+                    super::SkillPackageCapabilityKind::PromptTemplate => {
+                        if !prompt_template_ids.contains(capability.id.as_str()) {
+                            bail!(
+                                "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown prompt template {}",
+                                package.id,
+                                capability.id
+                            );
+                        }
+                    }
+                    super::SkillPackageCapabilityKind::AgentWorkflow => {
+                        if !agent_workflow_ids.contains(capability.id.as_str()) {
+                            bail!(
+                                "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown agent workflow {}",
+                                package.id,
+                                capability.id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn validate_prompt_templates(&self, model_names: &HashSet<String>) -> AnyResult<()> {

@@ -17,7 +17,7 @@ use crate::{
     config::{
         config_snapshot_id, AgentWorkflowPolicy, ApiKey, Config, PolicyRule, PromptTemplate,
         PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVersion,
-        PromptTemplateVersionStatus, Provider,
+        PromptTemplateVersionStatus, Provider, SkillPackage,
     },
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
@@ -30,9 +30,9 @@ use crate::{
         AdminList, AdminMcpServerMutationResponse, AdminPlugin, AdminPluginMutation,
         AdminPluginMutationResponse, AdminPolicyMutation, AdminPolicyMutationResponse,
         AdminPromptTemplate, AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse,
-        AdminProvider, AdminProviderModelCandidate, AdminProviderModelCatalog, AdminStatus,
-        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
-        ReadinessResponse,
+        AdminProvider, AdminProviderModelCandidate, AdminProviderModelCatalog, AdminSkillPackage,
+        AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage, HealthResponse,
+        OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
     },
     state::{AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord},
 };
@@ -1316,6 +1316,425 @@ impl FerroGateway {
                 .await
             }
         }
+    }
+
+    pub(super) async fn handle_admin_skill_packages(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let id = path.strip_prefix("/admin/v1/skill-packages/");
+        match (method, id) {
+            (&Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let data = state
+                            .config
+                            .skill_packages
+                            .iter()
+                            .map(admin_skill_package)
+                            .collect();
+                        write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &AdminList::new(data),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::GET, Some(id)) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let Some(package) = state
+                            .config
+                            .skill_packages
+                            .iter()
+                            .find(|package| package.id == id)
+                        else {
+                            return write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "skill_package_not_found",
+                                format!("skill package {id} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        };
+                        write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &AdminSkillPackageMutationResponse {
+                                object: "skill_package",
+                                skill_package: admin_skill_package(package),
+                            },
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::POST, None) => {
+                self.handle_admin_skill_package_upsert(session, ctx, headers, None)
+                    .await
+            }
+            (&Method::PUT | &Method::PATCH, Some(id)) => {
+                self.handle_admin_skill_package_upsert(session, ctx, headers, Some(id))
+                    .await
+            }
+            (&Method::DELETE, Some(id)) => {
+                self.handle_admin_skill_package_delete(session, ctx, headers, id)
+                    .await
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "skill package endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_skill_package_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_id: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let package = match serde_json::from_slice::<SkillPackage>(&body) {
+            Ok(package) => {
+                if path_id.is_some_and(|path_id| path_id != package.id.as_str()) {
+                    return write_json_error(
+                        session,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_skill_package",
+                        "request path id and body id must match",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                package
+            }
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "skill_package.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON skill package object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let package_id = package.id.clone();
+        match self.state.upsert_skill_package(package) {
+            Ok(outcome) if outcome.committed => {
+                let current = self.state.current();
+                let Some(package) = current
+                    .config
+                    .skill_packages
+                    .iter()
+                    .find(|package| package.id == package_id)
+                else {
+                    return write_json_error(
+                        session,
+                        StatusCode::CONFLICT,
+                        "skill_package_reload_rejected",
+                        format!("skill package {package_id} was not visible after reload"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "skill_package.upsert",
+                    &package_id,
+                    "committed",
+                    format!(
+                        "skill package {package_id} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                write_json_response(
+                    session,
+                    if path_id.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &AdminSkillPackageMutationResponse {
+                        object: "skill_package",
+                        skill_package: admin_skill_package(package),
+                    },
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(outcome) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected candidate skill package".into());
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "skill_package.upsert",
+                    &package_id,
+                    "rejected",
+                    reason.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "skill_package_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "skill_package.upsert",
+                    &package_id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_skill_package",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_skill_package_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        match self.state.delete_skill_package(id) {
+            Ok(Some(outcome)) if outcome.committed => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "skill_package.delete",
+                    id,
+                    "committed",
+                    format!(
+                        "skill package {id} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminDeleteResponse {
+                        object: "skill_package",
+                        id: id.to_string(),
+                        deleted: true,
+                    },
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(Some(outcome)) => {
+                let reason = outcome
+                    .reason
+                    .unwrap_or_else(|| "runtime rejected skill package delete".into());
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "skill_package_reload_rejected",
+                    reason,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "skill_package_not_found",
+                    format!("skill package {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_skill_package_delete",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_agent_skills(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        if method != &Method::GET {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "skill discovery endpoint supports GET only",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let state = self.state.current();
+        let auth = match authenticate(&state, &headers, "tools.read", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let id = path.strip_prefix("/v1/skills/");
+        if let Some(id) = id {
+            let Some(package) =
+                state.config.skill_packages.iter().find(|package| {
+                    package.id == id && skill_package_visible_to_auth(package, &auth)
+                })
+            else {
+                return write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "skill_package_not_found",
+                    format!("skill package {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await;
+            };
+            return write_json_response(
+                session,
+                StatusCode::OK,
+                &agent_skill_package(package),
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let data = state
+            .config
+            .skill_packages
+            .iter()
+            .filter(|package| skill_package_visible_to_auth(package, &auth))
+            .map(agent_skill_package)
+            .collect();
+        write_json_response(
+            session,
+            StatusCode::OK,
+            &AdminList::new(data),
+            &ctx.request_id,
+        )
+        .await
     }
 
     pub(super) async fn handle_admin_prompt_templates(
@@ -4862,6 +5281,43 @@ fn admin_agent_workflow(
             estimated_tokens: billing.1,
         },
     }
+}
+
+fn admin_skill_package(package: &SkillPackage) -> AdminSkillPackage {
+    AdminSkillPackage {
+        id: package.id.clone(),
+        name: package.name.clone(),
+        version: package.version.clone(),
+        description: package.description.clone(),
+        enabled: package.enabled,
+        compatibility: package.compatibility.clone(),
+        permissions: package.permissions.clone(),
+        capabilities: package.capabilities.clone(),
+        api_key_ids: package.api_key_ids.clone(),
+        metadata: redact_plugin_config(&package.metadata),
+    }
+}
+
+fn agent_skill_package(package: &SkillPackage) -> AgentSkillPackage {
+    AgentSkillPackage {
+        id: package.id.clone(),
+        name: package.name.clone(),
+        version: package.version.clone(),
+        description: package.description.clone(),
+        capabilities: package.capabilities.clone(),
+        compatibility: package.compatibility.clone(),
+    }
+}
+
+fn skill_package_visible_to_auth(package: &SkillPackage, auth: &AuthContext) -> bool {
+    if !package.enabled {
+        return false;
+    }
+    package.api_key_ids.is_empty()
+        || auth
+            .api_key_id
+            .as_deref()
+            .is_some_and(|api_key_id| package.api_key_ids.iter().any(|id| id == api_key_id))
 }
 
 fn admin_plugin(

@@ -37,6 +37,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) agent_workflows: Vec<AgentWorkflowPolicy>,
     #[serde(default)]
+    pub(crate) skill_packages: Vec<SkillPackage>,
+    #[serde(default)]
     pub(crate) prompt_templates: Vec<PromptTemplate>,
     #[serde(default)]
     pub(crate) guardrails: Vec<GuardrailRule>,
@@ -652,6 +654,55 @@ pub(crate) struct PluginCompatibility {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct SkillPackage {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(default = "default_skill_package_version")]
+    pub(crate) version: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) compatibility: SkillPackageCompatibility,
+    #[serde(default)]
+    pub(crate) permissions: ExtensionPermissions,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<SkillPackageCapability>,
+    #[serde(default)]
+    pub(crate) api_key_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) metadata: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct SkillPackageCompatibility {
+    #[serde(default)]
+    pub(crate) min_gateway_version: Option<String>,
+    #[serde(default)]
+    pub(crate) agent_runtimes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct SkillPackageCapability {
+    pub(crate) kind: SkillPackageCapabilityKind,
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SkillPackageCapabilityKind {
+    Plugin,
+    Tool,
+    McpServer,
+    McpTool,
+    PromptTemplate,
+    AgentWorkflow,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct ExtensionPermissions {
     #[serde(default)]
     pub(crate) tools: Vec<String>,
@@ -1026,6 +1077,10 @@ fn default_agent_runtime_wasm_max_fuel() -> u64 {
 
 fn default_agent_runtime_wasm_export_name() -> String {
     "run".to_string()
+}
+
+fn default_skill_package_version() -> String {
+    "0.1.0".into()
 }
 
 fn default_acme_directory_url() -> String {
@@ -1412,6 +1467,7 @@ impl Default for Config {
             policies: Vec::new(),
             gateway_configs: Vec::new(),
             agent_workflows: Vec::new(),
+            skill_packages: Vec::new(),
             prompt_templates: Vec::new(),
             guardrails: Vec::new(),
             plugins: Vec::new(),

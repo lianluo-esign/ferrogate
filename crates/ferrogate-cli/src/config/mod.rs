@@ -34,6 +34,7 @@ pub(crate) use self::types::{
     Model, ModelFallback, ObservabilityConfig, ObservabilityProvider, PluginCompatibility,
     PluginConfig, PluginManifest, PolicyRule, PromptTemplate, PromptTemplateMessage,
     PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVariable, PromptTemplateVersion,
-    PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule, StorageConfig,
+    PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule, SkillPackage,
+    SkillPackageCapability, SkillPackageCapabilityKind, SkillPackageCompatibility, StorageConfig,
     StorageMigrationMode, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
 };

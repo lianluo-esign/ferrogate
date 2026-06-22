@@ -102,6 +102,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/v1/skills" || path.starts_with("/v1/skills/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_agent_skills(session, ctx, headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path.starts_with("/v1/prompts/") && path.ends_with("/render") {
             let headers = req.headers.clone();
             let method = req.method.clone();
@@ -270,6 +278,14 @@ impl FerroGateway {
             let headers = req.headers.clone();
             let method = req.method.clone();
             self.handle_admin_agent_workflows(session, ctx, &headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/skill-packages" || path.starts_with("/admin/v1/skill-packages/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_skill_packages(session, ctx, &headers, &method, &path)
                 .await?;
             return Ok(true);
         }

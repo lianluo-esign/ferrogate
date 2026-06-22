@@ -191,6 +191,36 @@ pub(crate) struct AdminAgentWorkflowMutationResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminSkillPackage {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) description: Option<String>,
+    pub(crate) enabled: bool,
+    pub(crate) compatibility: crate::config::SkillPackageCompatibility,
+    pub(crate) permissions: crate::config::ExtensionPermissions,
+    pub(crate) capabilities: Vec<crate::config::SkillPackageCapability>,
+    pub(crate) api_key_ids: Vec<String>,
+    pub(crate) metadata: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSkillPackageMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) skill_package: AdminSkillPackage,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentSkillPackage {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) description: Option<String>,
+    pub(crate) capabilities: Vec<crate::config::SkillPackageCapability>,
+    pub(crate) compatibility: crate::config::SkillPackageCompatibility,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AdminPlugin {
     pub(crate) id: String,
     pub(crate) kind: crate::config::ExtensionKind,

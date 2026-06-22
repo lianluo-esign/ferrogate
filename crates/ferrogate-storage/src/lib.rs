@@ -293,6 +293,7 @@ pub struct ControlPlaneSnapshot {
     pub policies: Vec<String>,
     pub gateway_configs: Vec<String>,
     pub agent_workflows: Vec<String>,
+    pub skill_packages: Vec<String>,
     pub prompt_templates: Vec<String>,
     pub plugin_registrations: Vec<String>,
     pub mcp_servers: Vec<String>,
@@ -335,6 +336,7 @@ pub struct RuntimeControlPlaneState {
     policies: InMemoryRepository<StoredControlPlaneResource>,
     gateway_configs: InMemoryRepository<StoredControlPlaneResource>,
     agent_workflows: InMemoryRepository<StoredControlPlaneResource>,
+    skill_packages: InMemoryRepository<StoredControlPlaneResource>,
     prompt_templates: InMemoryRepository<StoredControlPlaneResource>,
     plugin_registrations: InMemoryRepository<StoredControlPlaneResource>,
     mcp_servers: InMemoryRepository<StoredControlPlaneResource>,
@@ -376,6 +378,7 @@ impl LibsqlControlPlaneStore {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_agent_workflows: Vec<(String, String)>,
+        bootstrap_skill_packages: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -402,6 +405,9 @@ impl LibsqlControlPlaneStore {
             .await?;
         store
             .seed_missing_resources("agent_workflow", bootstrap_agent_workflows)
+            .await?;
+        store
+            .seed_missing_resources("skill_package", bootstrap_skill_packages)
             .await?;
         store
             .seed_missing_resources("prompt_template", bootstrap_prompt_templates)
@@ -450,6 +456,7 @@ impl LibsqlControlPlaneStore {
             policies: self.list_documents("policy").await?,
             gateway_configs: self.list_documents("gateway_config").await?,
             agent_workflows: self.list_documents("agent_workflow").await?,
+            skill_packages: self.list_documents("skill_package").await?,
             prompt_templates: self.list_documents("prompt_template").await?,
             plugin_registrations: self.list_documents("plugin_registration").await?,
             mcp_servers: self.list_documents("mcp_server").await?,
@@ -576,6 +583,7 @@ impl PostgresControlPlaneStore {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_agent_workflows: Vec<(String, String)>,
+        bootstrap_skill_packages: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -599,6 +607,7 @@ impl PostgresControlPlaneStore {
         store.seed_missing_resources("policy", bootstrap_policies)?;
         store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
         store.seed_missing_resources("agent_workflow", bootstrap_agent_workflows)?;
+        store.seed_missing_resources("skill_package", bootstrap_skill_packages)?;
         store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
         store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
         store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
@@ -637,6 +646,7 @@ impl PostgresControlPlaneStore {
             policies: self.list_documents("policy")?,
             gateway_configs: self.list_documents("gateway_config")?,
             agent_workflows: self.list_documents("agent_workflow")?,
+            skill_packages: self.list_documents("skill_package")?,
             prompt_templates: self.list_documents("prompt_template")?,
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
@@ -796,6 +806,7 @@ impl MySqlControlPlaneStore {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_agent_workflows: Vec<(String, String)>,
+        bootstrap_skill_packages: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -816,6 +827,7 @@ impl MySqlControlPlaneStore {
         store.seed_missing_resources("policy", bootstrap_policies)?;
         store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
         store.seed_missing_resources("agent_workflow", bootstrap_agent_workflows)?;
+        store.seed_missing_resources("skill_package", bootstrap_skill_packages)?;
         store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
         store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
         store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
@@ -864,6 +876,7 @@ impl MySqlControlPlaneStore {
             policies: self.list_documents("policy")?,
             gateway_configs: self.list_documents("gateway_config")?,
             agent_workflows: self.list_documents("agent_workflow")?,
+            skill_packages: self.list_documents("skill_package")?,
             prompt_templates: self.list_documents("prompt_template")?,
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
@@ -1192,6 +1205,7 @@ impl RuntimeControlPlaneState {
             policies: InMemoryRepository::new(),
             gateway_configs: InMemoryRepository::new(),
             agent_workflows: InMemoryRepository::new(),
+            skill_packages: InMemoryRepository::new(),
             prompt_templates: InMemoryRepository::new(),
             plugin_registrations: InMemoryRepository::new(),
             mcp_servers: InMemoryRepository::new(),
@@ -1205,6 +1219,7 @@ impl RuntimeControlPlaneState {
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         agent_workflows: Vec<(String, String)>,
+        skill_packages: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
@@ -1225,6 +1240,9 @@ impl RuntimeControlPlaneState {
         for (id, document_json) in agent_workflows {
             state.upsert_agent_workflow(id, document_json);
         }
+        for (id, document_json) in skill_packages {
+            state.upsert_skill_package(id, document_json);
+        }
         for (id, document_json) in prompt_templates {
             state.upsert_prompt_template(id, document_json);
         }
@@ -1244,6 +1262,7 @@ impl RuntimeControlPlaneState {
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         agent_workflows: Vec<(String, String)>,
+        skill_packages: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
@@ -1253,6 +1272,7 @@ impl RuntimeControlPlaneState {
         self.policies = InMemoryRepository::new();
         self.gateway_configs = InMemoryRepository::new();
         self.agent_workflows = InMemoryRepository::new();
+        self.skill_packages = InMemoryRepository::new();
         self.prompt_templates = InMemoryRepository::new();
         self.plugin_registrations = InMemoryRepository::new();
         self.mcp_servers = InMemoryRepository::new();
@@ -1270,6 +1290,9 @@ impl RuntimeControlPlaneState {
         }
         for (id, document_json) in agent_workflows {
             self.upsert_agent_workflow(id, document_json);
+        }
+        for (id, document_json) in skill_packages {
+            self.upsert_skill_package(id, document_json);
         }
         for (id, document_json) in prompt_templates {
             self.upsert_prompt_template(id, document_json);
@@ -1323,6 +1346,14 @@ impl RuntimeControlPlaneState {
             .collect::<Vec<_>>();
         agent_workflows.sort_by(|left, right| left.0.cmp(&right.0));
 
+        let mut skill_packages = self
+            .skill_packages
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        skill_packages.sort_by(|left, right| left.0.cmp(&right.0));
+
         let mut prompt_templates = self
             .prompt_templates
             .list()
@@ -1365,6 +1396,10 @@ impl RuntimeControlPlaneState {
                 .map(|(_, document_json)| document_json)
                 .collect(),
             agent_workflows: agent_workflows
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+            skill_packages: skill_packages
                 .into_iter()
                 .map(|(_, document_json)| document_json)
                 .collect(),
@@ -1457,6 +1492,22 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_agent_workflow(&mut self, id: &str) -> bool {
         self.agent_workflows.remove(id).is_some()
+    }
+
+    pub fn upsert_skill_package(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.skill_packages.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "skill_package".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn delete_skill_package(&mut self, id: &str) -> bool {
+        self.skill_packages.remove(id).is_some()
     }
 
     pub fn upsert_prompt_template(&mut self, id: impl Into<String>, document_json: String) {
@@ -1824,6 +1875,7 @@ impl RuntimeStorageRepositories {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_agent_workflows: Vec<(String, String)>,
+        bootstrap_skill_packages: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -1840,6 +1892,7 @@ impl RuntimeStorageRepositories {
             bootstrap_policies,
             bootstrap_gateway_configs,
             bootstrap_agent_workflows,
+            bootstrap_skill_packages,
             bootstrap_prompt_templates,
             bootstrap_plugin_registrations,
             bootstrap_mcp_servers,
@@ -1871,6 +1924,7 @@ impl RuntimeStorageRepositories {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_agent_workflows: Vec<(String, String)>,
+        bootstrap_skill_packages: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -1889,6 +1943,7 @@ impl RuntimeStorageRepositories {
                         bootstrap_policies,
                         bootstrap_gateway_configs,
                         bootstrap_agent_workflows,
+                        bootstrap_skill_packages,
                         bootstrap_prompt_templates,
                         bootstrap_plugin_registrations,
                         bootstrap_mcp_servers,
@@ -1925,6 +1980,7 @@ impl RuntimeStorageRepositories {
         bootstrap_policies: Vec<(String, String)>,
         bootstrap_gateway_configs: Vec<(String, String)>,
         bootstrap_agent_workflows: Vec<(String, String)>,
+        bootstrap_skill_packages: Vec<(String, String)>,
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
@@ -1943,6 +1999,7 @@ impl RuntimeStorageRepositories {
                         bootstrap_policies,
                         bootstrap_gateway_configs,
                         bootstrap_agent_workflows,
+                        bootstrap_skill_packages,
                         bootstrap_prompt_templates,
                         bootstrap_plugin_registrations,
                         bootstrap_mcp_servers,
@@ -1982,6 +2039,7 @@ impl RuntimeStorageRepositories {
                     policies: Vec::new(),
                     gateway_configs: Vec::new(),
                     agent_workflows: Vec::new(),
+                    skill_packages: Vec::new(),
                     prompt_templates: Vec::new(),
                     plugin_registrations: Vec::new(),
                     mcp_servers: Vec::new(),
@@ -2001,6 +2059,7 @@ impl RuntimeStorageRepositories {
         policies: Vec<(String, String)>,
         gateway_configs: Vec<(String, String)>,
         agent_workflows: Vec<(String, String)>,
+        skill_packages: Vec<(String, String)>,
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
@@ -2014,6 +2073,7 @@ impl RuntimeStorageRepositories {
                         policies,
                         gateway_configs,
                         agent_workflows,
+                        skill_packages,
                         prompt_templates,
                         plugin_registrations,
                         mcp_servers,
@@ -2032,6 +2092,9 @@ impl RuntimeStorageRepositories {
                     .replace_kind("agent_workflow", agent_workflows)
                     .await?;
                 control_plane
+                    .replace_kind("skill_package", skill_packages)
+                    .await?;
+                control_plane
                     .replace_kind("prompt_template", prompt_templates)
                     .await?;
                 control_plane
@@ -2048,6 +2111,7 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("policy", policies)?;
                 control_plane.replace_kind("gateway_config", gateway_configs)?;
                 control_plane.replace_kind("agent_workflow", agent_workflows)?;
+                control_plane.replace_kind("skill_package", skill_packages)?;
                 control_plane.replace_kind("prompt_template", prompt_templates)?;
                 control_plane.replace_kind("plugin_registration", plugin_registrations)?;
                 control_plane.replace_kind("mcp_server", mcp_servers)?;
@@ -2059,6 +2123,7 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("policy", policies)?;
                 control_plane.replace_kind("gateway_config", gateway_configs)?;
                 control_plane.replace_kind("agent_workflow", agent_workflows)?;
+                control_plane.replace_kind("skill_package", skill_packages)?;
                 control_plane.replace_kind("prompt_template", prompt_templates)?;
                 control_plane.replace_kind("plugin_registration", plugin_registrations)?;
                 control_plane.replace_kind("mcp_server", mcp_servers)?;
@@ -2231,6 +2296,48 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("agent_workflow", id.to_string())
+            }
+        }
+    }
+
+    pub fn upsert_control_plane_skill_package(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_skill_package(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("skill_package", id.into(), document_json))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("skill_package", id.into(), document_json)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("skill_package", id.into(), document_json)
+            }
+        }
+    }
+
+    pub fn delete_control_plane_skill_package(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_skill_package(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("skill_package", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("skill_package", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.delete("skill_package", id.to_string())
             }
         }
     }

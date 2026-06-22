@@ -1148,122 +1148,6 @@
         }
       }
     },
-    "/admin/v1/mcp-servers/{name}": {
-      "parameters": [
-        {
-          "name": "name",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "string",
-            "minLength": 1
-          },
-          "description": "Stable MCP server name."
-        }
-      ],
-      "get": {
-        "operationId": "getAdminMcpServer",
-        "tags": [
-          "admin-read"
-        ],
-        "summary": "Get one MCP server status and discovered tool count.",
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/AdminMcpServerStatusOk"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          }
-        }
-      },
-      "put": {
-        "operationId": "putAdminMcpServer",
-        "tags": [
-          "admin-write"
-        ],
-        "summary": "Replace MCP server metadata or reconnect settings while preserving durable registration history.",
-        "requestBody": {
-          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
-        },
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/AdminMcpServerMutationOk"
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          }
-        }
-      },
-      "patch": {
-        "operationId": "patchAdminMcpServer",
-        "tags": [
-          "admin-write"
-        ],
-        "summary": "Update MCP server metadata or reconnect settings while preserving history.",
-        "requestBody": {
-          "$ref": "#/components/requestBodies/AdminMcpServerMutation"
-        },
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/AdminMcpServerMutationOk"
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          }
-        }
-      },
-      "delete": {
-        "operationId": "deleteAdminMcpServer",
-        "tags": [
-          "admin-write"
-        ],
-        "summary": "Delete an MCP server registration without deleting its session evidence.",
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/DeleteMcpServerResponse"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          }
-        }
-      }
-    },
     "/admin/v1/models": {
       "get": {
         "operationId": "listAdminModels",
@@ -2757,6 +2641,335 @@
           }
         }
       }
+    },
+    "/v1/skills": {
+      "get": {
+        "operationId": "listAgentSkills",
+        "tags": [
+          "Agent"
+        ],
+        "summary": "List enabled skill packages visible to the authenticated agent client.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Visible skill packages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSkillPackageList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/skills/{id}": {
+      "get": {
+        "operationId": "getAgentSkill",
+        "tags": [
+          "Agent"
+        ],
+        "summary": "Get one enabled skill package visible to the authenticated agent client.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Visible skill package.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSkillPackage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/admin/v1/skill-packages": {
+      "get": {
+        "operationId": "listAdminSkillPackages",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List registered skill packages.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registered skill packages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSkillPackageList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAdminSkillPackage",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Register a skill package.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminSkillPackageMutation"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminSkillPackageMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/skill-packages/{id}": {
+      "get": {
+        "operationId": "getAdminSkillPackage",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get one registered skill package.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminSkillPackageMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminSkillPackage",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Replace a skill package.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminSkillPackageMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminSkillPackageMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminSkillPackage",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Update a skill package.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminSkillPackageMutation"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminSkillPackageMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminSkillPackage",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Delete a skill package.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteSkillPackageResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3125,6 +3338,16 @@
             }
           }
         }
+      },
+      "AdminSkillPackageMutation": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SkillPackage"
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -3314,6 +3537,26 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/DeletePromptTemplateResponse"
+            }
+          }
+        }
+      },
+      "AdminSkillPackageMutationOk": {
+        "description": "Skill package mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminSkillPackageMutationResponse"
+            }
+          }
+        }
+      },
+      "DeleteSkillPackageResponse": {
+        "description": "Skill package delete response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteResponse"
             }
           }
         }
@@ -7855,6 +8098,206 @@
           }
         },
         "additionalProperties": true
+      },
+      "SkillPackageCapabilityKind": {
+        "type": "string",
+        "enum": [
+          "plugin",
+          "tool",
+          "mcp_server",
+          "mcp_tool",
+          "prompt_template",
+          "agent_workflow"
+        ]
+      },
+      "SkillPackageCapability": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/SkillPackageCapabilityKind"
+          },
+          "id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SkillPackageCompatibility": {
+        "type": "object",
+        "properties": {
+          "min_gateway_version": {
+            "type": "string",
+            "nullable": true
+          },
+          "agent_runtimes": {
+            "$ref": "#/components/schemas/StringList"
+          }
+        }
+      },
+      "SkillPackage": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "version",
+          "capabilities"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string",
+            "default": "0.1.0"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/SkillPackageCompatibility"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/ExtensionPermissions"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkillPackageCapability"
+            }
+          },
+          "api_key_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "AdminSkillPackage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SkillPackage"
+          }
+        ]
+      },
+      "AgentSkillPackage": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "version",
+          "capabilities",
+          "compatibility"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkillPackageCapability"
+            }
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/SkillPackageCompatibility"
+          }
+        }
+      },
+      "AdminSkillPackageMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "skill_package"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "skill_package"
+            ]
+          },
+          "skill_package": {
+            "$ref": "#/components/schemas/AdminSkillPackage"
+          }
+        }
+      },
+      "DeleteSkillPackageResponse": {
+        "$ref": "#/components/schemas/DeleteResponse"
+      },
+      "AdminSkillPackageList": {
+        "$ref": "#/components/schemas/AdminList_AdminSkillPackage"
+      },
+      "AgentSkillPackageList": {
+        "$ref": "#/components/schemas/AdminList_AgentSkillPackage"
+      },
+      "AdminList_AdminSkillPackage": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "list"
+            ]
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSkillPackage"
+            }
+          }
+        }
+      },
+      "AdminList_AgentSkillPackage": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "list"
+            ]
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentSkillPackage"
+            }
+          }
+        }
       }
     }
   }

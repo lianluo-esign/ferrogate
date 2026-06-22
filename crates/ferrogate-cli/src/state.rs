@@ -26,7 +26,7 @@ use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, AnalyticsConfig,
     AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect, GuardrailStage,
     HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus,
-    Provider, RouteRule, StorageConfig, StorageMigrationMode, Upstream,
+    Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -673,6 +673,47 @@ impl SharedAppState {
         result
     }
 
+    pub(crate) fn upsert_skill_package(
+        &self,
+        package: SkillPackage,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let result = (|| {
+            active.repositories.upsert_control_plane_skill_package(
+                package.id.clone(),
+                serde_json::to_string(&package)?,
+            )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(self.reload_process_local(candidate))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
+    pub(crate) fn delete_skill_package(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        if !active.repositories.delete_control_plane_skill_package(id)? {
+            return Ok(None);
+        }
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate.validate()?;
+            Ok(Some(self.reload_process_local(candidate)))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
     pub(crate) fn delete_agent_workflow(
         &self,
         id: &str,
@@ -974,6 +1015,8 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
     let agent_workflows = serialize_control_plane_documents(&config.agent_workflows, |workflow| {
         workflow_resource_id(workflow)
     });
+    let skill_packages =
+        serialize_control_plane_documents(&config.skill_packages, |package| package.id.clone());
     let prompt_templates =
         serialize_control_plane_documents(&config.prompt_templates, |template| template.id.clone());
     let plugin_registrations =
@@ -1000,6 +1043,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             agent_workflows,
+            skill_packages,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -1046,6 +1090,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             agent_workflows,
+            skill_packages,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -1078,6 +1123,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             agent_workflows,
+            skill_packages,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -1099,6 +1145,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             policies,
             gateway_configs,
             agent_workflows,
+            skill_packages,
             prompt_templates,
             plugin_registrations,
             mcp_servers,
@@ -1335,6 +1382,7 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     config.policies = deserialize_control_plane_documents(snapshot.policies)?;
     config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
     config.agent_workflows = deserialize_control_plane_documents(snapshot.agent_workflows)?;
+    config.skill_packages = deserialize_control_plane_documents(snapshot.skill_packages)?;
     config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
     config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
     config.extensions.clear();
@@ -2835,6 +2883,7 @@ impl AppState {
             serialize_control_plane_documents(&config.agent_workflows, |workflow| {
                 workflow_resource_id(workflow)
             }),
+            serialize_control_plane_documents(&config.skill_packages, |package| package.id.clone()),
             serialize_control_plane_documents(&config.prompt_templates, |template| {
                 template.id.clone()
             }),
@@ -2854,6 +2903,7 @@ impl AppState {
         config.policies = deserialize_control_plane_documents(snapshot.policies)?;
         config.gateway_configs = deserialize_control_plane_documents(snapshot.gateway_configs)?;
         config.agent_workflows = deserialize_control_plane_documents(snapshot.agent_workflows)?;
+        config.skill_packages = deserialize_control_plane_documents(snapshot.skill_packages)?;
         config.prompt_templates = deserialize_control_plane_documents(snapshot.prompt_templates)?;
         config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
         config.extensions.clear();
