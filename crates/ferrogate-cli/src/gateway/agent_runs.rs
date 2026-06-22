@@ -546,6 +546,20 @@ fn agent_workflow_use(
             }
         }
     }
+    if workflow.max_parallelism.is_some_and(|limit| {
+        request.tool_calls.len() > 1 && request.tool_calls.len() as u32 > limit
+    }) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "workflow_parallelism_limit_exceeded",
+            format!(
+                "agent workflow {}@{} declared {} tool call(s), exceeding configured parallelism limit",
+                workflow.id,
+                workflow.version,
+                request.tool_calls.len()
+            ),
+        ));
+    }
     if workflow
         .max_tool_calls
         .is_some_and(|limit| request.tool_calls.len() as u32 > limit)

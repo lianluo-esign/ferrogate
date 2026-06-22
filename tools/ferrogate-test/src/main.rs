@@ -948,6 +948,20 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     )?;
     case.expect_json(
         "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"parallel-flow","name":"Parallel flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"echo","kind":"tool","tool":"tool.echo","max_iterations":3}],"edges":[],"max_tool_calls":2,"max_parallelism":1,"max_iterations":3}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "parallel-flow");
+            assert_eq!(body["agent_workflow"]["workflow"]["max_parallelism"], 1);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
         "/v1/chat/completions",
         &[CLIENT_AUTH, JSON_CONTENT],
         r#"{"model":"fast-chat","messages":[{"role":"user","content":"gateway coverage client-secret"}]}"#,
@@ -1304,6 +1318,26 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["requests"][0]["agent_run_id"], "agent-run-e2e");
             assert_eq!(body["billing_events"][0]["agent_run_id"], "agent-run-e2e");
             assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/agent-runs",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-workflow-id: parallel-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: echo",
+        ],
+        r#"{"input":"run the parallel denied harness","max_turns":3,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"first"}},{"name":"tool.echo","arguments":{"message":"second"}}]}"#,
+        429,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "workflow_parallelism_limit_exceeded"
+            );
             Ok(())
         },
     )?;
