@@ -11,6 +11,7 @@ use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use std::collections::BTreeMap;
 
+use crate::gateway::dispatch::{dispatch_provider_request, dispatch_provider_streaming_request};
 use crate::{
     approval::{ApprovalDecisionError, ApprovalStatus, ToolApprovalDecisionRequest},
     auth::{authenticate, AuthContext},
@@ -22,21 +23,25 @@ use crate::{
     extensions::{ToolExecutionRequest, ToolExecutionResponse},
     responses::{
         write_empty_response, write_json_error, write_json_error_and_close, write_json_response,
-        write_raw_response, AdminAcmeStatus, AdminAgentWorkflow, AdminAgentWorkflowCounters,
-        AdminAgentWorkflowMutationResponse, AdminApiKey, AdminApiKeyMutation,
-        AdminApiKeyMutationResponse, AdminConfigReloadResponse, AdminConfigValidateRequest,
-        AdminConfigValidateResponse, AdminDeleteResponse, AdminDrainRequest, AdminDrainResponse,
-        AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
-        AdminList, AdminMcpServerMutationResponse, AdminPlugin, AdminPluginMutation,
+        write_raw_response, write_streaming_response, AdminAcmeStatus, AdminAgentUpstream,
+        AdminAgentUpstreamMutation, AdminAgentUpstreamMutationResponse, AdminAgentWorkflow,
+        AdminAgentWorkflowCounters, AdminAgentWorkflowMutationResponse, AdminApiKey,
+        AdminApiKeyMutation, AdminApiKeyMutationResponse, AdminConfigReloadResponse,
+        AdminConfigValidateRequest, AdminConfigValidateResponse, AdminDeleteResponse,
+        AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigMutation,
+        AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile, AdminList,
+        AdminMcpServerMutationResponse, AdminPlugin, AdminPluginMutation,
         AdminPluginMutationResponse, AdminPolicyMutation, AdminPolicyMutationResponse,
         AdminPromptTemplate, AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse,
         AdminProvider, AdminProviderModelCandidate, AdminProviderModelCatalog, AdminSkillPackage,
-        AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage, HealthResponse,
-        OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
+        AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery,
+        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
+        ReadinessResponse,
     },
     state::{AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord},
 };
 use ferrogate_providers::provider_compatibility_kind;
+use ferrogate_providers::{ProviderHeader, SecretValue};
 
 use super::body::read_request_body;
 use super::dispatch::dispatch_provider_catalog_request;
@@ -5227,6 +5232,532 @@ impl FerroGateway {
             }
         }
     }
+
+    pub(super) async fn handle_admin_agent_upstreams(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => match (method, path.strip_prefix("/admin/v1/agent-upstreams/")) {
+                (&Method::GET, None) => {
+                    let data = state
+                        .config
+                        .agent_upstreams
+                        .iter()
+                        .map(admin_agent_upstream)
+                        .collect();
+                    write_json_response(
+                        session,
+                        StatusCode::OK,
+                        &AdminList::new(data),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+                (&Method::POST, None) => {
+                    self.handle_admin_agent_upstream_upsert(session, ctx, headers, None)
+                        .await
+                }
+                (&Method::GET, Some(id)) if !id.contains('/') => {
+                    if let Some(upstream) = state
+                        .config
+                        .agent_upstreams
+                        .iter()
+                        .find(|upstream| upstream.id == id)
+                    {
+                        return write_json_response(
+                            session,
+                            StatusCode::OK,
+                            &AdminAgentUpstreamMutationResponse {
+                                object: "agent_upstream",
+                                agent_upstream: admin_agent_upstream(upstream),
+                            },
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "agent_upstream_not_found",
+                        format!("agent upstream {id} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+                (&Method::PUT | &Method::PATCH, Some(id)) if !id.contains('/') => {
+                    self.handle_admin_agent_upstream_upsert(session, ctx, headers, Some(id))
+                        .await
+                }
+                (&Method::DELETE, Some(id)) if !id.contains('/') => {
+                    self.handle_admin_agent_upstream_delete(session, ctx, headers, id)
+                        .await
+                }
+                _ => {
+                    write_json_error(
+                        session,
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "method_not_allowed",
+                        "agent upstream endpoint supports GET, POST, PUT, PATCH, and DELETE",
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            },
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_agent_upstream_upsert(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path_id: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_upstream.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let payload = match serde_json::from_slice::<AdminAgentUpstreamMutation>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_upstream.upsert",
+                    path_id.unwrap_or("new"),
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_body",
+                    "request body must be a JSON agent upstream object",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let upstream = match agent_upstream_from_mutation(path_id, payload) {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_upstream.upsert",
+                    path_id.unwrap_or("new"),
+                    "rejected",
+                    message.clone(),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_agent_upstream",
+                    message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let upstream_id = upstream.id.clone();
+        match self.state.upsert_agent_upstream(upstream.clone()) {
+            Ok(outcome) => {
+                let current = self.state.current();
+                let response = current
+                    .config
+                    .agent_upstreams
+                    .iter()
+                    .find(|candidate| candidate.id == upstream_id)
+                    .map(admin_agent_upstream)
+                    .unwrap_or_else(|| admin_agent_upstream(&upstream));
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_upstream.upsert",
+                    &upstream_id,
+                    "committed",
+                    format!(
+                        "agent upstream {upstream_id} committed: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                write_json_response(
+                    session,
+                    if path_id.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    &AdminAgentUpstreamMutationResponse {
+                        object: "agent_upstream",
+                        agent_upstream: response,
+                    },
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_upstream.upsert",
+                    &upstream_id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::CONFLICT,
+                    "agent_upstream_reload_rejected",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_agent_upstream_delete(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        match self.state.delete_agent_upstream(id) {
+            Ok(Some(outcome)) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_upstream.delete",
+                    id,
+                    "committed",
+                    format!(
+                        "agent upstream {id} deleted: active_snapshot={} candidate_snapshot={}",
+                        outcome.active_snapshot, outcome.candidate_snapshot
+                    ),
+                ));
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminDeleteResponse {
+                        object: "agent_upstream",
+                        id: id.to_string(),
+                        deleted: true,
+                    },
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "agent_upstream_not_found",
+                    format!("agent upstream {id} was not found"),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "agent_upstream.delete",
+                    id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_agent_upstream_delete",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_agent_ingress(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        if *method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "agent ingress requires POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let state = self.state.current();
+        let auth = match authenticate(&state, &headers, "agents.invoke", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let agent_id = path
+            .trim_start_matches("/v1/agents/")
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        if agent_id.is_empty() {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "agent_not_found",
+                "agent endpoint not found",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let Some(upstream) = state
+            .config
+            .agent_upstreams
+            .iter()
+            .find(|upstream| upstream.id == agent_id && upstream.enabled)
+        else {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "agent_not_found",
+                format!("agent upstream {agent_id} was not found"),
+                &ctx.request_id,
+            )
+            .await;
+        };
+
+        if !agent_upstream_visible_to_auth(upstream, &auth) {
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "agent_not_visible",
+                format!("agent upstream {agent_id} is not visible to this API key"),
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let body = match read_request_body(session, 128 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let payload = match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_json",
+                    format!("invalid agent request JSON: {error}"),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let request = ferrogate_providers::ProviderHttpRequest {
+            provider: upstream.id.clone(),
+            endpoint: upstream.endpoint.clone(),
+            body: payload,
+            stream: path.ends_with("/message:stream"),
+            headers: agent_upstream_headers(upstream, &auth, &ctx.request_id),
+        };
+        let timeout = std::time::Duration::from_secs(30);
+        if request.stream {
+            match dispatch_provider_streaming_request(request, timeout).await {
+                Ok(response) => {
+                    write_streaming_response(
+                        session,
+                        response.status,
+                        &response.content_type,
+                        response.initial_body,
+                        response.body,
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        StatusCode::BAD_GATEWAY,
+                        "agent_upstream_error",
+                        error.to_string(),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            }
+        } else {
+            match dispatch_provider_request(request, timeout, 128 * 1024).await {
+                Ok(response) => {
+                    write_raw_response(
+                        session,
+                        response.status,
+                        &response.content_type,
+                        Bytes::from(response.body),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        StatusCode::BAD_GATEWAY,
+                        "agent_upstream_error",
+                        error.to_string(),
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            }
+        }
+    }
+
+    pub(super) async fn handle_agent_discovery(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "agents.read", &ctx.request_id) {
+            Ok(auth) => {
+                let upstreams: Vec<_> = state
+                    .config
+                    .agent_upstreams
+                    .iter()
+                    .filter(|upstream| {
+                        upstream.enabled && agent_upstream_visible_to_auth(upstream, &auth)
+                    })
+                    .map(agent_upstream_discovery)
+                    .collect();
+                write_json_response(
+                    session,
+                    StatusCode::OK,
+                    &AdminList::new(upstreams),
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
 }
 
 fn api_key_source(key: &crate::config::ApiKey) -> &'static str {
@@ -5341,6 +5872,128 @@ fn admin_skill_package(package: &SkillPackage) -> AdminSkillPackage {
         api_key_ids: package.api_key_ids.clone(),
         metadata: redact_plugin_config(&package.metadata),
     }
+}
+
+fn admin_agent_upstream(upstream: &crate::config::AgentUpstreamConfig) -> AdminAgentUpstream {
+    AdminAgentUpstream {
+        id: upstream.id.clone(),
+        name: upstream.name.clone(),
+        description: upstream.description.clone(),
+        enabled: upstream.enabled,
+        protocol: upstream.protocol,
+        endpoint: upstream.endpoint.clone(),
+        tenant_ids: upstream.tenant_ids.clone(),
+        capabilities: upstream.capabilities.clone(),
+    }
+}
+
+fn agent_upstream_visible_to_auth(
+    upstream: &crate::config::AgentUpstreamConfig,
+    auth: &AuthContext,
+) -> bool {
+    if upstream.tenant_ids.is_empty() {
+        return true;
+    }
+    auth.api_key_id.as_deref().is_some_and(|api_key_id| {
+        upstream
+            .tenant_ids
+            .iter()
+            .any(|tenant_id| tenant_id == api_key_id)
+    })
+}
+
+fn agent_upstream_from_mutation(
+    path_id: Option<&str>,
+    payload: AdminAgentUpstreamMutation,
+) -> anyhow::Result<crate::config::AgentUpstreamConfig> {
+    let id = payload
+        .id
+        .or_else(|| path_id.map(str::to_string))
+        .ok_or_else(|| anyhow::anyhow!("field id: cannot be empty"))?;
+    let name = payload
+        .name
+        .ok_or_else(|| anyhow::anyhow!("field name: cannot be empty"))?;
+    let endpoint = payload
+        .endpoint
+        .ok_or_else(|| anyhow::anyhow!("field endpoint: cannot be empty"))?;
+    Ok(crate::config::AgentUpstreamConfig {
+        id,
+        name,
+        description: payload.description,
+        enabled: payload.enabled.unwrap_or(true),
+        protocol: payload.protocol.unwrap_or_default(),
+        endpoint,
+        auth: payload.auth.unwrap_or_default(),
+        tenant_ids: payload.tenant_ids.unwrap_or_default(),
+        capabilities: payload.capabilities.unwrap_or_else(|| {
+            vec![
+                crate::config::AgentUpstreamCapability::Invoke,
+                crate::config::AgentUpstreamCapability::Read,
+            ]
+        }),
+    })
+}
+
+fn agent_upstream_discovery<'a>(
+    upstream: &'a crate::config::AgentUpstreamConfig,
+) -> AgentUpstreamDiscovery<'a> {
+    AgentUpstreamDiscovery {
+        object: "agent_upstream",
+        id: &upstream.id,
+        name: &upstream.name,
+        description: upstream.description.as_deref(),
+        protocol: upstream.protocol,
+        endpoint: &upstream.endpoint,
+        capabilities: &upstream.capabilities,
+    }
+}
+
+fn agent_upstream_headers(
+    upstream: &crate::config::AgentUpstreamConfig,
+    auth: &AuthContext,
+    request_id: &str,
+) -> Vec<ProviderHeader> {
+    let mut headers = vec![
+        ProviderHeader {
+            name: http::header::CONTENT_TYPE.as_str().to_string(),
+            value: SecretValue::new("application/json"),
+        },
+        ProviderHeader {
+            name: "x-ferrogate-request-id".to_string(),
+            value: SecretValue::new(request_id),
+        },
+        ProviderHeader {
+            name: "x-ferrogate-trace-id".to_string(),
+            value: SecretValue::new(request_id),
+        },
+    ];
+
+    match &upstream.auth {
+        crate::config::AgentUpstreamAuth::None => {}
+        crate::config::AgentUpstreamAuth::Bearer { token } => {
+            if let Some(token) = token {
+                headers.push(ProviderHeader {
+                    name: http::header::AUTHORIZATION.as_str().to_string(),
+                    value: SecretValue::new(format!("Bearer {token}")),
+                });
+            }
+        }
+        crate::config::AgentUpstreamAuth::Header { name, value } => {
+            if let Some(value) = value {
+                headers.push(ProviderHeader {
+                    name: name.clone(),
+                    value: SecretValue::new(value.clone()),
+                });
+            }
+        }
+    }
+    if let Some(api_key_id) = &auth.api_key_id {
+        headers.push(ProviderHeader {
+            name: "x-ferrogate-api-key-id".to_string(),
+            value: SecretValue::new(api_key_id),
+        });
+    }
+    headers
 }
 
 fn admin_skill_package_resources(

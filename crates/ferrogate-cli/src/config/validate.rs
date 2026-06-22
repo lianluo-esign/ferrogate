@@ -108,6 +108,7 @@ impl Config {
         self.validate_agent_workflows(&api_key_ids, &model_names, &provider_names, &tool_names)?;
         self.validate_prompt_templates(&model_names)?;
         self.validate_skill_packages(&api_key_ids, &tool_names)?;
+        self.validate_agent_upstreams(&api_key_ids)?;
         self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
         self.validate_tls()?;
         self.validate_telemetry()?;
@@ -1782,6 +1783,53 @@ impl Config {
             let _ = server.approval_policy;
             ferrogate_mcp::validate_mcp_server_config(server)
                 .map_err(|error| anyhow::anyhow!("field mcp_servers[{index}]: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn validate_agent_upstreams(&self, _api_key_ids: &HashSet<String>) -> AnyResult<()> {
+        let mut ids = HashSet::new();
+        for (index, upstream) in self.agent_upstreams.iter().enumerate() {
+            if upstream.id.trim().is_empty() {
+                bail!("field agent_upstreams[{index}].id: cannot be empty");
+            }
+            if !ids.insert(upstream.id.as_str()) {
+                bail!(
+                    "field agent_upstreams[{index}].id: duplicate agent upstream id {}",
+                    upstream.id
+                );
+            }
+            if upstream.name.trim().is_empty() {
+                bail!("field agent_upstreams[{index}].name: cannot be empty");
+            }
+            if upstream.endpoint.trim().is_empty() {
+                bail!("field agent_upstreams[{index}].endpoint: cannot be empty");
+            }
+            if !upstream.endpoint.starts_with("http://")
+                && !upstream.endpoint.starts_with("https://")
+            {
+                bail!(
+                    "field agent_upstreams[{index}].endpoint: must start with http:// or https://"
+                );
+            }
+            if upstream
+                .tenant_ids
+                .iter()
+                .any(|tenant| tenant.trim().is_empty())
+            {
+                bail!("field agent_upstreams[{index}].tenant_ids: cannot contain empty tenant ids");
+            }
+            if upstream.capabilities.is_empty() {
+                bail!("field agent_upstreams[{index}].capabilities: at least one capability is required");
+            }
+            if upstream
+                .capabilities
+                .iter()
+                .any(|capability| matches!(capability, super::AgentUpstreamCapability::Stream))
+                && !matches!(upstream.protocol, super::AgentUpstreamProtocol::A2a)
+            {
+                bail!("field agent_upstreams[{index}].protocol: streaming capability requires A2A protocol");
+            }
         }
         Ok(())
     }

@@ -102,6 +102,20 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/.well-known/agent.json" {
+            let headers = req.headers.clone();
+            self.handle_agent_discovery(session, ctx, &headers).await?;
+            return Ok(true);
+        }
+
+        if path.starts_with("/v1/agents/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_agent_ingress(session, ctx, headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/v1/skills" || path.starts_with("/v1/skills/") {
             let headers = req.headers.clone();
             let method = req.method.clone();
@@ -209,6 +223,14 @@ impl FerroGateway {
             let headers = req.headers.clone();
             let query = req.uri.query().map(str::to_string);
             self.handle_admin_provider_models(session, ctx, &headers, query.as_deref())
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/agent-upstreams" || path.starts_with("/admin/v1/agent-upstreams/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_agent_upstreams(session, ctx, &headers, &method, &path)
                 .await?;
             return Ok(true);
         }

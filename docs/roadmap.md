@@ -111,7 +111,7 @@ These areas are implemented in the current open-source gateway:
 | Database providers | Harden MySQL production options behind the same storage contract used by Turso/libSQL and PostgreSQL, including managed-cloud compatibility and charset/collation guidance. | [#68](https://github.com/lianluo-esign/ferrogate/issues/68) |
 | External service boundaries | Keep tenant RBAC and billing integrations behind explicit service/provider boundaries instead of moving that complexity into the gateway hot path. | [#54](https://github.com/lianluo-esign/ferrogate/issues/54) |
 | Agent graph governance | Add workflow graph policy and execution budgets so multi-step agent runs can be governed at graph/run level, not only per request. | [#50](https://github.com/lianluo-esign/ferrogate/issues/50) |
-| Agent protocol ingress | Add A2A and broader agent protocol ingress governance while reusing auth, policy, approvals, billing, and observability surfaces. | [#48](https://github.com/lianluo-esign/ferrogate/issues/48) |
+| Agent protocol ingress | Add A2A and broader agent protocol ingress governance while reusing auth, policy, approvals, billing, and observability surfaces. Current slice covers registered agent upstream control-plane storage plus discovery metadata. | [#48](https://github.com/lianluo-esign/ferrogate/issues/48) |
 | Canonical AI request model | Extend the internal AI request model for tools and multimodal inputs without leaking provider-specific request shapes into gateway core. | [#9](https://github.com/lianluo-esign/ferrogate/issues/9) |
 | Responses streaming | Normalize Responses API streaming events so client compatibility is predictable across providers. | [#10](https://github.com/lianluo-esign/ferrogate/issues/10) |
 

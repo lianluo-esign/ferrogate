@@ -341,6 +341,54 @@ impl SharedAppState {
         result
     }
 
+    pub(crate) fn upsert_agent_upstream(
+        &self,
+        upstream: crate::config::AgentUpstreamConfig,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let result = (|| {
+            active.repositories.upsert_control_plane_agent_upstream(
+                upstream.id.clone(),
+                serde_json::to_string(&upstream)?,
+            )?;
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            upsert_or_replace_agent_upstream(&mut candidate.agent_upstreams, upstream);
+            candidate.validate()?;
+            Ok(self.reload_process_local(candidate))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
+    pub(crate) fn delete_agent_upstream(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<RuntimeReloadResult>> {
+        let active = self.current();
+        if !active
+            .repositories
+            .delete_control_plane_agent_upstream(id)?
+        {
+            return Ok(None);
+        }
+        let result = (|| {
+            let mut candidate = (*active.config).clone();
+            active.apply_control_plane_snapshot_to_config(&mut candidate)?;
+            candidate
+                .agent_upstreams
+                .retain(|upstream| upstream.id != id);
+            candidate.validate()?;
+            Ok(Some(self.reload_process_local(candidate)))
+        })();
+        if result.is_err() {
+            let _ = active.sync_control_plane_storage_from_config(&active.config);
+        }
+        result
+    }
+
     pub(crate) fn source_path(&self) -> Option<&PathBuf> {
         self.source_path.as_deref()
     }
@@ -1026,6 +1074,8 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         });
     let mcp_servers =
         serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone());
+    let agent_upstreams =
+        serialize_control_plane_documents(&config.agent_upstreams, |upstream| upstream.id.clone());
     if storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
         let url = storage
             .libsql_url
@@ -1048,6 +1098,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             prompt_templates,
             plugin_registrations,
             mcp_servers,
+            agent_upstreams,
             config.analytics.request_log_retention_records,
             config.analytics.audit_event_retention_records,
         ))
@@ -1095,6 +1146,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             prompt_templates,
             plugin_registrations,
             mcp_servers,
+            agent_upstreams,
             config.analytics.request_log_retention_records,
             config.analytics.audit_event_retention_records,
         )
@@ -1128,6 +1180,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             prompt_templates,
             plugin_registrations,
             mcp_servers,
+            agent_upstreams,
             config.analytics.request_log_retention_records,
             config.analytics.audit_event_retention_records,
         )
@@ -1150,6 +1203,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             prompt_templates,
             plugin_registrations,
             mcp_servers,
+            agent_upstreams,
         ),
         config.analytics.request_log_retention_records,
         config.analytics.audit_event_retention_records,
@@ -1385,6 +1439,20 @@ fn upsert_or_replace_mcp_server(
     }
 }
 
+fn upsert_or_replace_agent_upstream(
+    upstreams: &mut Vec<crate::config::AgentUpstreamConfig>,
+    upstream: crate::config::AgentUpstreamConfig,
+) {
+    if let Some(existing) = upstreams
+        .iter_mut()
+        .find(|existing| existing.id == upstream.id)
+    {
+        *existing = upstream;
+    } else {
+        upstreams.push(upstream);
+    }
+}
+
 fn apply_control_plane_snapshot_to_config_from_repositories(
     repositories: &RuntimeStorageRepositories,
     config: &mut Config,
@@ -1402,6 +1470,7 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
     config.extensions.clear();
     config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
+    config.agent_upstreams = deserialize_control_plane_documents(snapshot.agent_upstreams)?;
     if !tenant_refs.is_empty() {
         apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
     }
@@ -2910,6 +2979,9 @@ impl AppState {
                 plugin.id.clone()
             }),
             serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone()),
+            serialize_control_plane_documents(&config.agent_upstreams, |upstream| {
+                upstream.id.clone()
+            }),
         )?;
         Ok(())
     }
@@ -2928,6 +3000,7 @@ impl AppState {
         config.plugins = deserialize_control_plane_documents(snapshot.plugin_registrations)?;
         config.extensions.clear();
         config.mcp_servers = deserialize_control_plane_documents(snapshot.mcp_servers)?;
+        config.agent_upstreams = deserialize_control_plane_documents(snapshot.agent_upstreams)?;
         if !tenant_refs.is_empty() {
             apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
         }

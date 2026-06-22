@@ -212,6 +212,55 @@ pub(crate) struct AdminSkillPackageMutationResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminAgentUpstream {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) enabled: bool,
+    pub(crate) protocol: crate::config::AgentUpstreamProtocol,
+    pub(crate) endpoint: String,
+    pub(crate) tenant_ids: Vec<String>,
+    pub(crate) capabilities: Vec<crate::config::AgentUpstreamCapability>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminAgentUpstreamMutation {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) protocol: Option<crate::config::AgentUpstreamProtocol>,
+    pub(crate) endpoint: Option<String>,
+    #[serde(default)]
+    pub(crate) auth: Option<crate::config::AgentUpstreamAuth>,
+    #[serde(default)]
+    pub(crate) tenant_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) capabilities: Option<Vec<crate::config::AgentUpstreamCapability>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminAgentUpstreamMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) agent_upstream: AdminAgentUpstream,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentUpstreamDiscovery<'a> {
+    pub(crate) object: &'static str,
+    pub(crate) id: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) description: Option<&'a str>,
+    pub(crate) protocol: crate::config::AgentUpstreamProtocol,
+    pub(crate) endpoint: &'a str,
+    pub(crate) capabilities: &'a [crate::config::AgentUpstreamCapability],
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AgentSkillPackage {
     pub(crate) id: String,
     pub(crate) name: String,

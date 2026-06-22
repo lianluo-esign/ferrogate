@@ -83,6 +83,10 @@ Future work should push toward:
   reduction in complexity or risk.
 - Do not hide operational decisions. Routing, auth, policy, billing, and
   provider fallback must leave inspectable evidence.
+- When a test, build, or runtime failure appears, analyze and fix the root
+  cause first. Do not paper over the symptom with a narrower workaround,
+  brittle helper, or partial alignment that leaves the underlying mismatch in
+  place.
 - Every new feature must close an end-to-end loop before it is treated as done:
   config or API entrypoint, runtime behavior, observable evidence, and focused
   regression coverage must all exist for the same feature path.

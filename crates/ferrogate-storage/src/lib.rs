@@ -297,6 +297,7 @@ pub struct ControlPlaneSnapshot {
     pub prompt_templates: Vec<String>,
     pub plugin_registrations: Vec<String>,
     pub mcp_servers: Vec<String>,
+    pub agent_upstreams: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +341,7 @@ pub struct RuntimeControlPlaneState {
     prompt_templates: InMemoryRepository<StoredControlPlaneResource>,
     plugin_registrations: InMemoryRepository<StoredControlPlaneResource>,
     mcp_servers: InMemoryRepository<StoredControlPlaneResource>,
+    agent_upstreams: InMemoryRepository<StoredControlPlaneResource>,
     tool_approvals: InMemoryRepository<StoredControlPlaneResource>,
 }
 
@@ -382,6 +384,7 @@ impl LibsqlControlPlaneStore {
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
+        bootstrap_agent_upstreams: Vec<(String, String)>,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
         let database = build_libsql_database(url, auth_token).await?;
@@ -417,6 +420,9 @@ impl LibsqlControlPlaneStore {
             .await?;
         store
             .seed_missing_resources("mcp_server", bootstrap_mcp_servers)
+            .await?;
+        store
+            .seed_missing_resources("agent_upstream", bootstrap_agent_upstreams)
             .await?;
         Ok(store)
     }
@@ -460,6 +466,7 @@ impl LibsqlControlPlaneStore {
             prompt_templates: self.list_documents("prompt_template").await?,
             plugin_registrations: self.list_documents("plugin_registration").await?,
             mcp_servers: self.list_documents("mcp_server").await?,
+            agent_upstreams: self.list_documents("agent_upstream").await?,
         })
     }
 
@@ -587,6 +594,7 @@ impl PostgresControlPlaneStore {
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
+        bootstrap_agent_upstreams: Vec<(String, String)>,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
         let mut clients = Vec::with_capacity(config.pool_size);
@@ -611,6 +619,7 @@ impl PostgresControlPlaneStore {
         store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
         store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
         store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
+        store.seed_missing_resources("agent_upstream", bootstrap_agent_upstreams)?;
         Ok(store)
     }
 
@@ -650,6 +659,7 @@ impl PostgresControlPlaneStore {
             prompt_templates: self.list_documents("prompt_template")?,
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
+            agent_upstreams: self.list_documents("agent_upstream")?,
         })
     }
 
@@ -810,6 +820,7 @@ impl MySqlControlPlaneStore {
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
+        bootstrap_agent_upstreams: Vec<(String, String)>,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
         let opts = mysql_opts(&config)?;
@@ -831,6 +842,7 @@ impl MySqlControlPlaneStore {
         store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
         store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
         store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
+        store.seed_missing_resources("agent_upstream", bootstrap_agent_upstreams)?;
         Ok(store)
     }
 
@@ -880,6 +892,7 @@ impl MySqlControlPlaneStore {
             prompt_templates: self.list_documents("prompt_template")?,
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
+            agent_upstreams: self.list_documents("agent_upstream")?,
         })
     }
 
@@ -1209,6 +1222,7 @@ impl RuntimeControlPlaneState {
             prompt_templates: InMemoryRepository::new(),
             plugin_registrations: InMemoryRepository::new(),
             mcp_servers: InMemoryRepository::new(),
+            agent_upstreams: InMemoryRepository::new(),
             tool_approvals: InMemoryRepository::new(),
         }
     }
@@ -1223,6 +1237,7 @@ impl RuntimeControlPlaneState {
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
+        agent_upstreams: Vec<(String, String)>,
     ) -> Self {
         let mut state = Self::new();
         for (id, document_json) in api_keys {
@@ -1252,6 +1267,9 @@ impl RuntimeControlPlaneState {
         for (id, document_json) in mcp_servers {
             state.upsert_mcp_server(id, document_json);
         }
+        for (id, document_json) in agent_upstreams {
+            state.upsert_agent_upstream(id, document_json);
+        }
         state
     }
 
@@ -1266,6 +1284,7 @@ impl RuntimeControlPlaneState {
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
+        agent_upstreams: Vec<(String, String)>,
     ) {
         self.api_keys = InMemoryRepository::new();
         self.tenants = InMemoryRepository::new();
@@ -1276,6 +1295,7 @@ impl RuntimeControlPlaneState {
         self.prompt_templates = InMemoryRepository::new();
         self.plugin_registrations = InMemoryRepository::new();
         self.mcp_servers = InMemoryRepository::new();
+        self.agent_upstreams = InMemoryRepository::new();
         for (id, document_json) in api_keys {
             self.upsert_api_key(id, document_json);
         }
@@ -1302,6 +1322,9 @@ impl RuntimeControlPlaneState {
         }
         for (id, document_json) in mcp_servers {
             self.upsert_mcp_server(id, document_json);
+        }
+        for (id, document_json) in agent_upstreams {
+            self.upsert_agent_upstream(id, document_json);
         }
     }
 
@@ -1378,6 +1401,14 @@ impl RuntimeControlPlaneState {
             .collect::<Vec<_>>();
         mcp_servers.sort_by(|left, right| left.0.cmp(&right.0));
 
+        let mut agent_upstreams = self
+            .agent_upstreams
+            .list()
+            .into_iter()
+            .map(|resource| (resource.id, resource.document_json))
+            .collect::<Vec<_>>();
+        agent_upstreams.sort_by(|left, right| left.0.cmp(&right.0));
+
         ControlPlaneSnapshot {
             api_keys: api_keys
                 .into_iter()
@@ -1412,6 +1443,10 @@ impl RuntimeControlPlaneState {
                 .map(|(_, document_json)| document_json)
                 .collect(),
             mcp_servers: mcp_servers
+                .into_iter()
+                .map(|(_, document_json)| document_json)
+                .collect(),
+            agent_upstreams: agent_upstreams
                 .into_iter()
                 .map(|(_, document_json)| document_json)
                 .collect(),
@@ -1536,6 +1571,22 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_mcp_server(&mut self, id: &str) -> bool {
         self.mcp_servers.remove(id).is_some()
+    }
+
+    pub fn upsert_agent_upstream(&mut self, id: impl Into<String>, document_json: String) {
+        let id = id.into();
+        self.agent_upstreams.insert(
+            id.clone(),
+            StoredControlPlaneResource {
+                kind: "agent_upstream".into(),
+                id,
+                document_json,
+            },
+        );
+    }
+
+    pub fn delete_agent_upstream(&mut self, id: &str) -> bool {
+        self.agent_upstreams.remove(id).is_some()
     }
 
     pub fn upsert_plugin_registration(&mut self, id: impl Into<String>, document_json: String) {
@@ -1879,6 +1930,7 @@ impl RuntimeStorageRepositories {
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
+        bootstrap_agent_upstreams: Vec<(String, String)>,
         request_log_retention_records: usize,
         audit_event_retention_records: usize,
     ) -> Result<Self, StorageError> {
@@ -1896,6 +1948,7 @@ impl RuntimeStorageRepositories {
             bootstrap_prompt_templates,
             bootstrap_plugin_registrations,
             bootstrap_mcp_servers,
+            bootstrap_agent_upstreams,
             initialize_schema,
         )
         .await?;
@@ -1928,6 +1981,7 @@ impl RuntimeStorageRepositories {
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
+        bootstrap_agent_upstreams: Vec<(String, String)>,
         request_log_retention_records: usize,
         audit_event_retention_records: usize,
     ) -> Result<Self, StorageError> {
@@ -1947,6 +2001,7 @@ impl RuntimeStorageRepositories {
                         bootstrap_prompt_templates,
                         bootstrap_plugin_registrations,
                         bootstrap_mcp_servers,
+                        bootstrap_agent_upstreams,
                         initialize_schema,
                     )
                 })
@@ -1984,6 +2039,7 @@ impl RuntimeStorageRepositories {
         bootstrap_prompt_templates: Vec<(String, String)>,
         bootstrap_plugin_registrations: Vec<(String, String)>,
         bootstrap_mcp_servers: Vec<(String, String)>,
+        bootstrap_agent_upstreams: Vec<(String, String)>,
         request_log_retention_records: usize,
         audit_event_retention_records: usize,
     ) -> Result<Self, StorageError> {
@@ -2003,6 +2059,7 @@ impl RuntimeStorageRepositories {
                         bootstrap_prompt_templates,
                         bootstrap_plugin_registrations,
                         bootstrap_mcp_servers,
+                        bootstrap_agent_upstreams,
                         initialize_schema,
                     )
                 })
@@ -2043,6 +2100,7 @@ impl RuntimeStorageRepositories {
                     prompt_templates: Vec::new(),
                     plugin_registrations: Vec::new(),
                     mcp_servers: Vec::new(),
+                    agent_upstreams: Vec::new(),
                 })),
             RuntimeControlPlaneBackend::Libsql(control_plane) => {
                 block_on_storage(control_plane.snapshot())
@@ -2063,6 +2121,7 @@ impl RuntimeStorageRepositories {
         prompt_templates: Vec<(String, String)>,
         plugin_registrations: Vec<(String, String)>,
         mcp_servers: Vec<(String, String)>,
+        agent_upstreams: Vec<(String, String)>,
     ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
@@ -2077,6 +2136,7 @@ impl RuntimeStorageRepositories {
                         prompt_templates,
                         plugin_registrations,
                         mcp_servers,
+                        agent_upstreams,
                     );
                 }
                 Ok(())
@@ -2103,6 +2163,9 @@ impl RuntimeStorageRepositories {
                 control_plane
                     .replace_kind("mcp_server", mcp_servers)
                     .await?;
+                control_plane
+                    .replace_kind("agent_upstream", agent_upstreams)
+                    .await?;
                 Ok(())
             }),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
@@ -2115,6 +2178,7 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("prompt_template", prompt_templates)?;
                 control_plane.replace_kind("plugin_registration", plugin_registrations)?;
                 control_plane.replace_kind("mcp_server", mcp_servers)?;
+                control_plane.replace_kind("agent_upstream", agent_upstreams)?;
                 Ok(())
             }
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
@@ -2127,6 +2191,7 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("prompt_template", prompt_templates)?;
                 control_plane.replace_kind("plugin_registration", plugin_registrations)?;
                 control_plane.replace_kind("mcp_server", mcp_servers)?;
+                control_plane.replace_kind("agent_upstream", agent_upstreams)?;
                 Ok(())
             }
         }
@@ -2446,6 +2511,48 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("mcp_server", id.to_string())
+            }
+        }
+    }
+
+    pub fn upsert_control_plane_agent_upstream(
+        &self,
+        id: impl Into<String>,
+        document_json: String,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_agent_upstream(id, document_json);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.upsert("agent_upstream", id.into(), document_json))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert("agent_upstream", id.into(), document_json)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert("agent_upstream", id.into(), document_json)
+            }
+        }
+    }
+
+    pub fn delete_control_plane_agent_upstream(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_agent_upstream(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Libsql(control_plane) => {
+                block_on_storage(control_plane.delete("agent_upstream", id.to_string()))
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete("agent_upstream", id.to_string())
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.delete("agent_upstream", id.to_string())
             }
         }
     }
@@ -2788,6 +2895,65 @@ impl<T> StoragePage<T> {
 mod tests {
     use super::*;
 
+    async fn turso_libsql_empty(
+        provider_order: Vec<StorageProviderKind>,
+        required: bool,
+        url: String,
+        auth_token: Option<String>,
+        initialize_schema: bool,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Result<RuntimeStorageRepositories, StorageError> {
+        RuntimeStorageRepositories::turso_libsql(
+            provider_order,
+            required,
+            url,
+            auth_token,
+            initialize_schema,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            request_log_retention_records,
+            audit_event_retention_records,
+        )
+        .await
+    }
+
+    fn postgres_empty(
+        provider_order: Vec<StorageProviderKind>,
+        required: bool,
+        config: PostgresStorageConfig,
+        initialize_schema: bool,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Result<RuntimeStorageRepositories, StorageError> {
+        RuntimeStorageRepositories::postgres(
+            provider_order,
+            required,
+            config,
+            initialize_schema,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            request_log_retention_records,
+            audit_event_retention_records,
+        )
+    }
+
     #[test]
     fn in_memory_api_key_repository_gets_and_lists_records() {
         let mut repository = InMemoryRepository::new();
@@ -3047,7 +3213,7 @@ mod tests {
 
     #[test]
     fn postgres_tls_ca_path_errors_before_connecting() {
-        let error = RuntimeStorageRepositories::postgres(
+        let error = postgres_empty(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             PostgresStorageConfig {
@@ -3061,13 +3227,6 @@ mod tests {
                 search_path: Vec::new(),
             },
             false,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             10,
             10,
         )
@@ -3101,6 +3260,8 @@ mod tests {
                 )],
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
+                Vec::new(),
                 vec![(
                     "tool.echo".into(),
                     r#"{"id":"tool.echo","source":"builtin"}"#.to_string(),
@@ -3109,6 +3270,7 @@ mod tests {
                     "github".into(),
                     r#"{"name":"github","transport":"streamable_http"}"#.to_string(),
                 )],
+                Vec::new(),
             )
             .unwrap();
         let snapshot = repositories.control_plane_snapshot().unwrap();
@@ -3209,19 +3371,12 @@ mod tests {
         let url = format!("file://{}", db_path.display());
         let approval_json = r#"{"id":"approval-1","tool_name":"github.search","status":"pending"}"#;
 
-        let repositories = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+        let repositories = block_on_storage(turso_libsql_empty(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             url.clone(),
             None,
             true,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             10,
             10,
         ))
@@ -3230,19 +3385,12 @@ mod tests {
             .upsert_control_plane_tool_approval("approval-1", approval_json.to_string())
             .unwrap();
 
-        let reopened = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+        let reopened = block_on_storage(turso_libsql_empty(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             url,
             None,
             true,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             10,
             10,
         ))
@@ -3274,19 +3422,12 @@ mod tests {
             ..TenantContext::default()
         };
 
-        let repositories = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+        let repositories = block_on_storage(turso_libsql_empty(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             url.clone(),
             None,
             true,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             10,
             10,
         ))
@@ -3322,19 +3463,12 @@ mod tests {
             })
             .unwrap();
 
-        let reopened = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+        let reopened = block_on_storage(turso_libsql_empty(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             url,
             None,
             true,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             10,
             10,
         ))
@@ -3356,19 +3490,12 @@ mod tests {
         let url = format!("file://{}", db_path.display());
         let plugin_json = r#"{"id":"tool.echo","kind":"tool_provider","enabled":true,"source":"builtin","order":10,"approval_policy":"never","permissions":{"tools":["tool.echo"],"network":[],"filesystem":false,"shell":false},"config":{"timeout_ms":30000}}"#;
 
-        let repositories = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+        let repositories = block_on_storage(turso_libsql_empty(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             url.clone(),
             None,
             true,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             10,
             10,
         ))
@@ -3377,19 +3504,12 @@ mod tests {
             .upsert_control_plane_plugin_registration("tool.echo", plugin_json.to_string())
             .unwrap();
 
-        let reopened = block_on_storage(RuntimeStorageRepositories::turso_libsql(
+        let reopened = block_on_storage(turso_libsql_empty(
             DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
             true,
             url,
             None,
             true,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             10,
             10,
         ))
@@ -3401,5 +3521,53 @@ mod tests {
             .plugin_registrations
             .iter()
             .any(|document| document == plugin_json));
+    }
+
+    #[test]
+    fn libsql_schema_initialization_creates_control_plane_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ferrogate-schema-init.db");
+        let url = format!("file://{}", db_path.display());
+
+        let repositories = block_on_storage(turso_libsql_empty(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url.clone(),
+            None,
+            true,
+            10,
+            10,
+        ))
+        .unwrap();
+
+        repositories
+            .upsert_control_plane_api_key(
+                "init-key",
+                r#"{"id":"init-key","name":"Init"}"#.to_string(),
+            )
+            .unwrap();
+        let reopened = block_on_storage(turso_libsql_empty(
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            true,
+            url,
+            None,
+            true,
+            10,
+            10,
+        ))
+        .unwrap();
+
+        assert!(reopened
+            .control_plane_snapshot()
+            .unwrap()
+            .api_keys
+            .iter()
+            .any(|document| document.contains("\"id\":\"init-key\"")));
+        assert!(reopened
+            .control_plane_snapshot()
+            .unwrap()
+            .api_keys
+            .iter()
+            .all(|document| document.contains("\"name\":\"Init\"")));
     }
 }

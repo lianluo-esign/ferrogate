@@ -49,6 +49,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
+    pub(crate) agent_upstreams: Vec<AgentUpstreamConfig>,
+    #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
     pub(crate) observability: ObservabilityConfig,
@@ -987,6 +989,55 @@ pub(crate) struct Upstream {
     pub(crate) enabled: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentUpstreamConfig {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_agent_upstream_protocol")]
+    pub(crate) protocol: AgentUpstreamProtocol,
+    pub(crate) endpoint: String,
+    #[serde(default)]
+    pub(crate) auth: AgentUpstreamAuth,
+    #[serde(default)]
+    pub(crate) tenant_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<AgentUpstreamCapability>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentUpstreamProtocol {
+    #[default]
+    A2a,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentUpstreamAuth {
+    None,
+    Bearer { token: Option<String> },
+    Header { name: String, value: Option<String> },
+}
+
+impl Default for AgentUpstreamAuth {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentUpstreamCapability {
+    Invoke,
+    Read,
+    Stream,
+    Discover,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct RouteRule {
     pub(crate) name: String,
@@ -1047,6 +1098,10 @@ fn default_service_name() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_agent_upstream_protocol() -> AgentUpstreamProtocol {
+    AgentUpstreamProtocol::A2a
 }
 
 fn default_cluster_id() -> String {
@@ -1487,6 +1542,7 @@ impl Default for Config {
             plugins: Vec::new(),
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
+            agent_upstreams: Vec::new(),
             telemetry: TelemetryConfig::default(),
             observability: ObservabilityConfig::default(),
             analytics: AnalyticsConfig::default(),

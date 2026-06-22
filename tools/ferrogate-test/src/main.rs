@@ -834,12 +834,136 @@ fn run_auth_api(args: &AuthArgs) -> Result<()> {
 }
 
 fn run_gateway_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 7)?;
+    let case = LocalHarness::start_with_billing_and_agent(&args.ferrogate_bin, 7)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));
         Ok(())
     })?;
+    case.expect_json(
+        "GET",
+        "/.well-known/agent.json",
+        &[CLIENT_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(body["data"].is_array());
+            assert!(list_contains(&body, "id", "agent.echo"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/agents/agent.echo/message:send",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":"msg-1","method":"message:send","params":{"message":{"role":"user","parts":[{"type":"text","text":"hello"}]}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["content"][0]["text"], "agent-result");
+            assert_eq!(body["result"]["isError"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/.well-known/agent.json",
+        &[OBSERVER_AUTH],
+        "",
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "scope_denied");
+            Ok(())
+        },
+    )?;
+    let agent_upstream_endpoint = case.agent_endpoint()?;
+    let agent_upstream = format!(
+        r#"{{"id":"pi-agent-us","name":"Pi Agent US","description":"Community agent upstream","enabled":true,"protocol":"a2a","endpoint":"http://{agent_upstream_endpoint}/a2a","tenant_ids":["client"],"capabilities":["invoke","read","stream","discover"]}}"#
+    );
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-upstreams",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &agent_upstream,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_upstream");
+            assert_eq!(body["agent_upstream"]["id"], "pi-agent-us");
+            assert_eq!(body["agent_upstream"]["protocol"], "a2a");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/agent-upstreams/pi-agent-us",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "agent_upstream");
+            assert_eq!(body["agent_upstream"]["id"], "pi-agent-us");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/.well-known/agent.json",
+        &[CLIENT_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(body["data"].is_array());
+            assert!(list_contains(&body, "id", "pi-agent-us"));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/agents/pi-agent-us/message:stream",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":"msg-2","method":"message:stream","params":{"message":{"role":"user","parts":[{"type":"text","text":"hello"}]}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["result"]["content"][0]["text"], "agent-stream");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "PUT",
+        "/admin/v1/agent-upstreams/pi-agent-us",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        &format!(
+            r#"{{"id":"pi-agent-us","name":"Pi Agent US","enabled":false,"protocol":"a2a","endpoint":"http://{agent_upstream_endpoint}/a2a","tenant_ids":["client"],"capabilities":["invoke","read"]}}"#
+        ),
+        200,
+        |body| {
+            assert_eq!(body["agent_upstream"]["enabled"], false);
+            assert_eq!(body["agent_upstream"]["capabilities"][1], "read");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "DELETE",
+        "/admin/v1/agent-upstreams/pi-agent-us",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["deleted"], true);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-upstreams",
+        &[OBSERVER_AUTH, JSON_CONTENT],
+        &agent_upstream,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "scope_denied");
+            Ok(())
+        },
+    )?;
     case.expect_json("GET", "/v1/models", &[], "", 401, |body| {
         assert_eq!(body["error"]["code"], "missing_api_key");
         Ok(())
@@ -2391,6 +2515,18 @@ fn run_control_plane_restart(
         }
     })
     .to_string();
+    let agent_upstream_id = format!("{resource_id}-agent-upstream");
+    let agent_upstream_body = serde_json::json!({
+        "id": agent_upstream_id,
+        "name": "Turso restart agent upstream",
+        "description": "Durable upstream",
+        "enabled": true,
+        "protocol": "a2a",
+        "endpoint": "https://agent.example.com/a2a",
+        "tenant_ids": [resource_id],
+        "capabilities": ["invoke", "read", "stream", "discover"]
+    })
+    .to_string();
 
     let approval_id;
     let mcp_server_name = format!(
@@ -2467,6 +2603,20 @@ fn run_control_plane_restart(
             },
         )?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
+        case.expect_json(
+            "POST",
+            "/admin/v1/agent-upstreams",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &agent_upstream_body,
+            201,
+            |body| {
+                assert_eq!(body["agent_upstream"]["id"], agent_upstream_id);
+                assert_eq!(body["agent_upstream"]["protocol"], "a2a");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        case.expect_agent_upstream(&agent_upstream_id, true)?;
     }
 
     {
@@ -2480,6 +2630,7 @@ fn run_control_plane_restart(
         case.expect_gateway_config(&gateway_config_id)?;
         case.expect_policy(&policy_name)?;
         case.expect_prompt_template(&prompt_template_id, "active")?;
+        case.expect_agent_upstream(&agent_upstream_id, true)?;
         case.expect_restored_prompt_template_render(&resource_id, &prompt_template_id)?;
         case.expect_restored_api_key_models_access(&resource_id)?;
         case.expect_restored_gateway_config_selected(&resource_id, &gateway_config_id)?;
@@ -2542,6 +2693,17 @@ fn run_control_plane_restart(
                 Ok(())
             },
         )?;
+        case.expect_json(
+            "DELETE",
+            &format!("/admin/v1/agent-upstreams/{agent_upstream_id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["deleted"], true);
+                Ok(())
+            },
+        )?;
     }
 
     {
@@ -2556,6 +2718,7 @@ fn run_control_plane_restart(
             case.expect_missing_policy(&policy_name)?;
         }
         case.expect_prompt_template(&prompt_template_id, "archived")?;
+        case.expect_missing_agent_upstream(&agent_upstream_id)?;
     }
 
     Ok(())
@@ -2574,6 +2737,8 @@ struct LocalHarness {
     gateway: Child,
     provider: Option<JoinHandle<Vec<String>>>,
     mcp_server: Option<JoinHandle<Vec<String>>>,
+    agent_server: Option<JoinHandle<Vec<String>>>,
+    agent_addr: Option<String>,
     billing: Option<MockBillingServer>,
     observability: Option<MockOtlpServer>,
 }
@@ -2993,6 +3158,38 @@ impl TursoRestartHarness {
         )
     }
 
+    fn expect_agent_upstream(&self, id: &str, enabled: bool) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/agent-upstreams/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["agent_upstream"]["id"], id);
+                assert_eq!(body["agent_upstream"]["enabled"], enabled);
+                assert_eq!(body["agent_upstream"]["protocol"], "a2a");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_missing_agent_upstream(&self, id: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            &format!("/admin/v1/agent-upstreams/{id}"),
+            &[ADMIN_AUTH],
+            "",
+            404,
+            |body| {
+                assert_eq!(body["error"]["code"], "agent_upstream_not_found");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
     fn expect_restored_prompt_template_render(
         &self,
         api_key_id: &str,
@@ -3312,10 +3509,13 @@ impl Drop for TursoRestartHarness {
 
 impl LocalHarness {
     fn start(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
-        Self::start_inner(ferrogate_bin, expected_provider_requests, None, None)
+        Self::start_inner(ferrogate_bin, expected_provider_requests, None, None, false)
     }
 
-    fn start_with_billing(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
+    fn start_with_billing_and_agent(
+        ferrogate_bin: &Path,
+        expected_provider_requests: usize,
+    ) -> Result<Self> {
         let billing = spawn_mock_billing_server(expected_provider_requests)
             .context("start billing provider")?;
         Self::start_inner(
@@ -3323,6 +3523,7 @@ impl LocalHarness {
             expected_provider_requests,
             Some(billing),
             None,
+            true,
         )
     }
 
@@ -3336,6 +3537,7 @@ impl LocalHarness {
             expected_provider_requests,
             None,
             Some(auth_addr),
+            false,
         )
     }
 
@@ -3344,6 +3546,7 @@ impl LocalHarness {
         expected_provider_requests: usize,
         billing: Option<MockBillingServer>,
         auth_addr: Option<&str>,
+        include_agent: bool,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
@@ -3356,6 +3559,12 @@ impl LocalHarness {
         let (provider_addr, provider) =
             spawn_local_provider_upstream(expected_provider_requests).context("start provider")?;
         let (mcp_addr, mcp_server) = spawn_mock_mcp_server().context("start mcp provider")?;
+        let (agent_addr, agent_server) = if include_agent {
+            let (addr, server) = spawn_mock_agent_server().context("start agent provider")?;
+            (Some(addr), Some(server))
+        } else {
+            (None, None)
+        };
         let dir = tempfile::tempdir()?;
         let stdio_mcp_path = dir.path().join("blocking-stdio-mcp.py");
         std::fs::write(&stdio_mcp_path, blocking_stdio_mcp_script())?;
@@ -3368,6 +3577,7 @@ impl LocalHarness {
                 &gateway_addr,
                 &provider_addr,
                 &mcp_addr,
+                agent_addr.as_deref().unwrap_or("http://127.0.0.1:1/a2a"),
                 &stdio_mcp_path,
                 billing.as_ref(),
                 Some(&observability),
@@ -3381,7 +3591,13 @@ impl LocalHarness {
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(
+                if env::var("FERROGATE_TEST_DEBUG_STDERR").is_ok_and(|value| value == "1") {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                },
+            )
             .spawn()
             .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
 
@@ -3391,6 +3607,8 @@ impl LocalHarness {
             gateway,
             provider: Some(provider),
             mcp_server: Some(mcp_server),
+            agent_server,
+            agent_addr,
             billing,
             observability: Some(observability),
         };
@@ -3483,6 +3701,12 @@ impl LocalHarness {
         F: FnOnce(Value) -> Result<()>,
     {
         self.expect_json(method, path, headers, body, expected_status, check)
+    }
+
+    fn agent_endpoint(&self) -> Result<&str> {
+        self.agent_addr
+            .as_deref()
+            .context("agent harness is not configured")
     }
 
     fn expect_openmeter_export(&self) -> Result<()> {
@@ -3623,6 +3847,9 @@ impl Drop for LocalHarness {
         if let Some(mcp_server) = self.mcp_server.take() {
             let _ = mcp_server.join();
         }
+        if let Some(agent_server) = self.agent_server.take() {
+            let _ = agent_server.join();
+        }
         if let Some(billing) = self.billing.as_mut() {
             let _ = billing.handle.take().map(|handle| handle.join());
         }
@@ -3656,6 +3883,7 @@ fn local_gateway_config(
     gateway_addr: &str,
     provider_addr: &str,
     mcp_addr: &str,
+    agent_addr: &str,
     stdio_mcp_path: &Path,
     billing: Option<&MockBillingServer>,
     observability: Option<&MockOtlpServer>,
@@ -3783,6 +4011,16 @@ tools_to_auto_execute = ["search"]
 approval_policy = "never"
 timeout_ms = 3000
 
+[[agent_upstreams]]
+id = "agent.echo"
+name = "Agent Echo"
+description = "Harness agent upstream"
+enabled = true
+protocol = "a2a"
+endpoint = "http://{agent_addr}/a2a"
+tenant_ids = ["client"]
+capabilities = ["invoke", "read", "stream", "discover"]
+
 [[models]]
 name = "fast-chat"
 provider = "openai"
@@ -3803,7 +4041,7 @@ output_price_per_1m = 2.0
 id = "client"
 name = "Client"
 key = "client-secret"
-scopes = ["models.read", "chat.completions", "responses.create", "agent.runs.create", "admin.read", "tools.read", "tools.execute"]
+scopes = ["models.read", "chat.completions", "responses.create", "agent.runs.create", "admin.read", "agents.read", "agents.invoke", "tools.read", "tools.execute"]
 allowed_models = ["fast-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
@@ -4277,6 +4515,82 @@ fn spawn_mock_mcp_server() -> Result<(String, JoinHandle<Vec<String>>)> {
                                 "code": -32601,
                                 "message": "unsupported method"
                             }
+                        })
+                        .to_string()
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    requests.push(request);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        requests
+    });
+    Ok((addr, handle))
+}
+
+fn spawn_mock_agent_server() -> Result<(String, JoinHandle<Vec<String>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?.to_string();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(30) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let body = if request.contains(r#""method":"initialize""#) {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {"tools": {"listChanged": false}},
+                                "serverInfo": {"name": "agent-harness", "version": "1.0.0"}
+                            }
+                        })
+                        .to_string()
+                    } else if request.contains(r#""method":"message:send""#) {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": "agent-result"}
+                                ],
+                                "isError": false
+                            }
+                        })
+                        .to_string()
+                    } else if request.contains(r#""method":"message:stream""#) {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": "agent-stream"}
+                                ],
+                                "isError": false
+                            }
+                        })
+                        .to_string()
+                    } else {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "error": {"code": -32601, "message": "unsupported method"}
                         })
                         .to_string()
                     };
@@ -6653,20 +6967,26 @@ fn http_request_addr(
     headers: &[&str],
     body: &str,
 ) -> Result<HttpResponse> {
-    let mut stream = TcpStream::connect(addr)?;
+    let mut stream = TcpStream::connect(addr)
+        .with_context(|| format!("failed to connect to {addr} for {method} {path}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
-    )?;
+    )
+    .with_context(|| format!("failed to write request line to {addr} for {method} {path}"))?;
     for header in headers {
-        write!(stream, "{header}\r\n")?;
+        write!(stream, "{header}\r\n")
+            .with_context(|| format!("failed to write header to {addr} for {method} {path}"))?;
     }
-    write!(stream, "\r\n{body}")?;
+    write!(stream, "\r\n{body}")
+        .with_context(|| format!("failed to write request body to {addr} for {method} {path}"))?;
 
     let mut raw = String::new();
-    stream.read_to_string(&mut raw)?;
+    stream
+        .read_to_string(&mut raw)
+        .with_context(|| format!("failed to read response from {addr} for {method} {path}"))?;
     let status = raw
         .lines()
         .next()

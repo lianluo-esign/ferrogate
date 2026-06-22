@@ -167,6 +167,7 @@ impl Config {
             plugins: Vec::new(),
             extensions: Vec::new(),
             mcp_servers: Vec::new(),
+            agent_upstreams: Vec::new(),
             telemetry: TelemetryConfig::default(),
             observability: crate::config::ObservabilityConfig::default(),
             analytics: crate::config::AnalyticsConfig::default(),

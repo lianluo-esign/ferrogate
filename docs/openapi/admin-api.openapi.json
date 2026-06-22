@@ -2741,6 +2741,287 @@
         }
       }
     },
+    "/admin/v1/agent-upstreams": {
+      "get": {
+        "operationId": "listAdminAgentUpstreams",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List registered agent upstreams.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registered agent upstreams.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAgentUpstreamList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAdminAgentUpstream",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Register an agent upstream.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminAgentUpstreamMutationRequest"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/AdminAgentUpstreamMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/admin/v1/agent-upstreams/{id}": {
+      "get": {
+        "operationId": "getAdminAgentUpstream",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get one registered agent upstream.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAgentUpstreamMutationOk"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putAdminAgentUpstream",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Replace an agent upstream.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminAgentUpstreamMutationRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAgentUpstreamMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchAdminAgentUpstream",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Update an agent upstream.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminAgentUpstreamMutationRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminAgentUpstreamMutationOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAdminAgentUpstream",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Delete an agent upstream.",
+        "security": [
+          {
+            "AdminBearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteAgentUpstreamResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/.well-known/agent.json": {
+      "get": {
+        "operationId": "getAgentDiscovery",
+        "tags": [
+          "Agent"
+        ],
+        "summary": "List enabled agent upstreams visible to the authenticated agent client.",
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Visible agent upstreams.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentUpstreamDiscoveryList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/skill-packages": {
       "get": {
         "operationId": "listAdminSkillPackages",
@@ -3373,6 +3654,16 @@
           }
         }
       },
+      "AdminAgentUpstreamMutationRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminAgentUpstreamMutation"
+            }
+          }
+        }
+      },
       "AdminSkillPackageMutation": {
         "required": true,
         "content": {
@@ -3585,8 +3876,28 @@
           }
         }
       },
+      "AdminAgentUpstreamMutationOk": {
+        "description": "Agent upstream mutation response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminAgentUpstreamMutationResponse"
+            }
+          }
+        }
+      },
       "DeleteSkillPackageResponse": {
         "description": "Skill package delete response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteResponse"
+            }
+          }
+        }
+      },
+      "DeleteAgentUpstreamResponse": {
+        "description": "Agent upstream delete response.",
         "content": {
           "application/json": {
             "schema": {
@@ -5614,6 +5925,129 @@
           },
           "agent_workflow": {
             "$ref": "#/components/schemas/AdminAgentWorkflow"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentUpstreamMutation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/AgentUpstreamProtocol"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "auth": {
+            "$ref": "#/components/schemas/AgentUpstreamAuth"
+          },
+          "tenant_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentUpstreamCapability"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentUpstreamMutationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "agent_upstream"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_upstream"
+          },
+          "agent_upstream": {
+            "$ref": "#/components/schemas/AdminAgentUpstream"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAgentUpstream": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "protocol",
+          "endpoint",
+          "tenant_ids",
+          "capabilities"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/AgentUpstreamProtocol"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "tenant_ids": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentUpstreamCapability"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminList_AdminAgentUpstream": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "list"
+            ]
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminAgentUpstream"
+            }
           }
         },
         "additionalProperties": false
@@ -8368,6 +8802,143 @@
           }
         ]
       },
+      "AgentUpstreamDiscovery": {
+        "type": "object",
+        "required": [
+          "object",
+          "id",
+          "name",
+          "protocol",
+          "endpoint",
+          "capabilities"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent_upstream"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/AgentUpstreamProtocol"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentUpstreamCapability"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentUpstreamDiscoveryList": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentUpstreamDiscovery"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentUpstreamProtocol": {
+        "type": "string",
+        "enum": [
+          "a2a"
+        ]
+      },
+      "AgentUpstreamCapability": {
+        "type": "string",
+        "enum": [
+          "invoke",
+          "read",
+          "stream",
+          "discover"
+        ]
+      },
+      "AgentUpstreamAuth": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "none"
+            ],
+            "properties": {
+              "none": {
+                "type": "object",
+                "nullable": true
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bearer"
+            ],
+            "properties": {
+              "bearer": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "header"
+            ],
+            "properties": {
+              "header": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
       "AgentSkillPackage": {
         "type": "object",
         "required": [
@@ -8428,6 +8999,9 @@
       },
       "AgentSkillPackageList": {
         "$ref": "#/components/schemas/AdminList_AgentSkillPackage"
+      },
+      "AdminAgentUpstreamList": {
+        "$ref": "#/components/schemas/AdminList_AdminAgentUpstream"
       },
       "AdminList_AdminSkillPackage": {
         "type": "object",
