@@ -202,7 +202,7 @@ impl FerroGateway {
             .await;
         }
 
-        let workflow_use = match agent_workflow_use(&state, &headers, &auth, &request) {
+        let workflow_use = match agent_workflow_use(&state, &headers, &auth, &run_id, &request) {
             Ok(workflow_use) => workflow_use,
             Err((status, code, message)) => {
                 return write_json_error(session, status, code, message, &ctx.request_id).await;
@@ -455,6 +455,7 @@ fn agent_workflow_use(
     state: &AppState,
     headers: &HeaderMap,
     auth: &AuthContext,
+    run_id: &str,
     request: &AgentRunCreateRequest,
 ) -> Result<Option<AgentWorkflowUse>, (StatusCode, &'static str, String)> {
     let workflow_id = requested_optional_id_header(headers, WORKFLOW_ID_HEADER)
@@ -572,6 +573,25 @@ fn agent_workflow_use(
                 workflow.id, workflow.version, required_turns
             ),
         ));
+    }
+    if let Some(timeout_millis) = workflow.timeout_millis {
+        if let Some(started_at_unix) =
+            state.workflow_run_started_at(&workflow.id, workflow.version, run_id)
+        {
+            let elapsed_millis = now_unix_seconds()
+                .saturating_sub(started_at_unix)
+                .saturating_mul(1_000);
+            if elapsed_millis > timeout_millis {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "workflow_timeout_exceeded",
+                    format!(
+                        "agent workflow {}@{} elapsed time exceeded configured timeout",
+                        workflow.id, workflow.version
+                    ),
+                ));
+            }
+        }
     }
     Ok(Some(AgentWorkflowUse {
         id: workflow.id.clone(),

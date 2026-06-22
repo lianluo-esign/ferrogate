@@ -834,7 +834,7 @@ fn run_auth_api(args: &AuthArgs) -> Result<()> {
 }
 
 fn run_gateway_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 4)?;
+    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 5)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));
@@ -923,6 +923,20 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/admin/v1/agent-workflows",
         &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"timeout-flow","name":"Timeout flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"draft","kind":"model","model":"fast-chat"}],"edges":[],"max_model_calls":10,"max_iterations":2,"timeout_millis":1}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "timeout-flow");
+            assert_eq!(body["agent_workflow"]["workflow"]["timeout_millis"], 1);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
         r#"{"id":"tool-flow","name":"Tool flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"echo","kind":"tool","tool":"tool.echo","max_iterations":2}],"edges":[],"max_tool_calls":1,"max_iterations":2}"#,
         201,
         |body| {
@@ -961,6 +975,46 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         |body| {
             assert_eq!(body["object"], "chat.completion");
             assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: workflow-timeout-e2e",
+            "x-ferrogate-workflow-id: timeout-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: draft",
+            "x-ferrogate-workflow-iteration: 1",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow timeout seed"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    thread::sleep(Duration::from_millis(1_100));
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: workflow-timeout-e2e",
+            "x-ferrogate-workflow-id: timeout-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: draft",
+            "x-ferrogate-workflow-iteration: 2",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow timeout rejected"}]}"#,
+        429,
+        |body| {
+            assert_eq!(body["error"]["code"], "workflow_timeout_exceeded");
             Ok(())
         },
     )?;
@@ -1118,6 +1172,7 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert!(raw.contains("\"workflow_version\":1"));
             assert!(raw.contains("\"workflow_node_id\":\"draft\""));
             assert!(raw.contains("workflow_token_budget_exceeded"));
+            assert!(raw.contains("workflow_timeout_exceeded"));
             assert_secret_redacted(&raw);
             Ok(())
         },

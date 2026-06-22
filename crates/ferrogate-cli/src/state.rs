@@ -4137,6 +4137,47 @@ impl AppState {
         self.metering_events.list()
     }
 
+    pub(crate) fn workflow_run_started_at(
+        &self,
+        workflow_id: &str,
+        workflow_version: u32,
+        agent_run_id: &str,
+    ) -> Option<u64> {
+        let request_timestamps = self
+            .request_logs()
+            .into_iter()
+            .filter(|log| {
+                log.workflow_id.as_deref() == Some(workflow_id)
+                    && log.workflow_version == Some(workflow_version)
+                    && log.agent_run_id.as_deref() == Some(agent_run_id)
+            })
+            .flat_map(|log| [log.started_at_unix, log.completed_at_unix]);
+        let audit_timestamps = self
+            .audit_events()
+            .into_iter()
+            .filter(|event| {
+                event.workflow_id.as_deref() == Some(workflow_id)
+                    && event.workflow_version == Some(workflow_version)
+                    && event.agent_run_id.as_deref() == Some(agent_run_id)
+            })
+            .map(|event| event.occurred_at_unix);
+        let billing_timestamps = self
+            .metering_events()
+            .into_iter()
+            .filter(|event| {
+                event.workflow_id.as_deref() == Some(workflow_id)
+                    && event.workflow_version == Some(workflow_version)
+                    && event.agent_run_id.as_deref() == Some(agent_run_id)
+            })
+            .map(|event| event.occurred_at_unix);
+
+        request_timestamps
+            .chain(audit_timestamps)
+            .chain(billing_timestamps)
+            .flatten()
+            .min()
+    }
+
     pub(crate) fn request_logs_page(
         &self,
         pagination: AdminPagination,

@@ -7,7 +7,10 @@
 use http::{HeaderMap, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Deserialize;
-use std::io::{Error as IoError, Read};
+use std::{
+    io::{Error as IoError, Read},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tracing::{info, warn};
 
 use crate::{
@@ -201,16 +204,19 @@ impl FerroGateway {
             mut routes,
             body_text,
         } = request_plan;
+        let request_started_at_unix = now_unix_seconds();
         let workflow_provider_constraint = match enforce_ai_workflow_policy(
             &state,
             AiWorkflowRequestContext {
                 auth: &auth,
+                agent_run_id: &agent_run_id,
                 workflow_id: workflow_id.as_deref(),
                 workflow_version,
                 workflow_node_id: workflow_node_id.as_deref(),
                 workflow_iteration,
                 logical_model: &request.model,
                 estimated_usage: &estimated_usage,
+                now_unix: request_started_at_unix,
             },
         ) {
             Ok(constraint) => constraint,
@@ -226,6 +232,7 @@ impl FerroGateway {
                     &auth,
                     gateway_config.as_ref(),
                     &request.model,
+                    request_started_at_unix,
                     rejection,
                 )
                 .await?;
@@ -248,6 +255,7 @@ impl FerroGateway {
                 &auth,
                 gateway_config.as_ref(),
                 &request.model,
+                request_started_at_unix,
                 rejection,
             )
             .await?;
@@ -480,8 +488,8 @@ impl FerroGateway {
                                 .collect()
                         }),
                         cache_status: Some("hit".into()),
-                        started_at_unix: None,
-                        completed_at_unix: None,
+                        started_at_unix: Some(request_started_at_unix),
+                        completed_at_unix: Some(now_unix_seconds()),
                     });
                     return write_raw_response(
                         session,
@@ -885,8 +893,8 @@ impl FerroGateway {
                                             .collect()
                                     }),
                                     cache_status: None,
-                                    started_at_unix: None,
-                                    completed_at_unix: None,
+                                    started_at_unix: Some(request_started_at_unix),
+                                    completed_at_unix: Some(now_unix_seconds()),
                                 });
                                 return write_streaming_bytes_response(
                                     session,
@@ -924,8 +932,8 @@ impl FerroGateway {
                                 prompt_body: record_bodies.then(|| body_json.to_string()),
                                 response_body: None,
                                 cache_status: None,
-                                started_at_unix: None,
-                                completed_at_unix: None,
+                                started_at_unix: Some(request_started_at_unix),
+                                completed_at_unix: Some(now_unix_seconds()),
                             });
                             if endpoint == AiEndpoint::Responses {
                                 let provider_kind = responses_stream_provider_kind(&provider.kind);
@@ -1243,8 +1251,8 @@ impl FerroGateway {
                                     .collect()
                             }),
                             cache_status: cache_key.as_ref().map(|_| "miss".to_string()),
-                            started_at_unix: None,
-                            completed_at_unix: None,
+                            started_at_unix: Some(request_started_at_unix),
+                            completed_at_unix: Some(now_unix_seconds()),
                         });
                         if let Some(cache_key) = cache_key {
                             if final_status.is_success() {
@@ -1375,6 +1383,7 @@ impl FerroGateway {
         auth: &AuthContext,
         gateway_config: Option<&GatewayConfigUse>,
         logical_model: &str,
+        now_unix: u64,
         rejection: AiWorkflowRejection,
     ) -> PingoraResult<()> {
         self.state.record_request_log(StoredRequestLog {
@@ -1400,8 +1409,8 @@ impl FerroGateway {
             prompt_body: None,
             response_body: None,
             cache_status: None,
-            started_at_unix: None,
-            completed_at_unix: None,
+            started_at_unix: Some(now_unix),
+            completed_at_unix: Some(now_unix),
         });
         write_json_error(
             session,
@@ -1943,12 +1952,14 @@ fn requested_optional_u32_header(
 
 struct AiWorkflowRequestContext<'a> {
     auth: &'a AuthContext,
+    agent_run_id: &'a str,
     workflow_id: Option<&'a str>,
     workflow_version: Option<u32>,
     workflow_node_id: Option<&'a str>,
     workflow_iteration: Option<u32>,
     logical_model: &'a str,
     estimated_usage: &'a BillingTokenUsage,
+    now_unix: u64,
 }
 
 struct AiWorkflowRejection {
@@ -2069,6 +2080,26 @@ fn enforce_ai_workflow_policy(
                     workflow.id, workflow.version, iteration
                 ),
             });
+        }
+    }
+    if let Some(timeout_millis) = workflow.timeout_millis {
+        if let Some(started_at_unix) =
+            state.workflow_run_started_at(&workflow.id, workflow.version, request.agent_run_id)
+        {
+            let elapsed_millis = request
+                .now_unix
+                .saturating_sub(started_at_unix)
+                .saturating_mul(1_000);
+            if elapsed_millis > timeout_millis {
+                return Err(AiWorkflowRejection {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    code: "workflow_timeout_exceeded",
+                    message: format!(
+                        "agent workflow {}@{} elapsed time exceeded configured timeout",
+                        workflow.id, workflow.version
+                    ),
+                });
+            }
         }
     }
     if workflow.token_budget.is_some_and(|budget| {
@@ -2197,6 +2228,13 @@ fn can_use_workflow(auth: &AuthContext, workflow: &AgentWorkflowPolicy) -> bool 
         return false;
     }
     true
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn gateway_config_error_response(
