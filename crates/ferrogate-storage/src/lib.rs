@@ -37,19 +37,14 @@ pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
     StorageProviderKind::Mysql,
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageProviderKind {
+    #[default]
     Memory,
     TursoLibsql,
     Postgres,
     Mysql,
-}
-
-impl Default for StorageProviderKind {
-    fn default() -> Self {
-        Self::Memory
-    }
 }
 
 impl StorageProviderKind {
@@ -134,6 +129,36 @@ pub struct MySqlStorageConfig {
     pub tls_mode: MySqlTlsMode,
     pub tls_ca_cert_path: Option<String>,
     pub connect_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControlPlaneDocuments {
+    pub api_keys: Vec<(String, String)>,
+    pub tenants: Vec<(String, String)>,
+    pub policies: Vec<(String, String)>,
+    pub gateway_configs: Vec<(String, String)>,
+    pub agent_workflows: Vec<(String, String)>,
+    pub skill_packages: Vec<(String, String)>,
+    pub prompt_templates: Vec<(String, String)>,
+    pub plugin_registrations: Vec<(String, String)>,
+    pub mcp_servers: Vec<(String, String)>,
+    pub agent_upstreams: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStorageOptions {
+    pub provider_order: Vec<StorageProviderKind>,
+    pub required: bool,
+    pub initialize_schema: bool,
+    pub control_plane: ControlPlaneDocuments,
+    pub request_log_retention_records: usize,
+    pub audit_event_retention_records: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibsqlStorageConfig {
+    pub url: String,
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,21 +398,11 @@ impl std::fmt::Debug for LibsqlControlPlaneStore {
 
 impl LibsqlControlPlaneStore {
     async fn connect(
-        url: String,
-        auth_token: Option<String>,
-        bootstrap_api_keys: Vec<(String, String)>,
-        bootstrap_tenants: Vec<(String, String)>,
-        bootstrap_policies: Vec<(String, String)>,
-        bootstrap_gateway_configs: Vec<(String, String)>,
-        bootstrap_agent_workflows: Vec<(String, String)>,
-        bootstrap_skill_packages: Vec<(String, String)>,
-        bootstrap_prompt_templates: Vec<(String, String)>,
-        bootstrap_plugin_registrations: Vec<(String, String)>,
-        bootstrap_mcp_servers: Vec<(String, String)>,
-        bootstrap_agent_upstreams: Vec<(String, String)>,
+        config: LibsqlStorageConfig,
+        bootstrap: ControlPlaneDocuments,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
-        let database = build_libsql_database(url, auth_token).await?;
+        let database = build_libsql_database(config.url, config.auth_token).await?;
         let store = Self {
             database: Arc::new(database),
         };
@@ -395,34 +410,34 @@ impl LibsqlControlPlaneStore {
             store.initialize_schema().await?;
         }
         store
-            .seed_missing_resources("api_key", bootstrap_api_keys)
+            .seed_missing_resources("api_key", bootstrap.api_keys)
             .await?;
         store
-            .seed_missing_resources("tenant", bootstrap_tenants)
+            .seed_missing_resources("tenant", bootstrap.tenants)
             .await?;
         store
-            .seed_missing_resources("policy", bootstrap_policies)
+            .seed_missing_resources("policy", bootstrap.policies)
             .await?;
         store
-            .seed_missing_resources("gateway_config", bootstrap_gateway_configs)
+            .seed_missing_resources("gateway_config", bootstrap.gateway_configs)
             .await?;
         store
-            .seed_missing_resources("agent_workflow", bootstrap_agent_workflows)
+            .seed_missing_resources("agent_workflow", bootstrap.agent_workflows)
             .await?;
         store
-            .seed_missing_resources("skill_package", bootstrap_skill_packages)
+            .seed_missing_resources("skill_package", bootstrap.skill_packages)
             .await?;
         store
-            .seed_missing_resources("prompt_template", bootstrap_prompt_templates)
+            .seed_missing_resources("prompt_template", bootstrap.prompt_templates)
             .await?;
         store
-            .seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)
+            .seed_missing_resources("plugin_registration", bootstrap.plugin_registrations)
             .await?;
         store
-            .seed_missing_resources("mcp_server", bootstrap_mcp_servers)
+            .seed_missing_resources("mcp_server", bootstrap.mcp_servers)
             .await?;
         store
-            .seed_missing_resources("agent_upstream", bootstrap_agent_upstreams)
+            .seed_missing_resources("agent_upstream", bootstrap.agent_upstreams)
             .await?;
         Ok(store)
     }
@@ -585,16 +600,7 @@ impl std::fmt::Debug for PostgresControlPlaneStore {
 impl PostgresControlPlaneStore {
     fn connect(
         config: PostgresStorageConfig,
-        bootstrap_api_keys: Vec<(String, String)>,
-        bootstrap_tenants: Vec<(String, String)>,
-        bootstrap_policies: Vec<(String, String)>,
-        bootstrap_gateway_configs: Vec<(String, String)>,
-        bootstrap_agent_workflows: Vec<(String, String)>,
-        bootstrap_skill_packages: Vec<(String, String)>,
-        bootstrap_prompt_templates: Vec<(String, String)>,
-        bootstrap_plugin_registrations: Vec<(String, String)>,
-        bootstrap_mcp_servers: Vec<(String, String)>,
-        bootstrap_agent_upstreams: Vec<(String, String)>,
+        bootstrap: ControlPlaneDocuments,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
         let mut clients = Vec::with_capacity(config.pool_size);
@@ -610,16 +616,16 @@ impl PostgresControlPlaneStore {
         if initialize_schema {
             store.initialize_schema()?;
         }
-        store.seed_missing_resources("api_key", bootstrap_api_keys)?;
-        store.seed_missing_resources("tenant", bootstrap_tenants)?;
-        store.seed_missing_resources("policy", bootstrap_policies)?;
-        store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
-        store.seed_missing_resources("agent_workflow", bootstrap_agent_workflows)?;
-        store.seed_missing_resources("skill_package", bootstrap_skill_packages)?;
-        store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
-        store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
-        store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
-        store.seed_missing_resources("agent_upstream", bootstrap_agent_upstreams)?;
+        store.seed_missing_resources("api_key", bootstrap.api_keys)?;
+        store.seed_missing_resources("tenant", bootstrap.tenants)?;
+        store.seed_missing_resources("policy", bootstrap.policies)?;
+        store.seed_missing_resources("gateway_config", bootstrap.gateway_configs)?;
+        store.seed_missing_resources("agent_workflow", bootstrap.agent_workflows)?;
+        store.seed_missing_resources("skill_package", bootstrap.skill_packages)?;
+        store.seed_missing_resources("prompt_template", bootstrap.prompt_templates)?;
+        store.seed_missing_resources("plugin_registration", bootstrap.plugin_registrations)?;
+        store.seed_missing_resources("mcp_server", bootstrap.mcp_servers)?;
+        store.seed_missing_resources("agent_upstream", bootstrap.agent_upstreams)?;
         Ok(store)
     }
 
@@ -811,16 +817,7 @@ impl std::fmt::Debug for MySqlControlPlaneStore {
 impl MySqlControlPlaneStore {
     fn connect(
         config: MySqlStorageConfig,
-        bootstrap_api_keys: Vec<(String, String)>,
-        bootstrap_tenants: Vec<(String, String)>,
-        bootstrap_policies: Vec<(String, String)>,
-        bootstrap_gateway_configs: Vec<(String, String)>,
-        bootstrap_agent_workflows: Vec<(String, String)>,
-        bootstrap_skill_packages: Vec<(String, String)>,
-        bootstrap_prompt_templates: Vec<(String, String)>,
-        bootstrap_plugin_registrations: Vec<(String, String)>,
-        bootstrap_mcp_servers: Vec<(String, String)>,
-        bootstrap_agent_upstreams: Vec<(String, String)>,
+        bootstrap: ControlPlaneDocuments,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
         let opts = mysql_opts(&config)?;
@@ -833,16 +830,16 @@ impl MySqlControlPlaneStore {
         if initialize_schema {
             store.initialize_schema()?;
         }
-        store.seed_missing_resources("api_key", bootstrap_api_keys)?;
-        store.seed_missing_resources("tenant", bootstrap_tenants)?;
-        store.seed_missing_resources("policy", bootstrap_policies)?;
-        store.seed_missing_resources("gateway_config", bootstrap_gateway_configs)?;
-        store.seed_missing_resources("agent_workflow", bootstrap_agent_workflows)?;
-        store.seed_missing_resources("skill_package", bootstrap_skill_packages)?;
-        store.seed_missing_resources("prompt_template", bootstrap_prompt_templates)?;
-        store.seed_missing_resources("plugin_registration", bootstrap_plugin_registrations)?;
-        store.seed_missing_resources("mcp_server", bootstrap_mcp_servers)?;
-        store.seed_missing_resources("agent_upstream", bootstrap_agent_upstreams)?;
+        store.seed_missing_resources("api_key", bootstrap.api_keys)?;
+        store.seed_missing_resources("tenant", bootstrap.tenants)?;
+        store.seed_missing_resources("policy", bootstrap.policies)?;
+        store.seed_missing_resources("gateway_config", bootstrap.gateway_configs)?;
+        store.seed_missing_resources("agent_workflow", bootstrap.agent_workflows)?;
+        store.seed_missing_resources("skill_package", bootstrap.skill_packages)?;
+        store.seed_missing_resources("prompt_template", bootstrap.prompt_templates)?;
+        store.seed_missing_resources("plugin_registration", bootstrap.plugin_registrations)?;
+        store.seed_missing_resources("mcp_server", bootstrap.mcp_servers)?;
+        store.seed_missing_resources("agent_upstream", bootstrap.agent_upstreams)?;
         Ok(store)
     }
 
@@ -1204,7 +1201,7 @@ fn is_local_libsql_server_url(url: &str) -> bool {
 
 #[derive(Debug)]
 enum RuntimeControlPlaneBackend {
-    Memory(Mutex<RuntimeControlPlaneState>),
+    Memory(Box<Mutex<RuntimeControlPlaneState>>),
     Libsql(Arc<LibsqlControlPlaneStore>),
     Postgres(Arc<PostgresControlPlaneStore>),
     Mysql(Arc<MySqlControlPlaneStore>),
@@ -1227,65 +1224,42 @@ impl RuntimeControlPlaneState {
         }
     }
 
-    pub fn from_documents(
-        api_keys: Vec<(String, String)>,
-        tenants: Vec<(String, String)>,
-        policies: Vec<(String, String)>,
-        gateway_configs: Vec<(String, String)>,
-        agent_workflows: Vec<(String, String)>,
-        skill_packages: Vec<(String, String)>,
-        prompt_templates: Vec<(String, String)>,
-        plugin_registrations: Vec<(String, String)>,
-        mcp_servers: Vec<(String, String)>,
-        agent_upstreams: Vec<(String, String)>,
-    ) -> Self {
+    pub fn from_documents(documents: ControlPlaneDocuments) -> Self {
         let mut state = Self::new();
-        for (id, document_json) in api_keys {
+        for (id, document_json) in documents.api_keys {
             state.upsert_api_key(id, document_json);
         }
-        for (id, document_json) in tenants {
+        for (id, document_json) in documents.tenants {
             state.upsert_tenant(id, document_json);
         }
-        for (id, document_json) in policies {
+        for (id, document_json) in documents.policies {
             state.upsert_policy(id, document_json);
         }
-        for (id, document_json) in gateway_configs {
+        for (id, document_json) in documents.gateway_configs {
             state.upsert_gateway_config(id, document_json);
         }
-        for (id, document_json) in agent_workflows {
+        for (id, document_json) in documents.agent_workflows {
             state.upsert_agent_workflow(id, document_json);
         }
-        for (id, document_json) in skill_packages {
+        for (id, document_json) in documents.skill_packages {
             state.upsert_skill_package(id, document_json);
         }
-        for (id, document_json) in prompt_templates {
+        for (id, document_json) in documents.prompt_templates {
             state.upsert_prompt_template(id, document_json);
         }
-        for (id, document_json) in plugin_registrations {
+        for (id, document_json) in documents.plugin_registrations {
             state.upsert_plugin_registration(id, document_json);
         }
-        for (id, document_json) in mcp_servers {
+        for (id, document_json) in documents.mcp_servers {
             state.upsert_mcp_server(id, document_json);
         }
-        for (id, document_json) in agent_upstreams {
+        for (id, document_json) in documents.agent_upstreams {
             state.upsert_agent_upstream(id, document_json);
         }
         state
     }
 
-    pub fn replace_config_documents(
-        &mut self,
-        api_keys: Vec<(String, String)>,
-        tenants: Vec<(String, String)>,
-        policies: Vec<(String, String)>,
-        gateway_configs: Vec<(String, String)>,
-        agent_workflows: Vec<(String, String)>,
-        skill_packages: Vec<(String, String)>,
-        prompt_templates: Vec<(String, String)>,
-        plugin_registrations: Vec<(String, String)>,
-        mcp_servers: Vec<(String, String)>,
-        agent_upstreams: Vec<(String, String)>,
-    ) {
+    pub fn replace_config_documents(&mut self, documents: ControlPlaneDocuments) {
         self.api_keys = InMemoryRepository::new();
         self.tenants = InMemoryRepository::new();
         self.policies = InMemoryRepository::new();
@@ -1296,34 +1270,34 @@ impl RuntimeControlPlaneState {
         self.plugin_registrations = InMemoryRepository::new();
         self.mcp_servers = InMemoryRepository::new();
         self.agent_upstreams = InMemoryRepository::new();
-        for (id, document_json) in api_keys {
+        for (id, document_json) in documents.api_keys {
             self.upsert_api_key(id, document_json);
         }
-        for (id, document_json) in tenants {
+        for (id, document_json) in documents.tenants {
             self.upsert_tenant(id, document_json);
         }
-        for (id, document_json) in policies {
+        for (id, document_json) in documents.policies {
             self.upsert_policy(id, document_json);
         }
-        for (id, document_json) in gateway_configs {
+        for (id, document_json) in documents.gateway_configs {
             self.upsert_gateway_config(id, document_json);
         }
-        for (id, document_json) in agent_workflows {
+        for (id, document_json) in documents.agent_workflows {
             self.upsert_agent_workflow(id, document_json);
         }
-        for (id, document_json) in skill_packages {
+        for (id, document_json) in documents.skill_packages {
             self.upsert_skill_package(id, document_json);
         }
-        for (id, document_json) in prompt_templates {
+        for (id, document_json) in documents.prompt_templates {
             self.upsert_prompt_template(id, document_json);
         }
-        for (id, document_json) in plugin_registrations {
+        for (id, document_json) in documents.plugin_registrations {
             self.upsert_plugin_registration(id, document_json);
         }
-        for (id, document_json) in mcp_servers {
+        for (id, document_json) in documents.mcp_servers {
             self.upsert_mcp_server(id, document_json);
         }
-        for (id, document_json) in agent_upstreams {
+        for (id, document_json) in documents.agent_upstreams {
             self.upsert_agent_upstream(id, document_json);
         }
     }
@@ -1638,6 +1612,12 @@ impl RuntimeControlPlaneState {
     }
 }
 
+impl Default for RuntimeControlPlaneState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiKey {
     pub id: String,
@@ -1889,7 +1869,7 @@ impl RuntimeStorageRepositories {
     ) -> Self {
         Self {
             backend,
-            control_plane: RuntimeControlPlaneBackend::Memory(Mutex::new(control_plane)),
+            control_plane: RuntimeControlPlaneBackend::Memory(Box::new(Mutex::new(control_plane))),
             request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
                 request_log_retention_records,
             )),
@@ -1916,40 +1896,20 @@ impl RuntimeStorageRepositories {
     }
 
     pub async fn turso_libsql(
-        provider_order: Vec<StorageProviderKind>,
-        required: bool,
-        url: String,
-        auth_token: Option<String>,
-        initialize_schema: bool,
-        bootstrap_api_keys: Vec<(String, String)>,
-        bootstrap_tenants: Vec<(String, String)>,
-        bootstrap_policies: Vec<(String, String)>,
-        bootstrap_gateway_configs: Vec<(String, String)>,
-        bootstrap_agent_workflows: Vec<(String, String)>,
-        bootstrap_skill_packages: Vec<(String, String)>,
-        bootstrap_prompt_templates: Vec<(String, String)>,
-        bootstrap_plugin_registrations: Vec<(String, String)>,
-        bootstrap_mcp_servers: Vec<(String, String)>,
-        bootstrap_agent_upstreams: Vec<(String, String)>,
-        request_log_retention_records: usize,
-        audit_event_retention_records: usize,
+        config: LibsqlStorageConfig,
+        options: RuntimeStorageOptions,
     ) -> Result<Self, StorageError> {
-        let backend =
-            RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, required, provider_order)?;
+        let backend = RuntimeStorageBackend::new(
+            StorageProviderKind::TursoLibsql,
+            options.required,
+            options.provider_order,
+        )?;
+        let request_log_retention_records = options.request_log_retention_records;
+        let audit_event_retention_records = options.audit_event_retention_records;
         let control_plane = LibsqlControlPlaneStore::connect(
-            url,
-            auth_token,
-            bootstrap_api_keys,
-            bootstrap_tenants,
-            bootstrap_policies,
-            bootstrap_gateway_configs,
-            bootstrap_agent_workflows,
-            bootstrap_skill_packages,
-            bootstrap_prompt_templates,
-            bootstrap_plugin_registrations,
-            bootstrap_mcp_servers,
-            bootstrap_agent_upstreams,
-            initialize_schema,
+            config,
+            options.control_plane,
+            options.initialize_schema,
         )
         .await?;
         Ok(Self {
@@ -1968,42 +1928,22 @@ impl RuntimeStorageRepositories {
     }
 
     pub fn postgres(
-        provider_order: Vec<StorageProviderKind>,
-        required: bool,
         config: PostgresStorageConfig,
-        initialize_schema: bool,
-        bootstrap_api_keys: Vec<(String, String)>,
-        bootstrap_tenants: Vec<(String, String)>,
-        bootstrap_policies: Vec<(String, String)>,
-        bootstrap_gateway_configs: Vec<(String, String)>,
-        bootstrap_agent_workflows: Vec<(String, String)>,
-        bootstrap_skill_packages: Vec<(String, String)>,
-        bootstrap_prompt_templates: Vec<(String, String)>,
-        bootstrap_plugin_registrations: Vec<(String, String)>,
-        bootstrap_mcp_servers: Vec<(String, String)>,
-        bootstrap_agent_upstreams: Vec<(String, String)>,
-        request_log_retention_records: usize,
-        audit_event_retention_records: usize,
+        options: RuntimeStorageOptions,
     ) -> Result<Self, StorageError> {
-        let backend =
-            RuntimeStorageBackend::new(StorageProviderKind::Postgres, required, provider_order)?;
+        let backend = RuntimeStorageBackend::new(
+            StorageProviderKind::Postgres,
+            options.required,
+            options.provider_order,
+        )?;
+        let request_log_retention_records = options.request_log_retention_records;
+        let audit_event_retention_records = options.audit_event_retention_records;
+        let bootstrap = options.control_plane;
+        let initialize_schema = options.initialize_schema;
         let control_plane = std::thread::scope(|scope| {
             scope
                 .spawn(move || {
-                    PostgresControlPlaneStore::connect(
-                        config,
-                        bootstrap_api_keys,
-                        bootstrap_tenants,
-                        bootstrap_policies,
-                        bootstrap_gateway_configs,
-                        bootstrap_agent_workflows,
-                        bootstrap_skill_packages,
-                        bootstrap_prompt_templates,
-                        bootstrap_plugin_registrations,
-                        bootstrap_mcp_servers,
-                        bootstrap_agent_upstreams,
-                        initialize_schema,
-                    )
+                    PostgresControlPlaneStore::connect(config, bootstrap, initialize_schema)
                 })
                 .join()
                 .map_err(|_| {
@@ -2026,42 +1966,22 @@ impl RuntimeStorageRepositories {
     }
 
     pub fn mysql(
-        provider_order: Vec<StorageProviderKind>,
-        required: bool,
         config: MySqlStorageConfig,
-        initialize_schema: bool,
-        bootstrap_api_keys: Vec<(String, String)>,
-        bootstrap_tenants: Vec<(String, String)>,
-        bootstrap_policies: Vec<(String, String)>,
-        bootstrap_gateway_configs: Vec<(String, String)>,
-        bootstrap_agent_workflows: Vec<(String, String)>,
-        bootstrap_skill_packages: Vec<(String, String)>,
-        bootstrap_prompt_templates: Vec<(String, String)>,
-        bootstrap_plugin_registrations: Vec<(String, String)>,
-        bootstrap_mcp_servers: Vec<(String, String)>,
-        bootstrap_agent_upstreams: Vec<(String, String)>,
-        request_log_retention_records: usize,
-        audit_event_retention_records: usize,
+        options: RuntimeStorageOptions,
     ) -> Result<Self, StorageError> {
-        let backend =
-            RuntimeStorageBackend::new(StorageProviderKind::Mysql, required, provider_order)?;
+        let backend = RuntimeStorageBackend::new(
+            StorageProviderKind::Mysql,
+            options.required,
+            options.provider_order,
+        )?;
+        let request_log_retention_records = options.request_log_retention_records;
+        let audit_event_retention_records = options.audit_event_retention_records;
+        let bootstrap = options.control_plane;
+        let initialize_schema = options.initialize_schema;
         let control_plane = std::thread::scope(|scope| {
             scope
                 .spawn(move || {
-                    MySqlControlPlaneStore::connect(
-                        config,
-                        bootstrap_api_keys,
-                        bootstrap_tenants,
-                        bootstrap_policies,
-                        bootstrap_gateway_configs,
-                        bootstrap_agent_workflows,
-                        bootstrap_skill_packages,
-                        bootstrap_prompt_templates,
-                        bootstrap_plugin_registrations,
-                        bootstrap_mcp_servers,
-                        bootstrap_agent_upstreams,
-                        initialize_schema,
-                    )
+                    MySqlControlPlaneStore::connect(config, bootstrap, initialize_schema)
                 })
                 .join()
                 .map_err(|_| StorageError::Mysql("mysql storage connect thread panicked".into()))?
@@ -2112,86 +2032,74 @@ impl RuntimeStorageRepositories {
 
     pub fn replace_control_plane(
         &self,
-        api_keys: Vec<(String, String)>,
-        tenants: Vec<(String, String)>,
-        policies: Vec<(String, String)>,
-        gateway_configs: Vec<(String, String)>,
-        agent_workflows: Vec<(String, String)>,
-        skill_packages: Vec<(String, String)>,
-        prompt_templates: Vec<(String, String)>,
-        plugin_registrations: Vec<(String, String)>,
-        mcp_servers: Vec<(String, String)>,
-        agent_upstreams: Vec<(String, String)>,
+        documents: ControlPlaneDocuments,
     ) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
-                    control_plane.replace_config_documents(
-                        api_keys,
-                        tenants,
-                        policies,
-                        gateway_configs,
-                        agent_workflows,
-                        skill_packages,
-                        prompt_templates,
-                        plugin_registrations,
-                        mcp_servers,
-                        agent_upstreams,
-                    );
+                    control_plane.replace_config_documents(documents);
                 }
                 Ok(())
             }
             RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(async {
-                control_plane.replace_kind("api_key", api_keys).await?;
-                control_plane.replace_kind("tenant", tenants).await?;
-                control_plane.replace_kind("policy", policies).await?;
                 control_plane
-                    .replace_kind("gateway_config", gateway_configs)
+                    .replace_kind("api_key", documents.api_keys)
                     .await?;
                 control_plane
-                    .replace_kind("agent_workflow", agent_workflows)
+                    .replace_kind("tenant", documents.tenants)
                     .await?;
                 control_plane
-                    .replace_kind("skill_package", skill_packages)
+                    .replace_kind("policy", documents.policies)
                     .await?;
                 control_plane
-                    .replace_kind("prompt_template", prompt_templates)
+                    .replace_kind("gateway_config", documents.gateway_configs)
                     .await?;
                 control_plane
-                    .replace_kind("plugin_registration", plugin_registrations)
+                    .replace_kind("agent_workflow", documents.agent_workflows)
                     .await?;
                 control_plane
-                    .replace_kind("mcp_server", mcp_servers)
+                    .replace_kind("skill_package", documents.skill_packages)
                     .await?;
                 control_plane
-                    .replace_kind("agent_upstream", agent_upstreams)
+                    .replace_kind("prompt_template", documents.prompt_templates)
+                    .await?;
+                control_plane
+                    .replace_kind("plugin_registration", documents.plugin_registrations)
+                    .await?;
+                control_plane
+                    .replace_kind("mcp_server", documents.mcp_servers)
+                    .await?;
+                control_plane
+                    .replace_kind("agent_upstream", documents.agent_upstreams)
                     .await?;
                 Ok(())
             }),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.replace_kind("api_key", api_keys)?;
-                control_plane.replace_kind("tenant", tenants)?;
-                control_plane.replace_kind("policy", policies)?;
-                control_plane.replace_kind("gateway_config", gateway_configs)?;
-                control_plane.replace_kind("agent_workflow", agent_workflows)?;
-                control_plane.replace_kind("skill_package", skill_packages)?;
-                control_plane.replace_kind("prompt_template", prompt_templates)?;
-                control_plane.replace_kind("plugin_registration", plugin_registrations)?;
-                control_plane.replace_kind("mcp_server", mcp_servers)?;
-                control_plane.replace_kind("agent_upstream", agent_upstreams)?;
+                control_plane.replace_kind("api_key", documents.api_keys)?;
+                control_plane.replace_kind("tenant", documents.tenants)?;
+                control_plane.replace_kind("policy", documents.policies)?;
+                control_plane.replace_kind("gateway_config", documents.gateway_configs)?;
+                control_plane.replace_kind("agent_workflow", documents.agent_workflows)?;
+                control_plane.replace_kind("skill_package", documents.skill_packages)?;
+                control_plane.replace_kind("prompt_template", documents.prompt_templates)?;
+                control_plane
+                    .replace_kind("plugin_registration", documents.plugin_registrations)?;
+                control_plane.replace_kind("mcp_server", documents.mcp_servers)?;
+                control_plane.replace_kind("agent_upstream", documents.agent_upstreams)?;
                 Ok(())
             }
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.replace_kind("api_key", api_keys)?;
-                control_plane.replace_kind("tenant", tenants)?;
-                control_plane.replace_kind("policy", policies)?;
-                control_plane.replace_kind("gateway_config", gateway_configs)?;
-                control_plane.replace_kind("agent_workflow", agent_workflows)?;
-                control_plane.replace_kind("skill_package", skill_packages)?;
-                control_plane.replace_kind("prompt_template", prompt_templates)?;
-                control_plane.replace_kind("plugin_registration", plugin_registrations)?;
-                control_plane.replace_kind("mcp_server", mcp_servers)?;
-                control_plane.replace_kind("agent_upstream", agent_upstreams)?;
+                control_plane.replace_kind("api_key", documents.api_keys)?;
+                control_plane.replace_kind("tenant", documents.tenants)?;
+                control_plane.replace_kind("policy", documents.policies)?;
+                control_plane.replace_kind("gateway_config", documents.gateway_configs)?;
+                control_plane.replace_kind("agent_workflow", documents.agent_workflows)?;
+                control_plane.replace_kind("skill_package", documents.skill_packages)?;
+                control_plane.replace_kind("prompt_template", documents.prompt_templates)?;
+                control_plane
+                    .replace_kind("plugin_registration", documents.plugin_registrations)?;
+                control_plane.replace_kind("mcp_server", documents.mcp_servers)?;
+                control_plane.replace_kind("agent_upstream", documents.agent_upstreams)?;
                 Ok(())
             }
         }
@@ -2905,23 +2813,14 @@ mod tests {
         audit_event_retention_records: usize,
     ) -> Result<RuntimeStorageRepositories, StorageError> {
         RuntimeStorageRepositories::turso_libsql(
-            provider_order,
-            required,
-            url,
-            auth_token,
-            initialize_schema,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            request_log_retention_records,
-            audit_event_retention_records,
+            LibsqlStorageConfig { url, auth_token },
+            runtime_options_empty(
+                provider_order,
+                required,
+                initialize_schema,
+                request_log_retention_records,
+                audit_event_retention_records,
+            ),
         )
         .await
     }
@@ -2935,23 +2834,32 @@ mod tests {
         audit_event_retention_records: usize,
     ) -> Result<RuntimeStorageRepositories, StorageError> {
         RuntimeStorageRepositories::postgres(
+            config,
+            runtime_options_empty(
+                provider_order,
+                required,
+                initialize_schema,
+                request_log_retention_records,
+                audit_event_retention_records,
+            ),
+        )
+    }
+
+    fn runtime_options_empty(
+        provider_order: Vec<StorageProviderKind>,
+        required: bool,
+        initialize_schema: bool,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> RuntimeStorageOptions {
+        RuntimeStorageOptions {
             provider_order,
             required,
-            config,
             initialize_schema,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            control_plane: ControlPlaneDocuments::default(),
             request_log_retention_records,
             audit_event_retention_records,
-        )
+        }
     }
 
     #[test]
@@ -3251,27 +3159,22 @@ mod tests {
             )
             .unwrap();
         repositories
-            .replace_control_plane(
-                vec![("key_a".into(), r#"{"id":"key_a","name":"A"}"#.to_string())],
-                Vec::new(),
-                vec![(
+            .replace_control_plane(ControlPlaneDocuments {
+                api_keys: vec![("key_a".into(), r#"{"id":"key_a","name":"A"}"#.to_string())],
+                policies: vec![(
                     "deny_a".into(),
                     r#"{"name":"deny_a","effect":"deny"}"#.to_string(),
                 )],
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                vec![(
+                plugin_registrations: vec![(
                     "tool.echo".into(),
                     r#"{"id":"tool.echo","source":"builtin"}"#.to_string(),
                 )],
-                vec![(
+                mcp_servers: vec![(
                     "github".into(),
                     r#"{"name":"github","transport":"streamable_http"}"#.to_string(),
                 )],
-                Vec::new(),
-            )
+                ..ControlPlaneDocuments::default()
+            })
             .unwrap();
         let snapshot = repositories.control_plane_snapshot().unwrap();
         assert_eq!(snapshot.api_keys, [r#"{"id":"key_a","name":"A"}"#]);

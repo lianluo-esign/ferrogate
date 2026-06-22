@@ -147,7 +147,7 @@ fn agent_run_endpoint_is_fail_closed_until_enabled() {
         "POST",
         "/v1/agent-runs",
         &[
-            "Authorization: Bearer tool-secret",
+            "Authorization: Bearer agent-secret",
             "Content-Type: application/json",
         ],
         r#"{"input":"summarize this"}"#,
@@ -782,16 +782,10 @@ fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
     let mut gateway = start_gateway(&config);
     wait_for_gateway(&gateway_addr);
 
-    let mcp_status = response_json(http_request(
-        &gateway_addr,
-        "GET",
-        "/admin/v1/mcp-servers",
-        &["Authorization: Bearer admin-secret"],
-        "",
-    ));
-    assert_eq!(mcp_status["data"][0]["name"], "github");
-    assert_eq!(mcp_status["data"][0]["connected"], true);
-    assert_eq!(mcp_status["data"][0]["tools"], 1);
+    let mcp_status = wait_for_mcp_server_connected(&gateway_addr, "github");
+    assert_eq!(mcp_status["name"], "github");
+    assert_eq!(mcp_status["connected"], true);
+    assert_eq!(mcp_status["tools"], 1);
 
     let tools = response_json(http_request(
         &gateway_addr,
@@ -1207,6 +1201,14 @@ id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[api_keys]]
+id = "agent-client"
+name = "Agent client"
+key = "agent-secret"
+scopes = ["agent.runs.create"]
 organization_id = "org_demo"
 project_id = "project_gateway"
 
@@ -1702,6 +1704,31 @@ fn wait_for_observability_ok(gateway_addr: &str) -> serde_json::Value {
         thread::sleep(Duration::from_millis(250));
     }
     panic!("observability exporter did not become ok: {last}");
+}
+
+fn wait_for_mcp_server_connected(gateway_addr: &str, name: &str) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    let mut last = serde_json::Value::Null;
+    while std::time::Instant::now() < deadline {
+        let body = response_json(http_request(
+            gateway_addr,
+            "GET",
+            "/admin/v1/mcp-servers",
+            &["Authorization: Bearer admin-secret"],
+            "",
+        ));
+        if let Some(status) = body["data"]
+            .as_array()
+            .and_then(|statuses| statuses.iter().find(|status| status["name"] == name))
+        {
+            if status["connected"] == true {
+                return status.clone();
+            }
+        }
+        last = body;
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("MCP server {name} did not become connected: {last}");
 }
 
 fn wait_for_pending_approval(gateway_addr: &str, exclude_ids: &[&str]) -> serde_json::Value {

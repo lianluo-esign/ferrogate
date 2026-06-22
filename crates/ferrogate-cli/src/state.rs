@@ -55,7 +55,8 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_storage::{
-    MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState, RuntimeStorageBackend,
+    ControlPlaneDocuments, LibsqlStorageConfig, MySqlStorageConfig, PostgresStorageConfig,
+    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
     RuntimeStorageRepositories, StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent,
     StoredAuditEvent, StoredRequestLog, StoredUsageAggregate,
 };
@@ -69,6 +70,17 @@ use tracing::warn;
 
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
 pub(crate) const RELOAD_MODE_LISTENER_LEVEL_REQUIRED: &str = "listener-level-required";
+
+pub(crate) struct ToolApprovalCreateRequest<'a> {
+    pub(crate) tool: &'a ToolExecutionRequest,
+    pub(crate) request_id: &'a str,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) actor_api_key_id: Option<String>,
+    pub(crate) server_name: Option<String>,
+    pub(crate) approval_policy: ferrogate_core::ApprovalPolicy,
+    pub(crate) can_log_bodies: bool,
+}
 
 #[derive(Debug)]
 struct SharedFileControlPlane {
@@ -1052,64 +1064,30 @@ fn initial_cluster_sync_status(config: &Config) -> ClusterSyncStatus {
 
 fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorageRepositories> {
     let storage = &config.storage;
-    let api_keys = serialize_control_plane_documents(&config.api_keys, |key| key.id.clone());
-    let tenants =
-        serialize_control_plane_documents(&tenant_refs_from_api_keys(&config.api_keys), |tenant| {
-            tenant.api_key_id.clone()
-        });
-    let policies =
-        serialize_control_plane_documents(&config.policies, |policy| policy.name.clone());
-    let gateway_configs =
-        serialize_control_plane_documents(&config.gateway_configs, |profile| profile.id.clone());
-    let agent_workflows = serialize_control_plane_documents(&config.agent_workflows, |workflow| {
-        workflow_resource_id(workflow)
-    });
-    let skill_packages =
-        serialize_control_plane_documents(&config.skill_packages, |package| package.id.clone());
-    let prompt_templates =
-        serialize_control_plane_documents(&config.prompt_templates, |template| template.id.clone());
-    let plugin_registrations =
-        serialize_control_plane_documents(&config.plugin_registrations(), |plugin| {
-            plugin.id.clone()
-        });
-    let mcp_servers =
-        serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone());
-    let agent_upstreams =
-        serialize_control_plane_documents(&config.agent_upstreams, |upstream| upstream.id.clone());
+    let control_plane = control_plane_documents_from_config(config);
+    let storage_options = |control_plane: ControlPlaneDocuments| RuntimeStorageOptions {
+        provider_order: storage.provider_order.clone(),
+        required: storage.required,
+        initialize_schema: storage.migration_mode == StorageMigrationMode::Auto,
+        control_plane,
+        request_log_retention_records: config.analytics.request_log_retention_records,
+        audit_event_retention_records: config.analytics.audit_event_retention_records,
+    };
     if storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
         let url = storage
             .libsql_url
             .clone()
             .ok_or_else(|| anyhow::anyhow!("field storage.libsql_url is required"))?;
         let auth_token = storage_libsql_auth_token(storage, &url)?;
-        let initialize_schema = storage.migration_mode == StorageMigrationMode::Auto;
         return block_on_runtime_storage(RuntimeStorageRepositories::turso_libsql(
-            storage.provider_order.clone(),
-            storage.required,
-            url,
-            auth_token,
-            initialize_schema,
-            api_keys,
-            tenants,
-            policies,
-            gateway_configs,
-            agent_workflows,
-            skill_packages,
-            prompt_templates,
-            plugin_registrations,
-            mcp_servers,
-            agent_upstreams,
-            config.analytics.request_log_retention_records,
-            config.analytics.audit_event_retention_records,
+            LibsqlStorageConfig { url, auth_token },
+            storage_options(control_plane),
         ))
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
     if storage.provider == ferrogate_storage::StorageProviderKind::Postgres {
         let dsn = storage_postgres_dsn(storage)?;
-        let initialize_schema = storage.migration_mode == StorageMigrationMode::Auto;
         return RuntimeStorageRepositories::postgres(
-            storage.provider_order.clone(),
-            storage.required,
             PostgresStorageConfig {
                 dsn,
                 pool_size: storage.postgres_pool_size,
@@ -1136,28 +1114,13 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
                     .map(ToOwned::to_owned)
                     .collect(),
             },
-            initialize_schema,
-            api_keys,
-            tenants,
-            policies,
-            gateway_configs,
-            agent_workflows,
-            skill_packages,
-            prompt_templates,
-            plugin_registrations,
-            mcp_servers,
-            agent_upstreams,
-            config.analytics.request_log_retention_records,
-            config.analytics.audit_event_retention_records,
+            storage_options(control_plane),
         )
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
     if storage.provider == ferrogate_storage::StorageProviderKind::Mysql {
         let dsn = storage_mysql_dsn(storage)?;
-        let initialize_schema = storage.migration_mode == StorageMigrationMode::Auto;
         return RuntimeStorageRepositories::mysql(
-            storage.provider_order.clone(),
-            storage.required,
             MySqlStorageConfig {
                 dsn,
                 pool_size: storage.mysql_pool_size,
@@ -1170,19 +1133,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
                     .map(ToOwned::to_owned),
                 connect_timeout_secs: storage.mysql_connect_timeout_secs,
             },
-            initialize_schema,
-            api_keys,
-            tenants,
-            policies,
-            gateway_configs,
-            agent_workflows,
-            skill_packages,
-            prompt_templates,
-            plugin_registrations,
-            mcp_servers,
-            agent_upstreams,
-            config.analytics.request_log_retention_records,
-            config.analytics.audit_event_retention_records,
+            storage_options(control_plane),
         )
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
@@ -1193,21 +1144,43 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
     )?;
     Ok(RuntimeStorageRepositories::new(
         backend,
-        RuntimeControlPlaneState::from_documents(
-            api_keys,
-            tenants,
-            policies,
-            gateway_configs,
-            agent_workflows,
-            skill_packages,
-            prompt_templates,
-            plugin_registrations,
-            mcp_servers,
-            agent_upstreams,
-        ),
+        RuntimeControlPlaneState::from_documents(control_plane),
         config.analytics.request_log_retention_records,
         config.analytics.audit_event_retention_records,
     ))
+}
+
+fn control_plane_documents_from_config(config: &Config) -> ControlPlaneDocuments {
+    ControlPlaneDocuments {
+        api_keys: serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
+        tenants: serialize_control_plane_documents(
+            &tenant_refs_from_api_keys(&config.api_keys),
+            |tenant| tenant.api_key_id.clone(),
+        ),
+        policies: serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
+        gateway_configs: serialize_control_plane_documents(&config.gateway_configs, |profile| {
+            profile.id.clone()
+        }),
+        agent_workflows: serialize_control_plane_documents(&config.agent_workflows, |workflow| {
+            workflow_resource_id(workflow)
+        }),
+        skill_packages: serialize_control_plane_documents(&config.skill_packages, |package| {
+            package.id.clone()
+        }),
+        prompt_templates: serialize_control_plane_documents(&config.prompt_templates, |template| {
+            template.id.clone()
+        }),
+        plugin_registrations: serialize_control_plane_documents(
+            &config.plugin_registrations(),
+            |plugin| plugin.id.clone(),
+        ),
+        mcp_servers: serialize_control_plane_documents(&config.mcp_servers, |server| {
+            server.name.clone()
+        }),
+        agent_upstreams: serialize_control_plane_documents(&config.agent_upstreams, |upstream| {
+            upstream.id.clone()
+        }),
+    }
 }
 
 fn storage_libsql_auth_token(
@@ -2612,28 +2585,21 @@ impl AppState {
 
     pub(crate) fn create_tool_approval(
         &self,
-        request: &ToolExecutionRequest,
-        request_id: &str,
-        trace_id: Option<String>,
-        tenant: ferrogate_core::TenantContext,
-        actor_api_key_id: Option<String>,
-        server_name: Option<String>,
-        approval_policy: ferrogate_core::ApprovalPolicy,
-        can_log_bodies: bool,
+        request: ToolApprovalCreateRequest<'_>,
     ) -> anyhow::Result<ToolApprovalRecord> {
         let record = self.approvals.create_pending(ToolApprovalDraft {
-            request_id: request_id.to_string(),
-            trace_id,
-            tenant,
-            actor_api_key_id,
-            tool_name: request.name.clone(),
-            server_name,
-            route: request.route.clone(),
-            approval_policy,
+            request_id: request.request_id.to_string(),
+            trace_id: request.trace_id,
+            tenant: request.tenant,
+            actor_api_key_id: request.actor_api_key_id,
+            tool_name: request.tool.name.clone(),
+            server_name: request.server_name,
+            route: request.tool.route.clone(),
+            approval_policy: request.approval_policy,
             approval_timeout_secs: self.config.reliability.tool_approval_timeout_secs,
             config_snapshot: config_snapshot_id(&self.config),
-            arguments: request.arguments.clone(),
-            can_log_bodies,
+            arguments: request.tool.arguments.clone(),
+            can_log_bodies: request.can_log_bodies,
         });
         self.persist_tool_approval(&record)?;
         Ok(record)
@@ -2691,7 +2657,6 @@ impl AppState {
             }
         }
     }
-
     pub(crate) fn deny_tool_approval(
         &self,
         id: &str,
@@ -2958,31 +2923,8 @@ impl AppState {
     }
 
     fn sync_control_plane_storage_from_config(&self, config: &Config) -> anyhow::Result<()> {
-        self.repositories.replace_control_plane(
-            serialize_control_plane_documents(&config.api_keys, |key| key.id.clone()),
-            serialize_control_plane_documents(
-                &tenant_refs_from_api_keys(&config.api_keys),
-                |tenant| tenant.api_key_id.clone(),
-            ),
-            serialize_control_plane_documents(&config.policies, |policy| policy.name.clone()),
-            serialize_control_plane_documents(&config.gateway_configs, |profile| {
-                profile.id.clone()
-            }),
-            serialize_control_plane_documents(&config.agent_workflows, |workflow| {
-                workflow_resource_id(workflow)
-            }),
-            serialize_control_plane_documents(&config.skill_packages, |package| package.id.clone()),
-            serialize_control_plane_documents(&config.prompt_templates, |template| {
-                template.id.clone()
-            }),
-            serialize_control_plane_documents(&config.plugin_registrations(), |plugin| {
-                plugin.id.clone()
-            }),
-            serialize_control_plane_documents(&config.mcp_servers, |server| server.name.clone()),
-            serialize_control_plane_documents(&config.agent_upstreams, |upstream| {
-                upstream.id.clone()
-            }),
-        )?;
+        self.repositories
+            .replace_control_plane(control_plane_documents_from_config(config))?;
         Ok(())
     }
 
@@ -5782,21 +5724,21 @@ mod tests {
             .any(|document| document.contains("\"status\":\"archived\"")));
 
         let approval = state
-            .create_tool_approval(
-                &ToolExecutionRequest {
+            .create_tool_approval(ToolApprovalCreateRequest {
+                tool: &ToolExecutionRequest {
                     name: "github.search".into(),
                     arguments: serde_json::json!({"query":"ferrogate"}),
                     route: None,
                     session_id: None,
                 },
-                "request-test",
-                Some("trace-test".into()),
-                ferrogate_core::TenantContext::default(),
-                Some("key_initial".into()),
-                Some("mcp.github".into()),
-                ferrogate_core::ApprovalPolicy::Always,
-                false,
-            )
+                request_id: "request-test",
+                trace_id: Some("trace-test".into()),
+                tenant: ferrogate_core::TenantContext::default(),
+                actor_api_key_id: Some("key_initial".into()),
+                server_name: Some("mcp.github".into()),
+                approval_policy: ferrogate_core::ApprovalPolicy::Always,
+                can_log_bodies: false,
+            })
             .unwrap();
         assert_eq!(approval.status, ApprovalStatus::Pending);
         let stored_approval = state.tool_approval(&approval.id).unwrap();

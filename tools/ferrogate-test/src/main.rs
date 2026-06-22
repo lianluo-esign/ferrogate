@@ -3573,16 +3573,16 @@ impl LocalHarness {
         let config_path = dir.path().join("ferrogate.toml");
         std::fs::write(
             &config_path,
-            local_gateway_config(
-                &gateway_addr,
-                &provider_addr,
-                &mcp_addr,
-                agent_addr.as_deref().unwrap_or("http://127.0.0.1:1/a2a"),
-                &stdio_mcp_path,
-                billing.as_ref(),
-                Some(&observability),
+            local_gateway_config(LocalGatewayConfig {
+                gateway_addr: &gateway_addr,
+                provider_addr: &provider_addr,
+                mcp_addr: &mcp_addr,
+                agent_addr: agent_addr.as_deref().unwrap_or("http://127.0.0.1:1/a2a"),
+                stdio_mcp_path: &stdio_mcp_path,
+                billing: billing.as_ref(),
+                observability: Some(&observability),
                 auth_addr,
-            ),
+            }),
         )?;
 
         let gateway = Command::new(ferrogate_bin)
@@ -3879,17 +3879,20 @@ impl Drop for MockThirdPartyAuthServer {
     }
 }
 
-fn local_gateway_config(
-    gateway_addr: &str,
-    provider_addr: &str,
-    mcp_addr: &str,
-    agent_addr: &str,
-    stdio_mcp_path: &Path,
-    billing: Option<&MockBillingServer>,
-    observability: Option<&MockOtlpServer>,
-    auth_addr: Option<&str>,
-) -> String {
-    let metering = billing
+struct LocalGatewayConfig<'a> {
+    gateway_addr: &'a str,
+    provider_addr: &'a str,
+    mcp_addr: &'a str,
+    agent_addr: &'a str,
+    stdio_mcp_path: &'a Path,
+    billing: Option<&'a MockBillingServer>,
+    observability: Option<&'a MockOtlpServer>,
+    auth_addr: Option<&'a str>,
+}
+
+fn local_gateway_config(config: LocalGatewayConfig<'_>) -> String {
+    let metering = config
+        .billing
         .map(|billing| {
             format!(
                 r#"
@@ -3907,7 +3910,8 @@ export_subject = "api_key_id"
             )
         })
         .unwrap_or_default();
-    let observability = observability
+    let observability = config
+        .observability
         .map(|observability| {
             format!(
                 r#"
@@ -3922,7 +3926,8 @@ export_timeout_secs = 3
             )
         })
         .unwrap_or_default();
-    let auth_service = auth_addr
+    let auth_service = config
+        .auth_addr
         .map(|auth_addr| {
             format!(
                 r#"
@@ -3934,6 +3939,10 @@ timeout_millis = 1000
             )
         })
         .unwrap_or_default();
+    let gateway_addr = config.gateway_addr;
+    let provider_addr = config.provider_addr;
+    let mcp_addr = config.mcp_addr;
+    let agent_addr = config.agent_addr;
     format!(
         r#"
 listen = "{gateway_addr}"
@@ -4069,7 +4078,7 @@ enabled = true
 api_key_ids = ["client"]
 cache_enabled = false
 "#,
-        stdio_mcp_path = toml_basic_string(&stdio_mcp_path.to_string_lossy())
+        stdio_mcp_path = toml_basic_string(&config.stdio_mcp_path.to_string_lossy())
     )
 }
 

@@ -69,16 +69,16 @@ pub(crate) fn start_analytics_background_sender(state: AppState) -> Option<JoinH
         let mut exported_billing_events = 0;
         let mut exported_usage_aggregates = 0;
         loop {
-            match export_analytics_once_since(
-                &state,
-                &sink,
+            match export_analytics_once_since(AnalyticsExportCursor {
+                state: &state,
+                sink: &sink,
                 timeout,
                 batch_max_events,
-                &mut exported_request_logs,
-                &mut exported_audit_events,
-                &mut exported_billing_events,
-                &mut exported_usage_aggregates,
-            ) {
+                exported_request_logs: &mut exported_request_logs,
+                exported_audit_events: &mut exported_audit_events,
+                exported_billing_events: &mut exported_billing_events,
+                exported_usage_aggregates: &mut exported_usage_aggregates,
+            }) {
                 Ok(()) => state.record_analytics_export_success(),
                 Err(error) => {
                     state.record_analytics_export_error(error.to_string());
@@ -171,25 +171,27 @@ fn export_otlp_once_since(
     Ok(())
 }
 
-fn export_analytics_once_since(
-    state: &AppState,
-    sink: &AnalyticsSink,
+struct AnalyticsExportCursor<'a> {
+    state: &'a AppState,
+    sink: &'a AnalyticsSink,
     timeout: Duration,
     batch_max_events: usize,
-    exported_request_logs: &mut usize,
-    exported_audit_events: &mut usize,
-    exported_billing_events: &mut usize,
-    exported_usage_aggregates: &mut usize,
-) -> AnyResult<()> {
-    let request_logs = state.request_logs();
-    let audit_events = state.audit_events();
-    let billing_events = state.metering_events();
-    let usage_aggregates = state.usage_aggregates();
+    exported_request_logs: &'a mut usize,
+    exported_audit_events: &'a mut usize,
+    exported_billing_events: &'a mut usize,
+    exported_usage_aggregates: &'a mut usize,
+}
+
+fn export_analytics_once_since(cursor: AnalyticsExportCursor<'_>) -> AnyResult<()> {
+    let request_logs = cursor.state.request_logs();
+    let audit_events = cursor.state.audit_events();
+    let billing_events = cursor.state.metering_events();
+    let usage_aggregates = cursor.state.usage_aggregates();
 
     let mut records = Vec::new();
     records.extend(
         request_logs
-            .get(*exported_request_logs..)
+            .get(*cursor.exported_request_logs..)
             .unwrap_or_default()
             .iter()
             .flat_map(|log| {
@@ -201,21 +203,21 @@ fn export_analytics_once_since(
     );
     records.extend(
         audit_events
-            .get(*exported_audit_events..)
+            .get(*cursor.exported_audit_events..)
             .unwrap_or_default()
             .iter()
             .map(AnalyticsRecord::from_audit_event),
     );
     records.extend(
         billing_events
-            .get(*exported_billing_events..)
+            .get(*cursor.exported_billing_events..)
             .unwrap_or_default()
             .iter()
             .map(AnalyticsRecord::from_billing_event),
     );
     records.extend(
         usage_aggregates
-            .get(*exported_usage_aggregates..)
+            .get(*cursor.exported_usage_aggregates..)
             .unwrap_or_default()
             .iter()
             .map(AnalyticsRecord::from_usage_aggregate),
@@ -225,13 +227,13 @@ fn export_analytics_once_since(
         return Ok(());
     }
 
-    for chunk in records.chunks(batch_max_events.max(1)) {
-        dispatch_analytics_records(sink, chunk, timeout)?;
+    for chunk in records.chunks(cursor.batch_max_events.max(1)) {
+        dispatch_analytics_records(cursor.sink, chunk, cursor.timeout)?;
     }
-    *exported_request_logs = request_logs.len();
-    *exported_audit_events = audit_events.len();
-    *exported_billing_events = billing_events.len();
-    *exported_usage_aggregates = usage_aggregates.len();
+    *cursor.exported_request_logs = request_logs.len();
+    *cursor.exported_audit_events = audit_events.len();
+    *cursor.exported_billing_events = billing_events.len();
+    *cursor.exported_usage_aggregates = usage_aggregates.len();
     Ok(())
 }
 
@@ -1344,16 +1346,16 @@ mod tests {
         let mut exported_audit_events = 0;
         let mut exported_billing_events = 0;
         let mut exported_usage_aggregates = 0;
-        export_analytics_once_since(
-            &state,
-            &AnalyticsSink::Vector { endpoint },
-            Duration::from_secs(3),
-            128,
-            &mut exported_request_logs,
-            &mut exported_audit_events,
-            &mut exported_billing_events,
-            &mut exported_usage_aggregates,
-        )
+        export_analytics_once_since(AnalyticsExportCursor {
+            state: &state,
+            sink: &AnalyticsSink::Vector { endpoint },
+            timeout: Duration::from_secs(3),
+            batch_max_events: 128,
+            exported_request_logs: &mut exported_request_logs,
+            exported_audit_events: &mut exported_audit_events,
+            exported_billing_events: &mut exported_billing_events,
+            exported_usage_aggregates: &mut exported_usage_aggregates,
+        })
         .unwrap();
         server.join().unwrap();
 
@@ -1407,16 +1409,16 @@ mod tests {
         let mut exported_audit_events = 0;
         let mut exported_billing_events = 0;
         let mut exported_usage_aggregates = 0;
-        export_analytics_once_since(
-            &state,
-            &AnalyticsSink::Clickhouse { base_url: endpoint },
-            Duration::from_secs(3),
-            128,
-            &mut exported_request_logs,
-            &mut exported_audit_events,
-            &mut exported_billing_events,
-            &mut exported_usage_aggregates,
-        )
+        export_analytics_once_since(AnalyticsExportCursor {
+            state: &state,
+            sink: &AnalyticsSink::Clickhouse { base_url: endpoint },
+            timeout: Duration::from_secs(3),
+            batch_max_events: 128,
+            exported_request_logs: &mut exported_request_logs,
+            exported_audit_events: &mut exported_audit_events,
+            exported_billing_events: &mut exported_billing_events,
+            exported_usage_aggregates: &mut exported_usage_aggregates,
+        })
         .unwrap();
         server.join().unwrap();
 

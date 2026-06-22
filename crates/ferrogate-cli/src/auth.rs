@@ -276,12 +276,12 @@ fn external_scope_allows(scopes: &HashSet<String>, required_scope: &str) -> bool
 
 fn external_auth_error(error: AuthServiceClientError, request_id: &str) -> AuthError {
     match error {
-        AuthServiceClientError::HttpStatus { status, body } if status == 401 => AuthError {
+        AuthServiceClientError::HttpStatus { status: 401, body } => AuthError {
             status: StatusCode::UNAUTHORIZED,
             code: "invalid_api_key",
             message: sanitize_auth_error_body(&body),
         },
-        AuthServiceClientError::HttpStatus { status, body } if status == 403 => AuthError {
+        AuthServiceClientError::HttpStatus { status: 403, body } => AuthError {
             status: StatusCode::FORBIDDEN,
             code: "external_auth_denied",
             message: sanitize_auth_error_body(&body),
@@ -386,7 +386,7 @@ fn auth_service_post_json_once<R: DeserializeOwned>(
     )
     .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
     stream
-        .write_all(&body)
+        .write_all(body)
         .map_err(|error| AuthServiceClientError::Transport(error.to_string()))?;
     let mut response = Vec::new();
     stream

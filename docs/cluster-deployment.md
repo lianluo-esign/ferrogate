@@ -139,7 +139,7 @@ Install while referencing an externally managed Secret:
 helm upgrade --install ferrogate charts/ferrogate \
   --set secrets.create=false \
   --set secrets.name=ferrogate-secret \
-  --set image.tag=v2026.06.07
+  --set image.tag=v2026.06.22
 ```
 
 Validate the checked-in examples without a live cluster:

@@ -402,9 +402,11 @@ fn extract_text_deltas(
             .collect(),
         ResponsesStreamProviderKind::OpenAiCompatible | ResponsesStreamProviderKind::Other => {
             if let Some(output_text) = value.get("output_text").and_then(Value::as_str) {
-                return (!output_text.is_empty())
-                    .then(|| vec![output_text.to_string()])
-                    .unwrap_or_default();
+                return if output_text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![output_text.to_string()]
+                };
             }
             value
                 .get("choices")

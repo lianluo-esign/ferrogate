@@ -1178,7 +1178,7 @@ mod tests {
 
         let status = manager.statuses().pop().unwrap();
         assert_eq!(status.name, "local");
-        assert_eq!(status.connected, false);
+        assert!(!status.connected);
         assert_eq!(status.health, "degraded");
         assert_eq!(status.tools, 0);
         assert!(status

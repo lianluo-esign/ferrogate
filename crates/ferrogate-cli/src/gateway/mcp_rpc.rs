@@ -229,19 +229,19 @@ async fn tools_call(
     };
 
     if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
-        let approval = match state.create_tool_approval(
-            &request,
-            &ctx.request_id,
-            ctx.trace_id.clone(),
-            auth.tenant_context(),
-            auth.api_key_id.clone(),
-            audit_details
+        let approval = match state.create_tool_approval(crate::state::ToolApprovalCreateRequest {
+            tool: &request,
+            request_id: &ctx.request_id,
+            trace_id: ctx.trace_id.clone(),
+            tenant: auth.tenant_context(),
+            actor_api_key_id: auth.api_key_id.clone(),
+            server_name: audit_details
                 .as_ref()
                 .map(|(server, _)| server.clone())
                 .or_else(|| Some(tool.extension_id.clone())),
-            tool.approval_policy,
-            auth.can_record_bodies(state.config.telemetry.log_bodies),
-        ) {
+            approval_policy: tool.approval_policy,
+            can_log_bodies: auth.can_record_bodies(state.config.telemetry.log_bodies),
+        }) {
             Ok(approval) => approval,
             Err(error_response) => {
                 state.record_admin_audit_event(audit_event(

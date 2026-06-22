@@ -1185,7 +1185,7 @@ impl FerroGateway {
                     ctx,
                     &auth,
                     "agent_workflow.upsert",
-                    &format!("{workflow_id}@{workflow_version}"),
+                    format!("{workflow_id}@{workflow_version}"),
                     "committed",
                     format!(
                         "agent workflow {workflow_id}@{workflow_version} committed: active_snapshot={} candidate_snapshot={}",
@@ -1216,7 +1216,7 @@ impl FerroGateway {
                     ctx,
                     &auth,
                     "agent_workflow.upsert",
-                    &format!("{workflow_id}@{workflow_version}"),
+                    format!("{workflow_id}@{workflow_version}"),
                     "rejected",
                     reason.clone(),
                 ));
@@ -1235,7 +1235,7 @@ impl FerroGateway {
                     ctx,
                     &auth,
                     "agent_workflow.upsert",
-                    &format!("{workflow_id}@{workflow_version}"),
+                    format!("{workflow_id}@{workflow_version}"),
                     "rejected",
                     message.clone(),
                 ));
@@ -1688,7 +1688,7 @@ impl FerroGateway {
         method: &Method,
         path: &str,
     ) -> PingoraResult<()> {
-        if method != &Method::GET {
+        if method != Method::GET {
             return write_json_error(
                 session,
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -2771,37 +2771,38 @@ impl FerroGateway {
         };
 
         if tool.approval_policy == ferrogate_core::ApprovalPolicy::Always {
-            let approval = match state.create_tool_approval(
-                &request,
-                &ctx.request_id,
-                ctx.trace_id.clone(),
-                auth.tenant_context(),
-                auth.api_key_id.clone(),
-                mcp_audit_details
-                    .as_ref()
-                    .map(|(server, _)| server.clone())
-                    .or_else(|| Some(tool.extension_id.clone())),
-                tool.approval_policy,
-                auth.can_record_bodies(state.config.telemetry.log_bodies),
-            ) {
-                Ok(approval) => approval,
-                Err(error) => {
-                    state.record_admin_audit_event(tool_audit_event_draft_for_target(
-                        ctx,
-                        auth,
-                        execution,
-                        "tool.approval_requested",
-                        format!("tool:{}", request.name),
-                        "error",
-                        format!("tool approval persistence failed: {error}"),
-                    ));
-                    return Err(ToolExecutionHttpError {
-                        status: StatusCode::SERVICE_UNAVAILABLE,
-                        code: "tool_approval_storage_unavailable",
-                        message: "tool approval could not be persisted".to_string(),
-                    });
-                }
-            };
+            let approval =
+                match state.create_tool_approval(crate::state::ToolApprovalCreateRequest {
+                    tool: &request,
+                    request_id: &ctx.request_id,
+                    trace_id: ctx.trace_id.clone(),
+                    tenant: auth.tenant_context(),
+                    actor_api_key_id: auth.api_key_id.clone(),
+                    server_name: mcp_audit_details
+                        .as_ref()
+                        .map(|(server, _)| server.clone())
+                        .or_else(|| Some(tool.extension_id.clone())),
+                    approval_policy: tool.approval_policy,
+                    can_log_bodies: auth.can_record_bodies(state.config.telemetry.log_bodies),
+                }) {
+                    Ok(approval) => approval,
+                    Err(error) => {
+                        state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                            ctx,
+                            auth,
+                            execution,
+                            "tool.approval_requested",
+                            format!("tool:{}", request.name),
+                            "error",
+                            format!("tool approval persistence failed: {error}"),
+                        ));
+                        return Err(ToolExecutionHttpError {
+                            status: StatusCode::SERVICE_UNAVAILABLE,
+                            code: "tool_approval_storage_unavailable",
+                            message: "tool approval could not be persisted".to_string(),
+                        });
+                    }
+                };
             state.record_admin_audit_event(tool_audit_event_draft_for_target(
                 ctx,
                 auth,
@@ -3742,7 +3743,7 @@ impl FerroGateway {
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
                 if path == "/admin/v1/extensions" {
-                    if method != &Method::GET {
+                    if method != Method::GET {
                         return write_json_error(
                             session,
                             StatusCode::METHOD_NOT_ALLOWED,
@@ -3757,7 +3758,7 @@ impl FerroGateway {
                         .await;
                 }
                 if path == "/admin/v1/plugins" {
-                    if method == &Method::GET {
+                    if method == Method::GET {
                         let body = AdminList::new(state.extension_statuses());
                         return write_json_response(
                             session,
@@ -3767,7 +3768,7 @@ impl FerroGateway {
                         )
                         .await;
                     }
-                    if method == &Method::POST {
+                    if method == Method::POST {
                         return self
                             .handle_admin_plugin_upsert(session, ctx, headers, None)
                             .await;
@@ -4370,6 +4371,7 @@ impl FerroGateway {
                         .await
                     }
                     Err(ApprovalDecisionError::Terminal(record)) => {
+                        let record = *record;
                         write_json_error(
                             session,
                             StatusCode::CONFLICT,

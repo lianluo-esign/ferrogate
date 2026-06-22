@@ -102,7 +102,7 @@ pub(crate) enum ApprovalDecisionError {
         expected: String,
         provided: String,
     },
-    Terminal(ToolApprovalRecord),
+    Terminal(Box<ToolApprovalRecord>),
 }
 
 #[derive(Debug, Clone)]
@@ -288,7 +288,9 @@ impl ApprovalRegistry {
             )));
         };
         if entry.record.status.is_terminal() {
-            return Err(ApprovalDecisionError::Terminal(entry.record.clone()));
+            return Err(ApprovalDecisionError::Terminal(Box::new(
+                entry.record.clone(),
+            )));
         }
         if now >= entry.record.expires_at_unix {
             entry.record.status = ApprovalStatus::Expired;
@@ -298,7 +300,7 @@ impl ApprovalRegistry {
             entry.record.decided_at_unix = Some(now);
             let record = entry.record.clone();
             entry.notify.notify_waiters();
-            return Err(ApprovalDecisionError::Terminal(record));
+            return Err(ApprovalDecisionError::Terminal(Box::new(record)));
         }
         if let Some(provided) = fingerprint {
             if entry.record.fingerprint != provided {
@@ -371,11 +373,7 @@ fn redact_json(value: &Value) -> String {
         Value::String(_) => "\"[REDACTED]\"".into(),
         Value::Array(values) => format!(
             "[{}]",
-            values
-                .iter()
-                .map(|value| redact_json(value))
-                .collect::<Vec<_>>()
-                .join(",")
+            values.iter().map(redact_json).collect::<Vec<_>>().join(",")
         ),
         Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();

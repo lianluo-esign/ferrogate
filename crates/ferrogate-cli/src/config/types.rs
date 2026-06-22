@@ -1015,18 +1015,18 @@ pub(crate) enum AgentUpstreamProtocol {
     A2a,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AgentUpstreamAuth {
+    #[default]
     None,
-    Bearer { token: Option<String> },
-    Header { name: String, value: Option<String> },
-}
-
-impl Default for AgentUpstreamAuth {
-    fn default() -> Self {
-        Self::None
-    }
+    Bearer {
+        token: Option<String>,
+    },
+    Header {
+        name: String,
+        value: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

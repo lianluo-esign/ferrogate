@@ -196,7 +196,7 @@ impl FerroGateway {
                 session,
                 StatusCode::BAD_REQUEST,
                 "invalid_agent_tool_call",
-                format!("agent tool call name must not be empty: {:?}", tool_call),
+                format!("agent tool call name must not be empty: {tool_call:?}"),
                 &ctx.request_id,
             )
             .await;
@@ -266,13 +266,15 @@ impl FerroGateway {
         let tool_calls = request.tool_calls;
         let mut provider = match agent_provider(
             &state.config.agent_runtime,
-            request.input,
-            tool_calls.clone(),
-            self.clone(),
-            ctx,
-            auth.clone(),
-            run_id.clone(),
-            workflow_use.clone(),
+            AgentProviderContext {
+                input: request.input,
+                tool_calls: tool_calls.clone(),
+                gateway: self.clone(),
+                ctx,
+                auth: auth.clone(),
+                run_id: run_id.clone(),
+                workflow_use: workflow_use.clone(),
+            },
         ) {
             Ok(provider) => provider,
             Err((code, message)) => {
@@ -327,16 +329,16 @@ impl FerroGateway {
                     started_at_unix: Some(started_at_unix),
                     completed_at_unix: Some(now_unix_seconds()),
                 });
-                state.record_admin_audit_event(agent_audit_event(
+                state.record_admin_audit_event(agent_audit_event(AgentAuditEventContext {
                     ctx,
-                    &auth,
-                    Some(run_id),
-                    workflow_use.as_ref(),
-                    "agent.run_failed",
-                    "agent_run",
-                    "error",
-                    error.to_string(),
-                ));
+                    auth: &auth,
+                    agent_run_id: Some(run_id),
+                    workflow_use: workflow_use.as_ref(),
+                    action: "agent.run_failed",
+                    target: "agent_run",
+                    outcome: "error",
+                    message: error.to_string(),
+                }));
                 return write_json_error(
                     session,
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -702,60 +704,80 @@ fn agent_provider_name(config: &AgentRuntimeConfig) -> &'static str {
     }
 }
 
-fn agent_provider(
-    config: &AgentRuntimeConfig,
+struct AgentProviderContext<'a> {
     input: String,
     tool_calls: Vec<AgentRunToolCallRequest>,
     gateway: FerroGateway,
-    ctx: &ProxyContext,
+    ctx: &'a ProxyContext,
     auth: AuthContext,
     run_id: String,
     workflow_use: Option<AgentWorkflowUse>,
+}
+
+fn agent_provider(
+    config: &AgentRuntimeConfig,
+    context: AgentProviderContext<'_>,
 ) -> Result<Box<dyn AgentProvider + Send>, (&'static str, String)> {
     match config.provider {
         AgentRuntimeProvider::Wasm if config.wasm.module_path.is_some() => wasm_agent_provider(
             &config.wasm,
-            input,
-            config.timeout_millis,
-            gateway,
-            ctx,
-            auth,
-            run_id,
-            workflow_use,
-            tool_calls,
+            WasmAgentProviderContext {
+                input: context.input,
+                timeout_millis: config.timeout_millis,
+                gateway: context.gateway,
+                ctx: context.ctx,
+                auth: context.auth,
+                run_id: context.run_id,
+                workflow_use: context.workflow_use,
+                tool_calls: context.tool_calls,
+            },
         )
         .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
         .map_err(|error| ("invalid_agent_runtime_provider", error.to_string())),
-        AgentRuntimeProvider::Wasm => Ok(Box::new(DefaultAgentProvider::new(input, tool_calls))),
-        AgentRuntimeProvider::External => external_agent_provider(&config.external, input)
+        AgentRuntimeProvider::Wasm => Ok(Box::new(DefaultAgentProvider::new(
+            context.input,
+            context.tool_calls,
+        ))),
+        AgentRuntimeProvider::External => external_agent_provider(&config.external, context.input)
             .map(|provider| Box::new(provider) as Box<dyn AgentProvider + Send>)
             .map_err(|error| ("invalid_agent_runtime_provider", error.to_string())),
     }
 }
 
-fn wasm_agent_provider(
-    config: &AgentRuntimeWasmConfig,
+struct WasmAgentProviderContext<'a> {
     input: String,
     timeout_millis: u64,
     gateway: FerroGateway,
-    ctx: &ProxyContext,
+    ctx: &'a ProxyContext,
     auth: AuthContext,
     run_id: String,
     workflow_use: Option<AgentWorkflowUse>,
     tool_calls: Vec<AgentRunToolCallRequest>,
+}
+
+fn wasm_agent_provider(
+    config: &AgentRuntimeWasmConfig,
+    context: WasmAgentProviderContext<'_>,
 ) -> Result<WasmAgentProvider, AgentRuntimeError> {
     let module_path = config.module_path.clone().ok_or_else(|| {
         AgentRuntimeError::InvalidConfig("agent_runtime.wasm.module_path is required".into())
     })?;
-    let host = config
-        .host_abi
-        .then(|| WasmAgentHost::new(gateway, ctx, auth, run_id, workflow_use, tool_calls));
+    let host = config.host_abi.then(|| {
+        WasmAgentHost::new(
+            context.gateway,
+            context.ctx,
+            context.auth,
+            context.run_id,
+            context.workflow_use,
+            context.tool_calls,
+        )
+    });
     WasmAgentProvider::new(
         module_path,
         config.export_name.clone(),
         config.max_fuel,
-        timeout_millis,
-        input,
+        context.timeout_millis,
+        context.input,
         host,
     )
 }
@@ -919,16 +941,16 @@ impl WasmAgentHost {
         self.gateway
             .state
             .current()
-            .record_admin_audit_event(agent_audit_event(
-                &self.ctx,
-                &self.auth,
-                Some(self.run_id.clone()),
-                self.workflow_use.as_ref(),
+            .record_admin_audit_event(agent_audit_event(AgentAuditEventContext {
+                ctx: &self.ctx,
+                auth: &self.auth,
+                agent_run_id: Some(self.run_id.clone()),
+                workflow_use: self.workflow_use.as_ref(),
                 action,
-                target,
+                target: &target,
                 outcome,
                 message,
-            ));
+            }));
     }
 }
 
@@ -1230,29 +1252,33 @@ fn now_unix_seconds() -> u64 {
         .as_secs()
 }
 
-fn agent_audit_event(
-    ctx: &ProxyContext,
-    auth: &AuthContext,
+struct AgentAuditEventContext<'a> {
+    ctx: &'a ProxyContext,
+    auth: &'a AuthContext,
     agent_run_id: Option<String>,
-    workflow_use: Option<&AgentWorkflowUse>,
-    action: impl Into<String>,
-    target: impl Into<String>,
-    outcome: impl Into<String>,
-    message: impl Into<String>,
-) -> AdminAuditEventDraft {
+    workflow_use: Option<&'a AgentWorkflowUse>,
+    action: &'a str,
+    target: &'a str,
+    outcome: &'a str,
+    message: String,
+}
+
+fn agent_audit_event(context: AgentAuditEventContext<'_>) -> AdminAuditEventDraft {
     AdminAuditEventDraft {
-        request_id: ctx.request_id.clone(),
-        trace_id: ctx.trace_id.clone(),
-        agent_run_id,
-        workflow_id: workflow_use.map(|workflow| workflow.id.clone()),
-        workflow_version: workflow_use.map(|workflow| workflow.version),
-        workflow_node_id: workflow_use.map(|workflow| workflow.node_id.clone()),
-        actor_api_key_id: auth.api_key_id.clone(),
-        tenant: auth.tenant_context(),
-        action: action.into(),
-        target: target.into(),
-        outcome: outcome.into(),
-        message: message.into(),
+        request_id: context.ctx.request_id.clone(),
+        trace_id: context.ctx.trace_id.clone(),
+        agent_run_id: context.agent_run_id,
+        workflow_id: context.workflow_use.map(|workflow| workflow.id.clone()),
+        workflow_version: context.workflow_use.map(|workflow| workflow.version),
+        workflow_node_id: context
+            .workflow_use
+            .map(|workflow| workflow.node_id.clone()),
+        actor_api_key_id: context.auth.api_key_id.clone(),
+        tenant: context.auth.tenant_context(),
+        action: context.action.into(),
+        target: context.target.into(),
+        outcome: context.outcome.into(),
+        message: context.message,
     }
 }
 

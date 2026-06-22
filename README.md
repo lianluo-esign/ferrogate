@@ -904,18 +904,18 @@ into the gateway.
 
 ## Docker
 
-Stable releases use date-based tags such as `v2026.06.07`.
+Stable releases use date-based tags such as `v2026.06.22`.
 
 Pull the published GitHub Packages image and run it with a mounted config:
 
 ```bash
-docker pull ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+docker pull ghcr.io/lianluo-esign/ferrogate:v2026.06.22
 
 docker run --rm \
   -p 8080:8080 \
   -v "$PWD/config/ferrogate.example.toml:/etc/ferrogate/ferrogate.toml:ro" \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+  ghcr.io/lianluo-esign/ferrogate:v2026.06.22
 ```
 
 Build a local image when developing Docker changes:
@@ -946,7 +946,7 @@ docker run --rm \
   -v /etc/ferrogate/ferrogate.toml:/etc/ferrogate/ferrogate.toml:ro \
   -v /var/lib/ferrogate/acme:/var/lib/ferrogate/acme \
   -e FERROGATE_CONFIG=/etc/ferrogate/ferrogate.toml \
-  ghcr.io/lianluo-esign/ferrogate:v2026.06.07
+  ghcr.io/lianluo-esign/ferrogate:v2026.06.22
 ```
 
 ## Quality And Security
