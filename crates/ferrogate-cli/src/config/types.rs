@@ -400,7 +400,7 @@ pub(crate) struct GatewayConfigProfile {
     pub(crate) cache_enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentWorkflowPolicy {
     pub(crate) id: String,
@@ -432,7 +432,7 @@ pub(crate) struct AgentWorkflowPolicy {
     pub(crate) token_budget: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentWorkflowNode {
     pub(crate) id: String,
@@ -461,7 +461,7 @@ pub(crate) enum AgentWorkflowNodeKind {
     Checkpoint,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentWorkflowEdge {
     pub(crate) from: String,
@@ -470,7 +470,7 @@ pub(crate) struct AgentWorkflowEdge {
     pub(crate) condition: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PromptTemplate {
     pub(crate) id: String,
@@ -502,7 +502,7 @@ pub(crate) enum PromptTemplateTarget {
     Responses,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PromptTemplateVariable {
     pub(crate) name: String,
@@ -514,7 +514,7 @@ pub(crate) struct PromptTemplateVariable {
     pub(crate) description: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PromptTemplateVersion {
     #[serde(default = "default_gateway_config_revision")]
@@ -539,7 +539,7 @@ pub(crate) enum PromptTemplateVersionStatus {
     Archived,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PromptTemplateMessage {
     pub(crate) role: String,
@@ -670,9 +670,23 @@ pub(crate) struct SkillPackage {
     #[serde(default)]
     pub(crate) capabilities: Vec<SkillPackageCapability>,
     #[serde(default)]
+    pub(crate) resources: SkillPackageResources,
+    #[serde(default)]
     pub(crate) api_key_ids: Vec<String>,
     #[serde(default)]
     pub(crate) metadata: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct SkillPackageResources {
+    #[serde(default)]
+    pub(crate) plugins: Vec<PluginConfig>,
+    #[serde(default)]
+    pub(crate) mcp_servers: Vec<McpServerConfig>,
+    #[serde(default)]
+    pub(crate) prompt_templates: Vec<PromptTemplate>,
+    #[serde(default)]
+    pub(crate) agent_workflows: Vec<AgentWorkflowPolicy>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]

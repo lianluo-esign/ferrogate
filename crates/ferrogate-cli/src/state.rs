@@ -1375,6 +1375,7 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     repositories: &RuntimeStorageRepositories,
     config: &mut Config,
 ) -> anyhow::Result<()> {
+    let previous_skill_packages = config.skill_packages.clone();
     let snapshot = repositories.control_plane_snapshot()?;
     config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
     let tenant_refs: Vec<crate::responses::AdminTenantRef> =
@@ -1390,6 +1391,7 @@ fn apply_control_plane_snapshot_to_config_from_repositories(
     if !tenant_refs.is_empty() {
         apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
     }
+    config.materialize_skill_package_resources_with_previous(&previous_skill_packages);
     Ok(())
 }
 
@@ -2303,8 +2305,11 @@ impl AppState {
 
     pub(crate) fn try_new(mut config: Config) -> anyhow::Result<Self> {
         let analytics = config.analytics.clone();
+        config.materialize_skill_package_resources();
         let repositories = Arc::new(runtime_storage_repositories(&config)?);
+        let previous_skill_packages = config.skill_packages.clone();
         apply_control_plane_snapshot_to_config_from_repositories(&repositories, &mut config)?;
+        config.materialize_skill_package_resources_with_previous(&previous_skill_packages);
         let providers = config
             .providers
             .iter()
@@ -2896,6 +2901,7 @@ impl AppState {
     }
 
     fn apply_control_plane_snapshot_to_config(&self, config: &mut Config) -> anyhow::Result<()> {
+        let previous_skill_packages = config.skill_packages.clone();
         let snapshot = self.repositories.control_plane_snapshot()?;
         config.api_keys = deserialize_control_plane_documents(snapshot.api_keys)?;
         let tenant_refs: Vec<crate::responses::AdminTenantRef> =
@@ -2911,6 +2917,7 @@ impl AppState {
         if !tenant_refs.is_empty() {
             apply_tenant_refs_to_api_keys(&mut config.api_keys, tenant_refs);
         }
+        config.materialize_skill_package_resources_with_previous(&previous_skill_packages);
         Ok(())
     }
 

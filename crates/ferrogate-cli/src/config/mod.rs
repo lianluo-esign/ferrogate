@@ -35,6 +35,7 @@ pub(crate) use self::types::{
     PluginConfig, PluginManifest, PolicyRule, PromptTemplate, PromptTemplateMessage,
     PromptTemplateStatus, PromptTemplateTarget, PromptTemplateVariable, PromptTemplateVersion,
     PromptTemplateVersionStatus, Provider, ReliabilityConfig, RouteRule, SkillPackage,
-    SkillPackageCapability, SkillPackageCapabilityKind, SkillPackageCompatibility, StorageConfig,
-    StorageMigrationMode, TelemetryConfig, TlsAcmeConfig, TlsConfig, Upstream,
+    SkillPackageCapability, SkillPackageCapabilityKind, SkillPackageCompatibility,
+    SkillPackageResources, StorageConfig, StorageMigrationMode, TelemetryConfig, TlsAcmeConfig,
+    TlsConfig, Upstream,
 };

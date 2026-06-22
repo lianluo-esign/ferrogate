@@ -1054,6 +1054,118 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    let embedded_skill = r#"{"id":"embedded-skill","name":"Embedded skill","version":"1.0.0","description":"Skill package with owned resources","enabled":true,"api_key_ids":["client"],"compatibility":{"agent_runtimes":["pi-agent","codex","claude-code"]},"permissions":{"tools":["tool.health_check"],"network":[],"filesystem":false,"shell":false,"tenant_scope":true,"secrets":false,"admin_mutation":false},"capabilities":[{"kind":"plugin","id":"tool.health_check","description":"owned health-check tool provider"},{"kind":"tool","id":"tool.health_check","description":"owned health-check tool"},{"kind":"mcp_server","id":"skillhttp","description":"owned MCP server binding"},{"kind":"mcp_tool","id":"skillhttp-search","description":"owned MCP search tool"},{"kind":"prompt_template","id":"embedded-prompt","description":"owned prompt template"},{"kind":"agent_workflow","id":"embedded-flow","description":"owned workflow"}],"resources":{"plugins":[{"id":"tool.health_check","kind":"tool_provider","version":"1.0.0","manifest":{"name":"Health check","capabilities":["tool_provider"],"required_permissions":{"tools":["tool.health_check"],"network":[],"filesystem":false,"shell":false,"tenant_scope":false,"secrets":false,"admin_mutation":false},"hooks":[]},"enabled":true,"source":"builtin","order":11,"approval_policy":"never","permissions":{"tools":["tool.health_check"],"network":[],"filesystem":false,"shell":false,"tenant_scope":false,"secrets":false,"admin_mutation":false},"config":{"registered_by":"embedded-skill"}}],"mcp_servers":[{"name":"skillhttp","transport":"streamable_http","url":"http://127.0.0.1:1/mcp","auth_type":"none","headers":[],"tools_to_execute":["search"],"tools_to_auto_execute":["search"],"approval_policy":"never","tool_include":["search"],"tool_regex":[],"tls":{},"timeout_ms":100,"health_ping_interval_secs":10,"max_reconnect_attempts":1,"min_reconnect_backoff_secs":1,"max_reconnect_backoff_secs":1}],"prompt_templates":[{"id":"embedded-prompt","name":"Embedded prompt","status":"active","target":"chat_completions","model":"fast-chat","variables":[],"versions":[{"revision":1,"status":"active","messages":[{"role":"system","content":"Use gateway policy."}]}]}],"agent_workflows":[{"id":"embedded-flow","name":"Embedded flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"health","kind":"tool","tool":"tool.health_check","max_iterations":1}],"edges":[],"max_tool_calls":1,"max_iterations":1}]},"metadata":{"display":"Embedded","token":"client-secret"}}"#;
+    case.expect_json(
+        "POST",
+        "/admin/v1/skill-packages",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        embedded_skill,
+        201,
+        |body| {
+            assert_eq!(body["object"], "skill_package");
+            assert_eq!(body["skill_package"]["id"], "embedded-skill");
+            assert_eq!(
+                body["skill_package"]["resources"]["plugins"][0]["config"]["registered_by"],
+                "embedded-skill"
+            );
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/plugins/tool.health_check",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["id"], "tool.health_check");
+            assert_eq!(body["enabled"], true);
+            assert_array_contains(&body["tools"], "tool.health_check")
+                .context("skill-owned plugin must expose tool.health_check")?;
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json("GET", "/admin/v1/tools", &[ADMIN_AUTH], "", 200, |body| {
+        let tool = admin_list_item(&body, "name", "tool.health_check")
+            .context("skill-owned tool was not materialized")?;
+        assert_eq!(tool["extension_id"], "tool.health_check");
+        assert_secret_redacted(&body.to_string());
+        Ok(())
+    })?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/mcp-servers/skillhttp",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["name"], "skillhttp");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/tools/execute",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-skill-package: embedded-skill",
+        ],
+        r#"{"name":"tool.health_check","arguments":{},"session_id":"embedded-skill-tool-session"}"#,
+        200,
+        |body| {
+            assert_eq!(body["name"], "tool.health_check");
+            assert_eq!(body["content"]["status"], "ok");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    let disabled_embedded_skill = r#"{"id":"embedded-skill","name":"Embedded skill","version":"1.0.0","description":"Skill package with owned resources","enabled":false,"api_key_ids":["client"],"compatibility":{"agent_runtimes":["pi-agent","codex","claude-code"]},"permissions":{"tools":["tool.health_check"],"network":[],"filesystem":false,"shell":false,"tenant_scope":true,"secrets":false,"admin_mutation":false},"capabilities":[{"kind":"plugin","id":"tool.health_check"},{"kind":"tool","id":"tool.health_check"},{"kind":"mcp_server","id":"skillhttp"},{"kind":"mcp_tool","id":"skillhttp-search"},{"kind":"prompt_template","id":"embedded-prompt"},{"kind":"agent_workflow","id":"embedded-flow"}],"resources":{"plugins":[{"id":"tool.health_check","kind":"tool_provider","version":"1.0.0","manifest":{"name":"Health check","capabilities":["tool_provider"],"required_permissions":{"tools":["tool.health_check"],"network":[],"filesystem":false,"shell":false,"tenant_scope":false,"secrets":false,"admin_mutation":false},"hooks":[]},"enabled":true,"source":"builtin","order":11,"approval_policy":"never","permissions":{"tools":["tool.health_check"],"network":[],"filesystem":false,"shell":false,"tenant_scope":false,"secrets":false,"admin_mutation":false},"config":{"registered_by":"embedded-skill"}}],"mcp_servers":[{"name":"skillhttp","transport":"streamable_http","url":"http://127.0.0.1:1/mcp","auth_type":"none","headers":[],"tools_to_execute":["search"],"tools_to_auto_execute":["search"],"approval_policy":"never","tool_include":["search"],"tool_regex":[],"tls":{},"timeout_ms":100,"health_ping_interval_secs":10,"max_reconnect_attempts":1,"min_reconnect_backoff_secs":1,"max_reconnect_backoff_secs":1}],"prompt_templates":[{"id":"embedded-prompt","name":"Embedded prompt","status":"active","target":"chat_completions","model":"fast-chat","variables":[],"versions":[{"revision":1,"status":"active","messages":[{"role":"system","content":"Use gateway policy."}]}]}],"agent_workflows":[{"id":"embedded-flow","name":"Embedded flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"health","kind":"tool","tool":"tool.health_check","max_iterations":1}],"edges":[],"max_tool_calls":1,"max_iterations":1}]},"metadata":{"display":"Embedded","token":"client-secret"}}"#;
+    case.expect_json(
+        "PUT",
+        "/admin/v1/skill-packages/embedded-skill",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        disabled_embedded_skill,
+        200,
+        |body| {
+            assert_eq!(body["object"], "skill_package");
+            assert_eq!(body["skill_package"]["enabled"], false);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/plugins/tool.health_check",
+        &[ADMIN_AUTH],
+        "",
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], "plugin_not_found");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json("GET", "/admin/v1/tools", &[ADMIN_AUTH], "", 200, |body| {
+        assert!(!list_contains(&body, "name", "tool.health_check"));
+        assert_secret_redacted(&body.to_string());
+        Ok(())
+    })?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/mcp-servers/skillhttp",
+        &[ADMIN_AUTH],
+        "",
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], "mcp_server_not_found");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "GET",
         "/admin/v1/audit-events",

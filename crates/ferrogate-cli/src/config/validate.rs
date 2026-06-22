@@ -26,6 +26,65 @@ impl WorkflowToolNames {
 }
 
 impl Config {
+    pub(crate) fn materialize_skill_package_resources(&mut self) {
+        self.materialize_skill_package_resources_with_previous(&[]);
+    }
+
+    pub(crate) fn materialize_skill_package_resources_with_previous(
+        &mut self,
+        previous_packages: &[super::SkillPackage],
+    ) {
+        let mut owned_plugin_ids = HashSet::new();
+        let mut owned_mcp_server_names = HashSet::new();
+        let mut owned_prompt_template_ids = HashSet::new();
+        let mut owned_agent_workflow_keys = HashSet::new();
+
+        for package in previous_packages.iter().chain(self.skill_packages.iter()) {
+            collect_skill_package_resource_ids(
+                package,
+                &mut owned_plugin_ids,
+                &mut owned_mcp_server_names,
+                &mut owned_prompt_template_ids,
+                &mut owned_agent_workflow_keys,
+            );
+        }
+
+        self.plugins
+            .retain(|plugin| !owned_plugin_ids.contains(plugin.id.as_str()));
+        self.extensions
+            .retain(|plugin| !owned_plugin_ids.contains(plugin.id.as_str()));
+        self.mcp_servers
+            .retain(|server| !owned_mcp_server_names.contains(server.name.as_str()));
+        self.prompt_templates
+            .retain(|template| !owned_prompt_template_ids.contains(template.id.as_str()));
+        self.agent_workflows.retain(|workflow| {
+            !owned_agent_workflow_keys.contains(workflow.id.as_str())
+                && !owned_agent_workflow_keys
+                    .contains(skill_package_workflow_resource_id(workflow).as_str())
+        });
+
+        let enabled_resources = self
+            .skill_packages
+            .iter()
+            .filter(|package| package.enabled)
+            .map(|package| package.resources.clone())
+            .collect::<Vec<_>>();
+        for resources in enabled_resources {
+            for plugin in resources.plugins {
+                upsert_or_replace_plugin(&mut self.plugins, plugin);
+            }
+            for server in resources.mcp_servers {
+                upsert_or_replace_mcp_server(&mut self.mcp_servers, server);
+            }
+            for template in resources.prompt_templates {
+                upsert_or_replace_prompt_template(&mut self.prompt_templates, template);
+            }
+            for workflow in resources.agent_workflows {
+                upsert_or_replace_agent_workflow(&mut self.agent_workflows, workflow);
+            }
+        }
+    }
+
     pub(crate) fn validate(&self) -> AnyResult<()> {
         self.listen
             .parse::<std::net::SocketAddr>()
@@ -1254,25 +1313,53 @@ impl Config {
         api_key_ids: &HashSet<String>,
         tool_names: &WorkflowToolNames,
     ) -> AnyResult<()> {
-        let plugin_ids = self
+        let mut plugin_ids = self
             .plugin_registrations_for_validation()
             .map(|(_, _, plugin)| plugin.id.as_str())
             .collect::<HashSet<_>>();
-        let mcp_server_names = self
+        let mut mcp_server_names = self
             .mcp_servers
             .iter()
             .map(|server| server.name.as_str())
             .collect::<HashSet<_>>();
-        let prompt_template_ids = self
+        let mut prompt_template_ids = self
             .prompt_templates
             .iter()
             .map(|template| template.id.as_str())
             .collect::<HashSet<_>>();
-        let agent_workflow_ids = self
+        let mut agent_workflow_ids = self
             .agent_workflows
             .iter()
             .map(|workflow| workflow.id.as_str())
             .collect::<HashSet<_>>();
+        let mut embedded_tool_names = HashSet::<String>::new();
+        for package in &self.skill_packages {
+            for plugin in &package.resources.plugins {
+                plugin_ids.insert(plugin.id.as_str());
+                embedded_tool_names.extend(plugin.permissions.tools.iter().cloned());
+            }
+            for server in &package.resources.mcp_servers {
+                mcp_server_names.insert(server.name.as_str());
+                for tool in &server.tools_to_execute {
+                    embedded_tool_names.insert(tool.clone());
+                    embedded_tool_names.insert(format!("{}-{tool}", server.name));
+                }
+            }
+            prompt_template_ids.extend(
+                package
+                    .resources
+                    .prompt_templates
+                    .iter()
+                    .map(|template| template.id.as_str()),
+            );
+            agent_workflow_ids.extend(
+                package
+                    .resources
+                    .agent_workflows
+                    .iter()
+                    .map(|workflow| workflow.id.as_str()),
+            );
+        }
 
         let mut ids = HashSet::new();
         for (index, package) in self.skill_packages.iter().enumerate() {
@@ -1323,6 +1410,7 @@ impl Config {
                     );
                 }
             }
+            validate_skill_package_resource_capabilities(index, package)?;
             for (capability_index, capability) in package.capabilities.iter().enumerate() {
                 if capability.id.trim().is_empty() {
                     bail!(
@@ -1340,7 +1428,9 @@ impl Config {
                         }
                     }
                     super::SkillPackageCapabilityKind::Tool => {
-                        if !tool_names.contains(&capability.id) {
+                        if !tool_names.contains(&capability.id)
+                            && !embedded_tool_names.contains(capability.id.as_str())
+                        {
                             bail!(
                                 "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown tool {}",
                                 package.id,
@@ -1358,7 +1448,9 @@ impl Config {
                         }
                     }
                     super::SkillPackageCapabilityKind::McpTool => {
-                        if !tool_names.contains(&capability.id) {
+                        if !tool_names.contains(&capability.id)
+                            && !embedded_tool_names.contains(capability.id.as_str())
+                        {
                             bail!(
                                 "field skill_packages[{index}].capabilities[{capability_index}].id: skill package {} references unknown MCP tool {}",
                                 package.id,
@@ -1851,6 +1943,148 @@ fn validate_extension_permission_names(
         }
     }
     Ok(())
+}
+
+fn collect_skill_package_resource_ids(
+    package: &super::SkillPackage,
+    plugin_ids: &mut HashSet<String>,
+    mcp_server_names: &mut HashSet<String>,
+    prompt_template_ids: &mut HashSet<String>,
+    agent_workflow_keys: &mut HashSet<String>,
+) {
+    for plugin in &package.resources.plugins {
+        plugin_ids.insert(plugin.id.clone());
+    }
+    for server in &package.resources.mcp_servers {
+        mcp_server_names.insert(server.name.clone());
+    }
+    for template in &package.resources.prompt_templates {
+        prompt_template_ids.insert(template.id.clone());
+    }
+    for workflow in &package.resources.agent_workflows {
+        agent_workflow_keys.insert(workflow.id.clone());
+        agent_workflow_keys.insert(skill_package_workflow_resource_id(workflow));
+    }
+}
+
+fn validate_skill_package_resource_capabilities(
+    package_index: usize,
+    package: &super::SkillPackage,
+) -> AnyResult<()> {
+    for (resource_index, plugin) in package.resources.plugins.iter().enumerate() {
+        if !skill_package_has_capability(
+            package,
+            super::SkillPackageCapabilityKind::Plugin,
+            &plugin.id,
+        ) {
+            bail!(
+                "field skill_packages[{package_index}].resources.plugins[{resource_index}].id: embedded plugin {} must be declared as a plugin capability",
+                plugin.id
+            );
+        }
+    }
+    for (resource_index, server) in package.resources.mcp_servers.iter().enumerate() {
+        if !skill_package_has_capability(
+            package,
+            super::SkillPackageCapabilityKind::McpServer,
+            &server.name,
+        ) {
+            bail!(
+                "field skill_packages[{package_index}].resources.mcp_servers[{resource_index}].name: embedded MCP server {} must be declared as an MCP server capability",
+                server.name
+            );
+        }
+    }
+    for (resource_index, template) in package.resources.prompt_templates.iter().enumerate() {
+        if !skill_package_has_capability(
+            package,
+            super::SkillPackageCapabilityKind::PromptTemplate,
+            &template.id,
+        ) {
+            bail!(
+                "field skill_packages[{package_index}].resources.prompt_templates[{resource_index}].id: embedded prompt template {} must be declared as a prompt template capability",
+                template.id
+            );
+        }
+    }
+    for (resource_index, workflow) in package.resources.agent_workflows.iter().enumerate() {
+        if !skill_package_has_capability(
+            package,
+            super::SkillPackageCapabilityKind::AgentWorkflow,
+            &workflow.id,
+        ) {
+            bail!(
+                "field skill_packages[{package_index}].resources.agent_workflows[{resource_index}].id: embedded agent workflow {} must be declared as an agent workflow capability",
+                workflow.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn skill_package_has_capability(
+    package: &super::SkillPackage,
+    kind: super::SkillPackageCapabilityKind,
+    id: &str,
+) -> bool {
+    package
+        .capabilities
+        .iter()
+        .any(|capability| capability.kind == kind && capability.id == id)
+}
+
+fn skill_package_workflow_resource_id(workflow: &super::AgentWorkflowPolicy) -> String {
+    format!("{}@{}", workflow.id, workflow.version)
+}
+
+fn upsert_or_replace_plugin(plugins: &mut Vec<super::PluginConfig>, plugin: super::PluginConfig) {
+    if let Some(existing) = plugins.iter_mut().find(|existing| existing.id == plugin.id) {
+        *existing = plugin;
+    } else {
+        plugins.push(plugin);
+    }
+}
+
+fn upsert_or_replace_mcp_server(
+    servers: &mut Vec<super::McpServerConfig>,
+    server: super::McpServerConfig,
+) {
+    if let Some(existing) = servers
+        .iter_mut()
+        .find(|existing| existing.name == server.name)
+    {
+        *existing = server;
+    } else {
+        servers.push(server);
+    }
+}
+
+fn upsert_or_replace_prompt_template(
+    templates: &mut Vec<super::PromptTemplate>,
+    template: super::PromptTemplate,
+) {
+    if let Some(existing) = templates
+        .iter_mut()
+        .find(|existing| existing.id == template.id)
+    {
+        *existing = template;
+    } else {
+        templates.push(template);
+    }
+}
+
+fn upsert_or_replace_agent_workflow(
+    workflows: &mut Vec<super::AgentWorkflowPolicy>,
+    workflow: super::AgentWorkflowPolicy,
+) {
+    if let Some(existing) = workflows
+        .iter_mut()
+        .find(|existing| existing.id == workflow.id && existing.version == workflow.version)
+    {
+        *existing = workflow;
+    } else {
+        workflows.push(workflow);
+    }
 }
 
 fn validate_plugin_secret_permission(

@@ -29,6 +29,7 @@ impl Config {
         if is_caddyfile_path(path) {
             let mut config = Self::from_gateway_config(load_caddyfile(path)?);
             config.resolve_paths_relative_to(path.parent());
+            config.materialize_skill_package_resources();
             config
                 .validate()
                 .with_context(|| format!("failed to validate config file {}", path.display()))?;
@@ -39,6 +40,7 @@ impl Config {
             .with_context(|| format!("failed to read config file {}", path.display()))?;
         let mut config: Self = parse_structured_config(path, &raw)?;
         config.resolve_paths_relative_to(path.parent());
+        config.materialize_skill_package_resources();
         config
             .validate()
             .with_context(|| format!("failed to validate config file {}", path.display()))?;
@@ -46,19 +48,22 @@ impl Config {
     }
 
     pub(crate) fn from_toml_str(raw: &str) -> AnyResult<Self> {
-        let config: Self = toml::from_str(raw).context("failed to parse TOML config")?;
+        let mut config: Self = toml::from_str(raw).context("failed to parse TOML config")?;
+        config.materialize_skill_package_resources();
         config.validate()?;
         Ok(config)
     }
 
     pub(crate) fn from_yaml_str(raw: &str) -> AnyResult<Self> {
-        let config: Self = serde_yaml::from_str(raw).context("failed to parse YAML config")?;
+        let mut config: Self = serde_yaml::from_str(raw).context("failed to parse YAML config")?;
+        config.materialize_skill_package_resources();
         config.validate()?;
         Ok(config)
     }
 
     pub(crate) fn from_caddyfile_str(raw: &str, file: &str) -> AnyResult<Self> {
-        let config = Self::from_gateway_config(parse_caddyfile(raw, file)?);
+        let mut config = Self::from_gateway_config(parse_caddyfile(raw, file)?);
+        config.materialize_skill_package_resources();
         config.validate()?;
         Ok(config)
     }

@@ -200,6 +200,7 @@ pub(crate) struct AdminSkillPackage {
     pub(crate) compatibility: crate::config::SkillPackageCompatibility,
     pub(crate) permissions: crate::config::ExtensionPermissions,
     pub(crate) capabilities: Vec<crate::config::SkillPackageCapability>,
+    pub(crate) resources: crate::config::SkillPackageResources,
     pub(crate) api_key_ids: Vec<String>,
     pub(crate) metadata: BTreeMap<String, toml::Value>,
 }

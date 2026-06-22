@@ -5337,9 +5337,20 @@ fn admin_skill_package(package: &SkillPackage) -> AdminSkillPackage {
         compatibility: package.compatibility.clone(),
         permissions: package.permissions.clone(),
         capabilities: package.capabilities.clone(),
+        resources: admin_skill_package_resources(&package.resources),
         api_key_ids: package.api_key_ids.clone(),
         metadata: redact_plugin_config(&package.metadata),
     }
+}
+
+fn admin_skill_package_resources(
+    resources: &crate::config::SkillPackageResources,
+) -> crate::config::SkillPackageResources {
+    let mut resources = resources.clone();
+    for plugin in &mut resources.plugins {
+        plugin.config = redact_plugin_config(&plugin.config);
+    }
+    resources
 }
 
 fn agent_skill_package(package: &SkillPackage) -> AgentSkillPackage {

@@ -8175,6 +8175,141 @@
           }
         }
       },
+      "SkillPackagePluginConfig": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "request_hook",
+              "tool_provider",
+              "event_sink"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/PluginManifest"
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/PluginCompatibility"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "source": {
+            "type": "string"
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "approval_policy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/ExtensionPermissions"
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "SkillPackagePromptTemplate": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "model",
+          "versions"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "archived"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "chat_completions",
+              "responses"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SkillPackageResources": {
+        "type": "object",
+        "properties": {
+          "plugins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkillPackagePluginConfig"
+            },
+            "default": []
+          },
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/McpServerConfig"
+            },
+            "default": []
+          },
+          "prompt_templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkillPackagePromptTemplate"
+            },
+            "default": []
+          },
+          "agent_workflows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentWorkflowPolicy"
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
       "SkillPackage": {
         "type": "object",
         "required": [
@@ -8213,6 +8348,9 @@
             "items": {
               "$ref": "#/components/schemas/SkillPackageCapability"
             }
+          },
+          "resources": {
+            "$ref": "#/components/schemas/SkillPackageResources"
           },
           "api_key_ids": {
             "$ref": "#/components/schemas/StringList"
