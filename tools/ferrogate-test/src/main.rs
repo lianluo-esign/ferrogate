@@ -834,7 +834,7 @@ fn run_auth_api(args: &AuthArgs) -> Result<()> {
 }
 
 fn run_gateway_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 5)?;
+    let case = LocalHarness::start_with_billing(&args.ferrogate_bin, 7)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));
@@ -956,6 +956,23 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["object"], "agent_workflow");
             assert_eq!(body["agent_workflow"]["workflow"]["id"], "parallel-flow");
             assert_eq!(body["agent_workflow"]["workflow"]["max_parallelism"], 1);
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/agent-workflows",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{"id":"graph-flow","name":"Graph flow","version":1,"enabled":true,"api_key_ids":["client"],"nodes":[{"id":"start","kind":"model","model":"fast-chat"},{"id":"review","kind":"model","model":"fast-chat"}],"edges":[{"from":"start","to":"review"}],"max_model_calls":10,"max_iterations":3}"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "agent_workflow");
+            assert_eq!(body["agent_workflow"]["workflow"]["id"], "graph-flow");
+            assert_eq!(
+                body["agent_workflow"]["workflow"]["edges"][0]["from"],
+                "start"
+            );
             assert_secret_redacted(&body.to_string());
             Ok(())
         },
@@ -1232,6 +1249,66 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             "x-ferrogate-workflow-iteration: 1",
         ],
         r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow coverage"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: workflow-graph-e2e",
+            "x-ferrogate-workflow-id: graph-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: review",
+            "x-ferrogate-workflow-iteration: 1",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow graph rejected"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "workflow_edge_not_allowed");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: workflow-graph-e2e",
+            "x-ferrogate-workflow-id: graph-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: start",
+            "x-ferrogate-workflow-iteration: 1",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow graph start"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: workflow-graph-e2e",
+            "x-ferrogate-workflow-id: graph-flow",
+            "x-ferrogate-workflow-version: 1",
+            "x-ferrogate-workflow-node-id: review",
+            "x-ferrogate-workflow-iteration: 2",
+        ],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"workflow graph review"}]}"#,
         200,
         |body| {
             assert_eq!(body["object"], "chat.completion");

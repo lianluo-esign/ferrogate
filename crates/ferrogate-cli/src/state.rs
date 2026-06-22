@@ -23,10 +23,11 @@ use crate::approval::{
     ToolApprovalDecisionRequest, ToolApprovalDraft, ToolApprovalRecord,
 };
 use crate::config::{
-    config_snapshot_id, resolve_env_placeholders, AccessLogMode, AnalyticsConfig,
-    AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect, GuardrailStage,
-    HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus,
-    Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode, Upstream,
+    config_snapshot_id, resolve_env_placeholders, AccessLogMode, AgentWorkflowPolicy,
+    AnalyticsConfig, AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect,
+    GuardrailStage, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate,
+    PromptTemplateStatus, Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode,
+    Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -1299,6 +1300,19 @@ fn deserialize_control_plane_documents<T: for<'de> Deserialize<'de>>(
 
 fn workflow_resource_id(workflow: &crate::config::AgentWorkflowPolicy) -> String {
     format!("{}@{}", workflow.id, workflow.version)
+}
+
+fn record_latest_workflow_node(
+    latest: &mut Option<(u64, String)>,
+    timestamp: u64,
+    node_id: String,
+) {
+    if latest
+        .as_ref()
+        .is_none_or(|(latest_timestamp, _)| timestamp >= *latest_timestamp)
+    {
+        *latest = Some((timestamp, node_id));
+    }
 }
 
 pub(crate) fn select_agent_workflow<'a>(
@@ -4233,6 +4247,95 @@ impl AppState {
             .chain(billing_timestamps)
             .flatten()
             .min()
+    }
+
+    pub(crate) fn workflow_run_last_successful_node_id(
+        &self,
+        workflow_id: &str,
+        workflow_version: u32,
+        agent_run_id: &str,
+    ) -> Option<String> {
+        let mut latest: Option<(u64, String)> = None;
+        for log in self.request_logs() {
+            if log.workflow_id.as_deref() != Some(workflow_id)
+                || log.workflow_version != Some(workflow_version)
+                || log.agent_run_id.as_deref() != Some(agent_run_id)
+                || log.status_code >= 400
+            {
+                continue;
+            }
+            if let Some(node_id) = log.workflow_node_id {
+                let timestamp = log.completed_at_unix.or(log.started_at_unix).unwrap_or(0);
+                record_latest_workflow_node(&mut latest, timestamp, node_id);
+            }
+        }
+        for event in self.audit_events() {
+            if event.workflow_id.as_deref() != Some(workflow_id)
+                || event.workflow_version != Some(workflow_version)
+                || event.agent_run_id.as_deref() != Some(agent_run_id)
+                || event.outcome != "success"
+            {
+                continue;
+            }
+            if let Some(node_id) = event.workflow_node_id {
+                record_latest_workflow_node(
+                    &mut latest,
+                    event.occurred_at_unix.unwrap_or(0),
+                    node_id,
+                );
+            }
+        }
+        for event in self.metering_events() {
+            if event.workflow_id.as_deref() != Some(workflow_id)
+                || event.workflow_version != Some(workflow_version)
+                || event.agent_run_id.as_deref() != Some(agent_run_id)
+                || event.status_code >= 400
+            {
+                continue;
+            }
+            if let Some(node_id) = event.workflow_node_id {
+                record_latest_workflow_node(
+                    &mut latest,
+                    event.occurred_at_unix.unwrap_or(0),
+                    node_id,
+                );
+            }
+        }
+        latest.map(|(_, node_id)| node_id)
+    }
+
+    pub(crate) fn workflow_edge_transition_error(
+        &self,
+        workflow: &AgentWorkflowPolicy,
+        agent_run_id: &str,
+        node_id: &str,
+    ) -> Option<String> {
+        if workflow.edges.is_empty() {
+            return None;
+        }
+        if let Some(previous_node_id) =
+            self.workflow_run_last_successful_node_id(&workflow.id, workflow.version, agent_run_id)
+        {
+            if previous_node_id == node_id
+                || workflow
+                    .edges
+                    .iter()
+                    .any(|edge| edge.from == previous_node_id && edge.to == node_id)
+            {
+                return None;
+            }
+            return Some(format!(
+                "agent workflow {}@{} cannot transition from node {} to node {}",
+                workflow.id, workflow.version, previous_node_id, node_id
+            ));
+        }
+        if workflow.edges.iter().any(|edge| edge.to == node_id) {
+            return Some(format!(
+                "agent workflow {}@{} node {} has incoming edges and cannot start this run",
+                workflow.id, workflow.version, node_id
+            ));
+        }
+        None
     }
 
     pub(crate) fn request_logs_page(

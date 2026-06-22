@@ -2054,6 +2054,15 @@ fn enforce_ai_workflow_policy(
             ),
         });
     }
+    if let Some(message) =
+        state.workflow_edge_transition_error(workflow, request.agent_run_id, node_id)
+    {
+        return Err(AiWorkflowRejection {
+            status: StatusCode::FORBIDDEN,
+            code: "workflow_edge_not_allowed",
+            message,
+        });
+    }
     if workflow.max_model_calls.is_some_and(|limit| {
         workflow_model_call_count(state, &workflow.id, workflow.version) >= u64::from(limit)
     }) {

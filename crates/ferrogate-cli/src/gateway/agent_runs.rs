@@ -546,6 +546,9 @@ fn agent_workflow_use(
             }
         }
     }
+    if let Some(message) = state.workflow_edge_transition_error(workflow, run_id, node_id) {
+        return Err((StatusCode::FORBIDDEN, "workflow_edge_not_allowed", message));
+    }
     if workflow.max_parallelism.is_some_and(|limit| {
         request.tool_calls.len() > 1 && request.tool_calls.len() as u32 > limit
     }) {
