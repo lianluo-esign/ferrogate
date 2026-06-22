@@ -26,7 +26,9 @@ The project is developed as the open-source gateway foundation behind
   responses, graceful shutdown, and listener-level graceful upgrade.
 - **OpenAI-compatible AI API** with `GET /v1/models`,
   `POST /v1/chat/completions`, and `POST /v1/responses`, including
-  non-streaming and streaming SSE forwarding. See
+  non-streaming and streaming SSE forwarding, canonical Responses input
+  handling for text, image, and tool-capable request shapes across provider
+  adapters. See
   [Agent Framework Compatibility](docs/agent-framework-compatibility.md) for
   AutoGen, CrewAI, LangChain, LlamaIndex, Phidata, Control Flow, and custom SDK
   wiring.
@@ -43,13 +45,18 @@ The project is developed as the open-source gateway foundation behind
   and stdio server sessions, startup `initialize` plus `tools/list`, namespaced
   `serverName-toolName` tools, deny-by-default execution allowlists, policy
   targets, admin visibility, health checks, reconnects, and
-  `POST /v1/mcp/tool/execute`.
+  `POST /v1/mcp/tool/execute`. FerroGate also exposes a governed native MCP
+  JSON-RPC ingress at `POST /v1/mcp` for `initialize`, `ping`, `tools/list`, and
+  `tools/call`.
 - **Agentic Lite plugin surface** where a plugin is the governed capability
   bundle and tools are the executable actions exposed to agents and APIs. Built-in
   plugins cover request hooks, tool providers, event sinks, `GET /v1/tools`,
   `POST /v1/tools/execute`, admin plugin/tool views, explicit tool/network/
   tenant-scope/secret/admin-mutation permission declarations, tool sessions, and
   audit events.
+- **Agent runtime and skill package surface** for agent discovery, governed
+  A2A-style agent upstreams, bounded agent runs, workflow counters/timelines,
+  and skill-owned plugins, tools, MCP servers, prompt templates, and workflows.
 - **Caddy-style config file compatibility** through `Ferrogate/Caddyfile`
   parsing for familiar reverse-proxy routes, matchers, TLS, logging, and
   gateway settings, alongside structured TOML configuration.
@@ -72,6 +79,13 @@ The project is developed as the open-source gateway foundation behind
   aggregates, audit events, gateway config profiles, provider health,
   plugins/extensions, tools, MCP servers, config validation, process-local
   reload, and node drain/readiness.
+- **Durable control-plane storage** through memory, file-backed libSQL,
+  libSQL server/Turso-compatible protocol, PostgreSQL, PostgreSQL TLS, MySQL,
+  and MySQL TLS providers for API keys, tenants, policies, gateway configs,
+  prompt templates, plugin registrations, MCP server registrations, tool
+  approval records, agent workflows, and agent upstreams.
+- **Analytics delivery boundary** for high-write observability data through
+  either Vector-to-ClickHouse pipeline mode or direct ClickHouse warehouse mode.
 - **Cluster operations** for multi-node deployments with node identity, shared
   file control-plane state, Redis-backed request and token counters, status,
   readiness, and drain semantics.
@@ -93,6 +107,9 @@ Validated end-to-end:
 
 - HTTP reverse proxy runtime on Pingora.
 - OpenAI-compatible Chat Completions and Responses API paths.
+- Canonical Responses request mapping for text, image, tool definitions, tool
+  choice, and tool-call input shapes across OpenAI-compatible, Anthropic,
+  Gemini, and Grok/xAI request paths.
 - Agent framework compatibility for OpenAI-compatible clients using FerroGate
   `base_url`, virtual API keys, logical models, request logs, metering events,
   and Prometheus model/provider metrics.
@@ -104,15 +121,30 @@ Validated end-to-end:
 - Exact-match response cache for non-streaming AI requests.
 - Agentic Lite tools and MCP gateway execution through auth, policy, billing,
   audit, and metrics.
+- Native MCP JSON-RPC ingress at `POST /v1/mcp`, including `initialize`,
+  `ping`, `tools/list`, and governed `tools/call`.
+- Agent discovery, A2A-style agent upstream invocation and streaming, bounded
+  agent runs, workflow graph execution, workflow budgets, tool-call limits,
+  immutable approval/audit evidence, and agent run timelines.
+- Plugin registration, plugin-owned tool exposure, skill package compatibility
+  metadata for `pi-agent`, `codex`, and `claude-code`, and skill-owned resource
+  materialization for plugins, tools, MCP servers, prompt templates, and
+  workflows.
 - Request logs, token metering events, usage aggregates, provider health, cache
   metrics, MCP tool metrics, Prometheus, OTLP export, and ClickHouse analytics
   delivery through Vector pipeline or direct warehouse mode.
 - Admin API, API key and policy CRUD, static dashboard, config validation,
   process-local reload, status, readiness, and drain.
+- Durable control-plane restart behavior for libSQL file, libSQL server,
+  PostgreSQL, PostgreSQL TLS, MySQL, and MySQL TLS storage providers.
 - Manual TLS, ACME HTTP-01, ACME DNS-01, renewal scheduling, and listener-level
   graceful upgrade handoff.
 - Cluster identity, shared file state, Redis counters, readiness, and drain
   runbooks.
+- Docker-backed feature scenarios for direct ClickHouse analytics,
+  Vector-to-ClickHouse analytics, guardrail request deny, guardrail response
+  redact, full guardrail flow, cluster drain, shared API key state, stale shared
+  state handling, startup-unavailable shared state, and Redis counters.
 - Real Let's Encrypt staging and production issuance for both HTTP-01 and
   Cloudflare DNS-01 during live validation.
 
