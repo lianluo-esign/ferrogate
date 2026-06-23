@@ -12,8 +12,8 @@
 
 FerroGate 是一个基于 Cloudflare Pingora 构建的开源 Rust API 网关和 AI
 网关。它为团队提供一个可自托管的 AI 流量控制点，覆盖 OpenAI 兼容 API、
-供应商路由、虚拟 API Key、策略检查、Token 计量、MCP/工具执行、可观测性、
-Admin API、集群运维和自动 HTTPS。
+供应商路由、虚拟 API Key、策略检查、Token 计量、MCP/工具执行、显式 agent
+run、WASM 沙箱化 agent 执行、可观测性、Admin API、集群运维和自动 HTTPS。
 
 该项目也是 [Token4AI Cloud](https://token4ai.cloud) 背后的开源网关基础。
 
@@ -29,9 +29,10 @@ Admin API、集群运维和自动 HTTPS。
 - **治理能力：** 虚拟 API Key、scope、租户上下文、allow/deny 规则、请求频率
   限制、Token 预算和 exact-match 响应缓存。
 - **Agent 与工具流量：** MCP host/client、原生 `POST /v1/mcp` JSON-RPC 入口、
-  受治理的工具执行、插件注册和审计事件。
+  显式 `POST /v1/agent-runs`、受治理的工具执行、插件注册、可选 WASM 沙箱执行和
+  审计事件。
 - **运维可见性：** 请求日志、usage/metering 事件、供应商健康、缓存/工具指标、
-  Prometheus、OTLP 导出、Admin API 和 Dashboard。
+  agent run timeline、Prometheus、OTLP 导出、Admin API 和 Dashboard。
 - **生产运维：** durable control-plane storage、analytics warehouse、reload/drain
   readiness、集群计数器、Docker、Kubernetes manifests、Helm chart 和 ACME HTTPS。
 
@@ -86,6 +87,25 @@ curl -X POST http://127.0.0.1:8080/v1/responses \
 ```text
 http://127.0.0.1:8080/admin
 ```
+
+## Agentic Gateway
+
+FerroGate 支持显式 agent 流量，但不会把所有 AI 请求都变成 agent loop。普通
+Chat Completions 和 Responses 请求保持原有行为；agent 执行需要通过
+`POST /v1/agent-runs` 和运维侧 `[agent_runtime]` 配置显式开启。
+
+已实现的 agentic gateway 能力包括：
+
+- 带 max-turn 和 timeout 限制的有界 agent run。
+- 默认 provider、外部进程 provider、以及基于 Wasmtime 的可配置 WASM provider。
+- 默认拒绝的 WASM 执行边界，带 fuel/timeout 限制，没有默认 WASI、网络或文件系统
+  权限；可显式开启 `ferrogate.log`、`ferrogate.state_get`、
+  `ferrogate.state_set` 和 `ferrogate.tool_dispatch` host ABI。
+- agent run 和 WASM host ABI 发起的工具调用仍走统一 gateway 治理链路：auth、
+  scope、policy、approval、billing 和 audit evidence。
+- durable `agent_run` / `agent_run_event` 记录，以及
+  `GET /admin/v1/agent-runs` 和 `GET /admin/v1/agent-runs/{run_id}` timeline，
+  用于查看 request、billing、audit、tool 和 run-event 证据。
 
 ## 配置
 
@@ -151,7 +171,7 @@ crates/
   ferrogate-storage         Repository trait 与控制面存储边界
   ferrogate-billing         Token usage metering 模型与本地事件保留
   ferrogate-observability   Metrics、spans、exporter contracts
-  ferrogate-runtime         Reload 与 runtime lifecycle 状态机
+  ferrogate-runtime         Reload、lifecycle、有界 agent harness、WASM sandbox
   ferrogate-mcp             MCP host/client 管理器与工具执行桥接
 ```
 
@@ -193,10 +213,13 @@ OpenAPI 3.1 文档位于
 GET  /v1/models
 POST /v1/chat/completions
 POST /v1/responses
+POST /v1/agent-runs
 GET  /v1/tools
 POST /v1/tools/execute
 POST /v1/mcp
 POST /v1/mcp/tool/execute
+GET  /admin/v1/agent-runs
+GET  /admin/v1/agent-runs/{run_id}
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health

@@ -13,8 +13,8 @@
 FerroGate is an open-source Rust API gateway and AI gateway built on
 Cloudflare Pingora. It gives teams a self-hostable control point for AI traffic:
 OpenAI-compatible APIs, provider routing, virtual API keys, policy checks,
-token accounting, MCP/tool execution, observability, Admin APIs, cluster
-operations, and automatic HTTPS.
+token accounting, MCP/tool execution, opt-in agent runs, WASM sandboxed agent
+execution, observability, Admin APIs, cluster operations, and automatic HTTPS.
 
 The project is developed as the open-source gateway foundation behind
 [Token4AI Cloud](https://token4ai.cloud).
@@ -33,10 +33,11 @@ For the longer capability inventory and current implementation status, read the
 - **Governance:** virtual API keys, scopes, tenant context, allow/deny rules,
   request rate limits, token budgets, and exact-match response caching.
 - **Agent and tool traffic:** MCP host/client support, native `POST /v1/mcp`
-  JSON-RPC ingress, governed tool execution, plugin registration, and audit
-  events.
+  JSON-RPC ingress, explicit `POST /v1/agent-runs`, governed tool execution,
+  plugin registration, opt-in WASM sandbox execution, and audit events.
 - **Operator visibility:** request logs, usage and metering events, provider
-  health, cache/tool metrics, Prometheus, OTLP export, Admin API, and dashboard.
+  health, cache/tool metrics, agent run timelines, Prometheus, OTLP export,
+  Admin API, and dashboard.
 - **Production operations:** durable control-plane storage options, analytics
   warehouse delivery, reload/drain readiness, cluster counters, Docker,
   Kubernetes manifests, Helm chart, and ACME HTTPS.
@@ -93,6 +94,28 @@ Open the local dashboard:
 ```text
 http://127.0.0.1:8080/admin
 ```
+
+## Agentic Gateway
+
+FerroGate supports explicit agent traffic without turning every AI request into
+an agent loop. Normal Chat Completions and Responses calls keep their existing
+behavior; agent execution is opt-in through `POST /v1/agent-runs` and the
+operator-controlled `[agent_runtime]` configuration.
+
+Implemented agentic gateway surfaces include:
+
+- Bounded agent runs with max-turn and timeout limits.
+- Default, external-process, and configured Wasmtime-backed agent providers.
+- Deny-by-default WASM execution with fuel and timeout bounds, no ambient
+  WASI/network/filesystem access, and an optional host ABI for
+  `ferrogate.log`, `ferrogate.state_get`, `ferrogate.state_set`, and
+  `ferrogate.tool_dispatch`.
+- Tool calls from agent runs and WASM host ABI dispatch go through the same
+  gateway governance path as ordinary tool execution: auth, scopes, policy,
+  approvals, billing, and audit evidence.
+- Durable `agent_run` and `agent_run_event` records, plus
+  `GET /admin/v1/agent-runs` and `GET /admin/v1/agent-runs/{run_id}` timelines
+  for request, billing, audit, tool, and run-event evidence.
 
 ## Configuration
 
@@ -159,7 +182,7 @@ crates/
   ferrogate-storage         Repository traits and control-plane storage boundary
   ferrogate-billing         Token usage metering models and local event retention
   ferrogate-observability   Metrics, spans, exporter contracts
-  ferrogate-runtime         Reload and runtime lifecycle state machine
+  ferrogate-runtime         Reload, lifecycle, bounded agent harness, WASM sandbox
   ferrogate-mcp             MCP host/client manager and tool execution bridge
 ```
 
@@ -201,10 +224,13 @@ Common runtime and admin surfaces:
 GET  /v1/models
 POST /v1/chat/completions
 POST /v1/responses
+POST /v1/agent-runs
 GET  /v1/tools
 POST /v1/tools/execute
 POST /v1/mcp
 POST /v1/mcp/tool/execute
+GET  /admin/v1/agent-runs
+GET  /admin/v1/agent-runs/{run_id}
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
