@@ -99,17 +99,31 @@ http://127.0.0.1:8080/admin
 
 FerroGate supports explicit agent traffic without turning every AI request into
 an agent loop. Normal Chat Completions and Responses calls keep their existing
-behavior; agent execution is opt-in through `POST /v1/agent-runs` and the
-operator-controlled `[agent_runtime]` configuration.
+behavior; agent execution is opt-in through agent runtime, upstream, workflow,
+skill, prompt, and plugin control-plane surfaces.
 
 Implemented agentic gateway surfaces include:
 
-- Bounded agent runs with max-turn and timeout limits.
+- Agent discovery through `/.well-known/agent.json` and visible skill packages
+  through `GET /v1/skills` and `GET /v1/skills/{id}`.
+- Governed A2A-style agent upstreams with tenant/API-key visibility,
+  `agents.read`/`agents.invoke` scopes, request forwarding, and streaming
+  forwarding for `message:stream` paths.
+- Explicit `POST /v1/agent-runs` execution with max-turn and timeout limits.
 - Default, external-process, and configured Wasmtime-backed agent providers.
 - Deny-by-default WASM execution with fuel and timeout bounds, no ambient
   WASI/network/filesystem access, and an optional host ABI for
   `ferrogate.log`, `ferrogate.state_get`, `ferrogate.state_set`, and
   `ferrogate.tool_dispatch`.
+- Workflow graph policies with model/tool nodes, edge conditions, model-call
+  and tool-call budgets, token budgets, iteration limits, counters, and runtime
+  timelines.
+- Skill packages that can bundle visible capabilities and materialize owned
+  plugins, tools, MCP servers, prompt templates, and workflows.
+- Versioned prompt templates with audited `POST /v1/prompts/{id}/render`
+  output for Chat Completions or Responses request bodies.
+- Plugin registration and plugin-owned tool exposure with permissions, approval
+  policy, secret redaction, lifecycle status, and Admin API inspection.
 - Tool calls from agent runs and WASM host ABI dispatch go through the same
   gateway governance path as ordinary tool execution: auth, scopes, policy,
   approvals, billing, and audit evidence.
@@ -225,12 +239,27 @@ GET  /v1/models
 POST /v1/chat/completions
 POST /v1/responses
 POST /v1/agent-runs
+GET  /.well-known/agent.json
+GET  /v1/skills
+GET  /v1/skills/{id}
+POST /v1/prompts/{id}/render
 GET  /v1/tools
 POST /v1/tools/execute
 POST /v1/mcp
 POST /v1/mcp/tool/execute
 GET  /admin/v1/agent-runs
 GET  /admin/v1/agent-runs/{run_id}
+GET  /admin/v1/agent-upstreams
+GET  /admin/v1/agent-upstreams/{id}
+GET  /admin/v1/agent-workflows
+GET  /admin/v1/agent-workflows/{id}
+GET  /admin/v1/skill-packages
+GET  /admin/v1/skill-packages/{id}
+GET  /admin/v1/prompt-templates
+GET  /admin/v1/prompt-templates/{id}
+GET  /admin/v1/plugins
+GET  /admin/v1/plugins/{plugin_id}
+GET  /admin/v1/plugins/{plugin_id}/tools
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health

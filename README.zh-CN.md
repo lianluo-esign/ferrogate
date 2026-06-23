@@ -91,16 +91,29 @@ http://127.0.0.1:8080/admin
 ## Agentic Gateway
 
 FerroGate 支持显式 agent 流量，但不会把所有 AI 请求都变成 agent loop。普通
-Chat Completions 和 Responses 请求保持原有行为；agent 执行需要通过
-`POST /v1/agent-runs` 和运维侧 `[agent_runtime]` 配置显式开启。
+Chat Completions 和 Responses 请求保持原有行为；agent 执行通过 agent runtime、
+upstream、workflow、skill、prompt 和 plugin 控制面显式开启。
 
 已实现的 agentic gateway 能力包括：
 
-- 带 max-turn 和 timeout 限制的有界 agent run。
+- 通过 `/.well-known/agent.json` 做 agent discovery，并通过 `GET /v1/skills`
+  和 `GET /v1/skills/{id}` 暴露可见 skill package。
+- 受治理的 A2A-style agent upstream：支持 tenant/API-key 可见性、
+  `agents.read`/`agents.invoke` scope、请求转发，以及 `message:stream` 路径的
+  流式转发。
+- 显式 `POST /v1/agent-runs` 执行，并带 max-turn 和 timeout 限制。
 - 默认 provider、外部进程 provider、以及基于 Wasmtime 的可配置 WASM provider。
 - 默认拒绝的 WASM 执行边界，带 fuel/timeout 限制，没有默认 WASI、网络或文件系统
   权限；可显式开启 `ferrogate.log`、`ferrogate.state_get`、
   `ferrogate.state_set` 和 `ferrogate.tool_dispatch` host ABI。
+- Workflow graph policy：支持 model/tool node、edge condition、model-call 与
+  tool-call budget、token budget、iteration limit、counter 和 runtime timeline。
+- Skill package 可以声明可见 capability，并 materialize 自有 plugin、tool、MCP
+  server、prompt template 和 workflow。
+- Versioned prompt template 支持经审计的 `POST /v1/prompts/{id}/render`，输出
+  Chat Completions 或 Responses request body。
+- Plugin registration 和 plugin-owned tool exposure 支持 permission、approval
+  policy、secret redaction、lifecycle status 和 Admin API inspection。
 - agent run 和 WASM host ABI 发起的工具调用仍走统一 gateway 治理链路：auth、
   scope、policy、approval、billing 和 audit evidence。
 - durable `agent_run` / `agent_run_event` 记录，以及
@@ -214,12 +227,27 @@ GET  /v1/models
 POST /v1/chat/completions
 POST /v1/responses
 POST /v1/agent-runs
+GET  /.well-known/agent.json
+GET  /v1/skills
+GET  /v1/skills/{id}
+POST /v1/prompts/{id}/render
 GET  /v1/tools
 POST /v1/tools/execute
 POST /v1/mcp
 POST /v1/mcp/tool/execute
 GET  /admin/v1/agent-runs
 GET  /admin/v1/agent-runs/{run_id}
+GET  /admin/v1/agent-upstreams
+GET  /admin/v1/agent-upstreams/{id}
+GET  /admin/v1/agent-workflows
+GET  /admin/v1/agent-workflows/{id}
+GET  /admin/v1/skill-packages
+GET  /admin/v1/skill-packages/{id}
+GET  /admin/v1/prompt-templates
+GET  /admin/v1/prompt-templates/{id}
+GET  /admin/v1/plugins
+GET  /admin/v1/plugins/{plugin_id}
+GET  /admin/v1/plugins/{plugin_id}/tools
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
