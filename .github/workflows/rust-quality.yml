@@ -1,0 +1,50 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-24
+# description: FerroGate Rust quality, schema, and deployment-manifest CI module.
+
+name: Rust quality
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.88.0
+
+jobs:
+  quality:
+    name: rust-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check locked metadata
+        run: cargo metadata --locked --format-version=1 >/dev/null
+
+      - name: Validate OpenAPI schemas
+        run: python3 scripts/check-openapi.py
+
+      - name: Validate Kubernetes examples
+        run: scripts/check-kubernetes-examples.sh

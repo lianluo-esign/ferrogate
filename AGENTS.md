@@ -193,6 +193,21 @@ Do not claim production readiness from unit tests alone when the change affects
 runtime wiring, live reload, TLS/ACME, provider streaming, or billing
 settlement.
 
+## CI Workflow Structure
+
+Rust CI must stay split by business/runtime boundary instead of collapsing back
+into one monolithic GitHub Actions file. Keep `.github/workflows/ci.yml` as the
+thin orchestrator and preserve the branch-protection check named `rust-ci` as
+the aggregate gate. Put actual Rust validation work in reusable workflow files:
+quality/schema/deployment-manifest checks, workspace tests, gateway runtime and
+performance smoke tests, E2E harness execution, and CI image publishing should
+remain separately owned modules.
+
+When adding a new CI concern, extend the smallest matching workflow module or
+add a new reusable module, then wire it into the `rust-ci` aggregate check. Do
+not make an independent required check without also updating branch protection
+and documenting the migration path.
+
 ## Communication
 
 - Be concise and concrete.
