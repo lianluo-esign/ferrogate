@@ -1,0 +1,44 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-24
+# description: FerroGate CLI command, workspace skeleton, and test harness CI.
+
+name: Rust CLI tooling tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.88.0
+
+jobs:
+  cli-tooling-tests:
+    name: rust-cli-tooling-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Test CLI library and binary targets
+        run: cargo test -p ferrogate-cli --all-features --lib --bins
+
+      - name: Test CLI command and workspace skeleton slices
+        run: cargo test -p ferrogate-cli --all-features --test check_command --test workspace_skeleton
+
+      - name: Test FerroGate test harness package
+        run: cargo test -p ferrogate-test --all-features

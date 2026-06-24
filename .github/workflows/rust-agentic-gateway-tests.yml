@@ -1,0 +1,41 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-24
+# description: FerroGate agentic gateway, MCP, provider, and runtime feature-module test CI.
+
+name: Rust agentic gateway tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.88.0
+
+jobs:
+  agentic-gateway-tests:
+    name: rust-agentic-gateway-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Test providers, MCP, and agent runtime crates
+        run: cargo test -p ferrogate-providers -p ferrogate-mcp -p ferrogate-runtime --all-features
+
+      - name: Test agentic gateway API slice
+        run: cargo test -p ferrogate-cli --all-features --test agentic_lite

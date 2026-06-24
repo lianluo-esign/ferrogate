@@ -25,9 +25,25 @@ jobs:
     name: rust-quality
     uses: ./.github/workflows/rust-quality.yml
 
-  workspace-tests:
-    name: rust-workspace-tests
-    uses: ./.github/workflows/rust-workspace-tests.yml
+  core-policy-tests:
+    name: rust-core-policy-tests
+    uses: ./.github/workflows/rust-core-policy-tests.yml
+
+  control-plane-tests:
+    name: rust-control-plane-tests
+    uses: ./.github/workflows/rust-control-plane-tests.yml
+
+  agentic-gateway-tests:
+    name: rust-agentic-gateway-tests
+    uses: ./.github/workflows/rust-agentic-gateway-tests.yml
+
+  ai-proxy-tests:
+    name: rust-ai-proxy-tests
+    uses: ./.github/workflows/rust-ai-proxy-tests.yml
+
+  cli-tooling-tests:
+    name: rust-cli-tooling-tests
+    uses: ./.github/workflows/rust-cli-tooling-tests.yml
 
   gateway-runtime:
     name: rust-gateway-runtime
@@ -42,12 +58,16 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - quality
-      - workspace-tests
+      - core-policy-tests
+      - control-plane-tests
+      - agentic-gateway-tests
+      - ai-proxy-tests
+      - cli-tooling-tests
       - gateway-runtime
       - e2e-harness
     steps:
       - name: Confirm Rust CI modules passed
-        run: echo "rust-ci aggregate passed after quality, workspace, gateway runtime, and e2e harness modules."
+        run: echo "rust-ci aggregate passed after feature-module tests, gateway runtime, and e2e harness modules."
 
   image:
     name: ghcr-image

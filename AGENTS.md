@@ -199,9 +199,17 @@ Rust CI must stay split by business/runtime boundary instead of collapsing back
 into one monolithic GitHub Actions file. Keep `.github/workflows/ci.yml` as the
 thin orchestrator and preserve the branch-protection check named `rust-ci` as
 the aggregate gate. Put actual Rust validation work in reusable workflow files:
-quality/schema/deployment-manifest checks, workspace tests, gateway runtime and
-performance smoke tests, E2E harness execution, and CI image publishing should
-remain separately owned modules.
+quality/schema/deployment-manifest checks, feature-module tests, gateway runtime
+and performance smoke tests, E2E harness execution, and CI image publishing
+should remain separately owned modules.
+
+Feature-module test CI must map to the product/runtime surface it protects, not
+to "the whole workspace". Current test gates are core/config/policy/routing,
+control plane/auth/storage/billing/observability, agentic gateway/MCP/provider
+runtime, AI proxy/upstream proxy, and CLI/tooling/test-harness. If a new crate
+or integration test belongs to one of those surfaces, add it there. If it
+introduces a new ownership surface, add a new reusable test workflow and wire it
+into `rust-ci`.
 
 When adding a new CI concern, extend the smallest matching workflow module or
 add a new reusable module, then wire it into the `rust-ci` aggregate check. Do
