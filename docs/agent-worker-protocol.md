@@ -1,0 +1,337 @@
+---
+title: Agent Worker Protocol
+description: Ferrogate control-plane and execution-plane contract for self-hosted and Ferrogate-managed agent workers.
+permalink: /agent-worker-protocol/
+---
+
+# Agent Worker Protocol
+
+This document defines the execution contract for commercial agent workloads in
+FerroGate.
+
+The goal is not to standardize one framework. The goal is to standardize the
+boundary between:
+
+- a unified FerroGate control plane;
+- pluggable execution backends;
+- replaceable isolation layers;
+- evolving worker languages and agent frameworks.
+
+## Problem
+
+FerroGate needs to support two commercial execution modes:
+
+1. **Customer-hosted workers**: the customer provides a VM or host and installs
+   a supported agent runtime such as Claude Code or Codex. FerroGate connects to
+   that worker remotely and governs it.
+2. **FerroGate-hosted workers**: FerroGate schedules and starts a worker runtime
+   on behalf of the customer and manages its lifecycle.
+
+Both modes must preserve the same tenant, policy, quota, audit, and observability
+contract.
+
+## Design Goals
+
+- One control plane for all agent execution.
+- Multiple execution backends behind the same API.
+- Swappable isolation layers: VM, container, microVM, sandbox, or self-hosted.
+- Framework-neutral worker protocol.
+- Tenant isolation by default.
+- Commercial readiness: quotas, audit trails, billing evidence, rollback,
+  versioning, and customer-visible lifecycle state.
+
+## Non-Goals
+
+- Hard-coding one framework into the protocol.
+- Letting the gateway hot path own planning or memory.
+- Embedding execution-specific logic into the control plane.
+- Requiring the same runtime model for self-hosted and managed workers.
+
+## Reference Architecture
+
+### 1. Control Plane
+
+FerroGate owns:
+
+- tenant and workspace identity;
+- worker registration and versioning;
+- policy and approval rules;
+- quota, billing, and settlement;
+- run lifecycle state;
+- artifact and log indexing;
+- audit and trace evidence;
+- routing to a worker backend.
+
+### 2. Execution Plane
+
+A worker backend executes the agent. It may be:
+
+- a customer VM with Claude Code or Codex installed;
+- a FerroGate-managed container;
+- a microVM-backed runtime;
+- a sandboxed in-process runtime for low-risk workloads.
+
+### 3. Isolation Plane
+
+The isolation layer is an adapter, not a product decision. Supported isolation
+targets should include:
+
+- bare VM;
+- Docker / rootless Docker;
+- gVisor;
+- Kata Containers;
+- Firecracker or equivalent microVM;
+- local sandbox for low-risk developer usage.
+
+## Protocol Model
+
+The protocol should be event-driven and session-scoped.
+
+### Core Objects
+
+- `tenant`
+- `workspace`
+- `worker`
+- `session`
+- `run`
+- `artifact`
+- `checkpoint`
+- `policy_decision`
+- `tool_call`
+
+### Required Operations
+
+- `register_worker`
+- `probe_worker`
+- `start_session`
+- `submit_run`
+- `cancel_run`
+- `resume_run`
+- `heartbeat`
+- `stream_events`
+- `upload_artifact`
+- `fetch_checkpoint`
+- `close_session`
+
+### Required Worker Capabilities
+
+- planning / reasoning loop;
+- tool execution;
+- checkpoint and resume;
+- structured logs;
+- artifact export;
+- external callback for approvals;
+- memory read/write hooks;
+- optional framework-specific adapters.
+
+## Gateway-Mediated Capability Boundary
+
+Managed workers must not get ambient authority just because they run inside a
+sandbox. The worker sandbox is an execution boundary, not a trust boundary.
+
+Self-hosted workers are different: the customer owns the host and controls the
+agent process, local tools, filesystem, network, and credentials. FerroGate
+cannot and should not claim hard enforcement over that environment. For
+self-hosted workers, the protocol boundary is registration, identity,
+telemetry ingestion, lifecycle evidence, and optional customer-configured
+governance callbacks.
+
+Every external action produced by an agent must be mediated by the FerroGate AI
+gateway control plane:
+
+- ordinary tool calls;
+- MCP tool calls;
+- CLI and shell command execution;
+- skill invocation;
+- filesystem access beyond the prepared workspace;
+- browser or network automation;
+- third-party REST API calls;
+- secret and credential access;
+- memory reads and writes that cross the current session boundary.
+
+For managed workers, the worker runtime should request a capability. FerroGate
+decides whether the capability is allowed for the tenant, workspace, worker
+template, session, run, adapter, and isolation backend.
+
+For self-hosted workers, the worker daemon reports observations and lifecycle
+events back to FerroGate. Any local enforcement is the customer's
+responsibility unless the customer explicitly routes the action through
+FerroGate.
+
+Required enforcement layers:
+
+- **Auth**: the request is bound to a tenant, workspace, worker identity,
+  session, run, and API key or service principal.
+- **Policy**: tenant and workspace rules decide allowed tools, MCP servers,
+  CLI commands, skills, domains, methods, paths, and resource limits.
+- **Guardrails**: request, response, prompt, command, tool arguments, and
+  outbound REST payloads can be inspected or rejected before execution.
+- **Approval**: high-risk operations can pause the run and require human or
+  policy-driven approval.
+- **Audit**: every allowed, denied, failed, and approved external action leaves
+  immutable evidence.
+- **Billing**: token, tool, network, runtime, and third-party API usage can be
+  attributed to tenant, workspace, session, and run.
+- **Egress control**: managed workers should default to no direct public
+  network access. External API calls go through a gateway egress proxy or
+  equivalent governed dispatch path.
+
+The worker adapter may implement the framework-specific mechanics, but managed
+adapters must not bypass this capability boundary. Direct unmanaged network
+access, unmanaged CLI execution, direct MCP execution, and direct secret access
+are rejected for managed workers unless a policy explicitly grants a controlled
+gateway-mediated path.
+
+Self-hosted worker events should preserve enough evidence for operators to see
+what happened, but FerroGate treats those events as customer-provided telemetry,
+not as proof that FerroGate enforced the action.
+
+## Worker Backend Types
+
+### A. Self-Hosted Remote Worker
+
+Customer owns the host. FerroGate provides:
+
+- registration token;
+- TLS identity;
+- protocol client;
+- optional policy hints and governed callback endpoints;
+- run dispatch when the customer opts into remote orchestration;
+- status and telemetry collection.
+
+The customer runs the worker daemon, chooses the local framework, and controls
+local tool, network, filesystem, credential, and process access.
+
+### B. FerroGate-Managed Worker
+
+FerroGate provisions the backend, injects the runtime config, and recovers it
+on failure.
+
+This is the default commercial managed path.
+
+### C. Hybrid Worker
+
+The customer owns the execution image, FerroGate owns the orchestration and
+observability layer.
+
+This is the cleanest path for enterprise adoption.
+
+## Agent Framework Strategy
+
+The worker protocol should adapt to the framework, not the other way around.
+
+Recommended support order:
+
+1. Claude Code / Claude Agent SDK for code-oriented workers.
+2. Codex SDK for OpenAI-native coding workers.
+3. Hermes for general-purpose multi-step workers and memory-heavy flows.
+4. A minimal native worker harness for fallback and testing.
+
+Do not expose framework-specific semantics in the control-plane API.
+
+## Lifecycle
+
+1. Tenant registers a worker template or connects a self-hosted worker.
+2. FerroGate issues a worker identity and capability envelope.
+3. A run is scheduled against a session and isolation target.
+4. Worker starts or resumes.
+5. Tool calls and approvals flow through FerroGate governance.
+6. Logs, artifacts, checkpoints, and traces are persisted.
+7. Run completes, fails, or is cancelled.
+8. Session is closed and resources are reclaimed.
+
+## Commercial Requirements
+
+- Per-tenant worker quotas.
+- Per-workspace concurrency caps.
+- Worker runtime version pinning.
+- Signed worker images or package checksums.
+- Runtime capability allowlists.
+- Audit logs for every external action.
+- Retry and recovery semantics.
+- Clear usage and billing dimensions per tenant, workspace, worker, and run.
+
+## API Surface Sketch
+
+### Control Plane
+
+- `POST /admin/v1/worker-templates`
+- `GET /admin/v1/worker-templates`
+- `GET /admin/v1/workers`
+- `POST /admin/v1/workers`
+- `GET /admin/v1/workers/{id}`
+- `POST /admin/v1/workers/{id}/rotate`
+- `POST /admin/v1/workers/{id}/disable`
+
+### Runtime Plane
+
+- `POST /v1/worker-sessions`
+- `POST /v1/worker-sessions/{id}/runs`
+- `POST /v1/worker-sessions/{id}/cancel`
+- `POST /v1/worker-sessions/{id}/resume`
+- `GET /v1/worker-sessions/{id}/events`
+- `GET /v1/worker-sessions/{id}/artifacts`
+
+This is a sketch, not a final API contract.
+
+## Implementation Stages
+
+### Stage 1: Protocol And Identity
+
+- define protocol schema;
+- define worker identity and session lifecycle;
+- add self-hosted worker registration flow.
+
+### Stage 2: Self-Hosted Execution
+
+- add remote worker transport;
+- add heartbeat, event streaming, and artifact upload;
+- add cancellation and resume hooks.
+
+### Stage 3: Managed Execution
+
+- add managed-worker backend interface;
+- add managed session scheduling and cleanup;
+- add per-tenant and per-workspace concurrency control.
+
+### Stage 4: Gateway-Mediated Capability Boundary
+
+- add capability authorization for managed workers;
+- route managed tool, MCP, CLI, skill, REST, secret, memory, and browser access
+  through the AI gateway policy path;
+- ingest self-hosted worker telemetry with explicit trust level.
+
+### Stage 5: Framework Adapters
+
+- add runtime adapters for Claude Code, Codex, and Hermes;
+- normalize framework events into one worker event schema;
+- preserve framework-specific configuration outside the public API.
+
+### Stage 6: Isolation Backends
+
+- add managed provisioning backend;
+- add stronger isolation backends;
+- add billing dimensions and operator dashboards;
+- add enterprise policy controls.
+
+## Tracking Issues
+
+- #81 Agent Worker Protocol and commercial execution boundary.
+- #83 Self-hosted worker registration, remote transport, and telemetry
+  ingestion.
+- #85 FerroGate-managed worker sessions and lifecycle.
+- #86 Gateway-mediated capability boundary for managed worker tool, MCP, CLI,
+  skill, REST, secret, memory, and network access.
+- #84 Pluggable worker framework adapters for Claude Code, Codex, Hermes, and
+  future frameworks.
+- #82 Replaceable isolation backends for managed worker execution.
+
+## Success Criteria
+
+The design is commercially viable only when:
+
+- a tenant can run multiple agents concurrently without cross-tenant leakage;
+- the same control plane can route to self-hosted or managed workers;
+- the worker backend can be swapped without changing client contracts;
+- every run has an audit trail, usage record, and failure timeline;
+- framework upgrades do not require control-plane redesign.
