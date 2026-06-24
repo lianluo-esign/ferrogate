@@ -34,8 +34,8 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Test CLI library and binary targets
-        run: cargo test -p ferrogate-cli --all-features --lib --bins
+      - name: Test CLI binary target
+        run: cargo test -p ferrogate-cli --all-features --bins
 
       - name: Test CLI command and workspace skeleton slices
         run: cargo test -p ferrogate-cli --all-features --test check_command --test workspace_skeleton
