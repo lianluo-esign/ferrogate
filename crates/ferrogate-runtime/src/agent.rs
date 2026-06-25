@@ -9,7 +9,7 @@
 use std::{
     error::Error,
     fmt,
-    io::Write,
+    io::{ErrorKind, Write},
     process::{Command, Output, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -494,11 +494,13 @@ fn invoke_external_agent_provider(
             "tool_result_count": context.tool_results.len(),
         })
         .to_string();
-        stdin.write_all(payload.as_bytes()).map_err(|error| {
-            AgentRuntimeError::Provider(format!(
-                "failed to write external agent provider context: {error}"
-            ))
-        })?;
+        if let Err(error) = stdin.write_all(payload.as_bytes()) {
+            if error.kind() != ErrorKind::BrokenPipe {
+                return Err(AgentRuntimeError::Provider(format!(
+                    "failed to write external agent provider context: {error}"
+                )));
+            }
+        }
     }
 
     wait_for_external_agent_provider(child, config.timeout)
