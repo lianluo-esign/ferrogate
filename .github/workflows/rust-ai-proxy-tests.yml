@@ -18,8 +18,27 @@ env:
 
 jobs:
   ai-proxy-tests:
-    name: rust-ai-proxy-tests
+    name: rust-ai-proxy-tests / ${{ matrix.slice }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: ai_proxy_auth
+            package: ferrogate-cli
+            args: --all-features --test ai_proxy_auth
+          - slice: ai_proxy_dispatch_errors
+            package: ferrogate-cli
+            args: --all-features --test ai_proxy_dispatch_errors
+          - slice: ai_proxy_runtime
+            package: ferrogate-cli
+            args: --all-features --test ai_proxy_runtime
+          - slice: proxy_runtime
+            package: ferrogate-cli
+            args: --all-features --test proxy_runtime
+          - slice: upstream_pool
+            package: ferrogate-cli
+            args: --all-features --test upstream_pool
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,8 +53,5 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Test AI proxy auth, dispatch, and runtime slices
-        run: cargo test -p ferrogate-cli --all-features --test ai_proxy_auth --test ai_proxy_dispatch_errors --test ai_proxy_runtime
-
-      - name: Test upstream proxy runtime and pool slices
-        run: cargo test -p ferrogate-cli --all-features --test proxy_runtime --test upstream_pool
+      - name: Test ${{ matrix.slice }} slice
+        run: cargo test -p "${{ matrix.package }}" ${{ matrix.args }}

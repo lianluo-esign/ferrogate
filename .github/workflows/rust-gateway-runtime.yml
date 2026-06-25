@@ -18,8 +18,16 @@ env:
 
 jobs:
   gateway-runtime:
-    name: rust-gateway-runtime
+    name: rust-gateway-runtime / ${{ matrix.slice }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: runtime_perf
+            args: --test runtime_perf -- --nocapture
+          - slice: ai_proxy_perf
+            args: --test ai_proxy_perf -- --nocapture
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,5 +42,5 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Run performance smoke tests
-        run: cargo test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- --nocapture
+      - name: Run ${{ matrix.slice }} smoke test
+        run: cargo test -p ferrogate-cli ${{ matrix.args }}

@@ -211,6 +211,10 @@ or integration test belongs to one of those surfaces, add it there. If it
 introduces a new ownership surface, add a new reusable test workflow and wire it
 into `rust-ci`.
 
+If a development issue or task becomes an independent product/runtime entity,
+it must get its own focused CI workflow slice for that module instead of being
+only covered by a broad workspace-wide gate.
+
 When adding a new CI concern, extend the smallest matching workflow module or
 add a new reusable module, then wire it into the `rust-ci` aggregate check. Do
 not make an independent required check without also updating branch protection

@@ -18,8 +18,24 @@ env:
 
 jobs:
   agentic-gateway-tests:
-    name: rust-agentic-gateway-tests
+    name: rust-agentic-gateway-tests / ${{ matrix.slice }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: providers
+            package: ferrogate-providers
+            args: --all-features
+          - slice: mcp
+            package: ferrogate-mcp
+            args: --all-features
+          - slice: runtime
+            package: ferrogate-runtime
+            args: --all-features
+          - slice: agentic_lite
+            package: ferrogate-cli
+            args: --all-features --test agentic_lite
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,8 +50,5 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Test providers, MCP, and agent runtime crates
-        run: cargo test -p ferrogate-providers -p ferrogate-mcp -p ferrogate-runtime --all-features
-
-      - name: Test agentic gateway API slice
-        run: cargo test -p ferrogate-cli --all-features --test agentic_lite
+      - name: Test ${{ matrix.slice }} slice
+        run: cargo test -p "${{ matrix.package }}" ${{ matrix.args }}

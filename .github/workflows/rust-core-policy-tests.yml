@@ -18,8 +18,24 @@ env:
 
 jobs:
   core-policy-tests:
-    name: rust-core-policy-tests
+    name: rust-core-policy-tests / ${{ matrix.slice }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: core
+            package: ferrogate-core
+            args: --all-features
+          - slice: config
+            package: ferrogate-config
+            args: --all-features
+          - slice: policy
+            package: ferrogate-policy
+            args: --all-features
+          - slice: routing
+            package: ferrogate-routing
+            args: --all-features
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,5 +50,5 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Test core, config, policy, and routing crates
-        run: cargo test -p ferrogate-core -p ferrogate-config -p ferrogate-policy -p ferrogate-routing --all-features
+      - name: Test ${{ matrix.slice }} slice
+        run: cargo test -p "${{ matrix.package }}" ${{ matrix.args }}

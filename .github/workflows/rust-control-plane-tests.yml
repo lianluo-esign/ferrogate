@@ -18,8 +18,27 @@ env:
 
 jobs:
   control-plane-tests:
-    name: rust-control-plane-tests
+    name: rust-control-plane-tests / ${{ matrix.slice }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: admin
+            package: ferrogate-admin
+            args: --all-features
+          - slice: auth
+            package: ferrogate-auth
+            args: --all-features
+          - slice: storage
+            package: ferrogate-storage
+            args: --all-features
+          - slice: billing
+            package: ferrogate-billing
+            args: --all-features
+          - slice: observability
+            package: ferrogate-observability
+            args: --all-features
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,5 +53,5 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Test control plane, auth, storage, billing, and observability crates
-        run: cargo test -p ferrogate-admin -p ferrogate-auth -p ferrogate-storage -p ferrogate-billing -p ferrogate-observability --all-features
+      - name: Test ${{ matrix.slice }} slice
+        run: cargo test -p "${{ matrix.package }}" ${{ matrix.args }}

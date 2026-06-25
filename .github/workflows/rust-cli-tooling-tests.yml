@@ -18,8 +18,21 @@ env:
 
 jobs:
   cli-tooling-tests:
-    name: rust-cli-tooling-tests
+    name: rust-cli-tooling-tests / ${{ matrix.slice }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: cli_bins
+            package: ferrogate-cli
+            args: --all-features --bins
+          - slice: cli_slices
+            package: ferrogate-cli
+            args: --all-features --test check_command --test workspace_skeleton
+          - slice: test_harness
+            package: ferrogate-test
+            args: --all-features
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,11 +47,5 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Test CLI binary target
-        run: cargo test -p ferrogate-cli --all-features --bins
-
-      - name: Test CLI command and workspace skeleton slices
-        run: cargo test -p ferrogate-cli --all-features --test check_command --test workspace_skeleton
-
-      - name: Test FerroGate test harness package
-        run: cargo test -p ferrogate-test --all-features
+      - name: Test ${{ matrix.slice }} slice
+        run: cargo test -p "${{ matrix.package }}" ${{ matrix.args }}
