@@ -56,10 +56,9 @@ jobs:
   supabase-storage-tests:
     name: rust-supabase-storage-tests
     uses: ./.github/workflows/rust-supabase-storage-tests.yml
-    with:
+    secrets:
       supabase_dsn: ${{ secrets.FERROGATE_SUPABASE_DSN }}
       supabase_tls_ca_cert: ${{ secrets.FERROGATE_SUPABASE_TLS_CA_CERT }}
-    secrets: inherit
 
   rust-ci:
     name: rust-ci

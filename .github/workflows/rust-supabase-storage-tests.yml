@@ -8,17 +8,13 @@ name: Rust Supabase storage tests
 
 on:
   workflow_call:
-    inputs:
+    secrets:
       supabase_dsn:
         description: Optional live Supabase DSN for the live restart scenario.
         required: false
-        default: ""
-        type: string
       supabase_tls_ca_cert:
         description: Optional live Supabase private root CA PEM.
         required: false
-        default: ""
-        type: string
 
 permissions:
   contents: read
@@ -41,23 +37,19 @@ jobs:
             live: true
     steps:
       - name: Checkout
-        if: ${{ matrix.live == false || inputs.supabase_dsn != '' }}
         uses: actions/checkout@v5
 
       - name: Install system dependencies
-        if: ${{ matrix.live == false || inputs.supabase_dsn != '' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config
 
       - name: Install Rust toolchain
-        if: ${{ matrix.live == false || inputs.supabase_dsn != '' }}
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup default "$RUSTUP_TOOLCHAIN"
 
       - name: Build FerroGate and test harness
-        if: ${{ matrix.live == false || inputs.supabase_dsn != '' }}
         run: cargo build -p ferrogate-cli -p ferrogate-test --locked
 
       - name: Run local Supabase-compatible restart scenario
@@ -65,18 +57,19 @@ jobs:
         run: ./target/debug/ferrogate-test supabase-restart
 
       - name: Run live Supabase restart scenario
-        if: ${{ matrix.live == true && inputs.supabase_dsn != '' }}
+        if: ${{ matrix.live == true }}
         env:
-          FERROGATE_SUPABASE_DSN: ${{ inputs.supabase_dsn }}
-          FERROGATE_SUPABASE_TLS_CA_CERT: ${{ inputs.supabase_tls_ca_cert }}
+          FERROGATE_SUPABASE_DSN: ${{ secrets.supabase_dsn }}
+          FERROGATE_SUPABASE_TLS_CA_CERT: ${{ secrets.supabase_tls_ca_cert }}
         run: |
+          if [ -z "$FERROGATE_SUPABASE_DSN" ]; then
+            echo "FERROGATE_SUPABASE_DSN is not configured; skipping optional live Supabase restart scenario."
+            exit 0
+          fi
+
           args=()
           if [ -n "$FERROGATE_SUPABASE_TLS_CA_CERT" ]; then
             printf '%s' "$FERROGATE_SUPABASE_TLS_CA_CERT" > "${RUNNER_TEMP}/supabase-ca.pem"
             args+=(--tls-ca-cert-path "${RUNNER_TEMP}/supabase-ca.pem")
           fi
           ./target/debug/ferrogate-test supabase-live-restart "${args[@]}"
-
-      - name: Skip live Supabase restart scenario
-        if: ${{ matrix.live == true && inputs.supabase_dsn == '' }}
-        run: echo "FERROGATE_SUPABASE_DSN is not configured; skipping optional live Supabase restart scenario."
