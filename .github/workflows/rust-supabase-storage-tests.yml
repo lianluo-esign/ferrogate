@@ -1,0 +1,82 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-27
+# description: FerroGate Supabase durable storage E2E CI module.
+
+name: Rust Supabase storage tests
+
+on:
+  workflow_call:
+    secrets:
+      FERROGATE_SUPABASE_DSN:
+        required: false
+      FERROGATE_SUPABASE_TLS_CA_CERT:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.88.0
+
+jobs:
+  supabase-storage-tests:
+    name: rust-supabase-storage-tests / ${{ matrix.slice }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: local-compatible
+            live: false
+          - slice: live-supabase
+            live: true
+    steps:
+      - name: Checkout
+        if: ${{ matrix.live == false || secrets.FERROGATE_SUPABASE_DSN != '' }}
+        uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        if: ${{ matrix.live == false || secrets.FERROGATE_SUPABASE_DSN != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+
+      - name: Install Rust toolchain
+        if: ${{ matrix.live == false || secrets.FERROGATE_SUPABASE_DSN != '' }}
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup default "$RUSTUP_TOOLCHAIN"
+
+      - name: Build FerroGate and test harness
+        if: ${{ matrix.live == false || secrets.FERROGATE_SUPABASE_DSN != '' }}
+        run: cargo build -p ferrogate-cli -p ferrogate-test --locked
+
+      - name: Run local Supabase-compatible restart scenario
+        if: ${{ matrix.live == false }}
+        run: ./target/debug/ferrogate-test supabase-restart
+
+      - name: Prepare live Supabase CA
+        if: ${{ matrix.live == true && secrets.FERROGATE_SUPABASE_DSN != '' && secrets.FERROGATE_SUPABASE_TLS_CA_CERT != '' }}
+        env:
+          FERROGATE_SUPABASE_TLS_CA_CERT: ${{ secrets.FERROGATE_SUPABASE_TLS_CA_CERT }}
+        run: |
+          printf '%s' "$FERROGATE_SUPABASE_TLS_CA_CERT" > "${RUNNER_TEMP}/supabase-ca.pem"
+
+      - name: Run live Supabase restart scenario
+        if: ${{ matrix.live == true && secrets.FERROGATE_SUPABASE_DSN != '' }}
+        env:
+          FERROGATE_SUPABASE_DSN: ${{ secrets.FERROGATE_SUPABASE_DSN }}
+          FERROGATE_SUPABASE_TLS_CA_CERT: ${{ secrets.FERROGATE_SUPABASE_TLS_CA_CERT }}
+        run: |
+          args=()
+          if [ -n "$FERROGATE_SUPABASE_TLS_CA_CERT" ]; then
+            args+=(--tls-ca-cert-path "${RUNNER_TEMP}/supabase-ca.pem")
+          fi
+          ./target/debug/ferrogate-test supabase-live-restart "${args[@]}"
+
+      - name: Skip live Supabase restart scenario
+        if: ${{ matrix.live == true && secrets.FERROGATE_SUPABASE_DSN == '' }}
+        run: echo "FERROGATE_SUPABASE_DSN is not configured; skipping optional live Supabase restart scenario."

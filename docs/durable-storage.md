@@ -267,6 +267,20 @@ container:
 ./target/debug/ferrogate-test supabase-restart
 ```
 
+The focused `rust-supabase-storage-tests` CI module runs that deterministic
+scenario without cloud credentials. If repository secrets provide
+`FERROGATE_SUPABASE_DSN`, the same module also runs the opt-in live Supabase
+restart scenario:
+
+```bash
+FERROGATE_SUPABASE_DSN="postgresql://..." \
+./target/debug/ferrogate-test supabase-live-restart
+```
+
+Set `FERROGATE_SUPABASE_TLS_CA_CERT` in GitHub secrets only when the live
+Supabase deployment requires a private root CA; the workflow writes it to a
+temporary file and passes `FERROGATE_SUPABASE_TLS_CA_CERT_PATH` to the harness.
+
 Run the Docker-backed PostgreSQL restart test:
 
 ```bash

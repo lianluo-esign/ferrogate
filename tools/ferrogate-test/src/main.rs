@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, supabase-live-restart (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -67,6 +67,7 @@ fn main() -> Result<()> {
         Commands::LibsqlFileRestart(args) => run_libsql_file_restart(&args),
         Commands::LibsqlServerRestart(args) => run_libsql_server_restart(&args),
         Commands::SupabaseRestart(args) => run_supabase_restart(&args),
+        Commands::SupabaseLiveRestart(args) => run_supabase_live_restart(&args),
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
         Commands::MysqlRestart(args) => run_mysql_restart(&args),
@@ -132,6 +133,8 @@ enum Commands {
     LibsqlServerRestart(LocalArgs),
     /// Run local Supabase-compatible Postgres restart durability coverage.
     SupabaseRestart(LocalArgs),
+    /// Opt-in live Supabase restart durability scenario.
+    SupabaseLiveRestart(SupabaseLiveRestartArgs),
     /// Run local Docker-backed PostgreSQL restart durability coverage.
     PostgresRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
@@ -209,6 +212,18 @@ struct TursoLibsqlRestartArgs {
     /// Turso/libSQL auth token. Prefer FERROGATE_LIBSQL_AUTH_TOKEN in shell/CI.
     #[arg(long, env = "FERROGATE_LIBSQL_AUTH_TOKEN")]
     libsql_auth_token: String,
+}
+
+#[derive(Debug, Args)]
+struct SupabaseLiveRestartArgs {
+    #[command(flatten)]
+    local: LocalArgs,
+    /// Supabase direct or session-pooler Postgres DSN. Prefer FERROGATE_SUPABASE_DSN in shell/CI.
+    #[arg(long, env = "FERROGATE_SUPABASE_DSN")]
+    supabase_dsn: String,
+    /// Optional root CA path for private CA deployments.
+    #[arg(long, env = "FERROGATE_SUPABASE_TLS_CA_CERT_PATH")]
+    tls_ca_cert_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -2241,6 +2256,25 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
         true,
     )?;
     println!("supabase-restart scenario passed");
+    Ok(())
+}
+
+fn run_supabase_live_restart(args: &SupabaseLiveRestartArgs) -> Result<()> {
+    let dsn = args.supabase_dsn.trim();
+    if dsn.is_empty() {
+        bail!("--supabase-dsn must not be empty");
+    }
+    run_control_plane_supabase_restart(
+        &args.local.ferrogate_bin,
+        dsn,
+        PostgresRestartTls {
+            mode: "verify_full",
+            ca_cert_path: args.tls_ca_cert_path.as_deref(),
+        },
+        "ferrogate-supabase-live-test",
+        false,
+    )?;
+    println!("supabase-live-restart scenario passed");
     Ok(())
 }
 

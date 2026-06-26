@@ -53,6 +53,11 @@ jobs:
     name: rust-e2e-harness
     uses: ./.github/workflows/rust-e2e-harness.yml
 
+  supabase-storage-tests:
+    name: rust-supabase-storage-tests
+    uses: ./.github/workflows/rust-supabase-storage-tests.yml
+    secrets: inherit
+
   rust-ci:
     name: rust-ci
     runs-on: ubuntu-latest
@@ -65,6 +70,7 @@ jobs:
       - cli-tooling-tests
       - gateway-runtime
       - e2e-harness
+      - supabase-storage-tests
     steps:
       - name: Confirm Rust CI modules passed
         run: echo "rust-ci aggregate passed after feature-module tests, gateway runtime, and e2e harness modules."
