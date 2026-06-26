@@ -92,8 +92,9 @@ Validated end to end:
   metrics, MCP tool metrics, Prometheus, OTLP export, and ClickHouse analytics.
 - Admin API, API key and policy CRUD, static dashboard, config validation,
   reload, status, readiness, and drain.
-- Durable control-plane restart behavior for libSQL file, libSQL server,
-  PostgreSQL, PostgreSQL TLS, MySQL, and MySQL TLS storage providers.
+- Durable control-plane restart behavior for Supabase-compatible PostgreSQL TLS,
+  libSQL file, libSQL server, PostgreSQL, PostgreSQL TLS, MySQL, and MySQL TLS
+  storage providers.
 - Manual TLS, ACME HTTP-01, ACME DNS-01, renewal scheduling, and listener-level
   graceful upgrade handoff.
 - Cluster identity, shared file state, Redis counters, readiness, and drain
@@ -101,8 +102,8 @@ Validated end to end:
 
 Still intentionally scoped as next-stage production work:
 
-- Production hardening beyond the implemented Turso/libSQL, PostgreSQL, and
-  MySQL control-plane providers.
+- Production hardening beyond the implemented Supabase, Turso/libSQL,
+  PostgreSQL, and MySQL control-plane providers.
 - Full hosted Admin API control plane beyond the current implemented resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the

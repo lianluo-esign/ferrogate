@@ -68,6 +68,7 @@ jobs:
             provider: turso_libsql
             required: true
             provider_order:
+              - supabase
               - turso_libsql
               - postgres
               - mysql

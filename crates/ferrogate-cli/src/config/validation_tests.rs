@@ -1935,6 +1935,7 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
     assert_eq!(
         config.storage.provider_order,
         vec![
+            ferrogate_storage::StorageProviderKind::Supabase,
             ferrogate_storage::StorageProviderKind::TursoLibsql,
             ferrogate_storage::StorageProviderKind::Postgres,
             ferrogate_storage::StorageProviderKind::Mysql,
@@ -1952,6 +1953,48 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         ..Config::default()
     };
     config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Supabase,
+            required: true,
+            supabase_dsn_env: Some("FERROGATE_SUPABASE_DSN".into()),
+            postgres_tls_mode: ferrogate_storage::PostgresTlsMode::Require,
+            postgres_pool_size: 2,
+            postgres_connect_timeout_secs: 5,
+            postgres_statement_timeout_millis: 5_000,
+            postgres_schema: Some("ferrogate_control".into()),
+            postgres_search_path: vec!["public".into()],
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    config.validate().unwrap();
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Supabase,
+            required: true,
+            postgres_tls_mode: ferrogate_storage::PostgresTlsMode::Require,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.supabase_dsn_env"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Supabase,
+            required: true,
+            supabase_dsn_env: Some("FERROGATE_SUPABASE_DSN".into()),
+            postgres_tls_mode: ferrogate_storage::PostgresTlsMode::Prefer,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.postgres_tls_mode"));
 
     let config = Config {
         storage: StorageConfig {
@@ -2174,7 +2217,7 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         storage: StorageConfig {
             provider_order: vec![
                 ferrogate_storage::StorageProviderKind::Postgres,
-                ferrogate_storage::StorageProviderKind::TursoLibsql,
+                ferrogate_storage::StorageProviderKind::Supabase,
             ],
             ..StorageConfig::default()
         },

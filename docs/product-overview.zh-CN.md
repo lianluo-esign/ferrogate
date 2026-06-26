@@ -76,14 +76,14 @@
   指标、Prometheus、OTLP export 和 ClickHouse analytics。
 - Admin API、API key 和 policy CRUD、静态 Dashboard、配置验证、reload、status、
   readiness 和 drain。
-- libSQL file、libSQL server、PostgreSQL、PostgreSQL TLS、MySQL 和 MySQL TLS
-  storage provider 的控制面重启行为。
+- Supabase-compatible PostgreSQL TLS、libSQL file、libSQL server、PostgreSQL、
+  PostgreSQL TLS、MySQL 和 MySQL TLS storage provider 的控制面重启行为。
 - 手动 TLS、ACME HTTP-01、ACME DNS-01、续期调度和监听器级 graceful upgrade handoff。
 - 集群身份、共享文件状态、Redis 计数器、readiness 和 drain runbook。
 
 仍有意留作下一阶段生产工作的范围：
 
-- 在已实现的 Turso/libSQL、PostgreSQL、MySQL 控制面 provider 之上的生产硬化。
+- 在已实现的 Supabase、Turso/libSQL、PostgreSQL、MySQL 控制面 provider 之上的生产硬化。
 - 当前已实现资源之外的完整 hosted Admin API control plane。
 - Semantic/vector cache matching。当前已实现的缓存是 exact-match。
 - 内置 Cloudflare provider 和通用外部 hook 边界之外的更多 DNS provider。

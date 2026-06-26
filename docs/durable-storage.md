@@ -8,7 +8,7 @@
 
 ---
 title: Durable Control-Plane Storage
-description: Turso/libSQL, PostgreSQL, and MySQL storage guidance for FerroGate control-plane state.
+description: Supabase, Turso/libSQL, PostgreSQL, and MySQL storage guidance for FerroGate control-plane state.
 permalink: /durable-storage/
 ---
 
@@ -40,12 +40,56 @@ The default commercial provider order is fixed in config validation:
 
 ```toml
 [storage]
-provider_order = ["turso_libsql", "postgres", "mysql"]
+provider_order = ["supabase", "turso_libsql", "postgres", "mysql"]
 ```
 
-`turso_libsql` is the default commercial cloud provider. PostgreSQL and MySQL
-are also implemented for self-hosted/enterprise relational deployments behind
-the same repository contract instead of gateway-core special cases.
+`supabase` is the default commercial cloud provider. It uses the PostgreSQL wire
+protocol and checked-in PostgreSQL schema while preserving Supabase-specific
+config and Admin/status evidence. Turso/libSQL, PostgreSQL, and MySQL remain
+implemented compatibility paths behind the same repository contract instead of
+gateway-core special cases.
+
+## Supabase
+
+Use a Supabase direct or session-pooler DSN through an environment variable so
+passwords never appear in the config file:
+
+```yaml
+storage:
+  provider: supabase
+  required: true
+  provider_order:
+    - supabase
+    - turso_libsql
+    - postgres
+    - mysql
+  supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
+  postgres_pool_size: 4
+  postgres_tls_mode: verify_full
+  postgres_tls_ca_cert_path: "/etc/ferrogate/supabase-ca.pem"
+  postgres_connect_timeout_secs: 5
+  postgres_statement_timeout_millis: 30000
+  postgres_schema: ferrogate_control
+  postgres_search_path:
+    - public
+  migration_mode: auto
+```
+
+Runtime behavior:
+
+- `storage.required: true` fails closed if Supabase cannot be initialized.
+- `migration_mode: auto` runs the checked-in PostgreSQL schema at startup.
+- Admin/status evidence reports `provider: supabase` without returning the DSN.
+- `supabase_dsn_env` is required for Supabase so credentials stay secret-backed.
+- Supabase requires `postgres_tls_mode: require`, `verify_ca`, or `verify_full`.
+- Direct and session-pooler DSNs are supported first. Transaction-pooler mode
+  must not rely on prepared statements unless the selected Rust client path is
+  explicitly verified for that mode.
+- Control-plane resources use the same document-store contract as the existing
+  PostgreSQL implementation.
+
+The schema file is
+[`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
 
 ## Turso Cloud / Remote libSQL
 
@@ -56,6 +100,7 @@ storage:
   provider: turso_libsql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -86,6 +131,7 @@ storage:
   provider: postgres
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -141,6 +187,7 @@ storage:
   provider: mysql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -186,6 +233,7 @@ storage:
   provider: turso_libsql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -210,6 +258,13 @@ Run the deterministic local libSQL restart test:
 
 ```bash
 ./target/debug/ferrogate-test libsql-file-restart
+```
+
+Run the Supabase-compatible restart test against a local TLS-enabled PostgreSQL
+container:
+
+```bash
+./target/debug/ferrogate-test supabase-restart
 ```
 
 Run the Docker-backed PostgreSQL restart test:
@@ -244,8 +299,8 @@ It then deletes or archives those resources, restarts again, and verifies the
 post-cleanup state.
 
 `ferrogate-test ci` includes the local libSQL restart, local libSQL server
-restart, PostgreSQL restart, PostgreSQL TLS restart, MySQL restart, and MySQL
-TLS restart tests:
+restart, Supabase-compatible restart, PostgreSQL restart, PostgreSQL TLS
+restart, MySQL restart, and MySQL TLS restart tests:
 
 ```bash
 ./target/debug/ferrogate-test ci
@@ -265,9 +320,12 @@ HTTPS-only workaround.
 
 ## Backup And Export
 
+For Supabase, use Supabase managed backups/PITR for the database behind
+`storage.supabase_dsn_env`. FerroGate does not copy control-plane state into the
+analytics warehouse.
+
 For Turso Cloud, use the provider's managed backup/export workflow for the
-database that backs `storage.libsql_url`. FerroGate does not copy control-plane
-state into the analytics warehouse.
+database that backs `storage.libsql_url`.
 
 For PostgreSQL, use your managed PostgreSQL backup/PITR workflow for the
 database behind `storage.postgres_dsn_env`.
@@ -284,6 +342,10 @@ policy data.
 
 - Missing `storage.libsql_url` fails config validation when
   `provider: turso_libsql`.
+- Missing `storage.supabase_dsn_env` fails config validation when
+  `provider: supabase`.
+- Supabase rejects plaintext or opportunistic TLS modes; use
+  `postgres_tls_mode: require`, `verify_ca`, or `verify_full`.
 - Remote `libsql://` and `https://` URLs require either
   `storage.libsql_auth_token` or `storage.libsql_auth_token_env`.
 - Local `file://` URLs do not use a token.

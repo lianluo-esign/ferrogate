@@ -1085,6 +1085,39 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         ))
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
+    if storage.provider == ferrogate_storage::StorageProviderKind::Supabase {
+        let dsn = storage_supabase_dsn(storage)?;
+        return RuntimeStorageRepositories::supabase(
+            PostgresStorageConfig {
+                dsn,
+                pool_size: storage.postgres_pool_size,
+                tls_mode: storage.postgres_tls_mode,
+                tls_ca_cert_path: storage
+                    .postgres_tls_ca_cert_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(ToOwned::to_owned),
+                connect_timeout_secs: storage.postgres_connect_timeout_secs,
+                statement_timeout_millis: storage.postgres_statement_timeout_millis,
+                schema: storage
+                    .postgres_schema
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|schema| !schema.is_empty())
+                    .map(ToOwned::to_owned),
+                search_path: storage
+                    .postgres_search_path
+                    .iter()
+                    .map(|item| item.trim())
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            },
+            storage_options(control_plane),
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"));
+    }
     if storage.provider == ferrogate_storage::StorageProviderKind::Postgres {
         let dsn = storage_postgres_dsn(storage)?;
         return RuntimeStorageRepositories::postgres(
@@ -1232,6 +1265,26 @@ fn storage_postgres_dsn(storage: &StorageConfig) -> anyhow::Result<String> {
     if dsn.trim().is_empty() {
         anyhow::bail!(
             "field storage.postgres_dsn_env: environment variable {env_name} must not be empty"
+        );
+    }
+    Ok(dsn)
+}
+
+fn storage_supabase_dsn(storage: &StorageConfig) -> anyhow::Result<String> {
+    let env_name = storage
+        .supabase_dsn_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("field storage.supabase_dsn_env is required"))?;
+    let dsn = env::var(env_name).map_err(|_| {
+        anyhow::anyhow!(
+            "field storage.supabase_dsn_env: environment variable {env_name} is not set"
+        )
+    })?;
+    if dsn.trim().is_empty() {
+        anyhow::bail!(
+            "field storage.supabase_dsn_env: environment variable {env_name} must not be empty"
         );
     }
     Ok(dsn)

@@ -905,6 +905,8 @@ pub(crate) struct StorageConfig {
     pub(crate) postgres_dsn: Option<String>,
     #[serde(default)]
     pub(crate) postgres_dsn_env: Option<String>,
+    #[serde(default)]
+    pub(crate) supabase_dsn_env: Option<String>,
     #[serde(default = "default_postgres_pool_size")]
     pub(crate) postgres_pool_size: usize,
     #[serde(default)]
@@ -1427,6 +1429,7 @@ impl Default for StorageConfig {
             libsql_auth_token_env: None,
             postgres_dsn: None,
             postgres_dsn_env: None,
+            supabase_dsn_env: None,
             postgres_pool_size: default_postgres_pool_size(),
             postgres_tls_mode: PostgresTlsMode::default(),
             postgres_tls_ca_cert_path: None,

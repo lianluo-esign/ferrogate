@@ -270,6 +270,7 @@ storage:
   provider: turso_libsql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -380,6 +381,7 @@ storage:
   provider: postgres
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -425,6 +427,58 @@ storage:
 }
 
 #[test]
+fn parses_yaml_storage_supabase_operational_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.yaml");
+    std::fs::write(
+        &path,
+        r#"
+listen: "127.0.0.1:8080"
+storage:
+  provider: supabase
+  required: true
+  provider_order:
+    - supabase
+    - turso_libsql
+    - postgres
+    - mysql
+  supabase_dsn_env: FERROGATE_SUPABASE_DSN
+  postgres_pool_size: 3
+  postgres_tls_mode: require
+  postgres_connect_timeout_secs: 7
+  postgres_statement_timeout_millis: 4000
+  postgres_schema: ferrogate_control
+  postgres_search_path:
+    - public
+  migration_mode: auto
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert_eq!(
+        config.storage.provider,
+        ferrogate_storage::StorageProviderKind::Supabase
+    );
+    assert_eq!(
+        config.storage.supabase_dsn_env.as_deref(),
+        Some("FERROGATE_SUPABASE_DSN")
+    );
+    assert_eq!(config.storage.postgres_pool_size, 3);
+    assert_eq!(
+        config.storage.postgres_tls_mode,
+        ferrogate_storage::PostgresTlsMode::Require
+    );
+    assert_eq!(config.storage.postgres_connect_timeout_secs, 7);
+    assert_eq!(config.storage.postgres_statement_timeout_millis, 4000);
+    assert_eq!(
+        config.storage.postgres_schema.as_deref(),
+        Some("ferrogate_control")
+    );
+    assert_eq!(config.storage.postgres_search_path, ["public"]);
+}
+
+#[test]
 fn parses_yaml_storage_mysql_operational_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.yaml");
@@ -436,6 +490,7 @@ storage:
   provider: mysql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -484,6 +539,7 @@ storage:
   provider: turso_libsql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql

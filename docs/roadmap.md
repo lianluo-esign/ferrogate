@@ -85,8 +85,9 @@ These areas are implemented in the current open-source gateway:
   readiness, drain, API-key CRUD, policy CRUD, gateway-config CRUD, prompt
   template CRUD/render, tool approvals, request-log exports, and dashboard
   visibility.
-- Durable storage provider abstraction plus Turso/libSQL, PostgreSQL, and MySQL
-  control-plane storage wiring for configured control-plane resources.
+- Durable storage provider abstraction plus Supabase, Turso/libSQL,
+  PostgreSQL, and MySQL control-plane storage wiring for configured
+  control-plane resources.
 - Opt-in agent runtime primitives in `ferrogate-runtime`: a deny-by-default
   Wasmtime sandbox executor and a bounded harness/provider boundary. These are
   not wired into default gateway endpoints yet.

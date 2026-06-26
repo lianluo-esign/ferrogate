@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -66,6 +66,7 @@ fn main() -> Result<()> {
         Commands::GatewayApi(args) => run_gateway_api(&args),
         Commands::LibsqlFileRestart(args) => run_libsql_file_restart(&args),
         Commands::LibsqlServerRestart(args) => run_libsql_server_restart(&args),
+        Commands::SupabaseRestart(args) => run_supabase_restart(&args),
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
         Commands::MysqlRestart(args) => run_mysql_restart(&args),
@@ -79,6 +80,7 @@ fn main() -> Result<()> {
             run_gateway_api(&args.local)?;
             run_libsql_file_restart(&args.local)?;
             run_libsql_server_restart(&args.local)?;
+            run_supabase_restart(&args.local)?;
             run_postgres_restart(&args.local)?;
             run_postgres_tls_restart(&args.local)?;
             run_mysql_restart(&args.local)?;
@@ -128,6 +130,8 @@ enum Commands {
     LibsqlFileRestart(LocalArgs),
     /// Run local Docker-backed libSQL server protocol restart durability coverage.
     LibsqlServerRestart(LocalArgs),
+    /// Run local Supabase-compatible Postgres restart durability coverage.
+    SupabaseRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL restart durability coverage.
     PostgresRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
@@ -283,9 +287,10 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert_eq!(body["storage"]["durable"], false);
         assert_eq!(body["storage"]["implemented"], true);
         assert_eq!(body["storage"]["contract_version"], 1);
-        assert_eq!(body["storage"]["provider_order"][0], "turso_libsql");
-        assert_eq!(body["storage"]["provider_order"][1], "postgres");
-        assert_eq!(body["storage"]["provider_order"][2], "mysql");
+        assert_eq!(body["storage"]["provider_order"][0], "supabase");
+        assert_eq!(body["storage"]["provider_order"][1], "turso_libsql");
+        assert_eq!(body["storage"]["provider_order"][2], "postgres");
+        assert_eq!(body["storage"]["provider_order"][3], "mysql");
         assert_eq!(body["analytics"]["provider"], "vector");
         assert_eq!(body["analytics"]["enabled"], false);
         assert_eq!(body["analytics"]["active"], false);
@@ -2189,6 +2194,56 @@ fn run_libsql_server_restart(args: &LocalArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_supabase_restart(args: &LocalArgs) -> Result<()> {
+    let host_port = free_port()?;
+    let cert_dir = tempfile::tempdir()?;
+    let certs = write_postgres_tls_certs(cert_dir.path())?;
+    let _cleanup = PostgresCleanup;
+    stop_postgres_container();
+    let cert_mount = format!("{}:/ferrogate-postgres-tls:ro", cert_dir.path().display());
+    docker_args([
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        POSTGRES_CONTAINER.to_string(),
+        "-e".to_string(),
+        "POSTGRES_PASSWORD=postgres".to_string(),
+        "-e".to_string(),
+        "POSTGRES_DB=ferrogate".to_string(),
+        "-p".to_string(),
+        format!("127.0.0.1:{host_port}:5432"),
+        "-v".to_string(),
+        cert_mount,
+        "--entrypoint".to_string(),
+        "sh".to_string(),
+        POSTGRES_IMAGE.to_string(),
+        "-c".to_string(),
+        r#"set -eu
+mkdir -p /var/lib/postgresql/tls
+cp /ferrogate-postgres-tls/server.crt /var/lib/postgresql/tls/server.crt
+cp /ferrogate-postgres-tls/server.key /var/lib/postgresql/tls/server.key
+chown postgres:postgres /var/lib/postgresql/tls/server.crt /var/lib/postgresql/tls/server.key
+chmod 600 /var/lib/postgresql/tls/server.key
+exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresql/tls/server.crt -c ssl_key_file=/var/lib/postgresql/tls/server.key"#
+            .to_string(),
+    ])?;
+    wait_for_postgres_server()?;
+    let dsn =
+        format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=require");
+    run_control_plane_supabase_restart(
+        &args.ferrogate_bin,
+        &dsn,
+        PostgresRestartTls {
+            mode: "verify_full",
+            ca_cert_path: Some(certs.ca_cert_path.as_path()),
+        },
+        "ferrogate-supabase-test",
+        true,
+    )?;
+    println!("supabase-restart scenario passed");
+    Ok(())
+}
+
 fn run_postgres_restart(args: &LocalArgs) -> Result<()> {
     let host_port = free_port()?;
     let _cleanup = PostgresCleanup;
@@ -2409,6 +2464,24 @@ fn run_control_plane_postgres_restart(
     )
 }
 
+fn run_control_plane_supabase_restart(
+    ferrogate_bin: &Path,
+    supabase_dsn: &str,
+    tls: PostgresRestartTls<'_>,
+    resource_prefix: &str,
+    verify_deleted_after_restart: bool,
+) -> Result<()> {
+    run_control_plane_restart(
+        ferrogate_bin,
+        ControlPlaneRestartStorage::Supabase {
+            dsn: supabase_dsn,
+            tls,
+        },
+        resource_prefix,
+        verify_deleted_after_restart,
+    )
+}
+
 fn run_control_plane_mysql_restart(
     ferrogate_bin: &Path,
     mysql_dsn: &str,
@@ -2449,6 +2522,10 @@ enum ControlPlaneRestartStorage<'a> {
         dsn: &'a str,
         tls: PostgresRestartTls<'a>,
     },
+    Supabase {
+        dsn: &'a str,
+        tls: PostgresRestartTls<'a>,
+    },
     Mysql {
         dsn: &'a str,
         tls: MySqlRestartTls<'a>,
@@ -2470,18 +2547,18 @@ fn run_control_plane_restart(
     );
     let api_key_body = serde_json::json!({
         "id": resource_id,
-        "name": "Turso restart test key",
+        "name": "Durable storage restart test key",
         "key": format!("{resource_id}-secret"),
         "scopes": ["models.read", "chat.completions", "prompts.render"],
         "allowed_models": ["fast-chat"],
-        "organization_id": "org_turso_e2e",
+        "organization_id": "org_storage_e2e",
         "project_id": "project_restart"
     })
     .to_string();
     let gateway_config_id = format!("{resource_id}-profile");
     let gateway_config_body = serde_json::json!({
         "id": gateway_config_id,
-        "name": "Turso restart profile",
+        "name": "Durable storage restart profile",
         "revision": 7,
         "api_key_ids": [resource_id],
         "cache_enabled": false
@@ -2495,8 +2572,8 @@ fn run_control_plane_restart(
             "api_key_ids": [resource_id],
             "models": ["fast-chat"],
             "providers": ["openai"],
-            "code": "blocked_by_turso_restart_test",
-            "message": "blocked by Turso restart test",
+            "code": "blocked_by_storage_restart_test",
+            "message": "blocked by durable storage restart test",
             "enabled": enabled
         })
         .to_string()
@@ -2506,7 +2583,7 @@ fn run_control_plane_restart(
     let prompt_template_id = format!("{resource_id}-prompt");
     let prompt_template_body = serde_json::json!({
         "id": prompt_template_id,
-        "name": "Turso restart prompt",
+        "name": "Durable storage restart prompt",
         "model": "fast-chat",
         "variables": [{"name": "topic", "required": true}],
         "version": {
@@ -2518,7 +2595,7 @@ fn run_control_plane_restart(
     let agent_upstream_id = format!("{resource_id}-agent-upstream");
     let agent_upstream_body = serde_json::json!({
         "id": agent_upstream_id,
-        "name": "Turso restart agent upstream",
+        "name": "Durable storage restart agent upstream",
         "description": "Durable upstream",
         "enabled": true,
         "protocol": "a2a",
@@ -2985,9 +3062,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["durable"], true);
             assert_eq!(body["storage"]["implemented"], true);
             assert_eq!(body["storage"]["required"], true);
-            assert_eq!(body["storage"]["provider_order"][0], "turso_libsql");
-            assert_eq!(body["storage"]["provider_order"][1], "postgres");
-            assert_eq!(body["storage"]["provider_order"][2], "mysql");
+            assert_eq!(body["storage"]["provider_order"][0], "supabase");
+            assert_eq!(body["storage"]["provider_order"][1], "turso_libsql");
+            assert_eq!(body["storage"]["provider_order"][2], "postgres");
+            assert_eq!(body["storage"]["provider_order"][3], "mysql");
             assert_secret_redacted(&body.to_string());
             Ok(())
         })
@@ -3002,7 +3080,7 @@ impl TursoRestartHarness {
             200,
             |body| {
                 assert_eq!(body["key"]["id"], id);
-                assert_eq!(body["key"]["name"], "Turso restart test key");
+                assert_eq!(body["key"]["name"], "Durable storage restart test key");
                 assert_eq!(body["key"]["key_source"], "inline");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
@@ -3028,7 +3106,10 @@ impl TursoRestartHarness {
             200,
             |body| {
                 assert_eq!(body["gateway_config"]["id"], id);
-                assert_eq!(body["gateway_config"]["name"], "Turso restart profile");
+                assert_eq!(
+                    body["gateway_config"]["name"],
+                    "Durable storage restart profile"
+                );
                 assert_eq!(body["gateway_config"]["revision"], 7);
                 assert_eq!(body["gateway_config"]["cache_enabled"], false);
                 assert_secret_redacted(&body.to_string());
@@ -3132,8 +3213,11 @@ impl TursoRestartHarness {
             r#"{"model":"fast-chat","messages":[{"role":"user","content":"durable policy check"}]}"#,
             403,
             |body| {
-                assert_eq!(body["error"]["code"], "blocked_by_turso_restart_test");
-                assert_eq!(body["error"]["message"], "blocked by Turso restart test");
+                assert_eq!(body["error"]["code"], "blocked_by_storage_restart_test");
+                assert_eq!(
+                    body["error"]["message"],
+                    "blocked by durable storage restart test"
+                );
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },
@@ -3149,7 +3233,10 @@ impl TursoRestartHarness {
             200,
             |body| {
                 assert_eq!(body["prompt_template"]["id"], id);
-                assert_eq!(body["prompt_template"]["name"], "Turso restart prompt");
+                assert_eq!(
+                    body["prompt_template"]["name"],
+                    "Durable storage restart prompt"
+                );
                 assert_eq!(body["prompt_template"]["status"], status);
                 assert_eq!(body["prompt_template"]["active_revision"], 1);
                 assert_secret_redacted(&body.to_string());
@@ -4086,6 +4173,7 @@ impl ControlPlaneRestartStorage<'_> {
     fn provider_name(self) -> &'static str {
         match self {
             ControlPlaneRestartStorage::Libsql { .. } => "turso_libsql",
+            ControlPlaneRestartStorage::Supabase { .. } => "supabase",
             ControlPlaneRestartStorage::Postgres { .. } => "postgres",
             ControlPlaneRestartStorage::Mysql { .. } => "mysql",
         }
@@ -4101,6 +4189,9 @@ impl ControlPlaneRestartStorage<'_> {
             }
             ControlPlaneRestartStorage::Postgres { dsn, .. } => {
                 command.env("FERROGATE_POSTGRES_DSN", dsn);
+            }
+            ControlPlaneRestartStorage::Supabase { dsn, .. } => {
+                command.env("FERROGATE_SUPABASE_DSN", dsn);
             }
             ControlPlaneRestartStorage::Mysql { dsn, .. } => {
                 command.env("FERROGATE_MYSQL_DSN", dsn);
@@ -4124,6 +4215,7 @@ impl ControlPlaneRestartStorage<'_> {
   provider: turso_libsql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
@@ -4146,10 +4238,43 @@ impl ControlPlaneRestartStorage<'_> {
   provider: postgres
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
+  postgres_pool_size: 2
+  postgres_tls_mode: {tls_mode}{ca_cert_path}
+  postgres_connect_timeout_secs: 5
+  postgres_statement_timeout_millis: 30000
+  postgres_schema: ferrogate_control
+  postgres_search_path:
+    - public
+  migration_mode: auto"#,
+                    tls_mode = tls.mode,
+                    ca_cert_path = ca_cert_path
+                )
+            }
+            ControlPlaneRestartStorage::Supabase { tls, .. } => {
+                let ca_cert_path = tls
+                    .ca_cert_path
+                    .map(|path| {
+                        format!(
+                            "\n  postgres_tls_ca_cert_path: {}",
+                            toml_basic_string(&path.to_string_lossy())
+                        )
+                    })
+                    .unwrap_or_default();
+                format!(
+                    r#"storage:
+  provider: supabase
+  required: true
+  provider_order:
+    - supabase
+    - turso_libsql
+    - postgres
+    - mysql
+  supabase_dsn_env: FERROGATE_SUPABASE_DSN
   postgres_pool_size: 2
   postgres_tls_mode: {tls_mode}{ca_cert_path}
   postgres_connect_timeout_secs: 5
@@ -4177,6 +4302,7 @@ impl ControlPlaneRestartStorage<'_> {
   provider: mysql
   required: true
   provider_order:
+    - supabase
     - turso_libsql
     - postgres
     - mysql

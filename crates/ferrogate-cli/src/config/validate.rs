@@ -511,10 +511,10 @@ impl Config {
             }
         }
         if self.storage.provider_order.first()
-            != Some(&ferrogate_storage::StorageProviderKind::TursoLibsql)
+            != Some(&ferrogate_storage::StorageProviderKind::Supabase)
         {
             bail!(
-                "field storage.provider_order[0]: turso_libsql must be the default commercial cloud provider"
+                "field storage.provider_order[0]: supabase must be the default commercial cloud provider"
             );
         }
         if !self.storage.provider.implemented() {
@@ -522,6 +522,17 @@ impl Config {
                 "field storage.provider: provider {} is not implemented yet",
                 self.storage.provider.as_str()
             );
+        }
+        if self.storage.provider == ferrogate_storage::StorageProviderKind::Supabase {
+            let has_dsn_env = self
+                .storage
+                .supabase_dsn_env
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty());
+            if !has_dsn_env {
+                bail!("field storage.supabase_dsn_env: required when storage.provider is supabase");
+            }
+            self.validate_postgres_wire_storage("storage.supabase")?;
         }
         if self.storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
             let Some(url) = self.storage.libsql_url.as_deref() else {
@@ -574,32 +585,7 @@ impl Config {
                     "field storage.postgres_dsn_env: required when storage.provider is postgres unless storage.postgres_dsn is set"
                 );
             }
-            if self.storage.postgres_pool_size == 0 {
-                bail!("field storage.postgres_pool_size: must be greater than zero");
-            }
-            if self.storage.postgres_connect_timeout_secs == 0 {
-                bail!("field storage.postgres_connect_timeout_secs: must be greater than zero");
-            }
-            if self.storage.postgres_statement_timeout_millis == 0 {
-                bail!("field storage.postgres_statement_timeout_millis: must be greater than zero");
-            }
-            if self
-                .storage
-                .postgres_tls_ca_cert_path
-                .as_deref()
-                .is_some_and(|path| path.trim().is_empty())
-            {
-                bail!("field storage.postgres_tls_ca_cert_path: must not be empty when set");
-            }
-            if let Some(schema) = self.storage.postgres_schema.as_deref() {
-                validate_postgres_identifier("storage.postgres_schema", schema)?;
-            }
-            for (index, item) in self.storage.postgres_search_path.iter().enumerate() {
-                validate_postgres_identifier(
-                    &format!("storage.postgres_search_path[{index}]"),
-                    item,
-                )?;
-            }
+            self.validate_postgres_wire_storage("storage.postgres")?;
         }
         if self.storage.provider == ferrogate_storage::StorageProviderKind::Mysql {
             let has_inline_dsn = self
@@ -644,6 +630,44 @@ impl Config {
         if self.storage.admin_list_default_limit > self.storage.admin_list_max_limit {
             bail!(
                 "field storage.admin_list_default_limit: must be less than or equal to storage.admin_list_max_limit"
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_postgres_wire_storage(&self, field_prefix: &str) -> AnyResult<()> {
+        if self.storage.postgres_pool_size == 0 {
+            bail!("field storage.postgres_pool_size: must be greater than zero");
+        }
+        if self.storage.postgres_connect_timeout_secs == 0 {
+            bail!("field storage.postgres_connect_timeout_secs: must be greater than zero");
+        }
+        if self.storage.postgres_statement_timeout_millis == 0 {
+            bail!("field storage.postgres_statement_timeout_millis: must be greater than zero");
+        }
+        if self
+            .storage
+            .postgres_tls_ca_cert_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            bail!("field storage.postgres_tls_ca_cert_path: must not be empty when set");
+        }
+        if let Some(schema) = self.storage.postgres_schema.as_deref() {
+            validate_postgres_identifier("storage.postgres_schema", schema)?;
+        }
+        for (index, item) in self.storage.postgres_search_path.iter().enumerate() {
+            validate_postgres_identifier(&format!("storage.postgres_search_path[{index}]"), item)?;
+        }
+        if field_prefix == "storage.supabase"
+            && matches!(
+                self.storage.postgres_tls_mode,
+                ferrogate_storage::PostgresTlsMode::Disable
+                    | ferrogate_storage::PostgresTlsMode::Prefer
+            )
+        {
+            bail!(
+                "field storage.postgres_tls_mode: supabase requires TLS mode require, verify_ca, or verify_full"
             );
         }
         Ok(())

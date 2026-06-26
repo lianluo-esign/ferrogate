@@ -4143,6 +4143,7 @@
         "type": "string",
         "enum": [
           "memory",
+          "supabase",
           "turso_libsql",
           "postgres",
           "mysql"

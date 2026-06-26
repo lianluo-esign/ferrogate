@@ -32,6 +32,7 @@ use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
+    StorageProviderKind::Supabase,
     StorageProviderKind::TursoLibsql,
     StorageProviderKind::Postgres,
     StorageProviderKind::Mysql,
@@ -42,6 +43,7 @@ pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
 pub enum StorageProviderKind {
     #[default]
     Memory,
+    Supabase,
     TursoLibsql,
     Postgres,
     Mysql,
@@ -51,6 +53,7 @@ impl StorageProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             StorageProviderKind::Memory => "memory",
+            StorageProviderKind::Supabase => "supabase",
             StorageProviderKind::TursoLibsql => "turso_libsql",
             StorageProviderKind::Postgres => "postgres",
             StorageProviderKind::Mysql => "mysql",
@@ -65,6 +68,7 @@ impl StorageProviderKind {
         matches!(
             self,
             StorageProviderKind::Memory
+                | StorageProviderKind::Supabase
                 | StorageProviderKind::TursoLibsql
                 | StorageProviderKind::Postgres
                 | StorageProviderKind::Mysql
@@ -1931,11 +1935,23 @@ impl RuntimeStorageRepositories {
         config: PostgresStorageConfig,
         options: RuntimeStorageOptions,
     ) -> Result<Self, StorageError> {
-        let backend = RuntimeStorageBackend::new(
-            StorageProviderKind::Postgres,
-            options.required,
-            options.provider_order,
-        )?;
+        Self::postgres_with_provider(StorageProviderKind::Postgres, config, options)
+    }
+
+    pub fn supabase(
+        config: PostgresStorageConfig,
+        options: RuntimeStorageOptions,
+    ) -> Result<Self, StorageError> {
+        Self::postgres_with_provider(StorageProviderKind::Supabase, config, options)
+    }
+
+    fn postgres_with_provider(
+        provider: StorageProviderKind,
+        config: PostgresStorageConfig,
+        options: RuntimeStorageOptions,
+    ) -> Result<Self, StorageError> {
+        let backend =
+            RuntimeStorageBackend::new(provider, options.required, options.provider_order)?;
         let request_log_retention_records = options.request_log_retention_records;
         let audit_event_retention_records = options.audit_event_retention_records;
         let bootstrap = options.control_plane;
@@ -3097,6 +3113,7 @@ mod tests {
         assert_eq!(
             evidence.provider_order,
             vec![
+                StorageProviderKind::Supabase,
                 StorageProviderKind::TursoLibsql,
                 StorageProviderKind::Postgres,
                 StorageProviderKind::Mysql,
@@ -3107,6 +3124,11 @@ mod tests {
             RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, true, Vec::new()).unwrap();
         assert!(turso_backend.evidence().durable);
         assert!(turso_backend.evidence().implemented);
+
+        let supabase_backend =
+            RuntimeStorageBackend::new(StorageProviderKind::Supabase, true, Vec::new()).unwrap();
+        assert!(supabase_backend.evidence().durable);
+        assert!(supabase_backend.evidence().implemented);
 
         let postgres_backend =
             RuntimeStorageBackend::new(StorageProviderKind::Postgres, true, Vec::new()).unwrap();
