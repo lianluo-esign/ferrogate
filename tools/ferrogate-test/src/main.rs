@@ -2245,6 +2245,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
     wait_for_postgres_server()?;
     let dsn =
         format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=require");
+    wait_for_postgres_query()?;
     run_control_plane_supabase_restart(
         &args.ferrogate_bin,
         &dsn,
@@ -2298,6 +2299,7 @@ fn run_postgres_restart(args: &LocalArgs) -> Result<()> {
     wait_for_postgres_server()?;
     let dsn =
         format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=disable");
+    wait_for_postgres_query()?;
     run_control_plane_postgres_restart(
         &args.ferrogate_bin,
         &dsn,
@@ -2348,6 +2350,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
     wait_for_postgres_server()?;
     let dsn =
         format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=require");
+    wait_for_postgres_query()?;
     run_control_plane_postgres_restart(
         &args.ferrogate_bin,
         &dsn,
@@ -6998,6 +7001,42 @@ fn wait_for_postgres_server() -> Result<()> {
         .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
         .unwrap_or_default();
     bail!("timed out waiting for local PostgreSQL server; logs: {logs}");
+}
+
+fn wait_for_postgres_query() -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        if Command::new("docker")
+            .args([
+                "exec",
+                "-e",
+                "PGPASSWORD=postgres",
+                POSTGRES_CONTAINER,
+                "psql",
+                "-U",
+                "postgres",
+                "-d",
+                "ferrogate",
+                "-c",
+                "select 1",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    let logs = Command::new("docker")
+        .args(["logs", POSTGRES_CONTAINER, "--tail", "120"])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
+        .unwrap_or_default();
+    bail!("timed out waiting for local PostgreSQL query readiness; logs: {logs}");
 }
 
 fn wait_for_mysql_server() -> Result<()> {
