@@ -10,6 +10,7 @@ mod agent;
 mod isolation;
 mod managed_worker;
 mod reload;
+mod self_hosted_worker;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -34,6 +35,12 @@ pub use managed_worker::{
     ManagedWorkerSessionRequest, ManagedWorkerSessionStatus, WorkerTemplate,
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
+pub use self_hosted_worker::{
+    RegisteredSelfHostedWorker, SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor,
+    SelfHostedTelemetryKind, SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel,
+    SelfHostedWorkerError, SelfHostedWorkerHeartbeat, SelfHostedWorkerIdentity,
+    SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
+};
 #[cfg(feature = "wasm")]
 pub use wasm::{
     WasmHostAbi, WasmHostRunOutcome, WasmRunOutcome, WasmSandboxConfig, WasmSandboxError,
