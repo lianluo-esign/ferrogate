@@ -15,6 +15,7 @@ mod proxy;
 mod responses_stream;
 
 use anyhow::{Context, Result as AnyResult};
+use http::HeaderMap;
 use pingora::{
     listeners::tls::TlsSettings,
     proxy::http_proxy_service,
@@ -50,12 +51,85 @@ use crate::{
 pub(crate) struct ProxyContext {
     request_id: String,
     trace_id: Option<String>,
+    traceparent: Option<String>,
+    tracestate: Option<String>,
     tenant_id: Option<String>,
     route: Option<RuntimeRoute>,
     upstream: Option<Upstream>,
     upstream_endpoint: Option<UpstreamEndpoint>,
     target_uri: Option<http::Uri>,
     original_host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IngressTraceContext {
+    trace_id: String,
+    traceparent: Option<String>,
+    tracestate: Option<String>,
+}
+
+pub(crate) fn ingress_trace_context(
+    headers: &HeaderMap,
+    fallback_trace_id: &str,
+) -> IngressTraceContext {
+    let traceparent = headers
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .and_then(|value| valid_traceparent(value).map(str::to_string));
+    let trace_id = traceparent
+        .as_deref()
+        .and_then(trace_id_from_traceparent)
+        .unwrap_or(fallback_trace_id)
+        .to_string();
+    let tracestate = traceparent.as_ref().and_then(|_| {
+        headers
+            .get("tracestate")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .map(str::to_string)
+    });
+
+    IngressTraceContext {
+        trace_id,
+        traceparent,
+        tracestate,
+    }
+}
+
+fn valid_traceparent(value: &str) -> Option<&str> {
+    let mut parts = value.split('-');
+    let version = parts.next()?;
+    let trace_id = parts.next()?;
+    let parent_id = parts.next()?;
+    let flags = parts.next()?;
+    if parts.next().is_some()
+        || version.len() != 2
+        || trace_id.len() != 32
+        || parent_id.len() != 16
+        || flags.len() != 2
+        || version == "ff"
+        || !is_lower_hex(version)
+        || !is_lower_hex(trace_id)
+        || !is_lower_hex(parent_id)
+        || !is_lower_hex(flags)
+        || trace_id.chars().all(|character| character == '0')
+        || parent_id.chars().all(|character| character == '0')
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn trace_id_from_traceparent(value: &str) -> Option<&str> {
+    value.split('-').nth(1)
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone)]
@@ -299,5 +373,42 @@ mod tests {
 
         let pid = std::fs::read_to_string(pid_file).unwrap();
         assert_eq!(pid, std::process::id().to_string());
+    }
+
+    #[test]
+    fn ingress_trace_context_accepts_valid_traceparent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "vendor=value".parse().unwrap());
+
+        let trace = ingress_trace_context(&headers, "fg-1");
+
+        assert_eq!(trace.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(
+            trace.traceparent.as_deref(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
+        assert_eq!(trace.tracestate.as_deref(), Some("vendor=value"));
+    }
+
+    #[test]
+    fn ingress_trace_context_falls_back_for_invalid_traceparent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+
+        let trace = ingress_trace_context(&headers, "fg-1");
+
+        assert_eq!(trace.trace_id, "fg-1");
+        assert!(trace.traceparent.is_none());
     }
 }

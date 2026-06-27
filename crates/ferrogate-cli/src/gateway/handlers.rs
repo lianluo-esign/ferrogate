@@ -21,9 +21,12 @@ impl FerroGateway {
         ctx: &mut ProxyContext,
     ) -> PingoraResult<bool> {
         ctx.request_id = self.state.next_request_id();
-        ctx.trace_id = Some(ctx.request_id.clone());
         let state = self.state.current();
         let req = session.req_header();
+        let trace = super::ingress_trace_context(&req.headers, &ctx.request_id);
+        ctx.trace_id = Some(trace.trace_id);
+        ctx.traceparent = trace.traceparent;
+        ctx.tracestate = trace.tracestate;
         let path = req.uri.path().to_string();
 
         if let Err(error) = state.run_pre_request_hooks(&ctx.request_id, &path) {

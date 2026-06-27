@@ -73,6 +73,25 @@ fn http_get(addr: &str, path: &str, host: &str) -> String {
     response
 }
 
+fn http_get_with_headers(addr: &str, path: &str, host: &str, headers: &[(&str, &str)]) -> String {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n"
+    )
+    .unwrap();
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n").unwrap();
+    }
+    stream.write_all(b"\r\n").unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
 fn https_get_with_openssl(addr: &str, path: &str, host: &str) -> Option<String> {
     let mut child = Command::new("openssl")
         .args(["s_client", "-connect", addr, "-servername", host, "-quiet"])
@@ -225,6 +244,61 @@ value = "proxied"
     assert!(upstream_request
         .to_ascii_lowercase()
         .contains("x-ferrogate-trace-id: fg-"));
+}
+
+#[test]
+fn reverse_proxy_accepts_traceparent_and_preserves_trace_headers() {
+    let gateway_addr = free_addr();
+    let (upstream_addr, upstream_handle) = spawn_echo_upstream();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+listen = "{gateway_addr}"
+
+[[upstreams]]
+name = "echo"
+url = "http://{upstream_addr}"
+
+[[routes]]
+name = "echo"
+upstream = "echo"
+hosts = ["example.test"]
+path_prefixes = ["/proxy"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let response = http_get_with_headers(
+        &gateway_addr,
+        "/proxy/get",
+        "example.test",
+        &[
+            ("traceparent", traceparent),
+            ("tracestate", "token4ai=ingress"),
+        ],
+    );
+    assert!(response.contains("200 OK"));
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("x-trace-id: 4bf92f3577b34da6a3ce929d0e0e4736"),
+        "{response}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    let upstream_request = upstream_handle.join().unwrap().to_ascii_lowercase();
+    assert!(upstream_request.contains(&format!("traceparent: {traceparent}")));
+    assert!(upstream_request.contains("tracestate: token4ai=ingress"));
+    assert!(upstream_request.contains("x-ferrogate-trace-id: 4bf92f3577b34da6a3ce929d0e0e4736"));
 }
 
 #[test]

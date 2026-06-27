@@ -74,6 +74,12 @@ impl ProxyHttp for FerroGateway {
         if let Some(trace_id) = &ctx.trace_id {
             upstream_request.insert_header("x-ferrogate-trace-id", trace_id.as_str())?;
         }
+        if let Some(traceparent) = &ctx.traceparent {
+            upstream_request.insert_header("traceparent", traceparent.as_str())?;
+        }
+        if let Some(tracestate) = &ctx.tracestate {
+            upstream_request.insert_header("tracestate", tracestate.as_str())?;
+        }
         if let Some(original_host) = &ctx.original_host {
             upstream_request.insert_header("x-forwarded-host", original_host.as_str())?;
         }

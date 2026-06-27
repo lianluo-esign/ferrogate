@@ -1372,6 +1372,15 @@ fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
 }
 
 fn stable_trace_id(value: &str) -> String {
+    let normalized = value.trim();
+    if normalized.len() == 32
+        && normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && !normalized.bytes().all(|byte| byte == b'0')
+    {
+        return normalized.to_string();
+    }
     format!(
         "{:016x}{:016x}",
         fnv1a64(value.as_bytes(), 0),
@@ -1440,6 +1449,15 @@ mod tests {
         net::TcpListener,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn stable_trace_id_preserves_w3c_trace_ids() {
+        let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+        assert_eq!(stable_trace_id(trace_id), trace_id);
+        assert_eq!(stable_trace_id("fg-1").len(), 32);
+        assert_ne!(stable_trace_id("fg-1"), "fg-1");
+    }
 
     #[test]
     fn otlp_export_once_posts_metrics_logs_and_traces_without_bodies() {

@@ -27,7 +27,9 @@ use crate::{
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
 use ferrogate_policy::PolicyDecision;
-use ferrogate_providers::{ModelRegistryError, ModelRoute, ProviderHttpRequest};
+use ferrogate_providers::{
+    ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest, SecretValue,
+};
 use ferrogate_storage::StoredRequestLog;
 
 use super::{
@@ -574,7 +576,7 @@ impl FerroGateway {
                 }
             }
 
-            let prepared = match prepare_ai_provider_request(
+            let mut prepared = match prepare_ai_provider_request(
                 &state,
                 AiProviderRequestInput {
                     endpoint,
@@ -625,6 +627,7 @@ impl FerroGateway {
                     return Ok(());
                 }
             };
+            add_trace_context_headers(&mut prepared, ctx);
 
             let attempt_plan = AiProviderAttemptPlan {
                 endpoint,
@@ -2323,6 +2326,29 @@ fn prepare_ai_provider_request(
     }
 }
 
+fn add_trace_context_headers(request: &mut ProviderHttpRequest, ctx: &ProxyContext) {
+    if let Some(traceparent) = &ctx.traceparent {
+        push_provider_header_if_absent(request, "traceparent", traceparent);
+    }
+    if let Some(tracestate) = &ctx.tracestate {
+        push_provider_header_if_absent(request, "tracestate", tracestate);
+    }
+}
+
+fn push_provider_header_if_absent(request: &mut ProviderHttpRequest, name: &str, value: &str) {
+    if request
+        .headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case(name))
+    {
+        return;
+    }
+    request.headers.push(ProviderHeader {
+        name: name.to_string(),
+        value: SecretValue::new(value),
+    });
+}
+
 fn estimate_chat_completion_usage(body: &serde_json::Value) -> BillingTokenUsage {
     let prompt_tokens = estimate_prompt_tokens(body);
     let completion_tokens = requested_completion_tokens(body)
@@ -2631,5 +2657,40 @@ mod tests {
             trace_id: Some("trace-test".into()),
             ..ProxyContext::default()
         }
+    }
+
+    #[test]
+    fn add_trace_context_headers_preserves_provider_header_precedence() {
+        let mut request = ProviderHttpRequest {
+            provider: "openai".into(),
+            endpoint: "http://provider.test/v1/chat/completions".into(),
+            body: serde_json::json!({}),
+            stream: false,
+            headers: vec![ProviderHeader {
+                name: "traceparent".into(),
+                value: SecretValue::new("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"),
+            }],
+        };
+        let ctx = ProxyContext {
+            traceparent: Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into()),
+            tracestate: Some("token4ai=ingress".into()),
+            ..proxy_context()
+        };
+
+        add_trace_context_headers(&mut request, &ctx);
+
+        let traceparent_headers = request
+            .headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case("traceparent"))
+            .collect::<Vec<_>>();
+        assert_eq!(traceparent_headers.len(), 1);
+        assert_eq!(
+            traceparent_headers[0].value.expose_secret(),
+            "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+        );
+        assert!(request.headers.iter().any(|header| {
+            header.name == "tracestate" && header.value.expose_secret() == "token4ai=ingress"
+        }));
     }
 }
