@@ -24,6 +24,7 @@ mod assertions;
 mod cli;
 mod fixtures;
 mod http;
+mod local;
 mod mocks;
 
 use assertions::*;
@@ -32,12 +33,13 @@ use cli::{
     IMAGE_TAG,
 };
 use fixtures::{
-    analytics_direct_clickhouse_gateway_config, analytics_gateway_config, auth_service_config,
+    analytics_direct_clickhouse_gateway_config, analytics_gateway_config,
     blocking_stdio_mcp_script, gateway_config, guardrail_complete_gateway_config,
     guardrail_gateway_config, guardrail_response_gateway_config, local_gateway_config,
     redis_counter_gateway_config, toml_basic_string, vector_clickhouse_config, LocalGatewayConfig,
 };
 use http::{free_addr, free_port, http_request, http_request_addr};
+use local::AuthHarness;
 use mocks::{
     spawn_local_provider_upstream, spawn_mock_agent_server, spawn_mock_billing_server,
     spawn_mock_mcp_server, spawn_mock_otlp_server, spawn_mock_third_party_auth_server,
@@ -3073,12 +3075,6 @@ struct LocalHarness {
     observability: Option<MockOtlpServer>,
 }
 
-struct AuthHarness {
-    _dir: tempfile::TempDir,
-    auth_addr: String,
-    auth: Child,
-}
-
 struct TursoRestartHarness {
     _dir: tempfile::TempDir,
     gateway_addr: String,
@@ -3100,97 +3096,6 @@ impl StorageMigrationMode {
             StorageMigrationMode::Auto => "auto",
             StorageMigrationMode::ValidateOnly => "validate_only",
         }
-    }
-}
-
-impl AuthHarness {
-    fn start(ferrogate_auth_bin: &Path) -> Result<Self> {
-        if !ferrogate_auth_bin.exists() {
-            bail!(
-                "ferrogate-auth binary does not exist at {}; run `cargo build -p ferrogate-auth` first or pass --ferrogate-auth-bin",
-                ferrogate_auth_bin.display()
-            );
-        }
-
-        let auth_addr = free_addr()?;
-        let dir = tempfile::tempdir()?;
-        let config_path = dir.path().join("auth-service.yaml");
-        std::fs::write(&config_path, auth_service_config())?;
-
-        let auth = Command::new(ferrogate_auth_bin)
-            .args(["serve", "--listen"])
-            .arg(&auth_addr)
-            .args(["--data"])
-            .arg(&config_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| format!("failed to start {}", ferrogate_auth_bin.display()))?;
-
-        let mut harness = Self {
-            _dir: dir,
-            auth_addr,
-            auth,
-        };
-        harness.wait_for_auth()?;
-        Ok(harness)
-    }
-
-    fn wait_for_auth(&mut self) -> Result<()> {
-        let started = Instant::now();
-        let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(20) {
-            if let Some(status) = self.auth.try_wait()? {
-                bail!("ferrogate-auth process exited before readiness check: {status}");
-            }
-            match http_request_addr(&self.auth_addr, "GET", "/healthz", &[], "") {
-                Ok(response) if response.status == 200 => return Ok(()),
-                Ok(response) => last = response.raw,
-                Err(error) => last = error.to_string(),
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!(
-            "timed out waiting for ferrogate-auth on {}; last response: {last}",
-            self.auth_addr
-        );
-    }
-
-    fn expect_json<F>(
-        &self,
-        method: &str,
-        path: &str,
-        headers: &[&str],
-        body: &str,
-        expected_status: u16,
-        check: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(Value) -> Result<()>,
-    {
-        let response = http_request_addr(&self.auth_addr, method, path, headers, body)?;
-        if response.status != expected_status {
-            bail!(
-                "{method} {path} expected status {expected_status}, got {}; raw: {}",
-                response.status,
-                response.raw
-            );
-        }
-        let body: Value = serde_json::from_str(&response.body).with_context(|| {
-            format!(
-                "failed to parse JSON body for {method} {path}: {}",
-                response.body
-            )
-        })?;
-        check(body)
-    }
-}
-
-impl Drop for AuthHarness {
-    fn drop(&mut self) {
-        let _ = self.auth.kill();
-        let _ = self.auth.wait();
     }
 }
 
