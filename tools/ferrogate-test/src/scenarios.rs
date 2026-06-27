@@ -106,6 +106,18 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             );
             assert_eq!(body["data"][0]["persistence"]["provider"], "memory");
             assert_eq!(body["data"][0]["persistence"]["implemented"], false);
+            assert_eq!(
+                body["data"][0]["persistence"]["timeline_evidence_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["session_lifecycle_implemented"],
+                false
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["agent_worker_transport_implemented"],
+                false
+            );
             Ok(())
         },
     )?;

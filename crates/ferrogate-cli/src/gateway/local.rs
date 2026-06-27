@@ -3773,6 +3773,9 @@ impl FerroGateway {
                         provider: storage.provider,
                         durable: storage.durable,
                         implemented: false,
+                        timeline_evidence_implemented: true,
+                        session_lifecycle_implemented: false,
+                        agent_worker_transport_implemented: false,
                         contract_version: storage.contract_version,
                     },
                 }]);

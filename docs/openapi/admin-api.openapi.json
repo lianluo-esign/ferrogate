@@ -9317,6 +9317,9 @@
           "provider",
           "durable",
           "implemented",
+          "timeline_evidence_implemented",
+          "session_lifecycle_implemented",
+          "agent_worker_transport_implemented",
           "contract_version"
         ],
         "properties": {
@@ -9328,7 +9331,19 @@
           },
           "implemented": {
             "type": "boolean",
-            "description": "False until managed worker session/run/evidence records are persisted through the Supabase-backed control-plane storage path."
+            "description": "False until managed worker template, session lifecycle, agent-worker transport, and evidence records are all persisted through the Supabase-backed control-plane storage path."
+          },
+          "timeline_evidence_implemented": {
+            "type": "boolean",
+            "description": "True when managed run/timeline evidence can use the existing agent_runs and agent_run_events persistence path."
+          },
+          "session_lifecycle_implemented": {
+            "type": "boolean",
+            "description": "True only after managed worker template/session/run lifecycle records are persisted."
+          },
+          "agent_worker_transport_implemented": {
+            "type": "boolean",
+            "description": "True only after the gateway has a real agent-worker control transport rather than a contract-only boundary."
           },
           "contract_version": {
             "type": "integer",
