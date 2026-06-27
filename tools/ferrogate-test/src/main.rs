@@ -25,6 +25,7 @@ mod fixtures;
 mod http;
 mod local;
 mod mocks;
+mod storage;
 
 use assertions::*;
 use cli::{
@@ -34,11 +35,14 @@ use cli::{
 use fixtures::{
     analytics_direct_clickhouse_gateway_config, analytics_gateway_config, gateway_config,
     guardrail_complete_gateway_config, guardrail_gateway_config, guardrail_response_gateway_config,
-    redis_counter_gateway_config, toml_basic_string, vector_clickhouse_config,
+    redis_counter_gateway_config, vector_clickhouse_config,
 };
 use http::{free_addr, free_port, http_request, http_request_addr};
 use local::{AuthHarness, LocalHarness};
 use mocks::{spawn_local_provider_upstream, spawn_mock_third_party_auth_server};
+use storage::{
+    ControlPlaneRestartStorage, MySqlRestartTls, PostgresRestartTls, StorageMigrationMode,
+};
 const NETWORK_NAME: &str = "ferrogate-e2e-net";
 const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
 const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
@@ -2711,44 +2715,6 @@ fn run_control_plane_mysql_restart(
     )
 }
 
-#[derive(Clone, Copy)]
-struct MySqlRestartTls<'a> {
-    mode: &'a str,
-    ca_cert_path: Option<&'a Path>,
-}
-
-#[derive(Clone, Copy)]
-struct PostgresRestartTls<'a> {
-    mode: &'a str,
-    ca_cert_path: Option<&'a Path>,
-}
-
-#[derive(Clone, Copy)]
-enum ControlPlaneRestartStorage<'a> {
-    Postgres {
-        dsn: &'a str,
-        tls: PostgresRestartTls<'a>,
-    },
-    Supabase {
-        dsn: &'a str,
-        tls: PostgresRestartTls<'a>,
-    },
-    Mysql {
-        dsn: &'a str,
-        tls: MySqlRestartTls<'a>,
-    },
-}
-
-impl ControlPlaneRestartStorage<'_> {
-    fn supports_durable_metering(self) -> bool {
-        matches!(
-            self,
-            ControlPlaneRestartStorage::Postgres { .. }
-                | ControlPlaneRestartStorage::Supabase { .. }
-        )
-    }
-}
-
 fn run_control_plane_restart(
     ferrogate_bin: &Path,
     storage: ControlPlaneRestartStorage<'_>,
@@ -3064,21 +3030,6 @@ struct TursoRestartHarness {
     stderr: Option<std::process::ChildStderr>,
     expected_storage_provider: &'static str,
     expected_migration_mode: StorageMigrationMode,
-}
-
-#[derive(Clone, Copy)]
-enum StorageMigrationMode {
-    Auto,
-    ValidateOnly,
-}
-
-impl StorageMigrationMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            StorageMigrationMode::Auto => "auto",
-            StorageMigrationMode::ValidateOnly => "validate_only",
-        }
-    }
 }
 
 impl TursoRestartHarness {
@@ -4091,259 +4042,6 @@ impl Drop for TursoRestartHarness {
     fn drop(&mut self) {
         let _ = self.gateway.kill();
         let _ = self.gateway.wait();
-    }
-}
-
-impl ControlPlaneRestartStorage<'_> {
-    fn provider_name(self) -> &'static str {
-        match self {
-            ControlPlaneRestartStorage::Supabase { .. } => "supabase",
-            ControlPlaneRestartStorage::Postgres { .. } => "postgres",
-            ControlPlaneRestartStorage::Mysql { .. } => "mysql",
-        }
-    }
-
-    fn apply_env(self, command: &mut Command) {
-        match self {
-            ControlPlaneRestartStorage::Postgres { dsn, .. } => {
-                command.env("FERROGATE_POSTGRES_DSN", dsn);
-            }
-            ControlPlaneRestartStorage::Supabase { dsn, .. } => {
-                command.env("FERROGATE_SUPABASE_DSN", dsn);
-            }
-            ControlPlaneRestartStorage::Mysql { dsn, .. } => {
-                command.env("FERROGATE_MYSQL_DSN", dsn);
-            }
-        }
-    }
-
-    fn storage_block_with_migration_mode(self, migration_mode: StorageMigrationMode) -> String {
-        match self {
-            ControlPlaneRestartStorage::Postgres { tls, .. } => {
-                let ca_cert_path = tls
-                    .ca_cert_path
-                    .map(|path| {
-                        format!(
-                            "\n  postgres_tls_ca_cert_path: {}",
-                            toml_basic_string(&path.to_string_lossy())
-                        )
-                    })
-                    .unwrap_or_default();
-                format!(
-                    r#"storage:
-  provider: postgres
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-    - mysql
-  postgres_dsn_env: FERROGATE_POSTGRES_DSN
-  postgres_pool_size: 2
-  postgres_tls_mode: {tls_mode}{ca_cert_path}
-  postgres_connect_timeout_secs: 5
-  postgres_statement_timeout_millis: 30000
-  postgres_schema: ferrogate_control
-  postgres_search_path:
-    - public
-  migration_mode: {migration_mode}"#,
-                    tls_mode = tls.mode,
-                    ca_cert_path = ca_cert_path,
-                    migration_mode = migration_mode.as_str()
-                )
-            }
-            ControlPlaneRestartStorage::Supabase { tls, .. } => {
-                let ca_cert_path = tls
-                    .ca_cert_path
-                    .map(|path| {
-                        format!(
-                            "\n  postgres_tls_ca_cert_path: {}",
-                            toml_basic_string(&path.to_string_lossy())
-                        )
-                    })
-                    .unwrap_or_default();
-                format!(
-                    r#"storage:
-  provider: supabase
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-    - mysql
-  supabase_dsn_env: FERROGATE_SUPABASE_DSN
-  postgres_pool_size: 2
-  postgres_tls_mode: {tls_mode}{ca_cert_path}
-  postgres_connect_timeout_secs: 5
-  postgres_statement_timeout_millis: 30000
-  postgres_schema: ferrogate_control
-  postgres_search_path:
-    - public
-  migration_mode: {migration_mode}"#,
-                    tls_mode = tls.mode,
-                    ca_cert_path = ca_cert_path,
-                    migration_mode = migration_mode.as_str()
-                )
-            }
-            ControlPlaneRestartStorage::Mysql { tls, .. } => {
-                let ca_cert_path = tls
-                    .ca_cert_path
-                    .map(|path| {
-                        format!(
-                            "\n  mysql_tls_ca_cert_path: {}",
-                            toml_basic_string(&path.to_string_lossy())
-                        )
-                    })
-                    .unwrap_or_default();
-                format!(
-                    r#"storage:
-  provider: mysql
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-    - mysql
-  mysql_dsn_env: FERROGATE_MYSQL_DSN
-  mysql_pool_size: 2
-  mysql_tls_mode: {tls_mode}{ca_cert_path}
-  mysql_connect_timeout_secs: 5
-  migration_mode: {migration_mode}"#,
-                    tls_mode = tls.mode,
-                    ca_cert_path = ca_cert_path,
-                    migration_mode = migration_mode.as_str()
-                )
-            }
-        }
-    }
-
-    fn restart_config(
-        self,
-        gateway_addr: &str,
-        include_plugins: bool,
-        include_mcp_server: bool,
-        migration_mode: StorageMigrationMode,
-        provider_base_url: Option<&str>,
-    ) -> String {
-        let plugins = if include_plugins {
-            r#"
-plugins:
-  - id: tool.echo
-    kind: tool_provider
-    source: builtin
-    enabled: true
-    order: 10
-    approval_policy: never
-    permissions:
-      tools:
-        - tool.echo
-"#
-        } else {
-            ""
-        };
-        let mcp_server = if include_mcp_server {
-            r#"
-mcp_servers:
-  - name: dbhttp
-    transport: streamable_http
-    url: "http://127.0.0.1:1/mcp"
-    tools_to_execute:
-      - search
-    tools_to_auto_execute:
-      - search
-    tool_include:
-      - search
-    approval_policy: never
-    timeout_ms: 100
-"#
-        } else {
-            ""
-        };
-        let provider_base_url = provider_base_url.unwrap_or("http://127.0.0.1:1/v1");
-        format!(
-            r#"
-listen: "{gateway_addr}"
-
-{storage}
-
-reliability:
-  tool_approval_timeout_secs: 1
-
-providers:
-  - name: openai
-    kind: openai
-    base_url: "{provider_base_url}"
-    api_key_env: FERROGATE_PROVIDER_SECRET
-
-models:
-  - name: fast-chat
-    provider: openai
-    provider_model: gpt-4o-mini
-    capabilities:
-      - chat
-
-api_keys:
-  - id: admin
-    name: Admin
-    key: admin-secret
-    scopes:
-      - admin.read
-      - admin.write
-      - tools.read
-      - tools.execute
-{plugins}
-{mcp_server}
-"#,
-            storage = self.storage_block_with_migration_mode(migration_mode),
-            provider_base_url = provider_base_url
-        )
-    }
-
-    fn live_token4ai_provider_config(
-        self,
-        gateway_addr: &str,
-        provider_base_url: &str,
-        provider_model: &str,
-        migration_mode: StorageMigrationMode,
-    ) -> String {
-        format!(
-            r#"
-listen: "{gateway_addr}"
-
-{storage}
-
-providers:
-  - name: token4ai
-    kind: openai
-    base_url: "{provider_base_url}"
-    api_key_env: FERROGATE_PROVIDER_SECRET
-
-models:
-  - name: live-chat
-    provider: token4ai
-    provider_model: "{provider_model}"
-    capabilities:
-      - chat
-
-api_keys:
-  - id: client
-    name: Live Token4AI client
-    key: client-secret
-    scopes:
-      - models.read
-      - chat.completions
-    allowed_models:
-      - live-chat
-    organization_id: org_token4ai_live
-    project_id: project_gateway
-  - id: admin
-    name: Admin
-    key: admin-secret
-    scopes:
-      - admin.read
-      - admin.write
-"#,
-            storage = self.storage_block_with_migration_mode(migration_mode),
-            provider_base_url = provider_base_url,
-            provider_model = provider_model,
-        )
     }
 }
 
