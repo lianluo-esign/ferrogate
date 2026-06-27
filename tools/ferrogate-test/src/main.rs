@@ -3031,6 +3031,7 @@ fn run_control_plane_restart(
         }
         if storage.supports_durable_metering() {
             case.expect_durable_metering_usage(&resource_id, 2)?;
+            case.expect_durable_request_and_audit_evidence(&resource_id)?;
         }
         case.expect_json(
             "PATCH",
@@ -3124,6 +3125,7 @@ fn run_control_plane_restart(
         }
         if storage.supports_durable_metering() {
             case.expect_durable_metering_usage(&resource_id, 2)?;
+            case.expect_durable_request_and_audit_evidence(&resource_id)?;
         }
         case.expect_prompt_template(&prompt_template_id, "archived")?;
         case.expect_missing_agent_upstream(&agent_upstream_id)?;
@@ -3657,6 +3659,70 @@ impl TursoRestartHarness {
                         )
                     })?;
                 assert_eq!(aggregate["usage"]["total_tokens"], expected_total);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_durable_request_and_audit_evidence(&self, api_key_id: &str) -> Result<()> {
+        self.expect_json(
+            "GET",
+            "/admin/v1/request-logs?limit=100",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let logs = body["data"]
+                    .as_array()
+                    .context("request logs response data must be an array")?;
+                let log = logs
+                    .iter()
+                    .find(|log| {
+                        log["tenant"]["api_key_id"] == api_key_id
+                            && log["logical_model"] == "fast-chat"
+                            && log["provider"] == "openai"
+                            && log["status_code"] == 200
+                    })
+                    .with_context(|| {
+                        format!(
+                            "durable request log for API key {api_key_id} was not found in {body}"
+                        )
+                    })?;
+                assert_eq!(log["prompt_recorded"], false);
+                assert_eq!(log["response_recorded"], false);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+
+        self.expect_json(
+            "GET",
+            "/admin/v1/audit-events?limit=200",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let events = body["data"]
+                    .as_array()
+                    .context("audit events response data must be an array")?;
+                let event = events
+                    .iter()
+                    .find(|event| {
+                        event["actor_api_key_id"] == "admin"
+                            && event["target"].as_str().is_some_and(|target| {
+                                target == api_key_id || target.contains(api_key_id)
+                            })
+                            && event["outcome"] == "committed"
+                    })
+                    .with_context(|| {
+                        format!(
+                            "durable audit event for API key {api_key_id} was not found in {body}"
+                        )
+                    })?;
+                assert!(event["action"].as_str().is_some_and(|action| {
+                    action == "api_key.upsert" || action == "api_key.delete"
+                }));
                 assert_secret_redacted(&body.to_string());
                 Ok(())
             },

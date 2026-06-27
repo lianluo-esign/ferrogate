@@ -884,6 +884,222 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    fn append_request_log(&self, log: &StoredRequestLog) -> Result<(), StorageError> {
+        let request_json = serialize_storage_document(log)?;
+        let tenant_context_id = tenant_storage_key(&log.tenant);
+        let workflow_version = log.workflow_version.map(|value| value.to_string());
+        let gateway_config_revision = log.gateway_config_revision.map(|value| value as i64);
+        let status_code = i32::from(log.status_code);
+        let started_at_unix = saturating_i64(log.started_at_unix.unwrap_or_else(now_unix_seconds));
+        let completed_at_unix = log.completed_at_unix.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO request_logs \
+                 (request_id, trace_id, agent_run_id, workflow_id, workflow_version, \
+                  workflow_node_id, cluster_id, node_id, tenant, route, provider, logical_model, \
+                  provider_model, gateway_config_id, gateway_config_revision, status_code, \
+                  error_code, cache_status, started_at_unix, completed_at_unix, request_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
+                         $16, $17, $18, $19, $20, $21::text::jsonb) \
+                 ON CONFLICT (request_id) DO UPDATE SET \
+                 trace_id = EXCLUDED.trace_id, \
+                 agent_run_id = EXCLUDED.agent_run_id, \
+                 workflow_id = EXCLUDED.workflow_id, \
+                 workflow_version = EXCLUDED.workflow_version, \
+                 workflow_node_id = EXCLUDED.workflow_node_id, \
+                 cluster_id = EXCLUDED.cluster_id, \
+                 node_id = EXCLUDED.node_id, \
+                 tenant = EXCLUDED.tenant, \
+                 route = EXCLUDED.route, \
+                 provider = EXCLUDED.provider, \
+                 logical_model = EXCLUDED.logical_model, \
+                 provider_model = EXCLUDED.provider_model, \
+                 gateway_config_id = EXCLUDED.gateway_config_id, \
+                 gateway_config_revision = EXCLUDED.gateway_config_revision, \
+                 status_code = EXCLUDED.status_code, \
+                 error_code = EXCLUDED.error_code, \
+                 cache_status = EXCLUDED.cache_status, \
+                 started_at_unix = EXCLUDED.started_at_unix, \
+                 completed_at_unix = EXCLUDED.completed_at_unix, \
+                 request_json = EXCLUDED.request_json",
+                &[
+                    &log.request_id,
+                    &log.trace_id,
+                    &log.agent_run_id,
+                    &log.workflow_id,
+                    &workflow_version,
+                    &log.workflow_node_id,
+                    &log.cluster_id,
+                    &log.node_id,
+                    &tenant_context_id,
+                    &log.route,
+                    &log.provider,
+                    &log.logical_model,
+                    &log.provider_model,
+                    &log.gateway_config_id,
+                    &gateway_config_revision,
+                    &status_code,
+                    &log.error_code,
+                    &log.cache_status,
+                    &started_at_unix,
+                    &completed_at_unix,
+                    &request_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn request_logs_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<StoragePage<StoredRequestLog>, StorageError> {
+        let offset = saturating_i64(offset as u64);
+        let limit = saturating_i64(limit as u64);
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT request_json::text, count(*) OVER() \
+                     FROM request_logs \
+                     ORDER BY started_at_unix ASC, request_id ASC \
+                     OFFSET $1 LIMIT $2",
+                    &[&offset, &limit],
+                )
+                .map_err(postgres_error)?;
+            let total = rows
+                .first()
+                .map(|row| row.get::<_, i64>(1))
+                .unwrap_or_default();
+            let mut data = Vec::with_capacity(rows.len());
+            for row in rows {
+                data.push(deserialize_storage_document(
+                    row.get::<_, String>(0).as_str(),
+                )?);
+            }
+            Ok(StoragePage {
+                data,
+                total: usize::try_from(total).unwrap_or(usize::MAX),
+                offset: usize::try_from(offset).unwrap_or(usize::MAX),
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            })
+        })
+    }
+
+    fn request_logs(&self) -> Result<Vec<StoredRequestLog>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT request_json::text \
+                     FROM request_logs \
+                     ORDER BY started_at_unix ASC, request_id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            let mut logs = Vec::with_capacity(rows.len());
+            for row in rows {
+                logs.push(deserialize_storage_document(
+                    row.get::<_, String>(0).as_str(),
+                )?);
+            }
+            Ok(logs)
+        })
+    }
+
+    fn append_audit_event(&self, event: &StoredAuditEvent) -> Result<(), StorageError> {
+        let audit_json = serialize_storage_document(event)?;
+        let tenant_context_id = tenant_storage_key(&event.tenant);
+        let workflow_version = event.workflow_version.map(|value| value.to_string());
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO audit_events \
+                 (id, request_id, trace_id, agent_run_id, workflow_id, workflow_version, \
+                  workflow_node_id, cluster_id, node_id, actor_api_key_id, tenant, action, target, \
+                  outcome, occurred_at_unix, audit_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
+                         $16::text::jsonb) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &event.id,
+                    &event.request_id,
+                    &event.trace_id,
+                    &event.agent_run_id,
+                    &event.workflow_id,
+                    &workflow_version,
+                    &event.workflow_node_id,
+                    &event.cluster_id,
+                    &event.node_id,
+                    &event.actor_api_key_id,
+                    &tenant_context_id,
+                    &event.action,
+                    &event.target,
+                    &event.outcome,
+                    &occurred_at_unix,
+                    &audit_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn audit_events_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<StoragePage<StoredAuditEvent>, StorageError> {
+        let offset = saturating_i64(offset as u64);
+        let limit = saturating_i64(limit as u64);
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT audit_json::text, count(*) OVER() \
+                     FROM audit_events \
+                     ORDER BY occurred_at_unix ASC, id ASC \
+                     OFFSET $1 LIMIT $2",
+                    &[&offset, &limit],
+                )
+                .map_err(postgres_error)?;
+            let total = rows
+                .first()
+                .map(|row| row.get::<_, i64>(1))
+                .unwrap_or_default();
+            let mut data = Vec::with_capacity(rows.len());
+            for row in rows {
+                data.push(deserialize_storage_document(
+                    row.get::<_, String>(0).as_str(),
+                )?);
+            }
+            Ok(StoragePage {
+                data,
+                total: usize::try_from(total).unwrap_or(usize::MAX),
+                offset: usize::try_from(offset).unwrap_or(usize::MAX),
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            })
+        })
+    }
+
+    fn audit_events(&self) -> Result<Vec<StoredAuditEvent>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT audit_json::text \
+                     FROM audit_events \
+                     ORDER BY occurred_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            let mut events = Vec::with_capacity(rows.len());
+            for row in rows {
+                events.push(deserialize_storage_document(
+                    row.get::<_, String>(0).as_str(),
+                )?);
+            }
+            Ok(events)
+        })
+    }
+
     fn billing_events_page(
         &self,
         offset: usize,
@@ -1532,6 +1748,16 @@ fn saturating_i64(value: u64) -> i64 {
 
 fn nonnegative_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
+}
+
+fn serialize_storage_document<T: Serialize>(value: &T) -> Result<String, StorageError> {
+    serde_json::to_string(value).map_err(|error| StorageError::Serialization(error.to_string()))
+}
+
+fn deserialize_storage_document<T: for<'de> Deserialize<'de>>(
+    value: &str,
+) -> Result<T, StorageError> {
+    serde_json::from_str(value).map_err(|error| StorageError::Serialization(error.to_string()))
 }
 
 fn tenant_storage_key(tenant: &TenantContext) -> String {
@@ -3143,6 +3369,10 @@ impl RuntimeStorageRepositories {
     }
 
     pub fn append_request_log(&self, log: StoredRequestLog) {
+        if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
+            let _ = control_plane.append_request_log(&log);
+            return;
+        }
         if let Ok(mut logs) = self.request_logs.lock() {
             logs.append(log);
         }
@@ -3214,31 +3444,58 @@ impl RuntimeStorageRepositories {
     }
 
     pub fn request_logs(&self) -> Vec<StoredRequestLog> {
-        self.request_logs
-            .lock()
-            .map(|logs| logs.list())
-            .unwrap_or_default()
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.request_logs().unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => self
+                .request_logs
+                .lock()
+                .map(|logs| logs.list())
+                .unwrap_or_default(),
+        }
     }
 
     pub fn request_logs_page(&self, offset: usize, limit: usize) -> StoragePage<StoredRequestLog> {
-        self.request_logs
-            .lock()
-            .map(|logs| StoragePage {
-                data: logs.list_paginated(offset, limit),
-                total: logs.len(),
-                offset,
-                limit,
-            })
-            .unwrap_or_else(|_| StoragePage::empty(offset, limit))
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .request_logs_page(offset, limit)
+                .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => self
+                .request_logs
+                .lock()
+                .map(|logs| StoragePage {
+                    data: logs.list_paginated(offset, limit),
+                    total: logs.len(),
+                    offset,
+                    limit,
+                })
+                .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
+        }
     }
 
     pub fn append_audit_event(&self, event: StoredAuditEvent) {
+        if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
+            let _ = control_plane.append_audit_event(&event);
+            return;
+        }
         if let Ok(mut events) = self.audit_events.lock() {
             events.append(event);
         }
     }
 
     pub fn next_audit_event_id(&self) -> String {
+        if matches!(&self.control_plane, RuntimeControlPlaneBackend::Postgres(_)) {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            return format!("audit-{nanos}-{}", std::process::id());
+        }
         self.audit_events
             .lock()
             .map(|events| format!("audit-{}", events.len() + 1))
@@ -3246,22 +3503,38 @@ impl RuntimeStorageRepositories {
     }
 
     pub fn audit_events(&self) -> Vec<StoredAuditEvent> {
-        self.audit_events
-            .lock()
-            .map(|events| events.list())
-            .unwrap_or_default()
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.audit_events().unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => self
+                .audit_events
+                .lock()
+                .map(|events| events.list())
+                .unwrap_or_default(),
+        }
     }
 
     pub fn audit_events_page(&self, offset: usize, limit: usize) -> StoragePage<StoredAuditEvent> {
-        self.audit_events
-            .lock()
-            .map(|events| StoragePage {
-                data: events.list_paginated(offset, limit),
-                total: events.len(),
-                offset,
-                limit,
-            })
-            .unwrap_or_else(|_| StoragePage::empty(offset, limit))
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .audit_events_page(offset, limit)
+                .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => self
+                .audit_events
+                .lock()
+                .map(|events| StoragePage {
+                    data: events.list_paginated(offset, limit),
+                    total: events.len(),
+                    offset,
+                    limit,
+                })
+                .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
+        }
     }
 
     pub fn upsert_usage_aggregate(
