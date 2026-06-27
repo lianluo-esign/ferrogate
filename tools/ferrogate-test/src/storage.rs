@@ -7,12 +7,14 @@
 use crate::{
     assertions::{assert_array_contains, assert_secret_redacted, list_contains},
     cli::{LocalArgs, SupabaseLiveRestartArgs, SupabaseLiveToken4aiProviderArgs},
-    docker_args,
+    constants::{ADMIN_AUTH, CLIENT_AUTH, JSON_CONTENT},
+    docker::{
+        docker_args, MYSQL_CONTAINER, MYSQL_IMAGE, POSTGRES_CONTAINER, POSTGRES_IMAGE,
+        POSTGRES_MIGRATION_SOURCE_CONTAINER, POSTGRES_MIGRATION_TARGET_CONTAINER,
+    },
     fixtures::toml_basic_string,
     http::{free_addr, free_port, http_request_addr},
     mocks::spawn_local_provider_upstream,
-    ADMIN_AUTH, CLIENT_AUTH, JSON_CONTENT, MYSQL_CONTAINER, MYSQL_IMAGE, POSTGRES_CONTAINER,
-    POSTGRES_IMAGE, POSTGRES_MIGRATION_SOURCE_CONTAINER, POSTGRES_MIGRATION_TARGET_CONTAINER,
 };
 use anyhow::{bail, Context, Result};
 use rcgen::{

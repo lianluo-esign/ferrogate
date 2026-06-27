@@ -7,9 +7,12 @@
 use crate::{
     assertions::*,
     cli::{AuthArgs, LocalArgs},
+    constants::{
+        ADMIN_AUTH, AUTH_TEST_CLIENT_2, CLIENT_AUTH, JSON_CONTENT, OBSERVER_AUTH,
+        SUPPORT_SKILL_HEADER,
+    },
     local::{AuthHarness, LocalHarness},
     mocks::spawn_mock_third_party_auth_server,
-    ADMIN_AUTH, AUTH_TEST_CLIENT_2, CLIENT_AUTH, JSON_CONTENT, OBSERVER_AUTH, SUPPORT_SKILL_HEADER,
 };
 use anyhow::{Context, Result};
 use std::{thread, time::Duration};

@@ -1,0 +1,12 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-06-11
+// description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+pub(crate) const ADMIN_AUTH: &str = "Authorization: Bearer admin-secret";
+pub(crate) const CLIENT_AUTH: &str = "Authorization: Bearer client-secret";
+pub(crate) const OBSERVER_AUTH: &str = "Authorization: Bearer observer-secret";
+pub(crate) const AUTH_TEST_CLIENT_2: &str = "Authorization: Bearer test-secret-2";
+pub(crate) const JSON_CONTENT: &str = "Content-Type: application/json";
+pub(crate) const SUPPORT_SKILL_HEADER: &str = "x-ferrogate-skill-package: support-skill";

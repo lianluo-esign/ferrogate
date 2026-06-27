@@ -8,6 +8,7 @@ use crate::{
     assertions::{
         agent_run_otlp_trace_is_reconstructable, assert_secret_redacted, http_request_body,
     },
+    constants::ADMIN_AUTH,
     fixtures::{
         auth_service_config, blocking_stdio_mcp_script, local_gateway_config, LocalGatewayConfig,
     },
@@ -16,7 +17,6 @@ use crate::{
         spawn_local_provider_upstream, spawn_mock_agent_server, spawn_mock_billing_server,
         spawn_mock_mcp_server, spawn_mock_otlp_server, MockBillingServer, MockOtlpServer,
     },
-    ADMIN_AUTH,
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
