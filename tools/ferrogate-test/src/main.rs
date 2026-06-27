@@ -2246,6 +2246,14 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
     let dsn =
         format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=require");
     wait_for_postgres_query()?;
+    expect_supabase_validate_only_schema_failure(
+        &args.ferrogate_bin,
+        &dsn,
+        PostgresRestartTls {
+            mode: "verify_full",
+            ca_cert_path: Some(certs.ca_cert_path.as_path()),
+        },
+    )?;
     run_control_plane_supabase_restart(
         &args.ferrogate_bin,
         &dsn,
@@ -2259,6 +2267,64 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
     expect_supabase_schema_migrations("ferrogate_control")?;
     println!("supabase-restart scenario passed");
     Ok(())
+}
+
+fn expect_supabase_validate_only_schema_failure(
+    ferrogate_bin: &Path,
+    supabase_dsn: &str,
+    tls: PostgresRestartTls<'_>,
+) -> Result<()> {
+    let storage = ControlPlaneRestartStorage::Supabase {
+        dsn: supabase_dsn,
+        tls,
+    };
+    let gateway_addr = free_addr()?;
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("ferrogate-validate-only.yaml");
+    std::fs::write(
+        &config_path,
+        storage.restart_config(
+            &gateway_addr,
+            false,
+            false,
+            StorageMigrationMode::ValidateOnly,
+        ),
+    )?;
+
+    let mut gateway = Command::new(ferrogate_bin);
+    gateway
+        .args(["run", "--config"])
+        .arg(&config_path)
+        .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    storage.apply_env(&mut gateway);
+    let mut gateway = gateway
+        .spawn()
+        .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(20) {
+        if let Some(status) = gateway.try_wait()? {
+            if status.success() {
+                bail!("validate-only Supabase startup unexpectedly succeeded without schema");
+            }
+            let mut stderr = String::new();
+            if let Some(mut pipe) = gateway.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            assert_secret_redacted(&stderr);
+            if !stderr.contains("required schema table control_plane_resources is missing") {
+                bail!("validate-only Supabase startup failed with unexpected stderr: {stderr}");
+            }
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let _ = gateway.kill();
+    bail!("validate-only Supabase startup did not fail before readiness timeout");
 }
 
 fn run_supabase_live_restart(args: &SupabaseLiveRestartArgs) -> Result<()> {
@@ -2735,7 +2801,13 @@ fn run_control_plane_restart(
     }
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, storage, false, false)?;
+        let case = TursoRestartHarness::start_with_migration_mode(
+            ferrogate_bin,
+            storage,
+            false,
+            false,
+            StorageMigrationMode::ValidateOnly,
+        )?;
         case.expect_storage_status()?;
         case.expect_plugin("tool.echo")?;
         case.expect_mcp_server(&mcp_server_name)?;
@@ -2822,7 +2894,13 @@ fn run_control_plane_restart(
     }
 
     {
-        let case = TursoRestartHarness::start(ferrogate_bin, storage, false, false)?;
+        let case = TursoRestartHarness::start_with_migration_mode(
+            ferrogate_bin,
+            storage,
+            false,
+            false,
+            StorageMigrationMode::ValidateOnly,
+        )?;
         case.expect_storage_status()?;
         case.expect_plugin("tool.echo")?;
         case.expect_missing_mcp_server(&mcp_server_name)?;
@@ -2887,6 +2965,21 @@ struct TursoRestartHarness {
     gateway: Child,
     stderr: Option<std::process::ChildStderr>,
     expected_storage_provider: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum StorageMigrationMode {
+    Auto,
+    ValidateOnly,
+}
+
+impl StorageMigrationMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            StorageMigrationMode::Auto => "auto",
+            StorageMigrationMode::ValidateOnly => "validate_only",
+        }
+    }
 }
 
 impl AuthHarness {
@@ -2987,6 +3080,22 @@ impl TursoRestartHarness {
         include_plugins: bool,
         include_mcp_server: bool,
     ) -> Result<Self> {
+        Self::start_with_migration_mode(
+            ferrogate_bin,
+            storage,
+            include_plugins,
+            include_mcp_server,
+            StorageMigrationMode::Auto,
+        )
+    }
+
+    fn start_with_migration_mode(
+        ferrogate_bin: &Path,
+        storage: ControlPlaneRestartStorage<'_>,
+        include_plugins: bool,
+        include_mcp_server: bool,
+        migration_mode: StorageMigrationMode,
+    ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
                 "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
@@ -2999,7 +3108,12 @@ impl TursoRestartHarness {
         let config_path = dir.path().join("ferrogate.yaml");
         std::fs::write(
             &config_path,
-            storage.restart_config(&gateway_addr, include_plugins, include_mcp_server),
+            storage.restart_config(
+                &gateway_addr,
+                include_plugins,
+                include_mcp_server,
+                migration_mode,
+            ),
         )?;
 
         let mut command = Command::new(ferrogate_bin);
@@ -3104,6 +3218,20 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "turso_libsql");
             assert_eq!(body["storage"]["provider_order"][2], "postgres");
             assert_eq!(body["storage"]["provider_order"][3], "mysql");
+            if matches!(self.expected_storage_provider, "supabase" | "postgres") {
+                assert_eq!(body["storage"]["schema"]["engine"], "postgres");
+                assert_eq!(body["storage"]["schema"]["version"], 2);
+                assert_eq!(
+                    body["storage"]["schema"]["name"],
+                    "002_supabase_control_plane_billing_evidence"
+                );
+                assert_eq!(body["storage"]["schema"]["validated"], true);
+                assert!(body["storage"]["schema"]["checksum"]
+                    .as_str()
+                    .is_some_and(|checksum| checksum.len() == 16));
+            } else {
+                assert!(body["storage"]["schema"].is_null());
+            }
             assert_secret_redacted(&body.to_string());
             Ok(())
         })
@@ -4240,7 +4368,7 @@ impl ControlPlaneRestartStorage<'_> {
         }
     }
 
-    fn storage_block(self) -> String {
+    fn storage_block_with_migration_mode(self, migration_mode: StorageMigrationMode) -> String {
         match self {
             ControlPlaneRestartStorage::Libsql { url, auth_token } => {
                 let auth_token_env = if auth_token.is_some() {
@@ -4258,7 +4386,8 @@ impl ControlPlaneRestartStorage<'_> {
     - postgres
     - mysql
   libsql_url: "{url}"{auth_token_env}
-  migration_mode: auto"#
+  migration_mode: {migration_mode}"#,
+                    migration_mode = migration_mode.as_str()
                 )
             }
             ControlPlaneRestartStorage::Postgres { tls, .. } => {
@@ -4288,9 +4417,10 @@ impl ControlPlaneRestartStorage<'_> {
   postgres_schema: ferrogate_control
   postgres_search_path:
     - public
-  migration_mode: auto"#,
+  migration_mode: {migration_mode}"#,
                     tls_mode = tls.mode,
-                    ca_cert_path = ca_cert_path
+                    ca_cert_path = ca_cert_path,
+                    migration_mode = migration_mode.as_str()
                 )
             }
             ControlPlaneRestartStorage::Supabase { tls, .. } => {
@@ -4320,9 +4450,10 @@ impl ControlPlaneRestartStorage<'_> {
   postgres_schema: ferrogate_control
   postgres_search_path:
     - public
-  migration_mode: auto"#,
+  migration_mode: {migration_mode}"#,
                     tls_mode = tls.mode,
-                    ca_cert_path = ca_cert_path
+                    ca_cert_path = ca_cert_path,
+                    migration_mode = migration_mode.as_str()
                 )
             }
             ControlPlaneRestartStorage::Mysql { tls, .. } => {
@@ -4348,9 +4479,10 @@ impl ControlPlaneRestartStorage<'_> {
   mysql_pool_size: 2
   mysql_tls_mode: {tls_mode}{ca_cert_path}
   mysql_connect_timeout_secs: 5
-  migration_mode: auto"#,
+  migration_mode: {migration_mode}"#,
                     tls_mode = tls.mode,
-                    ca_cert_path = ca_cert_path
+                    ca_cert_path = ca_cert_path,
+                    migration_mode = migration_mode.as_str()
                 )
             }
         }
@@ -4361,6 +4493,7 @@ impl ControlPlaneRestartStorage<'_> {
         gateway_addr: &str,
         include_plugins: bool,
         include_mcp_server: bool,
+        migration_mode: StorageMigrationMode,
     ) -> String {
         let plugins = if include_plugins {
             r#"
@@ -4430,7 +4563,7 @@ api_keys:
 {plugins}
 {mcp_server}
 "#,
-            storage = self.storage_block()
+            storage = self.storage_block_with_migration_mode(migration_mode)
         )
     }
 }

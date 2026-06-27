@@ -4111,7 +4111,8 @@
           "implemented",
           "required",
           "provider_order",
-          "contract_version"
+          "contract_version",
+          "schema"
         ],
         "properties": {
           "provider": {
@@ -4135,6 +4136,45 @@
           "contract_version": {
             "type": "integer",
             "minimum": 1
+          },
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StorageSchemaEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "StorageSchemaEvidence": {
+        "type": "object",
+        "required": [
+          "engine",
+          "version",
+          "name",
+          "checksum",
+          "validated"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "checksum": {
+            "type": "string"
+          },
+          "validated": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false

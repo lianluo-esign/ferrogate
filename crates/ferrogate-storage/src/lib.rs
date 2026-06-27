@@ -194,7 +194,33 @@ pub struct StorageBackendEvidence {
     pub required: bool,
     pub provider_order: Vec<StorageProviderKind>,
     pub contract_version: u32,
+    pub schema: Option<StorageSchemaEvidence>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageSchemaEvidence {
+    pub engine: String,
+    pub version: u64,
+    pub name: String,
+    pub checksum: String,
+    pub validated: bool,
+}
+
+impl StorageSchemaEvidence {
+    fn postgres_expected() -> Self {
+        Self {
+            engine: "postgres".into(),
+            version: POSTGRES_SCHEMA_VERSION,
+            name: POSTGRES_SCHEMA_NAME.into(),
+            checksum: fnv1a64_hex(POSTGRES_SCHEMA_SQL),
+            validated: true,
+        }
+    }
+}
+
+const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
+const POSTGRES_SCHEMA_VERSION: u64 = 2;
+const POSTGRES_SCHEMA_NAME: &str = "002_supabase_control_plane_billing_evidence";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -238,6 +264,7 @@ impl RuntimeStorageBackend {
             required: self.required,
             provider_order: self.provider_order.clone(),
             contract_version: self.contract_version,
+            schema: None,
         }
     }
 
@@ -380,6 +407,7 @@ struct LibsqlControlPlaneStore {
 
 struct PostgresControlPlaneStore {
     pool: Arc<PostgresClientPool>,
+    schema: StorageSchemaEvidence,
 }
 
 struct MySqlControlPlaneStore {
@@ -616,10 +644,12 @@ impl PostgresControlPlaneStore {
                 clients: Mutex::new(clients),
                 available: Condvar::new(),
             }),
+            schema: StorageSchemaEvidence::postgres_expected(),
         };
         if initialize_schema {
             store.initialize_schema()?;
         }
+        store.validate_schema()?;
         store.seed_missing_resources("api_key", bootstrap.api_keys)?;
         store.seed_missing_resources("tenant", bootstrap.tenants)?;
         store.seed_missing_resources("policy", bootstrap.policies)?;
@@ -634,10 +664,16 @@ impl PostgresControlPlaneStore {
     }
 
     fn initialize_schema(&self) -> Result<(), StorageError> {
-        self.with_client(|client| {
-            client.batch_execute(include_str!("../../../sql/001_init_postgres.sql"))
-        })?;
+        self.with_client(|client| client.batch_execute(POSTGRES_SCHEMA_SQL))?;
         Ok(())
+    }
+
+    fn validate_schema(&self) -> Result<(), StorageError> {
+        self.with_client_storage(validate_postgres_schema)
+    }
+
+    fn schema_evidence(&self) -> StorageSchemaEvidence {
+        self.schema.clone()
     }
 
     fn seed_missing_resources(
@@ -757,11 +793,18 @@ impl PostgresControlPlaneStore {
         &self,
         action: impl FnOnce(&mut PostgresClient) -> Result<T, postgres::Error> + Send,
     ) -> Result<T, StorageError> {
+        self.with_client_storage(|client| action(client).map_err(postgres_error))
+    }
+
+    fn with_client_storage<T: Send>(
+        &self,
+        action: impl FnOnce(&mut PostgresClient) -> Result<T, StorageError> + Send,
+    ) -> Result<T, StorageError> {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     let mut client = self.pool.acquire()?;
-                    let result = action(&mut client).map_err(postgres_error);
+                    let result = action(&mut client);
                     self.pool.release(client);
                     result
                 })
@@ -1158,6 +1201,105 @@ fn postgres_search_path_sql(config: &PostgresStorageConfig) -> String {
 
 fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageError> {
+    const TABLES: &[&str] = &[
+        "control_plane_resources",
+        "agent_runs",
+        "agent_run_events",
+        "request_logs",
+        "audit_events",
+        "billing_metering_events",
+        "usage_aggregates",
+        "storage_schema_migrations",
+    ];
+    for table in TABLES {
+        let exists = client
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[table])
+            .map_err(postgres_error)?
+            .get::<_, bool>(0);
+        if !exists {
+            return Err(StorageError::Postgres(format!(
+                "required schema table {table} is missing"
+            )));
+        }
+    }
+
+    const JSONB_COLUMNS: &[(&str, &str)] = &[
+        ("control_plane_resources", "document_json"),
+        ("agent_runs", "run_json"),
+        ("agent_run_events", "event_json"),
+        ("request_logs", "request_json"),
+        ("audit_events", "audit_json"),
+        ("billing_metering_events", "event_json"),
+        ("usage_aggregates", "usage_json"),
+    ];
+    for (table, column) in JSONB_COLUMNS {
+        let data_type = client
+            .query_opt(
+                "SELECT data_type FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = $1 \
+                   AND column_name = $2",
+                &[table, column],
+            )
+            .map_err(postgres_error)?
+            .map(|row| row.get::<_, String>(0));
+        if data_type.as_deref() != Some("jsonb") {
+            return Err(StorageError::Postgres(format!(
+                "required schema column {table}.{column} must be jsonb"
+            )));
+        }
+    }
+
+    const INDEXES: &[&str] = &[
+        "idx_control_plane_resources_document_gin",
+        "idx_agent_runs_tenant_started",
+        "idx_agent_run_events_run_time",
+        "idx_request_logs_model_provider_started",
+        "idx_audit_events_actor_time",
+        "idx_billing_metering_model_provider_time",
+        "idx_usage_aggregates_tenant_model_provider",
+    ];
+    for index in INDEXES {
+        let count = client
+            .query_one(
+                "SELECT count(*) FROM pg_indexes \
+                 WHERE schemaname = current_schema() AND indexname = $1",
+                &[index],
+            )
+            .map_err(postgres_error)?
+            .get::<_, i64>(0);
+        if count != 1 {
+            return Err(StorageError::Postgres(format!(
+                "required schema index {index} is missing"
+            )));
+        }
+    }
+
+    let row = client
+        .query_opt(
+            "SELECT name FROM storage_schema_migrations WHERE version = $1",
+            &[&(POSTGRES_SCHEMA_VERSION as i64)],
+        )
+        .map_err(postgres_error)?;
+    let name = row.map(|row| row.get::<_, String>(0));
+    if name.as_deref() != Some(POSTGRES_SCHEMA_NAME) {
+        return Err(StorageError::Postgres(format!(
+            "required schema migration {POSTGRES_SCHEMA_VERSION}:{POSTGRES_SCHEMA_NAME} is missing"
+        )));
+    }
+    Ok(())
+}
+
+fn fnv1a64_hex(input: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 async fn build_libsql_database(
@@ -2018,7 +2160,11 @@ impl RuntimeStorageRepositories {
     }
 
     pub fn backend_evidence(&self) -> StorageBackendEvidence {
-        self.backend.evidence()
+        let mut evidence = self.backend.evidence();
+        if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
+            evidence.schema = Some(control_plane.schema_evidence());
+        }
+        evidence
     }
 
     pub fn control_plane_snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
