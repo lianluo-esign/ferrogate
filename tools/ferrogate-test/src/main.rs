@@ -5,7 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::ValueEnum;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa, KeyPair,
 };
@@ -22,10 +22,13 @@ use std::{
 };
 
 mod assertions;
+mod cli;
 
 use assertions::*;
-
-const IMAGE_TAG: &str = "ferrogate:e2e-local";
+use cli::{
+    AuthArgs, DockerScenario, LocalArgs, SupabaseLiveRestartArgs, SupabaseLiveToken4aiProviderArgs,
+    IMAGE_TAG,
+};
 const NETWORK_NAME: &str = "ferrogate-e2e-net";
 const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
 const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
@@ -43,239 +46,45 @@ const GATEWAY_A_PORT: u16 = 18080;
 const GATEWAY_B_PORT: u16 = 18081;
 
 fn main() -> Result<()> {
-    print_attribution_banner();
-    let cli = Cli::parse();
-    match cli.command {
-        Commands::List => {
-            println!(
-            "local: admin-api, auth-api, gateway-api, ci, supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart"
-        );
-            println!("docker: {}", DockerScenario::names().join(", "));
-            Ok(())
-        }
-        Commands::Run(args) => run_docker_scenario(args.scenario, &args.image),
-        Commands::RunAll(args) => {
-            run_admin_api(&args.local)?;
-            run_auth_api(&args.auth)?;
-            run_gateway_external_auth_api(&args.local, &args.auth)?;
-            run_gateway_third_party_auth_api(&args.local)?;
-            run_gateway_api(&args.local)?;
-            if args.include_docker {
-                run_all_docker_scenarios(&args.image)?;
+    cli::run(cli::Dispatch {
+        admin: run_admin_api,
+        auth: run_auth_api,
+        gateway: run_gateway_api,
+        supabase_restart: run_supabase_restart,
+        supabase_live_smoke: run_supabase_live_smoke,
+        supabase_live_restart: run_supabase_live_restart,
+        supabase_live_token4ai_provider: run_supabase_live_token4ai_provider,
+        supabase_migration: run_supabase_migration,
+        postgres_restart: run_postgres_restart,
+        postgres_tls_restart: run_postgres_tls_restart,
+        mysql_restart: run_mysql_restart,
+        mysql_tls_restart: run_mysql_tls_restart,
+        docker: run_docker_scenario,
+        run_all_admin_auth_gateway: |local, auth, include_docker, image| {
+            run_admin_api(local)?;
+            run_auth_api(auth)?;
+            run_gateway_external_auth_api(local, auth)?;
+            run_gateway_third_party_auth_api(local)?;
+            run_gateway_api(local)?;
+            if include_docker {
+                run_all_docker_scenarios(image)?;
             }
             Ok(())
-        }
-        Commands::AdminApi(args) => run_admin_api(&args),
-        Commands::AuthApi(args) => run_auth_api(&args),
-        Commands::GatewayApi(args) => run_gateway_api(&args),
-        Commands::SupabaseRestart(args) => run_supabase_restart(&args),
-        Commands::SupabaseLiveSmoke(args) => run_supabase_live_smoke(&args),
-        Commands::SupabaseLiveRestart(args) => run_supabase_live_restart(&args),
-        Commands::SupabaseLiveToken4aiProvider(args) => run_supabase_live_token4ai_provider(&args),
-        Commands::SupabaseMigration(args) => run_supabase_migration(&args),
-        Commands::PostgresRestart(args) => run_postgres_restart(&args),
-        Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
-        Commands::MysqlRestart(args) => run_mysql_restart(&args),
-        Commands::MysqlTlsRestart(args) => run_mysql_tls_restart(&args),
-        Commands::Ci(args) => {
-            run_admin_api(&args.local)?;
-            run_auth_api(&args.auth)?;
-            run_gateway_external_auth_api(&args.local, &args.auth)?;
-            run_gateway_third_party_auth_api(&args.local)?;
-            run_gateway_api(&args.local)?;
-            run_supabase_migration(&args.local)?;
-            run_supabase_restart(&args.local)?;
-            run_postgres_restart(&args.local)?;
-            run_postgres_tls_restart(&args.local)?;
-            run_mysql_restart(&args.local)?;
-            run_mysql_tls_restart(&args.local)
-        }
-    }
-}
-
-fn print_attribution_banner() {
-    println!("Token4AI Cloud Attribution");
-    println!(
-        "Developed by the commercial cloud service company represented by https://token4ai.cloud."
-    );
-    println!("Author: jamesduan (X: https://x.com/JamesDuanL)");
-    println!("Created: 2026-06-11");
-    println!(
-        "description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure."
-    );
-    println!();
-}
-
-#[derive(Debug, Parser)]
-#[command(name = "ferrogate-test")]
-#[command(author = "jamesduan <https://x.com/JamesDuanL>")]
-#[command(version)]
-#[command(about = "FerroGate end-to-end test harness for admin, auth, and gateway APIs")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Debug, Subcommand)]
-enum Commands {
-    /// List available local and Docker-backed scenarios.
-    List,
-    /// Run one Docker-backed cluster/container scenario.
-    Run(DockerRunArgs),
-    /// Run the full local API harness and optionally the Docker scenario set.
-    RunAll(RunAllArgs),
-    /// Run Admin API coverage against a real local FerroGate process.
-    AdminApi(LocalArgs),
-    /// Run auth service coverage against a real local ferrogate-auth process.
-    AuthApi(AuthArgs),
-    /// Run gateway API coverage against a real local FerroGate process.
-    GatewayApi(LocalArgs),
-    /// Run local Supabase-compatible Postgres restart durability coverage.
-    SupabaseRestart(LocalArgs),
-    /// Opt-in live Supabase connection, migration, status, and minimal persistence smoke.
-    SupabaseLiveSmoke(SupabaseLiveRestartArgs),
-    /// Opt-in live Supabase restart durability scenario.
-    SupabaseLiveRestart(SupabaseLiveRestartArgs),
-    /// Opt-in live Supabase and Token4AI OpenAI-compatible provider billing scenario.
-    SupabaseLiveToken4aiProvider(SupabaseLiveToken4aiProviderArgs),
-    /// Run local PostgreSQL-to-Supabase-compatible migration tooling coverage.
-    SupabaseMigration(LocalArgs),
-    /// Run local Docker-backed PostgreSQL restart durability coverage.
-    PostgresRestart(LocalArgs),
-    /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
-    PostgresTlsRestart(LocalArgs),
-    /// Run local Docker-backed MySQL restart durability coverage.
-    MysqlRestart(LocalArgs),
-    /// Run local Docker-backed MySQL TLS restart durability coverage.
-    MysqlTlsRestart(LocalArgs),
-    /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
-    Ci(CiArgs),
-}
-
-#[derive(Debug, Args)]
-struct DockerRunArgs {
-    #[arg(value_enum)]
-    scenario: DockerScenario,
-    /// Docker image to verify. Defaults to a local build tag, but may point at a GHCR image.
-    #[arg(long, env = "FERROGATE_TEST_IMAGE", default_value = IMAGE_TAG)]
-    image: String,
-}
-
-#[derive(Debug, Args)]
-struct RunAllArgs {
-    #[command(flatten)]
-    local: LocalArgs,
-    #[command(flatten)]
-    auth: AuthArgs,
-    /// Also run Docker-backed cluster, shared-state, and Redis scenarios.
-    #[arg(long)]
-    include_docker: bool,
-    /// Docker image to verify. Defaults to a local build tag, but may point at a GHCR image.
-    #[arg(long, env = "FERROGATE_TEST_IMAGE", default_value = IMAGE_TAG)]
-    image: String,
-}
-
-#[derive(Debug, Args)]
-struct LocalArgs {
-    /// Path to a built ferrogate binary. Defaults to target/debug/ferrogate.
-    #[arg(
-        long,
-        env = "FERROGATE_TEST_FERROGATE_BIN",
-        default_value = "target/debug/ferrogate"
-    )]
-    ferrogate_bin: PathBuf,
-}
-
-#[derive(Debug, Args)]
-struct AuthArgs {
-    /// Path to a built ferrogate-auth binary. Defaults to target/debug/ferrogate-auth.
-    #[arg(
-        long,
-        env = "FERROGATE_TEST_FERROGATE_AUTH_BIN",
-        default_value = "target/debug/ferrogate-auth"
-    )]
-    ferrogate_auth_bin: PathBuf,
-}
-
-#[derive(Debug, Args)]
-struct CiArgs {
-    #[command(flatten)]
-    local: LocalArgs,
-    #[command(flatten)]
-    auth: AuthArgs,
-}
-
-#[derive(Debug, Args)]
-struct SupabaseLiveRestartArgs {
-    #[command(flatten)]
-    local: LocalArgs,
-    /// Supabase direct or session-pooler Postgres DSN. Prefer FERROGATE_SUPABASE_DSN in shell/CI.
-    #[arg(long, env = "FERROGATE_SUPABASE_DSN")]
-    supabase_dsn: String,
-    /// PostgreSQL TLS mode for the live Supabase connection.
-    #[arg(
-        long,
-        env = "FERROGATE_SUPABASE_TLS_MODE",
-        default_value = "verify_full"
-    )]
-    tls_mode: String,
-    /// Optional root CA path for private CA deployments.
-    #[arg(long, env = "FERROGATE_SUPABASE_TLS_CA_CERT_PATH")]
-    tls_ca_cert_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-struct SupabaseLiveToken4aiProviderArgs {
-    #[command(flatten)]
-    supabase: SupabaseLiveRestartArgs,
-    /// OpenAI-compatible provider base URL for Token4AI AI Gateway.
-    #[arg(
-        long,
-        env = "FERROGATE_TOKEN4AI_OPENAI_BASE_URL",
-        default_value = "https://api.token4ai.cloud/v1"
-    )]
-    provider_base_url: String,
-    /// Provider API key. Prefer FERROGATE_TOKEN4AI_OPENAI_API_KEY in shell/CI.
-    #[arg(long, env = "FERROGATE_TOKEN4AI_OPENAI_API_KEY")]
-    provider_api_key: String,
-    /// Live model to call through the Token4AI OpenAI-compatible API.
-    #[arg(
-        long,
-        env = "FERROGATE_TOKEN4AI_OPENAI_MODEL",
-        default_value = "gpt-4o-mini"
-    )]
-    provider_model: String,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum DockerScenario {
-    AnalyticsDirectClickhouse,
-    AnalyticsVectorClickhouse,
-    ClusterDrain,
-    GuardrailComplete,
-    GuardrailRequestDeny,
-    GuardrailResponseRedact,
-    SharedApiKey,
-    SharedStateStale,
-    SharedStateStartupUnavailable,
-    RedisCounters,
-}
-
-impl DockerScenario {
-    fn names() -> &'static [&'static str] {
-        &[
-            "analytics-direct-clickhouse",
-            "analytics-vector-clickhouse",
-            "cluster-drain",
-            "guardrail-complete",
-            "guardrail-request-deny",
-            "guardrail-response-redact",
-            "shared-api-key",
-            "shared-state-stale",
-            "shared-state-startup-unavailable",
-            "redis-counters",
-        ]
-    }
+        },
+        ci: |local, auth| {
+            run_admin_api(local)?;
+            run_auth_api(auth)?;
+            run_gateway_external_auth_api(local, auth)?;
+            run_gateway_third_party_auth_api(local)?;
+            run_gateway_api(local)?;
+            run_supabase_migration(local)?;
+            run_supabase_restart(local)?;
+            run_postgres_restart(local)?;
+            run_postgres_tls_restart(local)?;
+            run_mysql_restart(local)?;
+            run_mysql_tls_restart(local)
+        },
+    })
 }
 
 fn run_docker_scenario(scenario: DockerScenario, image: &str) -> Result<()> {
