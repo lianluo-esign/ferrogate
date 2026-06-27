@@ -114,6 +114,7 @@ pub(crate) struct AdminManagedWorkerPersistence {
     pub(crate) durable: bool,
     pub(crate) implemented: bool,
     pub(crate) timeline_evidence_implemented: bool,
+    pub(crate) session_lifecycle_schema_ready: bool,
     pub(crate) session_lifecycle_implemented: bool,
     pub(crate) agent_worker_transport_implemented: bool,
     pub(crate) contract_version: u32,

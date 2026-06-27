@@ -111,6 +111,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 true
             );
             assert_eq!(
+                body["data"][0]["persistence"]["session_lifecycle_schema_ready"],
+                false
+            );
+            assert_eq!(
                 body["data"][0]["persistence"]["session_lifecycle_implemented"],
                 false
             );

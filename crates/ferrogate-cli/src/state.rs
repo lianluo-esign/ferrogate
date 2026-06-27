@@ -2943,6 +2943,15 @@ impl AppState {
         self.repositories.backend_evidence()
     }
 
+    pub(crate) fn managed_worker_session_lifecycle_storage_ready(&self) -> bool {
+        self.storage_status().schema.as_ref().is_some_and(|schema| {
+            schema.engine == "postgres"
+                && schema.validated
+                && schema.version >= 4
+                && schema.name == "004_supabase_managed_worker_lifecycle"
+        })
+    }
+
     pub(crate) fn cluster_status(&self) -> ClusterStatus {
         ClusterStatus::new(
             &self.cluster_identity,

@@ -9318,6 +9318,7 @@
           "durable",
           "implemented",
           "timeline_evidence_implemented",
+          "session_lifecycle_schema_ready",
           "session_lifecycle_implemented",
           "agent_worker_transport_implemented",
           "contract_version"
@@ -9337,9 +9338,13 @@
             "type": "boolean",
             "description": "True when managed run/timeline evidence can use the existing agent_runs and agent_run_events persistence path."
           },
+          "session_lifecycle_schema_ready": {
+            "type": "boolean",
+            "description": "True when the active Supabase/Postgres schema contains the managed worker template, agent-worker instance, session, and lifecycle event tables."
+          },
           "session_lifecycle_implemented": {
             "type": "boolean",
-            "description": "True only after managed worker template/session/run lifecycle records are persisted."
+            "description": "True only after managed worker scheduler/create/cancel paths write session lifecycle records through durable storage."
           },
           "agent_worker_transport_implemented": {
             "type": "boolean",

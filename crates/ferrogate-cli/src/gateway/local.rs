@@ -3718,6 +3718,8 @@ impl FerroGateway {
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
             Ok(_) => {
                 let storage = state.storage_status();
+                let session_lifecycle_schema_ready =
+                    state.managed_worker_session_lifecycle_storage_ready();
                 let body = AdminList::new(vec![AdminManagedWorkerRuntime {
                     id: "managed-worker-runtime",
                     status: "contract_ready",
@@ -3774,6 +3776,7 @@ impl FerroGateway {
                         durable: storage.durable,
                         implemented: false,
                         timeline_evidence_implemented: true,
+                        session_lifecycle_schema_ready,
                         session_lifecycle_implemented: false,
                         agent_worker_transport_implemented: false,
                         contract_version: storage.contract_version,
