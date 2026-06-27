@@ -859,6 +859,58 @@ mod tests {
     }
 
     #[test]
+    fn managed_adapter_approval_required_is_normalized_evidence() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        let authorizer = crate::SimpleCapabilityAuthorizer::new(crate::CapabilityPolicy {
+            allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
+            approval_required_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
+            ..crate::CapabilityPolicy::default()
+        });
+
+        let (evidence, event) = authorize_framework_capability(
+            &authorizer,
+            FrameworkCapabilityRequest {
+                session,
+                action: CapabilityAction::Cli,
+                target: "bash -lc cargo test".to_string(),
+                high_risk: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            evidence.decision,
+            CapabilityAuthorizationDecision::ApprovalRequired
+        );
+        assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityRequested);
+        assert_eq!(
+            event.metadata.get("decision").map(String::as_str),
+            Some("approval_required")
+        );
+        assert_eq!(
+            event.metadata.get("action").map(String::as_str),
+            Some("cli")
+        );
+        assert_eq!(
+            event.metadata.get("target").map(String::as_str),
+            Some("bash -lc cargo test")
+        );
+        assert_eq!(
+            event.metadata.get("tenant_id").map(String::as_str),
+            Some("tenant-1")
+        );
+        assert_eq!(
+            event.metadata.get("worker_id").map(String::as_str),
+            Some("worker-1")
+        );
+        assert_eq!(
+            event.metadata.get("isolation_backend").map(String::as_str),
+            Some("firecracker")
+        );
+    }
+
+    #[test]
     fn self_hosted_adapter_capability_report_is_reported_telemetry() {
         let mut adapter = NativeHarnessAdapter::default();
         let (session, _) = adapter
