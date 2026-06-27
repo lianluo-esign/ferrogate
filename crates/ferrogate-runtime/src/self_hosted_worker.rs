@@ -165,6 +165,52 @@ pub struct SelfHostedWorkerHeartbeat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedArtifactUploadRequest {
+    pub identity: SelfHostedWorkerIdentity,
+    pub session_id: String,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub name: String,
+    pub media_type: String,
+    pub byte_len: usize,
+    pub reported_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedArtifactUpload {
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub name: String,
+    pub media_type: String,
+    pub byte_len: usize,
+    pub trust_level: SelfHostedTelemetryTrustLevel,
+    pub reported_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedCheckpointFetchRequest {
+    pub identity: SelfHostedWorkerIdentity,
+    pub session_id: String,
+    pub run_id: String,
+    pub checkpoint_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedCheckpointReference {
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub checkpoint_id: String,
+    pub trust_level: SelfHostedTelemetryTrustLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedTelemetryRequest {
     pub identity: SelfHostedWorkerIdentity,
     pub session_id: String,
@@ -286,6 +332,137 @@ impl SelfHostedTelemetryIngestor {
     }
 }
 
+pub trait SelfHostedWorkerTransport {
+    fn probe_worker(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        identity: &SelfHostedWorkerIdentity,
+    ) -> Result<RegisteredSelfHostedWorker, SelfHostedWorkerError>;
+    fn heartbeat(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        identity: &SelfHostedWorkerIdentity,
+        status: &str,
+        reported_at_unix: u64,
+    ) -> Result<SelfHostedWorkerHeartbeat, SelfHostedWorkerError>;
+    fn stream_events(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedTelemetryRequest,
+    ) -> Result<SelfHostedTelemetryEvent, SelfHostedWorkerError>;
+    fn upload_artifact(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedArtifactUploadRequest,
+    ) -> Result<SelfHostedArtifactUpload, SelfHostedWorkerError>;
+    fn fetch_checkpoint(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedCheckpointFetchRequest,
+    ) -> Result<SelfHostedCheckpointReference, SelfHostedWorkerError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InMemorySelfHostedWorkerTransport {
+    ingestor: SelfHostedTelemetryIngestor,
+    max_artifact_bytes: usize,
+}
+
+impl InMemorySelfHostedWorkerTransport {
+    pub fn new(
+        max_payload_bytes: usize,
+        max_artifact_bytes: usize,
+    ) -> Result<Self, SelfHostedWorkerError> {
+        if max_artifact_bytes == 0 {
+            return Err(SelfHostedWorkerError::InvalidTelemetry(
+                "max_artifact_bytes must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self {
+            ingestor: SelfHostedTelemetryIngestor::new(max_payload_bytes)?,
+            max_artifact_bytes,
+        })
+    }
+}
+
+impl Default for InMemorySelfHostedWorkerTransport {
+    fn default() -> Self {
+        Self {
+            ingestor: SelfHostedTelemetryIngestor::default(),
+            max_artifact_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+impl SelfHostedWorkerTransport for InMemorySelfHostedWorkerTransport {
+    fn probe_worker(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        identity: &SelfHostedWorkerIdentity,
+    ) -> Result<RegisteredSelfHostedWorker, SelfHostedWorkerError> {
+        registry.validate_identity(identity).cloned()
+    }
+
+    fn heartbeat(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        identity: &SelfHostedWorkerIdentity,
+        status: &str,
+        reported_at_unix: u64,
+    ) -> Result<SelfHostedWorkerHeartbeat, SelfHostedWorkerError> {
+        self.ingestor
+            .heartbeat(registry, identity, status, reported_at_unix)
+    }
+
+    fn stream_events(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedTelemetryRequest,
+    ) -> Result<SelfHostedTelemetryEvent, SelfHostedWorkerError> {
+        self.ingestor.ingest(registry, request)
+    }
+
+    fn upload_artifact(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedArtifactUploadRequest,
+    ) -> Result<SelfHostedArtifactUpload, SelfHostedWorkerError> {
+        let worker = registry.validate_identity(&request.identity)?;
+        validate_artifact_upload(&request, self.max_artifact_bytes)?;
+        Ok(SelfHostedArtifactUpload {
+            tenant_id: worker.tenant_id.clone(),
+            workspace_id: worker.workspace_id.clone(),
+            worker_id: worker.worker_id.clone(),
+            session_id: request.session_id,
+            run_id: request.run_id,
+            artifact_id: request.artifact_id,
+            name: request.name,
+            media_type: request.media_type,
+            byte_len: request.byte_len,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+            reported_at_unix: request.reported_at_unix,
+        })
+    }
+
+    fn fetch_checkpoint(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedCheckpointFetchRequest,
+    ) -> Result<SelfHostedCheckpointReference, SelfHostedWorkerError> {
+        let worker = registry.validate_identity(&request.identity)?;
+        validate_checkpoint_fetch(&request)?;
+        Ok(SelfHostedCheckpointReference {
+            tenant_id: worker.tenant_id.clone(),
+            workspace_id: worker.workspace_id.clone(),
+            worker_id: worker.worker_id.clone(),
+            session_id: request.session_id,
+            run_id: request.run_id,
+            checkpoint_id: request.checkpoint_id,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelfHostedWorkerError {
     InvalidRegistration(String),
@@ -375,6 +552,42 @@ fn validate_telemetry_request(
             "reported_at_unix must be greater than zero".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_artifact_upload(
+    request: &SelfHostedArtifactUploadRequest,
+    max_artifact_bytes: usize,
+) -> Result<(), SelfHostedWorkerError> {
+    require_telemetry_non_empty("session_id", &request.session_id)?;
+    require_telemetry_non_empty("run_id", &request.run_id)?;
+    require_telemetry_non_empty("artifact_id", &request.artifact_id)?;
+    require_telemetry_non_empty("name", &request.name)?;
+    require_telemetry_non_empty("media_type", &request.media_type)?;
+    if request.byte_len == 0 {
+        return Err(SelfHostedWorkerError::InvalidTelemetry(
+            "artifact byte_len must be greater than zero".to_string(),
+        ));
+    }
+    if request.byte_len > max_artifact_bytes {
+        return Err(SelfHostedWorkerError::InvalidTelemetry(format!(
+            "artifact exceeds maximum size of {max_artifact_bytes} bytes"
+        )));
+    }
+    if request.reported_at_unix == 0 {
+        return Err(SelfHostedWorkerError::InvalidTelemetry(
+            "reported_at_unix must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_fetch(
+    request: &SelfHostedCheckpointFetchRequest,
+) -> Result<(), SelfHostedWorkerError> {
+    require_telemetry_non_empty("session_id", &request.session_id)?;
+    require_telemetry_non_empty("run_id", &request.run_id)?;
+    require_telemetry_non_empty("checkpoint_id", &request.checkpoint_id)?;
     Ok(())
 }
 
@@ -552,6 +765,101 @@ mod tests {
         assert_eq!(heartbeat.workspace_id, "workspace-1");
         assert_eq!(heartbeat.worker_id, "worker-1");
         assert_eq!(heartbeat.status, "online");
+    }
+
+    #[test]
+    fn transport_probes_heartbeats_streams_events_and_reports_artifacts() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+
+        let worker = transport.probe_worker(&registry, &identity).unwrap();
+        let heartbeat = transport
+            .heartbeat(&registry, &identity, "online", 1_725_000_001)
+            .unwrap();
+        let event = transport
+            .stream_events(
+                &registry,
+                SelfHostedTelemetryRequest {
+                    identity: identity.clone(),
+                    session_id: "session-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    event_id: "event-transport-1".to_string(),
+                    kind: SelfHostedTelemetryKind::Log,
+                    message: Some("log line".to_string()),
+                    artifact_id: None,
+                    checkpoint_id: None,
+                    reported_at_unix: 1_725_000_002,
+                    payload_bytes: 256,
+                },
+            )
+            .unwrap();
+        let artifact = transport
+            .upload_artifact(
+                &registry,
+                SelfHostedArtifactUploadRequest {
+                    identity: identity.clone(),
+                    session_id: "session-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    artifact_id: "artifact-1".to_string(),
+                    name: "report.txt".to_string(),
+                    media_type: "text/plain".to_string(),
+                    byte_len: 128,
+                    reported_at_unix: 1_725_000_003,
+                },
+            )
+            .unwrap();
+        let checkpoint = transport
+            .fetch_checkpoint(
+                &registry,
+                SelfHostedCheckpointFetchRequest {
+                    identity,
+                    session_id: "session-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    checkpoint_id: "checkpoint-1".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(worker.worker_id, "worker-1");
+        assert_eq!(heartbeat.status, "online");
+        assert_eq!(event.kind, SelfHostedTelemetryKind::Log);
+        assert_eq!(artifact.artifact_id, "artifact-1");
+        assert_eq!(
+            artifact.trust_level,
+            SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker
+        );
+        assert_eq!(checkpoint.checkpoint_id, "checkpoint-1");
+        assert_eq!(
+            checkpoint.trust_level,
+            SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker
+        );
+    }
+
+    #[test]
+    fn transport_rejects_oversized_artifact_uploads() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let transport = InMemorySelfHostedWorkerTransport::new(1024, 128).unwrap();
+
+        let error = transport
+            .upload_artifact(
+                &registry,
+                SelfHostedArtifactUploadRequest {
+                    identity,
+                    session_id: "session-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    artifact_id: "artifact-1".to_string(),
+                    name: "report.txt".to_string(),
+                    media_type: "text/plain".to_string(),
+                    byte_len: 129,
+                    reported_at_unix: 1_725_000_003,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, SelfHostedWorkerError::InvalidTelemetry(_)));
+        assert!(error.to_string().contains("artifact exceeds maximum size"));
     }
 
     fn registered_registry() -> SelfHostedWorkerRegistry {

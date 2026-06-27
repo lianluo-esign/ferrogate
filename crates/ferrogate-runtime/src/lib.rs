@@ -53,10 +53,12 @@ pub use managed_worker::{
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 pub use self_hosted_worker::{
-    RegisteredSelfHostedWorker, SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor,
+    InMemorySelfHostedWorkerTransport, RegisteredSelfHostedWorker, SelfHostedArtifactUpload,
+    SelfHostedArtifactUploadRequest, SelfHostedCheckpointFetchRequest,
+    SelfHostedCheckpointReference, SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor,
     SelfHostedTelemetryKind, SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel,
     SelfHostedWorkerError, SelfHostedWorkerHeartbeat, SelfHostedWorkerIdentity,
-    SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
+    SelfHostedWorkerRegistration, SelfHostedWorkerRegistry, SelfHostedWorkerTransport,
 };
 #[cfg(feature = "wasm")]
 pub use wasm::{
