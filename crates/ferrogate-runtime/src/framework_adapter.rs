@@ -13,6 +13,12 @@
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
+use crate::{
+    self_hosted_trust_level_for_capability_report, CapabilityAction,
+    CapabilityAuthorizationDecision, CapabilityAuthorizationEvidence, CapabilityAuthorizer,
+    ManagedCapabilityRequest, SelfHostedTelemetryTrustLevel,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportedFramework {
     ClaudeCode,
@@ -89,6 +95,7 @@ pub struct FrameworkAdapterSessionRequest {
     pub tenant_id: String,
     pub workspace_id: String,
     pub worker_id: String,
+    pub isolation_backend: String,
     pub mode: FrameworkAdapterMode,
     pub required_capabilities: FrameworkAdapterCapabilities,
 }
@@ -97,6 +104,10 @@ pub struct FrameworkAdapterSessionRequest {
 pub struct FrameworkAdapterSession {
     pub session_id: String,
     pub run_id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub isolation_backend: String,
     pub adapter_name: String,
     pub adapter_version: String,
     pub framework: SupportedFramework,
@@ -107,6 +118,14 @@ pub struct FrameworkAdapterSession {
 pub struct FrameworkAdapterRunRequest {
     pub session: FrameworkAdapterSession,
     pub input_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkCapabilityRequest {
+    pub session: FrameworkAdapterSession,
+    pub action: CapabilityAction,
+    pub target: String,
+    pub high_risk: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +228,10 @@ impl FrameworkAdapter for NativeHarnessAdapter {
         let session = FrameworkAdapterSession {
             session_id: request.session_id,
             run_id: request.run_id,
+            tenant_id: request.tenant_id,
+            workspace_id: request.workspace_id,
+            worker_id: request.worker_id.clone(),
+            isolation_backend: request.isolation_backend,
             adapter_name: self.descriptor.name.clone(),
             adapter_version: self.descriptor.version.clone(),
             framework: self.descriptor.framework,
@@ -292,6 +315,61 @@ impl FrameworkAdapter for NativeHarnessAdapter {
     }
 }
 
+pub fn authorize_framework_capability<A>(
+    authorizer: &A,
+    request: FrameworkCapabilityRequest,
+) -> Result<(CapabilityAuthorizationEvidence, NormalizedFrameworkEvent), FrameworkAdapterError>
+where
+    A: CapabilityAuthorizer,
+{
+    if request.session.mode == FrameworkAdapterMode::SelfHosted {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "self-hosted adapters report capability telemetry; they do not use managed authorization"
+                .to_string(),
+        ));
+    }
+    let outcome = authorizer
+        .authorize(ManagedCapabilityRequest {
+            tenant_id: request.session.tenant_id.clone(),
+            workspace_id: request.session.workspace_id.clone(),
+            worker_id: request.session.worker_id.clone(),
+            session_id: request.session.session_id.clone(),
+            run_id: request.session.run_id.clone(),
+            adapter_name: request.session.adapter_name.clone(),
+            isolation_backend: request.session.isolation_backend.clone(),
+            action: request.action,
+            target: request.target,
+            high_risk: request.high_risk,
+        })
+        .map_err(|error| FrameworkAdapterError::CapabilityDenied(error.to_string()))?;
+    let kind = match outcome.decision {
+        CapabilityAuthorizationDecision::Allowed => FrameworkAdapterEventKind::CapabilityAllowed,
+        CapabilityAuthorizationDecision::Denied => FrameworkAdapterEventKind::CapabilityDenied,
+        CapabilityAuthorizationDecision::ApprovalRequired => {
+            FrameworkAdapterEventKind::CapabilityRequested
+        }
+    };
+    let event = capability_authorization_event(&request.session, kind, &outcome.evidence);
+    Ok((outcome.evidence, event))
+}
+
+pub fn self_hosted_framework_capability_report(
+    request: FrameworkCapabilityRequest,
+) -> Result<NormalizedFrameworkEvent, FrameworkAdapterError> {
+    let trust_level = self_hosted_trust_level_for_capability_report(request.session.mode)
+        .ok_or_else(|| {
+            FrameworkAdapterError::InvalidRequest(
+                "managed adapters require gateway capability authorization".to_string(),
+            )
+        })?;
+    Ok(self_hosted_capability_report_event(
+        &request.session,
+        request.action,
+        &request.target,
+        trust_level,
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameworkAdapterError {
     InvalidDescriptor(String),
@@ -346,6 +424,7 @@ fn validate_session_request(
     require_request_field("tenant_id", &request.tenant_id)?;
     require_request_field("workspace_id", &request.workspace_id)?;
     require_request_field("worker_id", &request.worker_id)?;
+    require_request_field("isolation_backend", &request.isolation_backend)?;
     Ok(())
 }
 
@@ -377,6 +456,64 @@ fn normalized_event<'a>(
             .into_iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect(),
+    }
+}
+
+fn capability_authorization_event(
+    session: &FrameworkAdapterSession,
+    kind: FrameworkAdapterEventKind,
+    evidence: &CapabilityAuthorizationEvidence,
+) -> NormalizedFrameworkEvent {
+    normalized_event(
+        session,
+        kind,
+        Some(evidence.reason.clone()),
+        [
+            ("tenant_id", evidence.tenant_id.as_str()),
+            ("workspace_id", evidence.workspace_id.as_str()),
+            ("worker_id", evidence.worker_id.as_str()),
+            ("action", evidence.action.as_str()),
+            ("target", evidence.target.as_str()),
+            ("decision", capability_decision_label(evidence.decision)),
+            ("isolation_backend", evidence.isolation_backend.as_str()),
+        ],
+    )
+}
+
+fn self_hosted_capability_report_event(
+    session: &FrameworkAdapterSession,
+    action: CapabilityAction,
+    target: &str,
+    trust_level: SelfHostedTelemetryTrustLevel,
+) -> NormalizedFrameworkEvent {
+    normalized_event(
+        session,
+        FrameworkAdapterEventKind::CapabilityRequested,
+        Some("self-hosted adapter reported capability use".to_string()),
+        [
+            ("tenant_id", session.tenant_id.as_str()),
+            ("workspace_id", session.workspace_id.as_str()),
+            ("worker_id", session.worker_id.as_str()),
+            ("action", action.as_str()),
+            ("target", target),
+            ("trust_level", self_hosted_trust_level_label(trust_level)),
+        ],
+    )
+}
+
+fn capability_decision_label(decision: CapabilityAuthorizationDecision) -> &'static str {
+    match decision {
+        CapabilityAuthorizationDecision::Allowed => "allowed",
+        CapabilityAuthorizationDecision::Denied => "denied",
+        CapabilityAuthorizationDecision::ApprovalRequired => "approval_required",
+    }
+}
+
+fn self_hosted_trust_level_label(trust_level: SelfHostedTelemetryTrustLevel) -> &'static str {
+    match trust_level {
+        SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker => {
+            "reported_by_self_hosted_worker"
+        }
     }
 }
 
@@ -414,6 +551,9 @@ mod tests {
             .all(|event| event.adapter_name == "native-harness"
                 && event.session_id == "session-1"
                 && event.run_id == "run-1"));
+        assert_eq!(session.tenant_id, "tenant-1");
+        assert_eq!(session.workspace_id, "workspace-1");
+        assert_eq!(session.worker_id, "worker-1");
         assert_eq!(closed.kind, FrameworkAdapterEventKind::SessionClosed);
     }
 
@@ -466,6 +606,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn managed_adapter_capability_request_uses_gateway_authorizer() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        let authorizer = crate::SimpleCapabilityAuthorizer::new(crate::CapabilityPolicy {
+            allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Tool]),
+            ..crate::CapabilityPolicy::default()
+        });
+
+        let (evidence, event) = authorize_framework_capability(
+            &authorizer,
+            FrameworkCapabilityRequest {
+                session,
+                action: CapabilityAction::Tool,
+                target: "native.echo".to_string(),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.decision, CapabilityAuthorizationDecision::Allowed);
+        assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityAllowed);
+        assert_eq!(
+            event.metadata.get("decision").map(String::as_str),
+            Some("allowed")
+        );
+        assert_eq!(
+            event.metadata.get("isolation_backend").map(String::as_str),
+            Some("firecracker")
+        );
+    }
+
+    #[test]
+    fn managed_adapter_capability_denial_is_normalized_evidence() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        let authorizer = crate::SimpleCapabilityAuthorizer::default();
+
+        let (evidence, event) = authorize_framework_capability(
+            &authorizer,
+            FrameworkCapabilityRequest {
+                session,
+                action: CapabilityAction::Cli,
+                target: "bash".to_string(),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.decision, CapabilityAuthorizationDecision::Denied);
+        assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityDenied);
+        assert_eq!(
+            event.metadata.get("decision").map(String::as_str),
+            Some("denied")
+        );
+    }
+
+    #[test]
+    fn self_hosted_adapter_capability_report_is_reported_telemetry() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter
+            .start_session(FrameworkAdapterSessionRequest {
+                mode: FrameworkAdapterMode::SelfHosted,
+                ..session_request()
+            })
+            .unwrap();
+
+        let event = self_hosted_framework_capability_report(FrameworkCapabilityRequest {
+            session,
+            action: CapabilityAction::Cli,
+            target: "local-shell".to_string(),
+            high_risk: true,
+        })
+        .unwrap();
+
+        assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityRequested);
+        assert_eq!(
+            event.metadata.get("trust_level").map(String::as_str),
+            Some("reported_by_self_hosted_worker")
+        );
+    }
+
     fn session_request() -> FrameworkAdapterSessionRequest {
         FrameworkAdapterSessionRequest {
             session_id: "session-1".to_string(),
@@ -473,6 +695,7 @@ mod tests {
             tenant_id: "tenant-1".to_string(),
             workspace_id: "workspace-1".to_string(),
             worker_id: "worker-1".to_string(),
+            isolation_backend: "firecracker".to_string(),
             mode: FrameworkAdapterMode::Managed,
             required_capabilities: FrameworkAdapterCapabilities {
                 tools: true,

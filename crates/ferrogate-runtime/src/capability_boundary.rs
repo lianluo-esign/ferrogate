@@ -30,7 +30,7 @@ pub enum CapabilityAction {
 }
 
 impl CapabilityAction {
-    fn label(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Tool => "tool",
             Self::McpTool => "mcp.tool",
@@ -135,19 +135,19 @@ impl CapabilityAuthorizer for SimpleCapabilityAuthorizer {
         {
             (
                 CapabilityAuthorizationDecision::ApprovalRequired,
-                format!("{} requires approval", request.action.label()),
+                format!("{} requires approval", request.action.as_str()),
             )
         } else if self.policy.allowed_actions.contains(&request.action) {
             (
                 CapabilityAuthorizationDecision::Allowed,
-                format!("{} allowed by capability policy", request.action.label()),
+                format!("{} allowed by capability policy", request.action.as_str()),
             )
         } else {
             (
                 CapabilityAuthorizationDecision::Denied,
                 format!(
                     "{} is not allowed by capability policy",
-                    request.action.label()
+                    request.action.as_str()
                 ),
             )
         };

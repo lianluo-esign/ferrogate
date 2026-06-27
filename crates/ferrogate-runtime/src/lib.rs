@@ -29,9 +29,10 @@ pub use capability_boundary::{
     CapabilityPolicy, ManagedCapabilityRequest, SimpleCapabilityAuthorizer,
 };
 pub use framework_adapter::{
-    FrameworkAdapter, FrameworkAdapterCapabilities, FrameworkAdapterDescriptor,
-    FrameworkAdapterError, FrameworkAdapterEventKind, FrameworkAdapterMode,
-    FrameworkAdapterRunRequest, FrameworkAdapterSession, FrameworkAdapterSessionRequest,
+    authorize_framework_capability, self_hosted_framework_capability_report, FrameworkAdapter,
+    FrameworkAdapterCapabilities, FrameworkAdapterDescriptor, FrameworkAdapterError,
+    FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterRunRequest,
+    FrameworkAdapterSession, FrameworkAdapterSessionRequest, FrameworkCapabilityRequest,
     NativeHarnessAdapter, NormalizedFrameworkEvent, SupportedFramework,
 };
 pub use isolation::{
