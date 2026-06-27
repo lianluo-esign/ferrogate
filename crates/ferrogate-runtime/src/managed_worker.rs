@@ -90,6 +90,23 @@ pub struct ManagedWorkerExecution {
     pub cleanup: IsolationCleanupOutcome,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedWorkerFailedExecution {
+    pub session: ManagedWorkerSession,
+    pub error: ManagedWorkerError,
+    pub stop: Option<IsolationStopOutcome>,
+    pub cleanup: IsolationCleanupOutcome,
+}
+
+pub type ManagedWorkerFailure = Box<ManagedWorkerFailedExecution>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedWorkerCancellation {
+    pub session: ManagedWorkerSession,
+    pub stop: IsolationStopOutcome,
+    pub cleanup: IsolationCleanupOutcome,
+}
+
 pub trait AgentWorkerControlClient {
     fn backends(&mut self) -> &[IsolationBackendDescriptor];
     fn provision_managed_worker(
@@ -205,6 +222,135 @@ impl ManagedWorkerScheduler {
         })
     }
 
+    pub fn run_with_cleanup<C>(
+        &self,
+        request: ManagedWorkerSessionRequest,
+        run: ManagedWorkerRunRequest,
+        agent_worker: &mut C,
+    ) -> Result<ManagedWorkerExecution, ManagedWorkerFailure>
+    where
+        C: AgentWorkerControlClient,
+    {
+        let mut session = self.start_session(request, agent_worker).map_err(|error| {
+            Box::new(ManagedWorkerFailedExecution {
+                session: ManagedWorkerSession::failed_before_start(),
+                error,
+                stop: None,
+                cleanup: IsolationCleanupOutcome::not_started(),
+            })
+        })?;
+        let exec = match agent_worker.exec_or_attach(IsolationExecRequest {
+            instance_id: session.instance_id.clone(),
+            workload_ref: run.workload_ref,
+            args: run.args,
+        }) {
+            Ok(exec) => exec,
+            Err(error) => {
+                session.status = ManagedWorkerSessionStatus::Failed;
+                return Err(self.cleanup_failed_session(session, error, agent_worker));
+            }
+        };
+        let stop = match agent_worker.stop_managed_worker(&session.instance_id, "completed") {
+            Ok(stop) => stop,
+            Err(error) => {
+                session.status = ManagedWorkerSessionStatus::Failed;
+                return Err(self.cleanup_failed_session(session, error, agent_worker));
+            }
+        };
+        let cleanup = match agent_worker.cleanup_managed_worker(&session.instance_id) {
+            Ok(cleanup) => cleanup,
+            Err(error) => {
+                session.status = ManagedWorkerSessionStatus::Failed;
+                return Err(Box::new(ManagedWorkerFailedExecution {
+                    session,
+                    error,
+                    stop: Some(stop),
+                    cleanup: IsolationCleanupOutcome::not_started(),
+                }));
+            }
+        };
+        session.status = ManagedWorkerSessionStatus::CleanedUp;
+        Ok(ManagedWorkerExecution {
+            session,
+            exec,
+            stop,
+            cleanup,
+        })
+    }
+
+    pub fn cancel_session<C>(
+        &self,
+        mut session: ManagedWorkerSession,
+        reason: &str,
+        agent_worker: &mut C,
+    ) -> Result<ManagedWorkerCancellation, ManagedWorkerFailure>
+    where
+        C: AgentWorkerControlClient,
+    {
+        if reason.trim().is_empty() {
+            return Err(Box::new(ManagedWorkerFailedExecution {
+                session,
+                error: ManagedWorkerError::InvalidRequest(
+                    "cancel reason must not be empty".to_string(),
+                ),
+                stop: None,
+                cleanup: IsolationCleanupOutcome::not_started(),
+            }));
+        }
+        let stop = match agent_worker.stop_managed_worker(&session.instance_id, reason) {
+            Ok(stop) => stop,
+            Err(error) => {
+                session.status = ManagedWorkerSessionStatus::Failed;
+                return Err(self.cleanup_failed_session(session, error, agent_worker));
+            }
+        };
+        let cleanup = match agent_worker.cleanup_managed_worker(&session.instance_id) {
+            Ok(cleanup) => cleanup,
+            Err(error) => {
+                session.status = ManagedWorkerSessionStatus::Failed;
+                return Err(Box::new(ManagedWorkerFailedExecution {
+                    session,
+                    error,
+                    stop: Some(stop),
+                    cleanup: IsolationCleanupOutcome::not_started(),
+                }));
+            }
+        };
+        session.status = ManagedWorkerSessionStatus::CleanedUp;
+        Ok(ManagedWorkerCancellation {
+            session,
+            stop,
+            cleanup,
+        })
+    }
+
+    fn cleanup_failed_session<C>(
+        &self,
+        mut session: ManagedWorkerSession,
+        error: ManagedWorkerError,
+        agent_worker: &mut C,
+    ) -> ManagedWorkerFailure
+    where
+        C: AgentWorkerControlClient,
+    {
+        let stop = agent_worker
+            .stop_managed_worker(&session.instance_id, "failed")
+            .ok();
+        let cleanup = match agent_worker.cleanup_managed_worker(&session.instance_id) {
+            Ok(cleanup) => {
+                session.status = ManagedWorkerSessionStatus::CleanedUp;
+                cleanup
+            }
+            Err(_) => IsolationCleanupOutcome::not_started(),
+        };
+        Box::new(ManagedWorkerFailedExecution {
+            session,
+            error,
+            stop,
+            cleanup,
+        })
+    }
+
     fn validate_request(
         &self,
         request: &ManagedWorkerSessionRequest,
@@ -275,6 +421,48 @@ impl ManagedWorkerScheduler {
                     request.requested_framework_adapter
                 ))
             })
+    }
+}
+
+impl ManagedWorkerSession {
+    fn failed_before_start() -> Self {
+        Self {
+            tenant_id: String::new(),
+            workspace_id: String::new(),
+            session_id: String::new(),
+            run_id: String::new(),
+            worker_template_id: String::new(),
+            framework_adapter: String::new(),
+            capability_envelope_id: String::new(),
+            selected_backend: IsolationBackendDescriptor {
+                backend_name: String::new(),
+                backend_version: String::new(),
+                kind: crate::IsolationBackendKind::WasmSandbox,
+                capabilities: crate::IsolationBackendCapabilities::default(),
+            },
+            instance_id: String::new(),
+            status: ManagedWorkerSessionStatus::Failed,
+        }
+    }
+}
+
+impl IsolationCleanupOutcome {
+    fn not_started() -> Self {
+        Self {
+            instance_id: String::new(),
+            evidence: crate::IsolationLifecycleEvidence {
+                backend_name: String::new(),
+                backend_version: String::new(),
+                agent_worker_id: String::new(),
+                isolation_instance_id: None,
+                resource_limits: crate::IsolationResourceLimits::default(),
+                network_policy: crate::IsolationNetworkPolicy::default(),
+                filesystem_policy: crate::IsolationFilesystemPolicy::default(),
+                capability_envelope_id: String::new(),
+                outcome: "not_started".to_string(),
+                failure_reason: Some("session was not provisioned".to_string()),
+            },
+        }
     }
 }
 
@@ -434,6 +622,69 @@ mod tests {
     }
 
     #[test]
+    fn run_with_cleanup_stops_and_cleans_up_after_exec_failure() {
+        let scheduler = scheduler();
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+        agent_worker.fail_exec = true;
+
+        let failure = scheduler
+            .run_with_cleanup(session_request(), run_request(), &mut agent_worker)
+            .unwrap_err();
+
+        assert_eq!(
+            agent_worker.calls,
+            vec![
+                "backends",
+                "provision_managed_worker",
+                "exec_or_attach",
+                "stop_managed_worker",
+                "cleanup_managed_worker",
+            ]
+        );
+        assert!(matches!(failure.error, ManagedWorkerError::AgentWorker(_)));
+        assert_eq!(
+            failure.session.status,
+            ManagedWorkerSessionStatus::CleanedUp
+        );
+        assert!(failure.stop.is_some());
+        assert_eq!(failure.cleanup.evidence.outcome, "cleaned_up");
+    }
+
+    #[test]
+    fn cancel_session_stops_and_cleans_up_through_agent_worker() {
+        let scheduler = scheduler();
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+        let session = scheduler
+            .start_session(session_request(), &mut agent_worker)
+            .unwrap();
+        agent_worker.calls.clear();
+
+        let cancellation = scheduler
+            .cancel_session(session, "operator_cancelled", &mut agent_worker)
+            .unwrap();
+
+        assert_eq!(
+            agent_worker.calls,
+            vec!["stop_managed_worker", "cleanup_managed_worker"]
+        );
+        assert_eq!(
+            cancellation.session.status,
+            ManagedWorkerSessionStatus::CleanedUp
+        );
+        assert_eq!(
+            cancellation.stop.evidence.outcome,
+            "stopped:operator_cancelled"
+        );
+        assert_eq!(cancellation.cleanup.evidence.outcome, "cleaned_up");
+    }
+
+    #[test]
     fn rejects_invalid_scheduler_config() {
         let error = ManagedWorkerScheduler::new(
             ManagedWorkerSchedulerConfig {
@@ -496,6 +747,9 @@ mod tests {
     struct FakeAgentWorker {
         backends: Vec<IsolationBackendDescriptor>,
         calls: Vec<&'static str>,
+        fail_exec: bool,
+        fail_stop: bool,
+        fail_cleanup: bool,
     }
 
     impl FakeAgentWorker {
@@ -503,6 +757,9 @@ mod tests {
             Self {
                 backends,
                 calls: Vec::new(),
+                fail_exec: false,
+                fail_stop: false,
+                fail_cleanup: false,
             }
         }
 
@@ -544,6 +801,11 @@ mod tests {
             request: IsolationExecRequest,
         ) -> Result<IsolationExecOutcome, ManagedWorkerError> {
             self.calls.push("exec_or_attach");
+            if self.fail_exec {
+                return Err(ManagedWorkerError::AgentWorker(
+                    "exec failed in fake agent-worker".to_string(),
+                ));
+            }
             Ok(IsolationExecOutcome {
                 instance_id: request.instance_id.clone(),
                 exit_code: Some(0),
@@ -558,6 +820,11 @@ mod tests {
             reason: &str,
         ) -> Result<IsolationStopOutcome, ManagedWorkerError> {
             self.calls.push("stop_managed_worker");
+            if self.fail_stop {
+                return Err(ManagedWorkerError::AgentWorker(
+                    "stop failed in fake agent-worker".to_string(),
+                ));
+            }
             Ok(IsolationStopOutcome {
                 instance_id: instance_id.to_string(),
                 evidence: self.evidence(instance_id, &format!("stopped:{reason}")),
@@ -569,6 +836,11 @@ mod tests {
             instance_id: &str,
         ) -> Result<IsolationCleanupOutcome, ManagedWorkerError> {
             self.calls.push("cleanup_managed_worker");
+            if self.fail_cleanup {
+                return Err(ManagedWorkerError::AgentWorker(
+                    "cleanup failed in fake agent-worker".to_string(),
+                ));
+            }
             Ok(IsolationCleanupOutcome {
                 instance_id: instance_id.to_string(),
                 evidence: self.evidence(instance_id, "cleaned_up"),

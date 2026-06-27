@@ -47,9 +47,10 @@ pub use isolation::{
     IsolationStarted, IsolationStopOutcome,
 };
 pub use managed_worker::{
-    AgentWorkerControlClient, ManagedWorkerError, ManagedWorkerExecution, ManagedWorkerRunRequest,
-    ManagedWorkerScheduler, ManagedWorkerSchedulerConfig, ManagedWorkerSession,
-    ManagedWorkerSessionRequest, ManagedWorkerSessionStatus, WorkerTemplate,
+    AgentWorkerControlClient, ManagedWorkerCancellation, ManagedWorkerError,
+    ManagedWorkerExecution, ManagedWorkerFailedExecution, ManagedWorkerFailure,
+    ManagedWorkerRunRequest, ManagedWorkerScheduler, ManagedWorkerSchedulerConfig,
+    ManagedWorkerSession, ManagedWorkerSessionRequest, ManagedWorkerSessionStatus, WorkerTemplate,
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 pub use self_hosted_worker::{
