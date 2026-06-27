@@ -14,19 +14,20 @@ permalink: /analytics-warehouse/
 
 # Analytics Warehouse
 
-FerroGate sends high-write observability and usage data through the analytics
-delivery boundary, not through durable control-plane storage.
+FerroGate keeps the operator-facing evidence chain in Supabase and sends
+high-volume analytics copies through the analytics delivery boundary.
 
 Use the analytics warehouse path for:
 
-- request logs;
+- high-volume request log copies for scans and dashboards;
 - trace/span-like request attempt records;
-- usage metrics and token accounting records;
-- billing/metering analytics;
+- usage metric copies and long-window token analytics;
+- billing/metering analytics that do not update gateway rollups;
 - dashboard aggregates and charts.
 
 Use durable control-plane storage for API keys, policies, gateway config
-profiles, prompt templates, and tool approval records. See
+profiles, prompt templates, tool approval records, Admin API request logs,
+audit events, agent-run timelines, metering events, and usage rollups. See
 [`docs/durable-storage.md`](durable-storage.md).
 
 ## Storage Decision Matrix
@@ -36,12 +37,33 @@ profiles, prompt templates, and tool approval records. See
 | API key / policy / config point lookup | Supabase control-plane storage |
 | Control-plane CRUD | Supabase control-plane storage |
 | Billing, request, audit, usage, and agent-run evidence needed by Admin API | Supabase control-plane storage |
-| Recent request list, small-scale local testing | SQLite can be acceptable |
-| Massive request logs | ClickHouse |
+| Recent local-only request list for compatibility tests | In-memory or local file-backed compatibility storage |
+| Massive request-log scans and dashboard copies | ClickHouse |
 | Traces / spans queries | ClickHouse |
-| Usage metrics aggregation | ClickHouse |
-| High-volume billing / metering analytics | ClickHouse |
+| Usage metrics aggregation outside gateway billing rollups | ClickHouse |
+| High-volume billing / metering analytics copies | ClickHouse |
 | Dashboard chart statistics | ClickHouse |
+
+## Supabase Versus ClickHouse Boundary
+
+Supabase owns the synchronous evidence that must survive restart and be
+queryable through Admin API endpoints. FerroGate writes that evidence on the
+request/control-plane path with bounded rows: one request log per request, one
+audit event per decision, one idempotent metering event per metered request, and
+incremental usage rollups.
+
+ClickHouse owns analytical copies. Vector and direct ClickHouse exporters read
+the in-process evidence stream and send flat events downstream for wide scans,
+large retention windows, dashboard aggregation, and transformed observability.
+Those exports do not feed back into Supabase Admin API tables and must not be
+used to settle gateway usage rollups.
+
+If an export is slow or unavailable, analytics status records the failure while
+the Supabase evidence path remains the system of record. If Supabase is marked
+`storage.required: true` and the synchronous evidence write fails during a
+request path where billing/control-plane correctness depends on it, FerroGate
+fails closed instead of silently replacing durable evidence with warehouse-only
+exports.
 
 ## Pipeline Mode: FerroGate To Vector To ClickHouse
 

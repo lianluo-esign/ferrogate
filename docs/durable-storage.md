@@ -205,6 +205,47 @@ is reserved for control-plane resources and runtime evidence documents; billing
 facts use relational columns and joins so operators can query them directly in
 Supabase.
 
+## Evidence Boundary And Write Pressure
+
+Supabase is the synchronous system of record for the evidence that an operator
+needs to explain an Admin API or billing decision from the gateway itself:
+
+- control-plane documents and mutations;
+- request logs exposed by `/admin/v1/request-logs`;
+- audit events exposed by `/admin/v1/audit-events`;
+- agent-run timelines and tool/model events;
+- metering events and usage rollups exposed by `/admin/v1/metering-events`,
+  `/admin/v1/billing-events`, and `/admin/v1/usage-aggregates`.
+
+ClickHouse and Vector remain the high-volume analytics boundary. Use them for
+large dashboard scans, long-running trace/span exploration, warehouse
+aggregations, and sampled or transformed observability streams. They may carry
+copies of request, audit, billing, and metric records, but they are not the
+source of truth for the Admin API evidence chain.
+
+The Supabase write path is deliberately bounded:
+
+- request logs are one upsert per gateway request keyed by `request_id`;
+- audit events are one insert per operator/runtime decision keyed by event ID;
+- metering events are one idempotent insert per metered request plus an
+  incremental usage rollup update;
+- Admin list endpoints use pagination and indexed relational dimensions rather
+  than scanning JSONB payloads.
+
+`analytics.request_log_retention_records` and
+`analytics.audit_event_retention_records` still bound in-memory compatibility
+providers. Supabase/Postgres deployments must use database-side retention for
+durable evidence tables: partition by time or tenant, archive old partitions,
+or delete rows according to the tenant's compliance window. Do not rely on the
+in-memory retention knobs to prune Supabase tables.
+
+Export paths are independent. Enabling Vector, ClickHouse, OTLP, or external
+metering export sends copies of records out of FerroGate; it must not replace
+the Supabase evidence write, and operators should not add those exports back
+into the same Admin API tables or usage rollups. Duplicate warehouse rows are an
+analytics concern; duplicate Supabase metering writes are prevented by
+`request_id` idempotency.
+
 Retention expectations:
 
 - Control-plane documents are retained until deleted through the Admin API.
