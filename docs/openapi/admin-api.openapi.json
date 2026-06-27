@@ -439,6 +439,33 @@
         }
       }
     },
+    "/admin/v1/framework-adapters": {
+      "get": {
+        "operationId": "listAdminFrameworkAdapters",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List framework adapter contracts and implementation status for managed and self-hosted worker modes.",
+        "responses": {
+          "200": {
+            "description": "Framework adapter runtime contract list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminFrameworkAdapterRuntimeList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/observability": {
       "get": {
         "operationId": "listAdminObservability",
@@ -9279,6 +9306,124 @@
           "contract_version": {
             "type": "integer",
             "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminFrameworkAdapterRuntimeList": {
+        "$ref": "#/components/schemas/AdminList_AdminFrameworkAdapterRuntime"
+      },
+      "AdminList_AdminFrameworkAdapterRuntime": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminFrameworkAdapterRuntime"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminFrameworkAdapterRuntime": {
+        "type": "object",
+        "required": [
+          "id",
+          "framework",
+          "adapter_name",
+          "adapter_version",
+          "enabled",
+          "integration_status",
+          "modes",
+          "capabilities",
+          "event_schema",
+          "managed_capability_boundary",
+          "self_hosted_trust_level",
+          "public_api_exposes_framework_details"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "framework": {
+            "type": "string",
+            "enum": [
+              "claude_code",
+              "codex",
+              "hermes",
+              "native_harness"
+            ]
+          },
+          "adapter_name": {
+            "type": "string"
+          },
+          "adapter_version": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "integration_status": {
+            "type": "string",
+            "enum": [
+              "contract_ready",
+              "shim_pending"
+            ]
+          },
+          "modes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "managed",
+                "self_hosted"
+              ]
+            }
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "tools",
+                "mcp",
+                "memory.read",
+                "memory.write",
+                "checkpoint",
+                "artifacts",
+                "subagents",
+                "filesystem",
+                "shell",
+                "browser",
+                "rest.egress",
+                "secrets.read",
+                "streaming"
+              ]
+            }
+          },
+          "event_schema": {
+            "type": "string",
+            "const": "normalized_worker_event"
+          },
+          "managed_capability_boundary": {
+            "type": "string",
+            "const": "gateway_mediated"
+          },
+          "self_hosted_trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "public_api_exposes_framework_details": {
+            "type": "boolean",
+            "const": false
           }
         },
         "additionalProperties": false

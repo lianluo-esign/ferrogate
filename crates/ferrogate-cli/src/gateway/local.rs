@@ -28,9 +28,9 @@ use crate::{
         AdminAgentWorkflowCounters, AdminAgentWorkflowMutationResponse, AdminApiKey,
         AdminApiKeyMutation, AdminApiKeyMutationResponse, AdminConfigReloadResponse,
         AdminConfigValidateRequest, AdminConfigValidateResponse, AdminDeleteResponse,
-        AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigMutation,
-        AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile, AdminList,
-        AdminManagedWorkerIsolationBackend, AdminManagedWorkerPersistence,
+        AdminDrainRequest, AdminDrainResponse, AdminFrameworkAdapterRuntime,
+        AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
+        AdminList, AdminManagedWorkerIsolationBackend, AdminManagedWorkerPersistence,
         AdminManagedWorkerRuntime, AdminMcpServerMutationResponse, AdminPlugin,
         AdminPluginMutation, AdminPluginMutationResponse, AdminPolicyMutation,
         AdminPolicyMutationResponse, AdminPromptTemplate, AdminPromptTemplateMutation,
@@ -3790,6 +3790,85 @@ impl FerroGateway {
         }
     }
 
+    pub(super) async fn handle_admin_framework_adapters(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let body = AdminList::new(vec![
+                    framework_adapter_runtime(
+                        "claude-code",
+                        "claude_code",
+                        "claude-code",
+                        "shim_pending",
+                        &[
+                            "tools",
+                            "mcp",
+                            "filesystem",
+                            "shell",
+                            "checkpoint",
+                            "artifacts",
+                            "streaming",
+                        ],
+                    ),
+                    framework_adapter_runtime(
+                        "codex",
+                        "codex",
+                        "codex",
+                        "shim_pending",
+                        &[
+                            "tools",
+                            "mcp",
+                            "filesystem",
+                            "shell",
+                            "checkpoint",
+                            "artifacts",
+                            "streaming",
+                        ],
+                    ),
+                    framework_adapter_runtime(
+                        "hermes",
+                        "hermes",
+                        "hermes",
+                        "shim_pending",
+                        &[
+                            "tools",
+                            "mcp",
+                            "memory.read",
+                            "memory.write",
+                            "checkpoint",
+                            "artifacts",
+                            "subagents",
+                            "streaming",
+                        ],
+                    ),
+                    framework_adapter_runtime(
+                        "native-harness",
+                        "native_harness",
+                        "native-harness",
+                        "contract_ready",
+                        &["tools", "mcp", "checkpoint", "artifacts", "streaming"],
+                    ),
+                ]);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_admin_provider_health(
         &self,
         session: &mut Session,
@@ -5891,6 +5970,29 @@ fn admin_gateway_config(
         enabled: profile.enabled,
         api_key_ids: profile.api_key_ids.clone(),
         cache_enabled: profile.cache_enabled,
+    }
+}
+
+fn framework_adapter_runtime(
+    id: &'static str,
+    framework: &'static str,
+    adapter_name: &'static str,
+    integration_status: &'static str,
+    capabilities: &[&'static str],
+) -> AdminFrameworkAdapterRuntime {
+    AdminFrameworkAdapterRuntime {
+        id,
+        framework,
+        adapter_name,
+        adapter_version: "1",
+        enabled: integration_status == "contract_ready",
+        integration_status,
+        modes: vec!["managed", "self_hosted"],
+        capabilities: capabilities.to_vec(),
+        event_schema: "normalized_worker_event",
+        managed_capability_boundary: "gateway_mediated",
+        self_hosted_trust_level: "reported_by_self_hosted_worker",
+        public_api_exposes_framework_details: false,
     }
 }
 

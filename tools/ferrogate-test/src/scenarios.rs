@@ -111,6 +111,34 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     )?;
     case.expect_json(
         "GET",
+        "/admin/v1/framework-adapters",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert!(list_contains(&body, "id", "claude-code"));
+            assert!(list_contains(&body, "id", "codex"));
+            assert!(list_contains(&body, "id", "hermes"));
+            assert!(list_contains(&body, "id", "native-harness"));
+            let native = admin_list_item(&body, "id", "native-harness")
+                .context("native harness adapter should be listed")?;
+            assert_eq!(native["integration_status"], "contract_ready");
+            assert_eq!(native["enabled"], true);
+            assert_eq!(native["managed_capability_boundary"], "gateway_mediated");
+            assert_eq!(
+                native["self_hosted_trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(native["public_api_exposes_framework_details"], false);
+            let codex =
+                admin_list_item(&body, "id", "codex").context("codex adapter should be listed")?;
+            assert_eq!(codex["integration_status"], "shim_pending");
+            assert_eq!(codex["enabled"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
         "/admin/v1/provider-models?provider=openai",
         &[ADMIN_AUTH],
         "",

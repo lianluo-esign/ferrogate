@@ -116,6 +116,22 @@ pub(crate) struct AdminManagedWorkerPersistence {
     pub(crate) contract_version: u32,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminFrameworkAdapterRuntime {
+    pub(crate) id: &'static str,
+    pub(crate) framework: &'static str,
+    pub(crate) adapter_name: &'static str,
+    pub(crate) adapter_version: &'static str,
+    pub(crate) enabled: bool,
+    pub(crate) integration_status: &'static str,
+    pub(crate) modes: Vec<&'static str>,
+    pub(crate) capabilities: Vec<&'static str>,
+    pub(crate) event_schema: &'static str,
+    pub(crate) managed_capability_boundary: &'static str,
+    pub(crate) self_hosted_trust_level: &'static str,
+    pub(crate) public_api_exposes_framework_details: bool,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {
