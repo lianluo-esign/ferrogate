@@ -53,9 +53,11 @@ jobs:
       - name: Build FerroGate and test harness
         run: cargo build -p ferrogate-cli -p ferrogate-test --locked
 
-      - name: Run local Supabase-compatible restart scenario
+      - name: Run local Supabase-compatible migration and restart scenarios
         if: ${{ matrix.live == false }}
-        run: ./target/debug/ferrogate-test supabase-restart
+        run: |
+          ./target/debug/ferrogate-test supabase-migration
+          ./target/debug/ferrogate-test supabase-restart
 
       - name: Run live Supabase smoke scenario
         if: ${{ matrix.live == true }}

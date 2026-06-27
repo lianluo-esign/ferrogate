@@ -293,3 +293,45 @@ fn hash_key_generates_config_hash_without_echoing_extra_text() {
     assert!(!stdout.contains("client-secret"));
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
 }
+
+#[test]
+fn storage_migration_rejects_unsupported_source_provider() {
+    let output = ferrogate()
+        .args([
+            "storage",
+            "migrate-to-supabase",
+            "--source-provider",
+            "turso_libsql",
+            "--source-postgres-dsn",
+            "postgresql://source:secret@127.0.0.1:5432/source",
+            "--target-supabase-dsn",
+            "postgresql://target:secret@127.0.0.1:5432/target",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsupported --source-provider turso_libsql"));
+    assert!(stderr.contains("supports postgres and mysql"));
+    assert!(!stderr.contains("postgresql://source:secret"));
+    assert!(!stderr.contains("postgresql://target:secret"));
+}
+
+#[test]
+fn storage_migration_requires_source_dsn_without_echoing_target_secret() {
+    let output = ferrogate()
+        .args([
+            "storage",
+            "migrate-to-supabase",
+            "--target-supabase-dsn",
+            "postgresql://target:secret@127.0.0.1:5432/target",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("source postgres DSN requires inline value or env-name argument"));
+    assert!(!stderr.contains("postgresql://target:secret"));
+}

@@ -83,6 +83,64 @@ pub(crate) enum AuthCommands {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct StorageArgs {
+    #[command(subcommand)]
+    pub(crate) command: StorageCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum StorageCommands {
+    /// Migrate legacy durable control-plane state into Supabase.
+    MigrateToSupabase(StorageMigrateToSupabaseArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct StorageMigrateToSupabaseArgs {
+    /// Source durable provider. The current migration path supports postgres.
+    #[arg(long, default_value = "postgres")]
+    pub(crate) source_provider: String,
+    /// Source PostgreSQL DSN. Prefer --source-postgres-dsn-env for shell history safety.
+    #[arg(long, conflicts_with = "source_postgres_dsn_env")]
+    pub(crate) source_postgres_dsn: Option<String>,
+    /// Environment variable containing the source PostgreSQL DSN.
+    #[arg(long, env = "FERROGATE_MIGRATION_SOURCE_POSTGRES_DSN_ENV")]
+    pub(crate) source_postgres_dsn_env: Option<String>,
+    /// Source MySQL DSN. Prefer --source-mysql-dsn-env for shell history safety.
+    #[arg(long, conflicts_with = "source_mysql_dsn_env")]
+    pub(crate) source_mysql_dsn: Option<String>,
+    /// Environment variable containing the source MySQL DSN.
+    #[arg(long, env = "FERROGATE_MIGRATION_SOURCE_MYSQL_DSN_ENV")]
+    pub(crate) source_mysql_dsn_env: Option<String>,
+    /// Target Supabase DSN. Prefer --target-supabase-dsn-env for shell history safety.
+    #[arg(long, conflicts_with = "target_supabase_dsn_env")]
+    pub(crate) target_supabase_dsn: Option<String>,
+    /// Environment variable containing the target Supabase DSN.
+    #[arg(long, env = "FERROGATE_MIGRATION_TARGET_SUPABASE_DSN_ENV")]
+    pub(crate) target_supabase_dsn_env: Option<String>,
+    /// PostgreSQL/Supabase schema containing FerroGate storage tables.
+    #[arg(long, default_value = "ferrogate_control")]
+    pub(crate) postgres_schema: String,
+    /// PostgreSQL/Supabase TLS mode for source and target connections.
+    #[arg(long, default_value = "require")]
+    pub(crate) postgres_tls_mode: String,
+    /// Optional CA certificate path for PostgreSQL/Supabase TLS validation.
+    #[arg(long)]
+    pub(crate) postgres_tls_ca_cert_path: Option<String>,
+    /// MySQL TLS mode for MySQL source connections.
+    #[arg(long, default_value = "disable")]
+    pub(crate) mysql_tls_mode: String,
+    /// Optional CA certificate path for MySQL source TLS validation.
+    #[arg(long)]
+    pub(crate) mysql_tls_ca_cert_path: Option<String>,
+    /// Run migration validation and counts without writing the target.
+    #[arg(long, conflicts_with = "execute")]
+    pub(crate) dry_run: bool,
+    /// Write the exported source snapshot into Supabase.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub(crate) execute: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct AuthServeArgs {
     /// Address for the auth REST API service.
     #[arg(long, env = "FERROGATE_AUTH_LISTEN", default_value = "127.0.0.1:8090")]
@@ -98,6 +156,8 @@ pub(crate) enum Commands {
     Run(RunArgs),
     /// Run FerroGate side services.
     Auth(AuthArgs),
+    /// Operate durable storage and migration tooling.
+    Storage(StorageArgs),
     /// Validate configuration and print a summary.
     #[command(alias = "check")]
     Validate(ConfigArgs),

@@ -526,6 +526,74 @@ The legacy live remote-libSQL restart command has been removed from the public
 test harness. Use managed database backup/export for old remote libSQL state,
 then migrate that state into Supabase through the dedicated migration workflow.
 
+## Migration To Supabase
+
+The first migration-tooling slice supports PostgreSQL-wire and MySQL legacy
+storage to Supabase-compatible PostgreSQL. This covers generic PostgreSQL
+staging databases, MySQL compatibility deployments, and Supabase-compatible
+exports. It does not reintroduce the retired libSQL runtime client; for old
+Turso/libSQL deployments, export with the provider's managed tooling first, then
+stage the exported control-plane records in a PostgreSQL-compatible FerroGate
+schema before migrating into Supabase.
+
+Dry-run validates both ends and prints resource counts without writing to the
+target:
+
+```bash
+ferrogate storage migrate-to-supabase \
+  --source-provider postgres \
+  --source-postgres-dsn-env FERROGATE_POSTGRES_DSN \
+  --target-supabase-dsn-env FERROGATE_SUPABASE_DSN \
+  --postgres-schema ferrogate_control \
+  --postgres-tls-mode require \
+  --dry-run
+```
+
+Execute initializes the target schema when needed and imports the exported
+snapshot:
+
+```bash
+ferrogate storage migrate-to-supabase \
+  --source-provider postgres \
+  --source-postgres-dsn-env FERROGATE_POSTGRES_DSN \
+  --target-supabase-dsn-env FERROGATE_SUPABASE_DSN \
+  --postgres-schema ferrogate_control \
+  --postgres-tls-mode require \
+  --execute
+```
+
+The command prints counts for API keys, tenants, policies, gateway configs,
+prompt templates, plugin registrations, MCP servers, agent upstreams, tool
+approvals, request logs, audit events, billing events, usage aggregates, agent
+runs, and agent run events. Secrets are read from environment variables when
+`*-dsn-env` flags are used and are not included in the report.
+
+For a MySQL source, use `--source-provider mysql` with
+`--source-mysql-dsn-env FERROGATE_MYSQL_DSN`. The target remains Supabase.
+
+Conflict behavior is intentionally idempotent:
+
+- control-plane resource documents are replaced by kind and resource id;
+- tool approvals, agent runs, and agent run events are upserted by id;
+- billing events are deduplicated by request id;
+- request logs are upserted by request id;
+- audit events are inserted by id and existing rows are kept;
+- usage aggregates are replaced by aggregate id.
+
+Cutover flow:
+
+1. Run `--dry-run` and compare counts with source expectations.
+2. Take a managed backup/PITR snapshot of the source and target databases.
+3. Run `--execute`.
+4. Boot FerroGate with `storage.provider: supabase` and
+   `migration_mode: validate_only`.
+5. Verify Admin API status and list endpoints before switching traffic.
+
+Rollback is database-level: restore the pre-migration Supabase backup/PITR
+snapshot or point FerroGate back to the pre-cutover source while traffic remains
+stopped. Do not run active writers against both source and target during
+cutover.
+
 ## Backup And Export
 
 For Supabase, use Supabase managed backups/PITR for the database behind
@@ -534,7 +602,7 @@ analytics warehouse.
 
 For legacy remote libSQL deployments, use the provider's managed backup/export
 workflow for the database that backs `storage.libsql_url`, then migrate the
-exported state into Supabase when migration tooling is available.
+exported state through the PostgreSQL-compatible migration path above.
 
 For PostgreSQL, use your managed PostgreSQL backup/PITR workflow for the
 database behind `storage.postgres_dsn_env`.

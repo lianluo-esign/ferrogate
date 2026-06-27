@@ -28,6 +28,8 @@ const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
 const CLICKHOUSE_CONTAINER: &str = "ferrogate-e2e-clickhouse";
 const VECTOR_CONTAINER: &str = "ferrogate-e2e-vector";
 const POSTGRES_CONTAINER: &str = "ferrogate-e2e-postgres";
+const POSTGRES_MIGRATION_SOURCE_CONTAINER: &str = "ferrogate-e2e-postgres-migration-source";
+const POSTGRES_MIGRATION_TARGET_CONTAINER: &str = "ferrogate-e2e-postgres-migration-target";
 const POSTGRES_IMAGE: &str = "postgres:16-alpine";
 const MYSQL_CONTAINER: &str = "ferrogate-e2e-mysql";
 const MYSQL_IMAGE: &str = "mysql:8.4";
@@ -42,7 +44,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-            "local: admin-api, auth-api, gateway-api, ci, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart"
+            "local: admin-api, auth-api, gateway-api, ci, supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart"
         );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -66,6 +68,7 @@ fn main() -> Result<()> {
         Commands::SupabaseLiveSmoke(args) => run_supabase_live_smoke(&args),
         Commands::SupabaseLiveRestart(args) => run_supabase_live_restart(&args),
         Commands::SupabaseLiveToken4aiProvider(args) => run_supabase_live_token4ai_provider(&args),
+        Commands::SupabaseMigration(args) => run_supabase_migration(&args),
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
         Commands::MysqlRestart(args) => run_mysql_restart(&args),
@@ -76,6 +79,7 @@ fn main() -> Result<()> {
             run_gateway_external_auth_api(&args.local, &args.auth)?;
             run_gateway_third_party_auth_api(&args.local)?;
             run_gateway_api(&args.local)?;
+            run_supabase_migration(&args.local)?;
             run_supabase_restart(&args.local)?;
             run_postgres_restart(&args.local)?;
             run_postgres_tls_restart(&args.local)?;
@@ -130,6 +134,8 @@ enum Commands {
     SupabaseLiveRestart(SupabaseLiveRestartArgs),
     /// Opt-in live Supabase and Token4AI OpenAI-compatible provider billing scenario.
     SupabaseLiveToken4aiProvider(SupabaseLiveToken4aiProviderArgs),
+    /// Run local PostgreSQL-to-Supabase-compatible migration tooling coverage.
+    SupabaseMigration(LocalArgs),
     /// Run local Docker-backed PostgreSQL restart durability coverage.
     PostgresRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
@@ -2431,6 +2437,168 @@ fn run_supabase_live_token4ai_provider(args: &SupabaseLiveToken4aiProviderArgs) 
     Ok(())
 }
 
+fn run_supabase_migration(args: &LocalArgs) -> Result<()> {
+    let source_port = free_port()?;
+    let target_port = free_port()?;
+    let source_cert_dir = tempfile::tempdir()?;
+    let target_cert_dir = tempfile::tempdir()?;
+    write_postgres_tls_certs(source_cert_dir.path())?;
+    write_postgres_tls_certs(target_cert_dir.path())?;
+    let _cleanup = PostgresMigrationCleanup;
+    stop_postgres_container_named(POSTGRES_MIGRATION_SOURCE_CONTAINER);
+    stop_postgres_container_named(POSTGRES_MIGRATION_TARGET_CONTAINER);
+    start_postgres_tls_container(
+        POSTGRES_MIGRATION_SOURCE_CONTAINER,
+        source_port,
+        source_cert_dir.path(),
+    )?;
+    start_postgres_tls_container(
+        POSTGRES_MIGRATION_TARGET_CONTAINER,
+        target_port,
+        target_cert_dir.path(),
+    )?;
+    wait_for_postgres_server_named(POSTGRES_MIGRATION_SOURCE_CONTAINER)?;
+    wait_for_postgres_server_named(POSTGRES_MIGRATION_TARGET_CONTAINER)?;
+    wait_for_postgres_query_named(POSTGRES_MIGRATION_SOURCE_CONTAINER)?;
+    wait_for_postgres_query_named(POSTGRES_MIGRATION_TARGET_CONTAINER)?;
+
+    let source_dsn =
+        format!("host=127.0.0.1 port={source_port} user=postgres password=postgres dbname=ferrogate sslmode=require");
+    let target_dsn =
+        format!("host=127.0.0.1 port={target_port} user=postgres password=postgres dbname=ferrogate sslmode=require");
+    let resource_id = format!(
+        "ferrogate-migration-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before UNIX epoch")?
+            .as_millis()
+    );
+    let api_key_body = serde_json::json!({
+        "id": resource_id,
+        "name": "Supabase migration test key",
+        "key": format!("{resource_id}-secret"),
+        "scopes": ["models.read"],
+        "allowed_models": ["fast-chat"],
+        "organization_id": "org_migration",
+        "project_id": "project_migration"
+    })
+    .to_string();
+
+    {
+        let source = TursoRestartHarness::start(
+            &args.ferrogate_bin,
+            ControlPlaneRestartStorage::Postgres {
+                dsn: &source_dsn,
+                tls: PostgresRestartTls {
+                    mode: "require",
+                    ca_cert_path: None,
+                },
+            },
+            false,
+            true,
+        )?;
+        source.expect_storage_status()?;
+        source.expect_json(
+            "POST",
+            "/admin/v1/api-keys",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &api_key_body,
+            201,
+            |body| {
+                assert_eq!(body["key"]["id"], resource_id);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        source.expect_api_key_named(&resource_id, "Supabase migration test key")?;
+    }
+
+    let dry_run = Command::new(&args.ferrogate_bin)
+        .args([
+            "storage",
+            "migrate-to-supabase",
+            "--source-provider",
+            "postgres",
+            "--source-postgres-dsn-env",
+            "FERROGATE_TEST_SOURCE_DSN",
+            "--target-supabase-dsn-env",
+            "FERROGATE_TEST_TARGET_DSN",
+            "--postgres-schema",
+            "ferrogate_control",
+            "--postgres-tls-mode",
+            "require",
+            "--dry-run",
+        ])
+        .env("FERROGATE_TEST_SOURCE_DSN", &source_dsn)
+        .env("FERROGATE_TEST_TARGET_DSN", &target_dsn)
+        .output()
+        .context("run storage migration dry-run")?;
+    assert!(
+        dry_run.status.success(),
+        "dry-run stderr: {}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let dry_run_stdout = String::from_utf8_lossy(&dry_run.stdout);
+    assert!(dry_run_stdout.contains("FerroGate storage migration dry-run"));
+    assert!(dry_run_stdout.contains("target=supabase"));
+    assert!(dry_run_stdout.contains("api_keys=2"));
+    assert!(!dry_run_stdout.contains("password=postgres"));
+    assert!(!String::from_utf8_lossy(&dry_run.stderr).contains("password=postgres"));
+
+    let execute = Command::new(&args.ferrogate_bin)
+        .args([
+            "storage",
+            "migrate-to-supabase",
+            "--source-provider",
+            "postgres",
+            "--source-postgres-dsn-env",
+            "FERROGATE_TEST_SOURCE_DSN",
+            "--target-supabase-dsn-env",
+            "FERROGATE_TEST_TARGET_DSN",
+            "--postgres-schema",
+            "ferrogate_control",
+            "--postgres-tls-mode",
+            "require",
+            "--execute",
+        ])
+        .env("FERROGATE_TEST_SOURCE_DSN", &source_dsn)
+        .env("FERROGATE_TEST_TARGET_DSN", &target_dsn)
+        .output()
+        .context("run storage migration execute")?;
+    assert!(
+        execute.status.success(),
+        "execute stderr: {}",
+        String::from_utf8_lossy(&execute.stderr)
+    );
+    let execute_stdout = String::from_utf8_lossy(&execute.stdout);
+    assert!(execute_stdout.contains("FerroGate storage migration executed"));
+    assert!(execute_stdout.contains("api_keys=2"));
+    assert!(!execute_stdout.contains("password=postgres"));
+    assert!(!String::from_utf8_lossy(&execute.stderr).contains("password=postgres"));
+
+    {
+        let target = TursoRestartHarness::start_with_migration_mode(
+            &args.ferrogate_bin,
+            ControlPlaneRestartStorage::Supabase {
+                dsn: &target_dsn,
+                tls: PostgresRestartTls {
+                    mode: "require",
+                    ca_cert_path: None,
+                },
+            },
+            false,
+            false,
+            StorageMigrationMode::ValidateOnly,
+            None,
+        )?;
+        target.expect_storage_status()?;
+        target.expect_api_key_named(&resource_id, "Supabase migration test key")?;
+    }
+
+    println!("supabase-migration scenario passed");
+    Ok(())
+}
+
 fn supabase_live_tls_mode(mode: &str) -> Result<&'static str> {
     match mode.trim() {
         "require" => Ok("require"),
@@ -2446,19 +2614,7 @@ fn run_postgres_restart(args: &LocalArgs) -> Result<()> {
     let host_port = free_port()?;
     let _cleanup = PostgresCleanup;
     stop_postgres_container();
-    docker_args([
-        "run".to_string(),
-        "-d".to_string(),
-        "--name".to_string(),
-        POSTGRES_CONTAINER.to_string(),
-        "-e".to_string(),
-        "POSTGRES_PASSWORD=postgres".to_string(),
-        "-e".to_string(),
-        "POSTGRES_DB=ferrogate".to_string(),
-        "-p".to_string(),
-        format!("127.0.0.1:{host_port}:5432"),
-        POSTGRES_IMAGE.to_string(),
-    ])?;
+    start_postgres_container(POSTGRES_CONTAINER, host_port)?;
     wait_for_postgres_server()?;
     let dsn =
         format!("host=127.0.0.1 port={host_port} user=postgres password=postgres dbname=ferrogate sslmode=disable");
@@ -2475,6 +2631,52 @@ fn run_postgres_restart(args: &LocalArgs) -> Result<()> {
     )?;
     println!("postgres-restart scenario passed");
     Ok(())
+}
+
+fn start_postgres_container(name: &str, host_port: u16) -> Result<()> {
+    docker_args([
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "-e".to_string(),
+        "POSTGRES_PASSWORD=postgres".to_string(),
+        "-e".to_string(),
+        "POSTGRES_DB=ferrogate".to_string(),
+        "-p".to_string(),
+        format!("127.0.0.1:{host_port}:5432"),
+        POSTGRES_IMAGE.to_string(),
+    ])
+}
+
+fn start_postgres_tls_container(name: &str, host_port: u16, cert_dir: &Path) -> Result<()> {
+    let cert_mount = format!("{}:/ferrogate-postgres-tls:ro", cert_dir.display());
+    docker_args([
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "-e".to_string(),
+        "POSTGRES_PASSWORD=postgres".to_string(),
+        "-e".to_string(),
+        "POSTGRES_DB=ferrogate".to_string(),
+        "-p".to_string(),
+        format!("127.0.0.1:{host_port}:5432"),
+        "-v".to_string(),
+        cert_mount,
+        "--entrypoint".to_string(),
+        "sh".to_string(),
+        POSTGRES_IMAGE.to_string(),
+        "-c".to_string(),
+        r#"set -eu
+mkdir -p /var/lib/postgresql/tls
+cp /ferrogate-postgres-tls/server.crt /var/lib/postgresql/tls/server.crt
+cp /ferrogate-postgres-tls/server.key /var/lib/postgresql/tls/server.key
+chown postgres:postgres /var/lib/postgresql/tls/server.crt /var/lib/postgresql/tls/server.key
+chmod 600 /var/lib/postgresql/tls/server.key
+exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresql/tls/server.crt -c ssl_key_file=/var/lib/postgresql/tls/server.key"#
+            .to_string(),
+    ])
 }
 
 fn run_postgres_tls_restart(args: &LocalArgs) -> Result<()> {
@@ -7533,12 +7735,16 @@ fn wait_for_redis() -> Result<()> {
 }
 
 fn wait_for_postgres_server() -> Result<()> {
+    wait_for_postgres_server_named(POSTGRES_CONTAINER)
+}
+
+fn wait_for_postgres_server_named(container_name: &str) -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(30) {
         if Command::new("docker")
             .args([
                 "exec",
-                POSTGRES_CONTAINER,
+                container_name,
                 "pg_isready",
                 "-U",
                 "postgres",
@@ -7556,7 +7762,7 @@ fn wait_for_postgres_server() -> Result<()> {
         thread::sleep(Duration::from_millis(500));
     }
     let logs = Command::new("docker")
-        .args(["logs", POSTGRES_CONTAINER, "--tail", "120"])
+        .args(["logs", container_name, "--tail", "120"])
         .output()
         .ok()
         .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
@@ -7565,6 +7771,10 @@ fn wait_for_postgres_server() -> Result<()> {
 }
 
 fn wait_for_postgres_query() -> Result<()> {
+    wait_for_postgres_query_named(POSTGRES_CONTAINER)
+}
+
+fn wait_for_postgres_query_named(container_name: &str) -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(30) {
         if Command::new("docker")
@@ -7572,7 +7782,7 @@ fn wait_for_postgres_query() -> Result<()> {
                 "exec",
                 "-e",
                 "PGPASSWORD=postgres",
-                POSTGRES_CONTAINER,
+                container_name,
                 "psql",
                 "-U",
                 "postgres",
@@ -7592,7 +7802,7 @@ fn wait_for_postgres_query() -> Result<()> {
         thread::sleep(Duration::from_millis(500));
     }
     let logs = Command::new("docker")
-        .args(["logs", POSTGRES_CONTAINER, "--tail", "120"])
+        .args(["logs", container_name, "--tail", "120"])
         .output()
         .ok()
         .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
@@ -7972,8 +8182,12 @@ where
 }
 
 fn stop_postgres_container() {
+    stop_postgres_container_named(POSTGRES_CONTAINER);
+}
+
+fn stop_postgres_container_named(container_name: &str) {
     let _ = Command::new("docker")
-        .args(["rm", "-f", POSTGRES_CONTAINER])
+        .args(["rm", "-f", container_name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -7999,6 +8213,8 @@ fn cleanup_containers() {
             CLICKHOUSE_CONTAINER,
             VECTOR_CONTAINER,
             POSTGRES_CONTAINER,
+            POSTGRES_MIGRATION_SOURCE_CONTAINER,
+            POSTGRES_MIGRATION_TARGET_CONTAINER,
             MYSQL_CONTAINER,
         ])
         .stdout(Stdio::null())
@@ -8019,6 +8235,18 @@ impl Drop for PostgresCleanup {
             return;
         }
         stop_postgres_container();
+    }
+}
+
+struct PostgresMigrationCleanup;
+
+impl Drop for PostgresMigrationCleanup {
+    fn drop(&mut self) {
+        if env::var("FERROGATE_TEST_KEEP_CONTAINERS").is_ok_and(|value| value == "1") {
+            return;
+        }
+        stop_postgres_container_named(POSTGRES_MIGRATION_SOURCE_CONTAINER);
+        stop_postgres_container_named(POSTGRES_MIGRATION_TARGET_CONTAINER);
     }
 }
 

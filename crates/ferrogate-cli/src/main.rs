@@ -19,6 +19,7 @@ mod routing;
 #[cfg(test)]
 mod routing_tests;
 mod state;
+mod storage;
 mod telemetry;
 
 use anyhow::Result as AnyResult;
@@ -54,6 +55,7 @@ fn main() -> AnyResult<()> {
                 })
             }
         },
+        Commands::Storage(args) => storage::execute_storage_command(args.command),
         Commands::Validate(args) => {
             let config = Config::load(&args.config)?;
             println!("{}", format_validate_report(&config));

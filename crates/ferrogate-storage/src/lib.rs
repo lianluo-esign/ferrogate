@@ -133,7 +133,7 @@ pub struct MySqlStorageConfig {
     pub connect_timeout_secs: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPlaneDocuments {
     pub api_keys: Vec<(String, String)>,
     pub tenants: Vec<(String, String)>,
@@ -145,6 +145,63 @@ pub struct ControlPlaneDocuments {
     pub plugin_registrations: Vec<(String, String)>,
     pub mcp_servers: Vec<(String, String)>,
     pub agent_upstreams: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StorageMigrationSnapshot {
+    pub control_plane: ControlPlaneDocuments,
+    pub tool_approvals: Vec<(String, String)>,
+    pub billing_events: Vec<BillingEvent>,
+    pub usage_aggregates: Vec<StoredUsageAggregate>,
+    pub request_logs: Vec<StoredRequestLog>,
+    pub audit_events: Vec<StoredAuditEvent>,
+    pub agent_runs: Vec<StoredAgentRun>,
+    pub agent_run_events: Vec<StoredAgentRunEvent>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageMigrationCounts {
+    pub api_keys: usize,
+    pub tenants: usize,
+    pub policies: usize,
+    pub gateway_configs: usize,
+    pub agent_workflows: usize,
+    pub skill_packages: usize,
+    pub prompt_templates: usize,
+    pub plugin_registrations: usize,
+    pub mcp_servers: usize,
+    pub agent_upstreams: usize,
+    pub tool_approvals: usize,
+    pub billing_events: usize,
+    pub usage_aggregates: usize,
+    pub request_logs: usize,
+    pub audit_events: usize,
+    pub agent_runs: usize,
+    pub agent_run_events: usize,
+}
+
+impl StorageMigrationSnapshot {
+    pub fn counts(&self) -> StorageMigrationCounts {
+        StorageMigrationCounts {
+            api_keys: self.control_plane.api_keys.len(),
+            tenants: self.control_plane.tenants.len(),
+            policies: self.control_plane.policies.len(),
+            gateway_configs: self.control_plane.gateway_configs.len(),
+            agent_workflows: self.control_plane.agent_workflows.len(),
+            skill_packages: self.control_plane.skill_packages.len(),
+            prompt_templates: self.control_plane.prompt_templates.len(),
+            plugin_registrations: self.control_plane.plugin_registrations.len(),
+            mcp_servers: self.control_plane.mcp_servers.len(),
+            agent_upstreams: self.control_plane.agent_upstreams.len(),
+            tool_approvals: self.tool_approvals.len(),
+            billing_events: self.billing_events.len(),
+            usage_aggregates: self.usage_aggregates.len(),
+            request_logs: self.request_logs.len(),
+            audit_events: self.audit_events.len(),
+            agent_runs: self.agent_runs.len(),
+            agent_run_events: self.agent_run_events.len(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,6 +527,31 @@ impl PostgresControlPlaneStore {
         Ok(store)
     }
 
+    fn connect_for_migration(
+        config: PostgresStorageConfig,
+        initialize_schema: bool,
+        validate_schema: bool,
+    ) -> Result<Self, StorageError> {
+        let mut clients = Vec::with_capacity(config.pool_size);
+        for _ in 0..config.pool_size {
+            clients.push(connect_postgres_client(&config)?);
+        }
+        let store = Self {
+            pool: Arc::new(PostgresClientPool {
+                clients: Mutex::new(clients),
+                available: Condvar::new(),
+            }),
+            schema: StorageSchemaEvidence::postgres_expected(),
+        };
+        if initialize_schema {
+            store.initialize_schema()?;
+        }
+        if validate_schema {
+            store.validate_schema()?;
+        }
+        Ok(store)
+    }
+
     fn initialize_schema(&self) -> Result<(), StorageError> {
         self.with_client(|client| client.batch_execute(POSTGRES_SCHEMA_SQL))?;
         Ok(())
@@ -513,6 +595,38 @@ impl PostgresControlPlaneStore {
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
             agent_upstreams: self.list_documents("agent_upstream")?,
+        })
+    }
+
+    fn documents(&self) -> Result<ControlPlaneDocuments, StorageError> {
+        Ok(ControlPlaneDocuments {
+            api_keys: self.list_resource_documents("api_key")?,
+            tenants: self.list_resource_documents("tenant")?,
+            policies: self.list_resource_documents("policy")?,
+            gateway_configs: self.list_resource_documents("gateway_config")?,
+            agent_workflows: self.list_resource_documents("agent_workflow")?,
+            skill_packages: self.list_resource_documents("skill_package")?,
+            prompt_templates: self.list_resource_documents("prompt_template")?,
+            plugin_registrations: self.list_resource_documents("plugin_registration")?,
+            mcp_servers: self.list_resource_documents("mcp_server")?,
+            agent_upstreams: self.list_resource_documents("agent_upstream")?,
+        })
+    }
+
+    fn list_resource_documents(
+        &self,
+        kind: &'static str,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT resource_id, document_json::text FROM control_plane_resources \
+                 WHERE resource_kind = $1 ORDER BY resource_id ASC",
+                &[&kind],
+            )?;
+            Ok(rows
+                .into_iter()
+                .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+                .collect())
         })
     }
 
@@ -1144,6 +1258,37 @@ impl MySqlControlPlaneStore {
             plugin_registrations: self.list_documents("plugin_registration")?,
             mcp_servers: self.list_documents("mcp_server")?,
             agent_upstreams: self.list_documents("agent_upstream")?,
+        })
+    }
+
+    fn documents(&self) -> Result<ControlPlaneDocuments, StorageError> {
+        Ok(ControlPlaneDocuments {
+            api_keys: self.list_resource_documents("api_key")?,
+            tenants: self.list_resource_documents("tenant")?,
+            policies: self.list_resource_documents("policy")?,
+            gateway_configs: self.list_resource_documents("gateway_config")?,
+            agent_workflows: self.list_resource_documents("agent_workflow")?,
+            skill_packages: self.list_resource_documents("skill_package")?,
+            prompt_templates: self.list_resource_documents("prompt_template")?,
+            plugin_registrations: self.list_resource_documents("plugin_registration")?,
+            mcp_servers: self.list_resource_documents("mcp_server")?,
+            agent_upstreams: self.list_resource_documents("agent_upstream")?,
+        })
+    }
+
+    fn list_resource_documents(
+        &self,
+        kind: &'static str,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_map(
+                "SELECT resource_id, CAST(document_json AS CHAR) FROM control_plane_resources \
+                 WHERE resource_kind = :kind ORDER BY resource_id ASC",
+                params! {
+                    "kind" => kind,
+                },
+                |(id, document_json): (String, String)| (id, document_json),
+            )
         })
     }
 
@@ -1852,127 +1997,33 @@ impl RuntimeControlPlaneState {
     }
 
     pub fn snapshot(&self) -> ControlPlaneSnapshot {
-        let mut api_keys = self
-            .api_keys
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        api_keys.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut tenants = self
-            .tenants
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        tenants.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut policies = self
-            .policies
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        policies.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut gateway_configs = self
-            .gateway_configs
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        gateway_configs.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut agent_workflows = self
-            .agent_workflows
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        agent_workflows.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut skill_packages = self
-            .skill_packages
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        skill_packages.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut prompt_templates = self
-            .prompt_templates
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        prompt_templates.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut plugin_registrations = self
-            .plugin_registrations
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        plugin_registrations.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut mcp_servers = self
-            .mcp_servers
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        mcp_servers.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut agent_upstreams = self
-            .agent_upstreams
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        agent_upstreams.sort_by(|left, right| left.0.cmp(&right.0));
-
+        let documents = self.documents();
         ControlPlaneSnapshot {
-            api_keys: api_keys
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            tenants: tenants
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            policies: policies
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            gateway_configs: gateway_configs
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            agent_workflows: agent_workflows
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            skill_packages: skill_packages
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            prompt_templates: prompt_templates
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            plugin_registrations: plugin_registrations
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            mcp_servers: mcp_servers
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
-            agent_upstreams: agent_upstreams
-                .into_iter()
-                .map(|(_, document_json)| document_json)
-                .collect(),
+            api_keys: into_document_json(documents.api_keys),
+            tenants: into_document_json(documents.tenants),
+            policies: into_document_json(documents.policies),
+            gateway_configs: into_document_json(documents.gateway_configs),
+            agent_workflows: into_document_json(documents.agent_workflows),
+            skill_packages: into_document_json(documents.skill_packages),
+            prompt_templates: into_document_json(documents.prompt_templates),
+            plugin_registrations: into_document_json(documents.plugin_registrations),
+            mcp_servers: into_document_json(documents.mcp_servers),
+            agent_upstreams: into_document_json(documents.agent_upstreams),
+        }
+    }
+
+    pub fn documents(&self) -> ControlPlaneDocuments {
+        ControlPlaneDocuments {
+            api_keys: sorted_control_plane_documents(&self.api_keys),
+            tenants: sorted_control_plane_documents(&self.tenants),
+            policies: sorted_control_plane_documents(&self.policies),
+            gateway_configs: sorted_control_plane_documents(&self.gateway_configs),
+            agent_workflows: sorted_control_plane_documents(&self.agent_workflows),
+            skill_packages: sorted_control_plane_documents(&self.skill_packages),
+            prompt_templates: sorted_control_plane_documents(&self.prompt_templates),
+            plugin_registrations: sorted_control_plane_documents(&self.plugin_registrations),
+            mcp_servers: sorted_control_plane_documents(&self.mcp_servers),
+            agent_upstreams: sorted_control_plane_documents(&self.agent_upstreams),
         }
     }
 
@@ -2147,17 +2198,11 @@ impl RuntimeControlPlaneState {
     }
 
     pub fn tool_approvals(&self) -> Vec<String> {
-        let mut approvals = self
-            .tool_approvals
-            .list()
-            .into_iter()
-            .map(|resource| (resource.id, resource.document_json))
-            .collect::<Vec<_>>();
-        approvals.sort_by(|left, right| left.0.cmp(&right.0));
-        approvals
-            .into_iter()
-            .map(|(_, document_json)| document_json)
-            .collect()
+        into_document_json(self.tool_approval_documents())
+    }
+
+    pub fn tool_approval_documents(&self) -> Vec<(String, String)> {
+        sorted_control_plane_documents(&self.tool_approvals)
     }
 }
 
@@ -2165,6 +2210,25 @@ impl Default for RuntimeControlPlaneState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn sorted_control_plane_documents(
+    repository: &InMemoryRepository<StoredControlPlaneResource>,
+) -> Vec<(String, String)> {
+    let mut documents = repository
+        .list()
+        .into_iter()
+        .map(|resource| (resource.id, resource.document_json))
+        .collect::<Vec<_>>();
+    documents.sort_by(|left, right| left.0.cmp(&right.0));
+    documents
+}
+
+fn into_document_json(documents: Vec<(String, String)>) -> Vec<String> {
+    documents
+        .into_iter()
+        .map(|(_, document_json)| document_json)
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2498,6 +2562,94 @@ impl RuntimeStorageRepositories {
         })
     }
 
+    pub fn supabase_for_migration(
+        config: PostgresStorageConfig,
+        initialize_schema: bool,
+        validate_schema: bool,
+    ) -> Result<Self, StorageError> {
+        Self::postgres_wire_for_migration(
+            StorageProviderKind::Supabase,
+            config,
+            initialize_schema,
+            validate_schema,
+        )
+    }
+
+    pub fn postgres_for_migration(
+        config: PostgresStorageConfig,
+        initialize_schema: bool,
+        validate_schema: bool,
+    ) -> Result<Self, StorageError> {
+        Self::postgres_wire_for_migration(
+            StorageProviderKind::Postgres,
+            config,
+            initialize_schema,
+            validate_schema,
+        )
+    }
+
+    pub fn mysql_for_migration(
+        config: MySqlStorageConfig,
+        initialize_schema: bool,
+    ) -> Result<Self, StorageError> {
+        let backend = RuntimeStorageBackend::new_with_migration_mode(
+            StorageProviderKind::Mysql,
+            true,
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            if initialize_schema {
+                "auto".into()
+            } else {
+                "validate_only".into()
+            },
+        )?;
+        let control_plane = MySqlControlPlaneStore::connect(
+            config,
+            ControlPlaneDocuments::default(),
+            initialize_schema,
+        )?;
+        Ok(Self {
+            backend,
+            control_plane: RuntimeControlPlaneBackend::Mysql(Arc::new(control_plane)),
+            request_logs: Mutex::new(InMemoryAppendRepository::new()),
+            audit_events: Mutex::new(InMemoryAppendRepository::new()),
+            usage_aggregates: Mutex::new(InMemoryRepository::new()),
+            agent_runs: Mutex::new(InMemoryRepository::new()),
+            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+        })
+    }
+
+    fn postgres_wire_for_migration(
+        provider: StorageProviderKind,
+        config: PostgresStorageConfig,
+        initialize_schema: bool,
+        validate_schema: bool,
+    ) -> Result<Self, StorageError> {
+        let backend = RuntimeStorageBackend::new_with_migration_mode(
+            provider,
+            true,
+            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
+            if initialize_schema {
+                "auto".into()
+            } else {
+                "validate_only".into()
+            },
+        )?;
+        let control_plane = PostgresControlPlaneStore::connect_for_migration(
+            config,
+            initialize_schema,
+            validate_schema,
+        )?;
+        Ok(Self {
+            backend,
+            control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
+            request_logs: Mutex::new(InMemoryAppendRepository::new()),
+            audit_events: Mutex::new(InMemoryAppendRepository::new()),
+            usage_aggregates: Mutex::new(InMemoryRepository::new()),
+            agent_runs: Mutex::new(InMemoryRepository::new()),
+            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+        })
+    }
+
     pub fn mysql(
         config: MySqlStorageConfig,
         options: RuntimeStorageOptions,
@@ -2605,6 +2757,56 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
         }
+    }
+
+    pub fn export_migration_snapshot(&self) -> Result<StorageMigrationSnapshot, StorageError> {
+        let control_plane = match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map(|control_plane| control_plane.documents())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.documents()?,
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.documents()?,
+        };
+        Ok(StorageMigrationSnapshot {
+            control_plane,
+            tool_approvals: self.control_plane_tool_approval_documents()?,
+            billing_events: self.billing_events(),
+            usage_aggregates: self.usage_aggregates(),
+            request_logs: self.request_logs(),
+            audit_events: self.audit_events(),
+            agent_runs: self.agent_runs(),
+            agent_run_events: self.agent_run_events(),
+        })
+    }
+
+    pub fn import_migration_snapshot(
+        &self,
+        snapshot: StorageMigrationSnapshot,
+    ) -> Result<(), StorageError> {
+        self.replace_control_plane(snapshot.control_plane)?;
+        for (id, document_json) in snapshot.tool_approvals {
+            self.upsert_control_plane_tool_approval(id, document_json)?;
+        }
+        for event in snapshot.billing_events {
+            self.append_billing_event(event)?;
+        }
+        for aggregate in snapshot.usage_aggregates {
+            self.replace_usage_aggregate(aggregate)?;
+        }
+        for log in snapshot.request_logs {
+            self.append_request_log(log);
+        }
+        for event in snapshot.audit_events {
+            self.append_audit_event(event);
+        }
+        for run in snapshot.agent_runs {
+            self.upsert_agent_run(run)?;
+        }
+        for event in snapshot.agent_run_events {
+            self.append_agent_run_event(event)?;
+        }
+        Ok(())
     }
 
     pub fn upsert_control_plane_api_key(
@@ -2967,6 +3169,23 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    pub fn control_plane_tool_approval_documents(
+        &self,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.tool_approval_documents())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_resource_documents("tool_approval")
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.list_resource_documents("tool_approval")
+            }
+        }
+    }
+
     pub fn set_retention_limits(
         &self,
         request_log_retention_records: usize,
@@ -3155,6 +3374,24 @@ impl RuntimeStorageRepositories {
                 "usage aggregate repository lock poisoned".into(),
             ));
         };
+        if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
+            control_plane.upsert_usage_aggregate(&aggregate)?;
+        }
+        Ok(())
+    }
+
+    pub fn replace_usage_aggregate(
+        &self,
+        aggregate: StoredUsageAggregate,
+    ) -> Result<(), StorageError> {
+        let id = aggregate.id.clone();
+        if let Ok(mut aggregates) = self.usage_aggregates.lock() {
+            aggregates.insert(id, aggregate.clone());
+        } else {
+            return Err(StorageError::Serialization(
+                "usage aggregate repository lock poisoned".into(),
+            ));
+        }
         if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
             control_plane.upsert_usage_aggregate(&aggregate)?;
         }

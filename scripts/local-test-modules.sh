@@ -123,6 +123,7 @@ run_e2e_harness() {
 run_supabase_storage() {
   ensure_toolchain
   cargo build -p ferrogate-cli -p ferrogate-test --locked
+  ./target/debug/ferrogate-test supabase-migration
   ./target/debug/ferrogate-test supabase-restart
   if [[ -n "${FERROGATE_SUPABASE_DSN:-}" ]]; then
     args=()
