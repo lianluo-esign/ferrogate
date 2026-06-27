@@ -2256,6 +2256,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
         "ferrogate-supabase-test",
         true,
     )?;
+    expect_supabase_schema_migrations("ferrogate_control")?;
     println!("supabase-restart scenario passed");
     Ok(())
 }
@@ -7037,6 +7038,125 @@ fn wait_for_postgres_query() -> Result<()> {
         .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
         .unwrap_or_default();
     bail!("timed out waiting for local PostgreSQL query readiness; logs: {logs}");
+}
+
+fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
+    let expected_tables = [
+        "control_plane_resources",
+        "agent_runs",
+        "agent_run_events",
+        "request_logs",
+        "audit_events",
+        "billing_metering_events",
+        "usage_aggregates",
+        "storage_schema_migrations",
+    ];
+    for table in expected_tables {
+        let count = postgres_scalar(&format!(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = '{}' AND table_name = '{}'",
+            sql_literal(schema),
+            sql_literal(table)
+        ))?;
+        if count.trim() != "1" {
+            bail!("expected Supabase schema table {schema}.{table}, got count {count}");
+        }
+    }
+
+    let jsonb_columns = [
+        ("control_plane_resources", "document_json"),
+        ("agent_runs", "run_json"),
+        ("agent_run_events", "event_json"),
+        ("request_logs", "request_json"),
+        ("audit_events", "audit_json"),
+        ("billing_metering_events", "event_json"),
+        ("usage_aggregates", "usage_json"),
+    ];
+    for (table, column) in jsonb_columns {
+        let data_type = postgres_scalar(&format!(
+            "SELECT data_type FROM information_schema.columns \
+             WHERE table_schema = '{}' AND table_name = '{}' AND column_name = '{}'",
+            sql_literal(schema),
+            sql_literal(table),
+            sql_literal(column)
+        ))?;
+        if data_type.trim() != "jsonb" {
+            bail!("expected {schema}.{table}.{column} to be jsonb, got {data_type}");
+        }
+    }
+
+    let expected_indexes = [
+        "idx_control_plane_resources_document_gin",
+        "idx_agent_runs_tenant_started",
+        "idx_agent_run_events_run_time",
+        "idx_request_logs_model_provider_started",
+        "idx_audit_events_actor_time",
+        "idx_billing_metering_model_provider_time",
+        "idx_usage_aggregates_tenant_model_provider",
+    ];
+    for index in expected_indexes {
+        let count = postgres_scalar(&format!(
+            "SELECT count(*) FROM pg_indexes \
+             WHERE schemaname = '{}' AND indexname = '{}'",
+            sql_literal(schema),
+            sql_literal(index)
+        ))?;
+        if count.trim() != "1" {
+            bail!("expected Supabase schema index {schema}.{index}, got count {count}");
+        }
+    }
+
+    let migration_versions = postgres_scalar(&format!(
+        "SELECT string_agg(version::text || ':' || name, ',' ORDER BY version) \
+         FROM {}.storage_schema_migrations \
+         WHERE version IN (1, 2)",
+        quote_ident(schema)
+    ))?;
+    if migration_versions.trim()
+        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence"
+    {
+        bail!("unexpected Supabase migration versions: {migration_versions}");
+    }
+
+    Ok(())
+}
+
+fn postgres_scalar(query: &str) -> Result<String> {
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            "-e",
+            "PGPASSWORD=postgres",
+            POSTGRES_CONTAINER,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "ferrogate",
+            "-At",
+            "-c",
+            query,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to query local PostgreSQL container")?;
+    if !output.status.success() {
+        bail!(
+            "PostgreSQL query failed with {}; stdout: {}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn wait_for_mysql_server() -> Result<()> {

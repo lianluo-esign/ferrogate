@@ -34,6 +34,13 @@ traces/spans, usage metrics, billing/metering analytics, and dashboard
 aggregates belong to the analytics warehouse path in
 [`docs/analytics-warehouse.md`](analytics-warehouse.md).
 
+Supabase is the durable system of record for control-plane resources and the
+operator evidence needed to explain gateway decisions. High-write telemetry can
+still be exported to the analytics warehouse, but the gateway keeps normalized
+request, audit, agent-run, billing, and usage evidence tables in Supabase so
+Admin API views and incident reconstruction do not depend on an external
+warehouse being available.
+
 ## Provider Order
 
 The default commercial provider order is fixed in config validation:
@@ -78,18 +85,52 @@ storage:
 Runtime behavior:
 
 - `storage.required: true` fails closed if Supabase cannot be initialized.
-- `migration_mode: auto` runs the checked-in PostgreSQL schema at startup.
+- `migration_mode: auto` runs the checked-in PostgreSQL schema at startup. Use
+  it for local development, test environments, and first-boot CI harnesses.
+- `migration_mode: validate_only` or `disabled` is the production posture when
+  operators manage Supabase migrations outside the gateway process. In those
+  modes the checked-in schema must already exist before startup.
 - Admin/status evidence reports `provider: supabase` without returning the DSN.
 - `supabase_dsn_env` is required for Supabase so credentials stay secret-backed.
 - Supabase requires `postgres_tls_mode: require`, `verify_ca`, or `verify_full`.
 - Direct and session-pooler DSNs are supported first. Transaction-pooler mode
   must not rely on prepared statements unless the selected Rust client path is
   explicitly verified for that mode.
-- Control-plane resources use the same document-store contract as the existing
-  PostgreSQL implementation.
+- Control-plane resource documents are stored as `JSONB` in
+  `control_plane_resources`.
 
 The schema file is
 [`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
+
+Supabase table ownership:
+
+- `control_plane_resources`: Admin API resource documents such as API keys,
+  policies, gateway configs, prompt templates, plugins, MCP servers, tool
+  approvals, and agent upstreams. Document payloads use `JSONB`; resource kind
+  and ID remain the stable list/get keys.
+- `agent_runs` and `agent_run_events`: agent execution timelines and tool/model
+  turn evidence. These tables support tenant, request, trace, and timeline
+  lookups.
+- `request_logs`: normalized gateway request evidence for Admin API request
+  log views, cache status, status/error filtering, and model/provider queries.
+- `audit_events`: operator- and runtime-visible security decisions including
+  policy, tool, MCP, and Admin API mutations.
+- `billing_metering_events`: one row per metered gateway request with
+  tenant/model/provider token usage and usage-source evidence.
+- `usage_aggregates`: queryable rollups by organization, project, API key,
+  tenant, logical model, and provider.
+- `storage_schema_migrations`: applied schema versions and migration names used
+  by local validation and future admin status evidence.
+
+Retention expectations:
+
+- Control-plane documents are retained until deleted through the Admin API.
+- Request logs, audit events, agent-run timelines, and metering events are
+  operational evidence. Production Supabase deployments should apply explicit
+  retention partitions or archival jobs sized to tenant policy and compliance
+  requirements.
+- Usage aggregates are durable billing state and should be retained for the
+  billing/audit window, not pruned with high-volume telemetry exports.
 
 ## Turso Cloud / Remote libSQL
 

@@ -649,7 +649,7 @@ impl PostgresControlPlaneStore {
             for (id, document_json) in records {
                 client.execute(
                     "INSERT INTO control_plane_resources \
-                     (resource_kind, resource_id, document_json) VALUES ($1, $2, $3) \
+                     (resource_kind, resource_id, document_json) VALUES ($1, $2, $3::text::jsonb) \
                      ON CONFLICT (resource_kind, resource_id) DO NOTHING",
                     &[&kind, &id, &document_json],
                 )?;
@@ -676,7 +676,7 @@ impl PostgresControlPlaneStore {
     fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
         self.with_client(|client| {
             let rows = client.query(
-                "SELECT document_json FROM control_plane_resources \
+                "SELECT document_json::text FROM control_plane_resources \
                  WHERE resource_kind = $1 ORDER BY resource_id ASC",
                 &[&kind],
             )?;
@@ -690,7 +690,7 @@ impl PostgresControlPlaneStore {
     fn get_document(&self, kind: &'static str, id: String) -> Result<Option<String>, StorageError> {
         self.with_client(|client| {
             let row = client.query_opt(
-                "SELECT document_json FROM control_plane_resources \
+                "SELECT document_json::text FROM control_plane_resources \
                  WHERE resource_kind = $1 AND resource_id = $2",
                 &[&kind, &id],
             )?;
@@ -708,7 +708,7 @@ impl PostgresControlPlaneStore {
             client.execute(
                 "INSERT INTO control_plane_resources \
                  (resource_kind, resource_id, document_json, revision, updated_at_unix) \
-                 VALUES ($1, $2, $3, 1, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+                 VALUES ($1, $2, $3::text::jsonb, 1, EXTRACT(EPOCH FROM NOW())::BIGINT) \
                  ON CONFLICT (resource_kind, resource_id) DO UPDATE SET \
                  document_json = EXCLUDED.document_json, \
                  revision = control_plane_resources.revision + 1, \
@@ -733,7 +733,7 @@ impl PostgresControlPlaneStore {
             for (id, document_json) in records {
                 transaction.execute(
                     "INSERT INTO control_plane_resources \
-                     (resource_kind, resource_id, document_json) VALUES ($1, $2, $3)",
+                     (resource_kind, resource_id, document_json) VALUES ($1, $2, $3::text::jsonb)",
                     &[&kind, &id, &document_json],
                 )?;
             }
