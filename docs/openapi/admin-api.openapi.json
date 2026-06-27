@@ -466,6 +466,33 @@
         }
       }
     },
+    "/admin/v1/self-hosted-workers": {
+      "get": {
+        "operationId": "listAdminSelfHostedWorkers",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List self-hosted worker runtime contract and registration/persistence implementation status.",
+        "responses": {
+          "200": {
+            "description": "Self-hosted worker runtime contract list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerRuntimeList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/observability": {
       "get": {
         "operationId": "listAdminObservability",
@@ -9424,6 +9451,161 @@
           "public_api_exposes_framework_details": {
             "type": "boolean",
             "const": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerRuntimeList": {
+        "$ref": "#/components/schemas/AdminList_AdminSelfHostedWorkerRuntime"
+      },
+      "AdminList_AdminSelfHostedWorkerRuntime": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSelfHostedWorkerRuntime"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerRuntime": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "execution_owner",
+          "enforcement_boundary",
+          "trust_level",
+          "identity_scope",
+          "transport_actions",
+          "telemetry_kinds",
+          "registration_api",
+          "persistence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "contract_ready"
+            ]
+          },
+          "execution_owner": {
+            "type": "string",
+            "const": "customer"
+          },
+          "enforcement_boundary": {
+            "type": "string",
+            "const": "customer_owned_host"
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "identity_scope": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "tenant_id",
+                "workspace_id",
+                "worker_id"
+              ]
+            }
+          },
+          "transport_actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "register_worker",
+                "probe_worker",
+                "heartbeat",
+                "stream_events",
+                "upload_artifact",
+                "fetch_checkpoint"
+              ]
+            }
+          },
+          "telemetry_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lifecycle",
+                "log",
+                "tool_call",
+                "mcp_call",
+                "cli_command",
+                "skill_invocation",
+                "artifact",
+                "checkpoint",
+                "usage"
+              ]
+            }
+          },
+          "registration_api": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerSurface"
+          },
+          "persistence": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerPersistence"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerSurface": {
+        "type": "object",
+        "required": [
+          "implemented",
+          "planned_paths"
+        ],
+        "properties": {
+          "implemented": {
+            "type": "boolean"
+          },
+          "planned_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerPersistence": {
+        "type": "object",
+        "required": [
+          "provider",
+          "durable",
+          "implemented",
+          "contract_version"
+        ],
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/StorageProviderKind"
+          },
+          "durable": {
+            "type": "boolean"
+          },
+          "implemented": {
+            "type": "boolean",
+            "description": "False until self-hosted worker registration, heartbeat, telemetry, artifact, and checkpoint records are persisted through the Supabase-backed control-plane storage path."
+          },
+          "contract_version": {
+            "type": "integer",
+            "minimum": 1
           }
         },
         "additionalProperties": false

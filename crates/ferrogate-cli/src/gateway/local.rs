@@ -35,7 +35,8 @@ use crate::{
         AdminPluginMutation, AdminPluginMutationResponse, AdminPolicyMutation,
         AdminPolicyMutationResponse, AdminPromptTemplate, AdminPromptTemplateMutation,
         AdminPromptTemplateMutationResponse, AdminProvider, AdminProviderModelCandidate,
-        AdminProviderModelCatalog, AdminSkillPackage, AdminSkillPackageMutationResponse,
+        AdminProviderModelCatalog, AdminSelfHostedWorkerPersistence, AdminSelfHostedWorkerRuntime,
+        AdminSelfHostedWorkerSurface, AdminSkillPackage, AdminSkillPackageMutationResponse,
         AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery, HealthResponse, OpenAiModel,
         OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
     },
@@ -3854,6 +3855,72 @@ impl FerroGateway {
                         &["tools", "mcp", "checkpoint", "artifacts", "streaming"],
                     ),
                 ]);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_self_hosted_workers(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let storage = state.storage_status();
+                let body = AdminList::new(vec![AdminSelfHostedWorkerRuntime {
+                    id: "self-hosted-worker-runtime",
+                    status: "contract_ready",
+                    execution_owner: "customer",
+                    enforcement_boundary: "customer_owned_host",
+                    trust_level: "reported_by_self_hosted_worker",
+                    identity_scope: vec!["tenant_id", "workspace_id", "worker_id"],
+                    transport_actions: vec![
+                        "register_worker",
+                        "probe_worker",
+                        "heartbeat",
+                        "stream_events",
+                        "upload_artifact",
+                        "fetch_checkpoint",
+                    ],
+                    telemetry_kinds: vec![
+                        "lifecycle",
+                        "log",
+                        "tool_call",
+                        "mcp_call",
+                        "cli_command",
+                        "skill_invocation",
+                        "artifact",
+                        "checkpoint",
+                        "usage",
+                    ],
+                    registration_api: AdminSelfHostedWorkerSurface {
+                        implemented: false,
+                        planned_paths: vec![
+                            "/admin/v1/self-hosted-workers",
+                            "/admin/v1/self-hosted-workers/{id}",
+                            "/admin/v1/self-hosted-workers/{id}/rotate",
+                        ],
+                    },
+                    persistence: AdminSelfHostedWorkerPersistence {
+                        provider: storage.provider,
+                        durable: storage.durable,
+                        implemented: false,
+                        contract_version: storage.contract_version,
+                    },
+                }]);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {

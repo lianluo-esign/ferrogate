@@ -132,6 +132,34 @@ pub(crate) struct AdminFrameworkAdapterRuntime {
     pub(crate) public_api_exposes_framework_details: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerRuntime {
+    pub(crate) id: &'static str,
+    pub(crate) status: &'static str,
+    pub(crate) execution_owner: &'static str,
+    pub(crate) enforcement_boundary: &'static str,
+    pub(crate) trust_level: &'static str,
+    pub(crate) identity_scope: Vec<&'static str>,
+    pub(crate) transport_actions: Vec<&'static str>,
+    pub(crate) telemetry_kinds: Vec<&'static str>,
+    pub(crate) registration_api: AdminSelfHostedWorkerSurface,
+    pub(crate) persistence: AdminSelfHostedWorkerPersistence,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerSurface {
+    pub(crate) implemented: bool,
+    pub(crate) planned_paths: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerPersistence {
+    pub(crate) provider: ferrogate_storage::StorageProviderKind,
+    pub(crate) durable: bool,
+    pub(crate) implemented: bool,
+    pub(crate) contract_version: u32,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {

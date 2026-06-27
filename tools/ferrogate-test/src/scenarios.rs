@@ -139,6 +139,29 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     )?;
     case.expect_json(
         "GET",
+        "/admin/v1/self-hosted-workers",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["data"][0]["execution_owner"], "customer");
+            assert_eq!(
+                body["data"][0]["enforcement_boundary"],
+                "customer_owned_host"
+            );
+            assert_eq!(
+                body["data"][0]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["data"][0]["transport_actions"][0], "register_worker");
+            assert_eq!(body["data"][0]["registration_api"]["implemented"], false);
+            assert_eq!(body["data"][0]["persistence"]["implemented"], false);
+            assert_eq!(body["data"][0]["persistence"]["provider"], "memory");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
         "/admin/v1/provider-models?provider=openai",
         &[ADMIN_AUTH],
         "",
