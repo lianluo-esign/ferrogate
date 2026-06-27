@@ -517,6 +517,20 @@ impl Config {
                 "field storage.provider_order[0]: supabase must be the default commercial cloud provider"
             );
         }
+        if self
+            .storage
+            .provider_order
+            .contains(&ferrogate_storage::StorageProviderKind::TursoLibsql)
+        {
+            bail!(
+                "field storage.provider_order: turso_libsql has been removed from production durable provider order; migrate storage.provider to supabase"
+            );
+        }
+        if self.storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
+            bail!(
+                "field storage.provider: turso_libsql has been removed as a production durable provider; migrate to storage.provider: supabase with storage.supabase_dsn_env"
+            );
+        }
         if !self.storage.provider.implemented() {
             bail!(
                 "field storage.provider: provider {} is not implemented yet",
@@ -533,41 +547,6 @@ impl Config {
                 bail!("field storage.supabase_dsn_env: required when storage.provider is supabase");
             }
             self.validate_postgres_wire_storage("storage.supabase")?;
-        }
-        if self.storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
-            let Some(url) = self.storage.libsql_url.as_deref() else {
-                bail!("field storage.libsql_url: required when storage.provider is turso_libsql");
-            };
-            let url = url.trim();
-            if url.is_empty() {
-                bail!("field storage.libsql_url: must not be empty");
-            }
-            if !(url.starts_with("libsql://")
-                || url.starts_with("https://")
-                || url.starts_with("http://")
-                || url.starts_with("file://"))
-            {
-                bail!(
-                    "field storage.libsql_url: must start with libsql://, https://, http://, or file:// for turso_libsql"
-                );
-            }
-            let remote_url_requires_token =
-                !(url.starts_with("file://") || is_local_libsql_server_url(url));
-            let has_inline_token = self
-                .storage
-                .libsql_auth_token
-                .as_deref()
-                .is_some_and(|token| !token.trim().is_empty());
-            let has_token_env = self
-                .storage
-                .libsql_auth_token_env
-                .as_deref()
-                .is_some_and(|name| !name.trim().is_empty());
-            if remote_url_requires_token && !has_inline_token && !has_token_env {
-                bail!(
-                    "field storage.libsql_auth_token_env: required when storage.provider is turso_libsql unless storage.libsql_auth_token is set"
-                );
-            }
         }
         if self.storage.provider == ferrogate_storage::StorageProviderKind::Postgres {
             let has_inline_dsn = self
@@ -2253,18 +2232,6 @@ fn is_plugin_secret_config_key(key: &str) -> bool {
     ]
     .iter()
     .any(|needle| key.contains(needle))
-}
-
-fn is_local_libsql_server_url(url: &str) -> bool {
-    let Ok(uri) = url.parse::<http::Uri>() else {
-        return false;
-    };
-    if !matches!(uri.scheme_str(), Some("http")) {
-        return false;
-    }
-    uri.authority()
-        .map(|authority| matches!(authority.host(), "127.0.0.1" | "localhost" | "::1"))
-        .unwrap_or(false)
 }
 
 fn validate_plugin_manifest(

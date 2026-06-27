@@ -47,14 +47,15 @@ The default commercial provider order is fixed in config validation:
 
 ```toml
 [storage]
-provider_order = ["supabase", "turso_libsql", "postgres", "mysql"]
+provider_order = ["supabase", "postgres", "mysql"]
 ```
 
 `supabase` is the default commercial cloud provider. It uses the PostgreSQL wire
 protocol and checked-in PostgreSQL schema while preserving Supabase-specific
-config and Admin/status evidence. Turso/libSQL, PostgreSQL, and MySQL remain
-implemented compatibility paths behind the same repository contract instead of
-gateway-core special cases.
+config and Admin/status evidence. PostgreSQL and MySQL remain compatibility
+paths behind the same repository contract instead of gateway-core special cases.
+`turso_libsql` is no longer accepted as a production durable provider; migrate
+legacy configs to `storage.provider: supabase`.
 
 ## Supabase
 
@@ -67,7 +68,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
@@ -256,15 +256,15 @@ Retention expectations:
 - Usage aggregates are durable billing state and should be retained for the
   billing/audit window, not pruned with high-volume telemetry exports.
 
-## Legacy libSQL Compatibility
+## Legacy libSQL Migration
 
-The `turso_libsql` provider remains implemented for compatibility and
-deterministic local/provider-contract coverage. It is not the current
-commercial control-plane target; use Supabase for new production control-table
-deployments.
+`storage.provider: turso_libsql` has been removed from the production durable
+provider surface. New configs that select it fail validation with a migration
+message. Use Supabase for production control-plane tables and preserve old
+libSQL databases only as a migration source until the dedicated migration tool
+is available.
 
-For compatibility testing, use a `libsql://` URL and keep the auth token in an
-environment variable:
+Replace legacy remote libSQL config:
 
 ```yaml
 storage:
@@ -280,17 +280,29 @@ storage:
   migration_mode: auto
 ```
 
-Runtime behavior:
+with Supabase-backed durable storage:
 
-- `storage.required: true` fails closed if the durable provider cannot be
-  initialized.
-- `migration_mode: auto` runs the checked-in schema at startup.
-- Remote `libsql://` URLs require a non-empty token.
-- Admin/status evidence reports the active backend without returning the token.
+```yaml
+storage:
+  provider: supabase
+  required: true
+  provider_order:
+    - supabase
+    - postgres
+    - mysql
+  supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
+  postgres_tls_mode: verify_full
+  migration_mode: auto
+```
+
+Legacy runtime behavior remains documented only to support migration planning:
+remote `libsql://` URLs required a non-empty token, local `file://` URLs did not
+use a token, and Admin/status evidence reported the active backend without
+returning the token.
 
 The schema file is [`sql/001_init_libsql.sql`](../sql/001_init_libsql.sql). It
-creates resource-oriented control-plane tables so new Admin API resource types
-can be added without creating a new hot-path coupling to one database vendor.
+is retained for migration input compatibility, not as the production target for
+new deployments.
 
 ## PostgreSQL
 
@@ -303,7 +315,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   postgres_dsn_env: "FERROGATE_POSTGRES_DSN"
@@ -359,7 +370,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   mysql_dsn_env: "FERROGATE_MYSQL_DSN"
@@ -394,10 +404,10 @@ Runtime behavior:
 
 The schema file is [`sql/001_init_mysql.sql`](../sql/001_init_mysql.sql).
 
-## Local File-Backed libSQL
+## Legacy Local File-Backed libSQL
 
-For deterministic local development and CI-safe durability tests, the same
-`turso_libsql` provider also supports `file://` URLs:
+Older compatibility tests used the same `turso_libsql` provider with `file://`
+URLs:
 
 ```yaml
 storage:
@@ -405,17 +415,15 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   libsql_url: "file:///tmp/ferrogate-control-plane.db"
   migration_mode: auto
 ```
 
-`file://` uses the libSQL client local database path and does not require an
-auth token. This is not a production control-plane target. It exists to prove
-the provider contract locally without depending on external network
-availability.
+`file://` used the libSQL client local database path and did not require an auth
+token. It is not a production control-plane target and is no longer part of the
+default local CI path.
 
 ## Verification
 
@@ -425,11 +433,9 @@ Build the gateway and test harness:
 cargo build -p ferrogate-cli -p ferrogate-test --locked
 ```
 
-Run the deterministic local libSQL restart test:
-
-```bash
-./target/debug/ferrogate-test libsql-file-restart
-```
+The legacy local libSQL restart command has been removed from the public test
+harness. Keep old `file://` databases only as migration input and validate new
+durable deployments with the Supabase/PostgreSQL/MySQL restart scenarios.
 
 Run the Supabase-compatible restart test against a local TLS-enabled PostgreSQL
 container:
@@ -496,8 +502,8 @@ Run the Docker-backed MySQL TLS restart test:
 ./target/debug/ferrogate-test mysql-tls-restart
 ```
 
-This starts real FerroGate gateway processes against the same local libSQL
-database file and verifies through the Admin API that these resources survive
+These restart scenarios start real FerroGate gateway processes against the same
+durable backend and verify through the Admin API that these resources survive
 restart:
 
 - API key;
@@ -509,25 +515,16 @@ restart:
 It then deletes or archives those resources, restarts again, and verifies the
 post-cleanup state.
 
-`ferrogate-test ci` includes the local libSQL restart, local libSQL server
-restart, Supabase-compatible restart, PostgreSQL restart, PostgreSQL TLS
-restart, MySQL restart, and MySQL TLS restart tests:
+`ferrogate-test ci` includes the Supabase-compatible restart, PostgreSQL
+restart, PostgreSQL TLS restart, MySQL restart, and MySQL TLS restart tests:
 
 ```bash
 ./target/debug/ferrogate-test ci
 ```
 
-The live remote-libSQL restart test is intentionally opt-in because it requires
-a real cloud database and secret:
-
-```bash
-FERROGATE_LIBSQL_URL="libsql://your-database.aws-ap-northeast-1.turso.io" \
-FERROGATE_LIBSQL_AUTH_TOKEN="..." \
-./target/debug/ferrogate-test turso-libsql-restart
-```
-
-The live scenario rejects non-`libsql://` URLs so it cannot silently become an
-HTTPS-only workaround.
+The legacy live remote-libSQL restart command has been removed from the public
+test harness. Use managed database backup/export for old remote libSQL state,
+then migrate that state into Supabase through the dedicated migration workflow.
 
 ## Backup And Export
 
@@ -536,7 +533,8 @@ For Supabase, use Supabase managed backups/PITR for the database behind
 analytics warehouse.
 
 For legacy remote libSQL deployments, use the provider's managed backup/export
-workflow for the database that backs `storage.libsql_url`.
+workflow for the database that backs `storage.libsql_url`, then migrate the
+exported state into Supabase when migration tooling is available.
 
 For PostgreSQL, use your managed PostgreSQL backup/PITR workflow for the
 database behind `storage.postgres_dsn_env`.
@@ -551,15 +549,12 @@ policy data.
 
 ## Failure Semantics
 
-- Missing `storage.libsql_url` fails config validation when
-  `provider: turso_libsql`.
+- `storage.provider: turso_libsql` fails config validation with a migration
+  message; use `storage.provider: supabase` and `storage.supabase_dsn_env`.
 - Missing `storage.supabase_dsn_env` fails config validation when
   `provider: supabase`.
 - Supabase rejects plaintext or opportunistic TLS modes; use
   `postgres_tls_mode: require`, `verify_ca`, or `verify_full`.
-- Remote `libsql://` and `https://` URLs require either
-  `storage.libsql_auth_token` or `storage.libsql_auth_token_env`.
-- Local `file://` URLs do not use a token.
 - Missing `storage.postgres_dsn` and `storage.postgres_dsn_env` fails config
   validation when `provider: postgres`.
 - Invalid `storage.postgres_pool_size`, PostgreSQL timeout values, schema, or

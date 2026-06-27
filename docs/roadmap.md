@@ -85,9 +85,10 @@ These areas are implemented in the current open-source gateway:
   readiness, drain, API-key CRUD, policy CRUD, gateway-config CRUD, prompt
   template CRUD/render, tool approvals, request-log exports, and dashboard
   visibility.
-- Durable storage provider abstraction plus Supabase, Turso/libSQL,
-  PostgreSQL, and MySQL control-plane storage wiring for configured
-  control-plane resources.
+- Durable storage provider abstraction plus Supabase-first control-plane
+  storage wiring for configured control-plane resources, with PostgreSQL and
+  MySQL compatibility paths and Turso/libSQL retired from the production
+  provider surface.
 - Opt-in agent runtime primitives in `ferrogate-runtime`: a deny-by-default
   Wasmtime sandbox executor and a bounded harness/provider boundary. These are
   not wired into default gateway endpoints yet.
@@ -146,10 +147,11 @@ Use analytics delivery for high-write observability data:
 - dashboard chart statistics.
 
 The current direction is Supabase-first for commercial durable control-plane
-tables and operator evidence. Turso/libSQL, generic PostgreSQL, and MySQL are
-compatibility paths until their separate hardening or removal issues close.
-Analytics can flow through Vector to ClickHouse or directly to ClickHouse when
-operators want fewer moving parts.
+tables and operator evidence. Turso/libSQL is retired from the production
+provider surface and remains only as legacy migration input; generic PostgreSQL
+and MySQL are compatibility paths until their separate hardening or removal
+issues close. Analytics can flow through Vector to ClickHouse or directly to
+ClickHouse when operators want fewer moving parts.
 
 ## Non-Goals
 

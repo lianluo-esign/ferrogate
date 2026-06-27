@@ -259,7 +259,7 @@ timeout_ms = 30000
 }
 
 #[test]
-fn parses_yaml_storage_libsql_config_file() {
+fn rejects_yaml_storage_libsql_config_file_with_migration_message() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.yaml");
     std::fs::write(
@@ -271,7 +271,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   libsql_url: "libsql://example.turso.io"
@@ -281,19 +280,9 @@ storage:
     )
     .unwrap();
 
-    let config = Config::load(&path).unwrap();
-    assert_eq!(
-        config.storage.provider,
-        ferrogate_storage::StorageProviderKind::TursoLibsql
-    );
-    assert_eq!(
-        config.storage.libsql_url.as_deref(),
-        Some("libsql://example.turso.io")
-    );
-    assert_eq!(
-        config.storage.libsql_auth_token.as_deref(),
-        Some("test-token")
-    );
+    let error = format!("{:?}", Config::load(&path).unwrap_err());
+    assert!(error.contains("turso_libsql has been removed"));
+    assert!(error.contains("supabase"));
 }
 
 #[test]
@@ -382,7 +371,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
@@ -439,7 +427,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   supabase_dsn_env: FERROGATE_SUPABASE_DSN
@@ -491,7 +478,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   mysql_dsn_env: FERROGATE_MYSQL_DSN
@@ -526,7 +512,7 @@ storage:
 }
 
 #[test]
-fn parses_yaml_storage_libsql_file_config_without_token() {
+fn rejects_yaml_storage_libsql_file_config_with_migration_message() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("ferrogate-control-plane.db");
     let path = dir.path().join("ferrogate.yaml");
@@ -540,7 +526,6 @@ storage:
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   libsql_url: "file://{}"
@@ -551,17 +536,9 @@ storage:
     )
     .unwrap();
 
-    let config = Config::load(&path).unwrap();
-    assert_eq!(
-        config.storage.provider,
-        ferrogate_storage::StorageProviderKind::TursoLibsql
-    );
-    assert_eq!(
-        config.storage.libsql_url.as_deref(),
-        Some(format!("file://{}", db_path.display()).as_str())
-    );
-    assert!(config.storage.libsql_auth_token.is_none());
-    assert!(config.storage.libsql_auth_token_env.is_none());
+    let error = format!("{:?}", Config::load(&path).unwrap_err());
+    assert!(error.contains("turso_libsql has been removed"));
+    assert!(error.contains("supabase"));
 }
 
 #[test]

@@ -27,8 +27,6 @@ const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
 const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
 const CLICKHOUSE_CONTAINER: &str = "ferrogate-e2e-clickhouse";
 const VECTOR_CONTAINER: &str = "ferrogate-e2e-vector";
-const LIBSQL_CONTAINER: &str = "ferrogate-e2e-libsql";
-const LIBSQL_SERVER_IMAGE: &str = "ghcr.io/tursodatabase/libsql-server:latest";
 const POSTGRES_CONTAINER: &str = "ferrogate-e2e-postgres";
 const POSTGRES_IMAGE: &str = "postgres:16-alpine";
 const MYSQL_CONTAINER: &str = "ferrogate-e2e-mysql";
@@ -44,7 +42,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-            "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
+            "local: admin-api, auth-api, gateway-api, ci, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart"
         );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -64,8 +62,6 @@ fn main() -> Result<()> {
         Commands::AdminApi(args) => run_admin_api(&args),
         Commands::AuthApi(args) => run_auth_api(&args),
         Commands::GatewayApi(args) => run_gateway_api(&args),
-        Commands::LibsqlFileRestart(args) => run_libsql_file_restart(&args),
-        Commands::LibsqlServerRestart(args) => run_libsql_server_restart(&args),
         Commands::SupabaseRestart(args) => run_supabase_restart(&args),
         Commands::SupabaseLiveSmoke(args) => run_supabase_live_smoke(&args),
         Commands::SupabaseLiveRestart(args) => run_supabase_live_restart(&args),
@@ -74,15 +70,12 @@ fn main() -> Result<()> {
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
         Commands::MysqlRestart(args) => run_mysql_restart(&args),
         Commands::MysqlTlsRestart(args) => run_mysql_tls_restart(&args),
-        Commands::TursoLibsqlRestart(args) => run_turso_libsql_restart(&args),
         Commands::Ci(args) => {
             run_admin_api(&args.local)?;
             run_auth_api(&args.auth)?;
             run_gateway_external_auth_api(&args.local, &args.auth)?;
             run_gateway_third_party_auth_api(&args.local)?;
             run_gateway_api(&args.local)?;
-            run_libsql_file_restart(&args.local)?;
-            run_libsql_server_restart(&args.local)?;
             run_supabase_restart(&args.local)?;
             run_postgres_restart(&args.local)?;
             run_postgres_tls_restart(&args.local)?;
@@ -129,10 +122,6 @@ enum Commands {
     AuthApi(AuthArgs),
     /// Run gateway API coverage against a real local FerroGate process.
     GatewayApi(LocalArgs),
-    /// Run deterministic local file-backed libSQL restart durability coverage.
-    LibsqlFileRestart(LocalArgs),
-    /// Run local Docker-backed libSQL server protocol restart durability coverage.
-    LibsqlServerRestart(LocalArgs),
     /// Run local Supabase-compatible Postgres restart durability coverage.
     SupabaseRestart(LocalArgs),
     /// Opt-in live Supabase connection, migration, status, and minimal persistence smoke.
@@ -149,8 +138,6 @@ enum Commands {
     MysqlRestart(LocalArgs),
     /// Run local Docker-backed MySQL TLS restart durability coverage.
     MysqlTlsRestart(LocalArgs),
-    /// Opt-in live Turso/libSQL restart durability scenario.
-    TursoLibsqlRestart(TursoLibsqlRestartArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
     Ci(CiArgs),
 }
@@ -206,18 +193,6 @@ struct CiArgs {
     local: LocalArgs,
     #[command(flatten)]
     auth: AuthArgs,
-}
-
-#[derive(Debug, Args)]
-struct TursoLibsqlRestartArgs {
-    #[command(flatten)]
-    local: LocalArgs,
-    /// Turso/libSQL remote database URL, for example libsql://database.turso.io.
-    #[arg(long, env = "FERROGATE_LIBSQL_URL")]
-    libsql_url: String,
-    /// Turso/libSQL auth token. Prefer FERROGATE_LIBSQL_AUTH_TOKEN in shell/CI.
-    #[arg(long, env = "FERROGATE_LIBSQL_AUTH_TOKEN")]
-    libsql_auth_token: String,
 }
 
 #[derive(Debug, Args)]
@@ -342,9 +317,8 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert_eq!(body["storage"]["health"], "ok");
         assert_eq!(body["storage"]["contract_version"], 1);
         assert_eq!(body["storage"]["provider_order"][0], "supabase");
-        assert_eq!(body["storage"]["provider_order"][1], "turso_libsql");
-        assert_eq!(body["storage"]["provider_order"][2], "postgres");
-        assert_eq!(body["storage"]["provider_order"][3], "mysql");
+        assert_eq!(body["storage"]["provider_order"][1], "postgres");
+        assert_eq!(body["storage"]["provider_order"][2], "mysql");
         assert_eq!(body["analytics"]["provider"], "vector");
         assert_eq!(body["analytics"]["enabled"], false);
         assert_eq!(body["analytics"]["active"], false);
@@ -2183,71 +2157,6 @@ fn run_gateway_third_party_auth_api(local: &LocalArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_turso_libsql_restart(args: &TursoLibsqlRestartArgs) -> Result<()> {
-    if !args.libsql_url.starts_with("libsql://") {
-        bail!("--libsql-url must use the libsql:// protocol");
-    }
-    if args.libsql_auth_token.trim().is_empty() {
-        bail!("--libsql-auth-token must not be empty");
-    }
-
-    run_control_plane_libsql_restart(
-        &args.local.ferrogate_bin,
-        &args.libsql_url,
-        Some(&args.libsql_auth_token),
-        "ferrogate-test",
-        false,
-    )?;
-    println!("turso-libsql-restart scenario passed");
-    Ok(())
-}
-
-fn run_libsql_file_restart(args: &LocalArgs) -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let db_path = dir.path().join("ferrogate-control-plane.db");
-    let libsql_url = format!("file://{}", db_path.display());
-
-    run_control_plane_libsql_restart(
-        &args.ferrogate_bin,
-        &libsql_url,
-        None,
-        "ferrogate-file-test",
-        true,
-    )?;
-    println!("libsql-file-restart scenario passed");
-    Ok(())
-}
-
-fn run_libsql_server_restart(args: &LocalArgs) -> Result<()> {
-    let host_port = free_port()?;
-    let _cleanup = LibsqlServerCleanup;
-    stop_libsql_server_container();
-    docker_args([
-        "run".to_string(),
-        "-d".to_string(),
-        "--name".to_string(),
-        LIBSQL_CONTAINER.to_string(),
-        "-p".to_string(),
-        format!("{host_port}:8080"),
-        "-e".to_string(),
-        "SQLD_HTTP_LISTEN_ADDR=0.0.0.0:8080".to_string(),
-        "-e".to_string(),
-        "SQLD_GRPC_LISTEN_ADDR=0.0.0.0:5001".to_string(),
-        LIBSQL_SERVER_IMAGE.to_string(),
-    ])?;
-    wait_for_libsql_server(host_port)?;
-    let libsql_url = format!("http://127.0.0.1:{host_port}");
-    run_control_plane_libsql_restart(
-        &args.ferrogate_bin,
-        &libsql_url,
-        None,
-        "ferrogate-libsql-server-test",
-        true,
-    )?;
-    println!("libsql-server-restart scenario passed");
-    Ok(())
-}
-
 fn run_supabase_restart(args: &LocalArgs) -> Result<()> {
     let host_port = free_port()?;
     let cert_dir = tempfile::tempdir()?;
@@ -2719,24 +2628,6 @@ fn write_postgres_tls_certs(dir: &Path) -> Result<PostgresTlsFiles> {
     Ok(PostgresTlsFiles { ca_cert_path })
 }
 
-fn run_control_plane_libsql_restart(
-    ferrogate_bin: &Path,
-    libsql_url: &str,
-    libsql_auth_token: Option<&str>,
-    resource_prefix: &str,
-    verify_deleted_after_restart: bool,
-) -> Result<()> {
-    run_control_plane_restart(
-        ferrogate_bin,
-        ControlPlaneRestartStorage::Libsql {
-            url: libsql_url,
-            auth_token: libsql_auth_token,
-        },
-        resource_prefix,
-        verify_deleted_after_restart,
-    )
-}
-
 fn run_control_plane_postgres_restart(
     ferrogate_bin: &Path,
     postgres_dsn: &str,
@@ -2805,10 +2696,6 @@ struct PostgresRestartTls<'a> {
 
 #[derive(Clone, Copy)]
 enum ControlPlaneRestartStorage<'a> {
-    Libsql {
-        url: &'a str,
-        auth_token: Option<&'a str>,
-    },
     Postgres {
         dsn: &'a str,
         tls: PostgresRestartTls<'a>,
@@ -3517,9 +3404,8 @@ impl TursoRestartHarness {
             );
             assert_eq!(body["storage"]["health"], "ok");
             assert_eq!(body["storage"]["provider_order"][0], "supabase");
-            assert_eq!(body["storage"]["provider_order"][1], "turso_libsql");
-            assert_eq!(body["storage"]["provider_order"][2], "postgres");
-            assert_eq!(body["storage"]["provider_order"][3], "mysql");
+            assert_eq!(body["storage"]["provider_order"][1], "postgres");
+            assert_eq!(body["storage"]["provider_order"][2], "mysql");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
                 assert_eq!(body["storage"]["schema"]["version"], 3);
@@ -4883,7 +4769,6 @@ cache_enabled = false
 impl ControlPlaneRestartStorage<'_> {
     fn provider_name(self) -> &'static str {
         match self {
-            ControlPlaneRestartStorage::Libsql { .. } => "turso_libsql",
             ControlPlaneRestartStorage::Supabase { .. } => "supabase",
             ControlPlaneRestartStorage::Postgres { .. } => "postgres",
             ControlPlaneRestartStorage::Mysql { .. } => "mysql",
@@ -4892,12 +4777,6 @@ impl ControlPlaneRestartStorage<'_> {
 
     fn apply_env(self, command: &mut Command) {
         match self {
-            ControlPlaneRestartStorage::Libsql {
-                auth_token: Some(token),
-                ..
-            } => {
-                command.env("FERROGATE_LIBSQL_AUTH_TOKEN", token);
-            }
             ControlPlaneRestartStorage::Postgres { dsn, .. } => {
                 command.env("FERROGATE_POSTGRES_DSN", dsn);
             }
@@ -4907,34 +4786,11 @@ impl ControlPlaneRestartStorage<'_> {
             ControlPlaneRestartStorage::Mysql { dsn, .. } => {
                 command.env("FERROGATE_MYSQL_DSN", dsn);
             }
-            ControlPlaneRestartStorage::Libsql {
-                auth_token: None, ..
-            } => {}
         }
     }
 
     fn storage_block_with_migration_mode(self, migration_mode: StorageMigrationMode) -> String {
         match self {
-            ControlPlaneRestartStorage::Libsql { url, auth_token } => {
-                let auth_token_env = if auth_token.is_some() {
-                    "\n  libsql_auth_token_env: FERROGATE_LIBSQL_AUTH_TOKEN"
-                } else {
-                    ""
-                };
-                format!(
-                    r#"storage:
-  provider: turso_libsql
-  required: true
-  provider_order:
-    - supabase
-    - turso_libsql
-    - postgres
-    - mysql
-  libsql_url: "{url}"{auth_token_env}
-  migration_mode: {migration_mode}"#,
-                    migration_mode = migration_mode.as_str()
-                )
-            }
             ControlPlaneRestartStorage::Postgres { tls, .. } => {
                 let ca_cert_path = tls
                     .ca_cert_path
@@ -4951,7 +4807,6 @@ impl ControlPlaneRestartStorage<'_> {
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
@@ -4984,7 +4839,6 @@ impl ControlPlaneRestartStorage<'_> {
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   supabase_dsn_env: FERROGATE_SUPABASE_DSN
@@ -5017,7 +4871,6 @@ impl ControlPlaneRestartStorage<'_> {
   required: true
   provider_order:
     - supabase
-    - turso_libsql
     - postgres
     - mysql
   mysql_dsn_env: FERROGATE_MYSQL_DSN
@@ -7679,30 +7532,6 @@ fn wait_for_redis() -> Result<()> {
     bail!("redis did not start responding to PING")
 }
 
-fn wait_for_libsql_server(host_port: u16) -> Result<()> {
-    let started = Instant::now();
-    let mut last = String::new();
-    while started.elapsed() < Duration::from_secs(30) {
-        match http_request(host_port, "GET", "/", &[], "") {
-            Ok(response) => {
-                last = response.raw;
-                if matches!(response.status, 200 | 404 | 405) {
-                    return Ok(());
-                }
-            }
-            Err(error) => last = error.to_string(),
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    let logs = Command::new("docker")
-        .args(["logs", LIBSQL_CONTAINER, "--tail", "120"])
-        .output()
-        .ok()
-        .map(|output| String::from_utf8_lossy(&output.stderr).to_string())
-        .unwrap_or_default();
-    bail!("timed out waiting for local libSQL server; last response: {last}; logs: {logs}");
-}
-
 fn wait_for_postgres_server() -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(30) {
@@ -8142,14 +7971,6 @@ where
     Ok(())
 }
 
-fn stop_libsql_server_container() {
-    let _ = Command::new("docker")
-        .args(["rm", "-f", LIBSQL_CONTAINER])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
 fn stop_postgres_container() {
     let _ = Command::new("docker")
         .args(["rm", "-f", POSTGRES_CONTAINER])
@@ -8177,7 +7998,6 @@ fn cleanup_containers() {
             REDIS_CONTAINER,
             CLICKHOUSE_CONTAINER,
             VECTOR_CONTAINER,
-            LIBSQL_CONTAINER,
             POSTGRES_CONTAINER,
             MYSQL_CONTAINER,
         ])
@@ -8189,17 +8009,6 @@ fn cleanup_containers() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-}
-
-struct LibsqlServerCleanup;
-
-impl Drop for LibsqlServerCleanup {
-    fn drop(&mut self) {
-        if env::var("FERROGATE_TEST_KEEP_CONTAINERS").is_ok_and(|value| value == "1") {
-            return;
-        }
-        stop_libsql_server_container();
-    }
 }
 
 struct PostgresCleanup;

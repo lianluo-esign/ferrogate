@@ -1936,7 +1936,6 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         config.storage.provider_order,
         vec![
             ferrogate_storage::StorageProviderKind::Supabase,
-            ferrogate_storage::StorageProviderKind::TursoLibsql,
             ferrogate_storage::StorageProviderKind::Postgres,
             ferrogate_storage::StorageProviderKind::Mysql,
         ]
@@ -1952,7 +1951,9 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         },
         ..Config::default()
     };
-    config.validate().unwrap();
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("turso_libsql has been removed"));
+    assert!(error.contains("migrate"));
 
     let config = Config {
         storage: StorageConfig {
@@ -2182,26 +2183,18 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
 
     let config = Config {
         storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
-            required: true,
-            libsql_url: Some("file:///tmp/ferrogate-control-plane.db".into()),
-            ..StorageConfig::default()
-        },
-        ..Config::default()
-    };
-    config.validate().unwrap();
-
-    let config = Config {
-        storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::TursoLibsql,
-            required: true,
-            libsql_url: Some("libsql://example.turso.io".into()),
+            provider_order: vec![
+                ferrogate_storage::StorageProviderKind::Supabase,
+                ferrogate_storage::StorageProviderKind::TursoLibsql,
+                ferrogate_storage::StorageProviderKind::Postgres,
+            ],
             ..StorageConfig::default()
         },
         ..Config::default()
     };
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field storage.libsql_auth_token_env"));
+    assert!(error.contains("field storage.provider_order"));
+    assert!(error.contains("turso_libsql has been removed"));
 
     let config = Config {
         storage: StorageConfig {

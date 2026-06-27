@@ -1199,7 +1199,7 @@ scopes = ["admin.read", "admin.write"]
 }
 
 #[test]
-fn mcp_server_admin_write_and_restart_restore_work() {
+fn retired_turso_libsql_storage_config_fails_with_migration_message() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
@@ -1234,72 +1234,15 @@ scopes = ["admin.read", "admin.write"]
         ),
     )
     .unwrap();
-    std::env::set_var("FERROGATE_PROVIDER_SECRET", "provider-secret");
 
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
-    let mcp_name = "dbhttprestarttest";
-    let create = http_request(
-        &gateway_addr,
-        "POST",
-        "/admin/v1/mcp-servers",
-        &[
-            "Authorization: Bearer admin-secret",
-            "Content-Type: application/json",
-        ],
-        &serde_json::json!({
-            "name": mcp_name,
-            "transport": "streamable_http",
-            "url": "http://127.0.0.1:1/mcp",
-            "tools_to_execute": ["search"],
-            "tools_to_auto_execute": ["search"],
-            "approval_policy": "never",
-            "tool_include": ["search"],
-            "tool_regex": [],
-            "headers": [],
-            "tls": {},
-            "timeout_ms": 100,
-            "health_ping_interval_secs": 30,
-            "max_reconnect_attempts": 3,
-            "min_reconnect_backoff_secs": 1,
-            "max_reconnect_backoff_secs": 5
-        })
-        .to_string(),
-    );
-    assert!(create.contains("201 Created"), "{create}");
-    assert!(create.contains("\"object\":\"mcp_server\""), "{create}");
-    assert!(
-        create.contains(&format!("\"name\":\"{mcp_name}\"")),
-        "{create}"
-    );
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
-
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
-    let list = http_request(
-        &gateway_addr,
-        "GET",
-        "/admin/v1/mcp-servers",
-        &["Authorization: Bearer admin-secret"],
-        "",
-    );
-    assert!(list.contains("200 OK"), "{list}");
-    assert!(list.contains(&format!("\"name\":\"{mcp_name}\"")), "{list}");
-
-    let delete = http_request(
-        &gateway_addr,
-        "DELETE",
-        &format!("/admin/v1/mcp-servers/{mcp_name}"),
-        &["Authorization: Bearer admin-secret"],
-        "",
-    );
-    assert!(delete.contains("200 OK"), "{delete}");
-    assert!(delete.contains("\"object\":\"mcp_server\""), "{delete}");
-    assert!(delete.contains("\"deleted\":true"), "{delete}");
-
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrogate"))
+        .args(["check", "--config", config.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("turso_libsql has been removed"), "{stderr}");
+    assert!(stderr.contains("storage.provider: supabase"), "{stderr}");
 }
 
 #[test]

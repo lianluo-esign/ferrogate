@@ -55,10 +55,10 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_storage::{
-    ControlPlaneDocuments, LibsqlStorageConfig, MySqlStorageConfig, PostgresStorageConfig,
-    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
-    RuntimeStorageRepositories, StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent,
-    StoredAuditEvent, StoredRequestLog, StoredUsageAggregate,
+    ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
+    RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
+    StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAuditEvent,
+    StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -1074,18 +1074,6 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         request_log_retention_records: config.analytics.request_log_retention_records,
         audit_event_retention_records: config.analytics.audit_event_retention_records,
     };
-    if storage.provider == ferrogate_storage::StorageProviderKind::TursoLibsql {
-        let url = storage
-            .libsql_url
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("field storage.libsql_url is required"))?;
-        let auth_token = storage_libsql_auth_token(storage, &url)?;
-        return block_on_runtime_storage(RuntimeStorageRepositories::turso_libsql(
-            LibsqlStorageConfig { url, auth_token },
-            storage_options(control_plane),
-        ))
-        .map_err(|error| anyhow::anyhow!("{error}"));
-    }
     if storage.provider == ferrogate_storage::StorageProviderKind::Supabase {
         let dsn = storage_supabase_dsn(storage)?;
         return RuntimeStorageRepositories::supabase(
@@ -1217,32 +1205,6 @@ fn control_plane_documents_from_config(config: &Config) -> ControlPlaneDocuments
     }
 }
 
-fn storage_libsql_auth_token(
-    storage: &StorageConfig,
-    libsql_url: &str,
-) -> anyhow::Result<Option<String>> {
-    if libsql_url.trim().starts_with("file://") || is_local_libsql_server_url(libsql_url.trim()) {
-        return Ok(None);
-    }
-    if let Some(token) = storage
-        .libsql_auth_token
-        .as_deref()
-        .filter(|token| !token.trim().is_empty())
-    {
-        return Ok(Some(token.to_string()));
-    }
-    let env_name = storage
-        .libsql_auth_token_env
-        .as_deref()
-        .filter(|name| !name.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("field storage.libsql_auth_token_env is required"))?;
-    env::var(env_name).map(Some).map_err(|_| {
-        anyhow::anyhow!(
-            "field storage.libsql_auth_token_env: environment variable {env_name} is not set"
-        )
-    })
-}
-
 fn storage_postgres_dsn(storage: &StorageConfig) -> anyhow::Result<String> {
     if let Some(dsn) = storage
         .postgres_dsn
@@ -1315,42 +1277,6 @@ fn storage_mysql_dsn(storage: &StorageConfig) -> anyhow::Result<String> {
         );
     }
     Ok(dsn)
-}
-
-fn is_local_libsql_server_url(url: &str) -> bool {
-    let Ok(uri) = url.parse::<http::Uri>() else {
-        return false;
-    };
-    if !matches!(uri.scheme_str(), Some("http")) {
-        return false;
-    }
-    uri.authority()
-        .map(|authority| matches!(authority.host(), "127.0.0.1" | "localhost" | "::1"))
-        .unwrap_or(false)
-}
-
-fn block_on_runtime_storage<T: Send>(
-    future: impl std::future::Future<Output = Result<T, ferrogate_storage::StorageError>> + Send,
-) -> Result<T, ferrogate_storage::StorageError> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-            return tokio::task::block_in_place(|| handle.block_on(future));
-        }
-    }
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| ferrogate_storage::StorageError::Libsql(error.to_string()))?
-                    .block_on(future)
-            })
-            .join()
-            .map_err(|_| {
-                ferrogate_storage::StorageError::Libsql("storage runtime thread panicked".into())
-            })?
-    })
 }
 
 fn serialize_control_plane_documents<T: Serialize>(

@@ -12,7 +12,6 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    future::Future,
     str::FromStr,
     sync::{Arc, Condvar, Mutex},
     time::Duration,
@@ -20,7 +19,6 @@ use std::{
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::TenantContext;
-use libsql::Builder as LibsqlBuilder;
 use mysql::prelude::Queryable;
 use mysql::{
     params, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, SslOpts, TxOpts,
@@ -35,7 +33,6 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
     StorageProviderKind::Supabase,
-    StorageProviderKind::TursoLibsql,
     StorageProviderKind::Postgres,
     StorageProviderKind::Mysql,
 ];
@@ -71,7 +68,6 @@ impl StorageProviderKind {
             self,
             StorageProviderKind::Memory
                 | StorageProviderKind::Supabase
-                | StorageProviderKind::TursoLibsql
                 | StorageProviderKind::Postgres
                 | StorageProviderKind::Mysql
         )
@@ -160,12 +156,6 @@ pub struct RuntimeStorageOptions {
     pub control_plane: ControlPlaneDocuments,
     pub request_log_retention_records: usize,
     pub audit_event_retention_records: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LibsqlStorageConfig {
-    pub url: String,
-    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,9 +291,9 @@ pub enum StorageError {
         provider: StorageProviderKind,
         required: bool,
     },
-    Libsql(String),
     Postgres(String),
     Mysql(String),
+    Runtime(String),
     Serialization(String),
 }
 
@@ -317,9 +307,9 @@ impl std::fmt::Display for StorageError {
                     provider.as_str()
                 )
             }
-            StorageError::Libsql(error) => write!(formatter, "libsql storage error: {error}"),
             StorageError::Postgres(error) => write!(formatter, "postgres storage error: {error}"),
             StorageError::Mysql(error) => write!(formatter, "mysql storage error: {error}"),
+            StorageError::Runtime(error) => write!(formatter, "storage runtime error: {error}"),
             StorageError::Serialization(error) => {
                 write!(formatter, "storage serialization error: {error}")
             }
@@ -423,10 +413,6 @@ pub struct RuntimeControlPlaneState {
     tool_approvals: InMemoryRepository<StoredControlPlaneResource>,
 }
 
-struct LibsqlControlPlaneStore {
-    database: Arc<libsql::Database>,
-}
-
 struct PostgresControlPlaneStore {
     pool: Arc<PostgresClientPool>,
     schema: StorageSchemaEvidence,
@@ -439,207 +425,6 @@ struct MySqlControlPlaneStore {
 struct PostgresClientPool {
     clients: Mutex<Vec<PostgresClient>>,
     available: Condvar,
-}
-
-impl std::fmt::Debug for LibsqlControlPlaneStore {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LibsqlControlPlaneStore")
-            .field("database", &"<redacted>")
-            .finish()
-    }
-}
-
-impl LibsqlControlPlaneStore {
-    async fn connect(
-        config: LibsqlStorageConfig,
-        bootstrap: ControlPlaneDocuments,
-        initialize_schema: bool,
-    ) -> Result<Self, StorageError> {
-        let database = build_libsql_database(config.url, config.auth_token).await?;
-        let store = Self {
-            database: Arc::new(database),
-        };
-        if initialize_schema {
-            store.initialize_schema().await?;
-        }
-        store
-            .seed_missing_resources("api_key", bootstrap.api_keys)
-            .await?;
-        store
-            .seed_missing_resources("tenant", bootstrap.tenants)
-            .await?;
-        store
-            .seed_missing_resources("policy", bootstrap.policies)
-            .await?;
-        store
-            .seed_missing_resources("gateway_config", bootstrap.gateway_configs)
-            .await?;
-        store
-            .seed_missing_resources("agent_workflow", bootstrap.agent_workflows)
-            .await?;
-        store
-            .seed_missing_resources("skill_package", bootstrap.skill_packages)
-            .await?;
-        store
-            .seed_missing_resources("prompt_template", bootstrap.prompt_templates)
-            .await?;
-        store
-            .seed_missing_resources("plugin_registration", bootstrap.plugin_registrations)
-            .await?;
-        store
-            .seed_missing_resources("mcp_server", bootstrap.mcp_servers)
-            .await?;
-        store
-            .seed_missing_resources("agent_upstream", bootstrap.agent_upstreams)
-            .await?;
-        Ok(store)
-    }
-
-    async fn initialize_schema(&self) -> Result<(), StorageError> {
-        let connection = self.database.connect().map_err(libsql_error)?;
-        connection
-            .execute_transactional_batch(include_str!("../../../sql/001_init_libsql.sql"))
-            .await
-            .map_err(libsql_error)?;
-        Ok(())
-    }
-
-    async fn seed_missing_resources(
-        &self,
-        kind: &'static str,
-        records: Vec<(String, String)>,
-    ) -> Result<(), StorageError> {
-        let connection = self.database.connect().map_err(libsql_error)?;
-        for (id, document_json) in records {
-            connection
-                .execute(
-                    "INSERT OR IGNORE INTO control_plane_resources \
-                     (resource_kind, resource_id, document_json) VALUES (?1, ?2, ?3)",
-                    libsql::params![kind, id, document_json],
-                )
-                .await
-                .map_err(libsql_error)?;
-        }
-        Ok(())
-    }
-
-    async fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
-        Ok(ControlPlaneSnapshot {
-            api_keys: self.list_documents("api_key").await?,
-            tenants: self.list_documents("tenant").await?,
-            policies: self.list_documents("policy").await?,
-            gateway_configs: self.list_documents("gateway_config").await?,
-            agent_workflows: self.list_documents("agent_workflow").await?,
-            skill_packages: self.list_documents("skill_package").await?,
-            prompt_templates: self.list_documents("prompt_template").await?,
-            plugin_registrations: self.list_documents("plugin_registration").await?,
-            mcp_servers: self.list_documents("mcp_server").await?,
-            agent_upstreams: self.list_documents("agent_upstream").await?,
-        })
-    }
-
-    async fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
-        let connection = self.database.connect().map_err(libsql_error)?;
-        let mut rows = connection
-            .query(
-                "SELECT document_json FROM control_plane_resources \
-                 WHERE resource_kind = ?1 ORDER BY resource_id ASC",
-                libsql::params![kind],
-            )
-            .await
-            .map_err(libsql_error)?;
-        let mut documents = Vec::new();
-        while let Some(row) = rows.next().await.map_err(libsql_error)? {
-            documents.push(row.get::<String>(0).map_err(libsql_error)?);
-        }
-        Ok(documents)
-    }
-
-    async fn get_document(
-        &self,
-        kind: &'static str,
-        id: String,
-    ) -> Result<Option<String>, StorageError> {
-        let connection = self.database.connect().map_err(libsql_error)?;
-        let mut rows = connection
-            .query(
-                "SELECT document_json FROM control_plane_resources \
-                 WHERE resource_kind = ?1 AND resource_id = ?2",
-                libsql::params![kind, id],
-            )
-            .await
-            .map_err(libsql_error)?;
-        rows.next()
-            .await
-            .map_err(libsql_error)?
-            .map(|row| row.get::<String>(0).map_err(libsql_error))
-            .transpose()
-    }
-
-    async fn upsert(
-        &self,
-        kind: &'static str,
-        id: String,
-        document_json: String,
-    ) -> Result<(), StorageError> {
-        let connection = self.database.connect().map_err(libsql_error)?;
-        connection
-            .execute(
-                "INSERT INTO control_plane_resources \
-                 (resource_kind, resource_id, document_json, revision, updated_at_unix) \
-                 VALUES (?1, ?2, ?3, 1, unixepoch()) \
-                 ON CONFLICT(resource_kind, resource_id) DO UPDATE SET \
-                 document_json = excluded.document_json, \
-                 revision = control_plane_resources.revision + 1, \
-                 updated_at_unix = unixepoch()",
-                libsql::params![kind, id, document_json],
-            )
-            .await
-            .map_err(libsql_error)?;
-        Ok(())
-    }
-
-    async fn replace_kind(
-        &self,
-        kind: &'static str,
-        records: Vec<(String, String)>,
-    ) -> Result<(), StorageError> {
-        let connection = self.database.connect().map_err(libsql_error)?;
-        let transaction = connection.transaction().await.map_err(libsql_error)?;
-        transaction
-            .execute(
-                "DELETE FROM control_plane_resources WHERE resource_kind = ?1",
-                libsql::params![kind],
-            )
-            .await
-            .map_err(libsql_error)?;
-        for (id, document_json) in records {
-            transaction
-                .execute(
-                    "INSERT INTO control_plane_resources \
-                     (resource_kind, resource_id, document_json) VALUES (?1, ?2, ?3)",
-                    libsql::params![kind, id, document_json],
-                )
-                .await
-                .map_err(libsql_error)?;
-        }
-        transaction.commit().await.map_err(libsql_error)?;
-        Ok(())
-    }
-
-    async fn delete(&self, kind: &'static str, id: String) -> Result<bool, StorageError> {
-        let connection = self.database.connect().map_err(libsql_error)?;
-        let rows_changed = connection
-            .execute(
-                "DELETE FROM control_plane_resources \
-                 WHERE resource_kind = ?1 AND resource_id = ?2",
-                libsql::params![kind, id],
-            )
-            .await
-            .map_err(libsql_error)?;
-        Ok(rows_changed > 0)
-    }
 }
 
 impl std::fmt::Debug for PostgresControlPlaneStore {
@@ -1964,53 +1749,9 @@ fn billing_usage_source_from_str(value: &str) -> ferrogate_billing::BillingUsage
     }
 }
 
-async fn build_libsql_database(
-    url: String,
-    auth_token: Option<String>,
-) -> Result<libsql::Database, StorageError> {
-    if let Some(path) = url.strip_prefix("file://") {
-        if path.trim().is_empty() {
-            return Err(StorageError::Libsql(
-                "field storage.libsql_url: file:// path must not be empty".into(),
-            ));
-        }
-        return LibsqlBuilder::new_local(path)
-            .build()
-            .await
-            .map_err(libsql_error);
-    }
-
-    let auth_token = match auth_token.filter(|token| !token.trim().is_empty()) {
-        Some(token) => token,
-        None if is_local_libsql_server_url(&url) => String::new(),
-        None => {
-            return Err(StorageError::Libsql(
-                "field storage.libsql_auth_token_env is required for remote libSQL URLs".into(),
-            ));
-        }
-    };
-    LibsqlBuilder::new_remote(url, auth_token)
-        .build()
-        .await
-        .map_err(libsql_error)
-}
-
-fn is_local_libsql_server_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("http://") else {
-        return false;
-    };
-    let authority = rest.split('/').next().unwrap_or_default();
-    let host = authority
-        .strip_prefix('[')
-        .and_then(|value| value.split_once(']').map(|(host, _)| host))
-        .unwrap_or_else(|| authority.split(':').next().unwrap_or_default());
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
-}
-
 #[derive(Debug)]
 enum RuntimeControlPlaneBackend {
     Memory(Box<Mutex<RuntimeControlPlaneState>>),
-    Libsql(Arc<LibsqlControlPlaneStore>),
     Postgres(Arc<PostgresControlPlaneStore>),
     Mysql(Arc<MySqlControlPlaneStore>),
 }
@@ -2703,39 +2444,6 @@ impl RuntimeStorageRepositories {
         )
     }
 
-    pub async fn turso_libsql(
-        config: LibsqlStorageConfig,
-        options: RuntimeStorageOptions,
-    ) -> Result<Self, StorageError> {
-        let backend = RuntimeStorageBackend::new_with_migration_mode(
-            StorageProviderKind::TursoLibsql,
-            options.required,
-            options.provider_order,
-            options.migration_mode,
-        )?;
-        let request_log_retention_records = options.request_log_retention_records;
-        let audit_event_retention_records = options.audit_event_retention_records;
-        let control_plane = LibsqlControlPlaneStore::connect(
-            config,
-            options.control_plane,
-            options.initialize_schema,
-        )
-        .await?;
-        Ok(Self {
-            backend,
-            control_plane: RuntimeControlPlaneBackend::Libsql(Arc::new(control_plane)),
-            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                request_log_retention_records,
-            )),
-            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                audit_event_retention_records,
-            )),
-            usage_aggregates: Mutex::new(InMemoryRepository::new()),
-            agent_runs: Mutex::new(InMemoryRepository::new()),
-            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
-        })
-    }
-
     pub fn postgres(
         config: PostgresStorageConfig,
         options: RuntimeStorageOptions,
@@ -2852,9 +2560,6 @@ impl RuntimeStorageRepositories {
                     mcp_servers: Vec::new(),
                     agent_upstreams: Vec::new(),
                 })),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.snapshot())
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.snapshot(),
             RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.snapshot(),
         }
@@ -2871,39 +2576,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(async {
-                control_plane
-                    .replace_kind("api_key", documents.api_keys)
-                    .await?;
-                control_plane
-                    .replace_kind("tenant", documents.tenants)
-                    .await?;
-                control_plane
-                    .replace_kind("policy", documents.policies)
-                    .await?;
-                control_plane
-                    .replace_kind("gateway_config", documents.gateway_configs)
-                    .await?;
-                control_plane
-                    .replace_kind("agent_workflow", documents.agent_workflows)
-                    .await?;
-                control_plane
-                    .replace_kind("skill_package", documents.skill_packages)
-                    .await?;
-                control_plane
-                    .replace_kind("prompt_template", documents.prompt_templates)
-                    .await?;
-                control_plane
-                    .replace_kind("plugin_registration", documents.plugin_registrations)
-                    .await?;
-                control_plane
-                    .replace_kind("mcp_server", documents.mcp_servers)
-                    .await?;
-                control_plane
-                    .replace_kind("agent_upstream", documents.agent_upstreams)
-                    .await?;
-                Ok(())
-            }),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.replace_kind("api_key", documents.api_keys)?;
                 control_plane.replace_kind("tenant", documents.tenants)?;
@@ -2947,9 +2619,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("api_key", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("api_key", id.into(), document_json)
             }
@@ -2965,9 +2634,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_api_key(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("api_key", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("api_key", id.to_string())
             }
@@ -2989,9 +2655,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("policy", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("policy", id.into(), document_json)
             }
@@ -3007,9 +2670,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_policy(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("policy", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("policy", id.to_string())
             }
@@ -3031,9 +2691,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("gateway_config", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("gateway_config", id.into(), document_json)
             }
@@ -3049,9 +2706,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_gateway_config(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("gateway_config", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("gateway_config", id.to_string())
             }
@@ -3073,9 +2727,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("agent_workflow", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("agent_workflow", id.into(), document_json)
             }
@@ -3091,9 +2742,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_agent_workflow(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("agent_workflow", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("agent_workflow", id.to_string())
             }
@@ -3115,9 +2763,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("skill_package", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("skill_package", id.into(), document_json)
             }
@@ -3133,9 +2778,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_skill_package(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("skill_package", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("skill_package", id.to_string())
             }
@@ -3156,9 +2798,6 @@ impl RuntimeStorageRepositories {
                     control_plane.upsert_prompt_template(id, document_json);
                 }
                 Ok(())
-            }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("prompt_template", id.into(), document_json))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("prompt_template", id.into(), document_json)
@@ -3181,9 +2820,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(
-                control_plane.upsert("plugin_registration", id.into(), document_json),
-            ),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("plugin_registration", id.into(), document_json)
             }
@@ -3199,9 +2835,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_plugin_registration(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("plugin_registration", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("plugin_registration", id.to_string())
             }
@@ -3223,9 +2856,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("mcp_server", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("mcp_server", id.into(), document_json)
             }
@@ -3241,9 +2871,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_mcp_server(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("mcp_server", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("mcp_server", id.to_string())
             }
@@ -3265,9 +2892,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("agent_upstream", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("agent_upstream", id.into(), document_json)
             }
@@ -3283,9 +2907,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_agent_upstream(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.delete("agent_upstream", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete("agent_upstream", id.to_string())
             }
@@ -3307,9 +2928,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert("tool_approval", id.into(), document_json))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("tool_approval", id.into(), document_json)
             }
@@ -3325,9 +2943,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .ok()
                 .and_then(|control_plane| control_plane.tool_approval(id))),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.get_document("tool_approval", id.to_string()))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_document("tool_approval", id.to_string())
             }
@@ -3343,9 +2958,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|control_plane| control_plane.tool_approvals())
                 .unwrap_or_default()),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.list_documents("tool_approval"))
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_documents("tool_approval")
             }
@@ -3383,9 +2995,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.append_billing_event(&event)
             }
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => {
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
                 self.upsert_in_memory_usage_aggregate(&event);
                 Ok(true)
             }
@@ -3426,9 +3036,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.billing_events().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => Vec::new(),
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
+                Vec::new()
+            }
         }
     }
 
@@ -3437,9 +3047,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .billing_events_page(offset, limit)
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => StoragePage::empty(offset, limit),
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
+                StoragePage::empty(offset, limit)
+            }
         }
     }
 
@@ -3448,9 +3058,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.request_logs().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
                 .request_logs
                 .lock()
                 .map(|logs| logs.list())
@@ -3463,9 +3071,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .request_logs_page(offset, limit)
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
                 .request_logs
                 .lock()
                 .map(|logs| StoragePage {
@@ -3507,9 +3113,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.audit_events().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
                 .audit_events
                 .lock()
                 .map(|events| events.list())
@@ -3522,9 +3126,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .audit_events_page(offset, limit)
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
                 .audit_events
                 .lock()
                 .map(|events| StoragePage {
@@ -3564,9 +3166,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.usage_aggregates().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_)
-            | RuntimeControlPlaneBackend::Libsql(_)
-            | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
                 .usage_aggregates
                 .lock()
                 .map(|aggregates| aggregates.list())
@@ -3582,9 +3182,6 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => block_on_storage(
-                control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?),
-            ),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?)
             }
@@ -3598,12 +3195,6 @@ impl RuntimeStorageRepositories {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(_) => {
                 self.agent_runs.lock().ok().and_then(|runs| runs.get(id))
-            }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.get_document("agent_run", id.to_string()))
-                    .ok()
-                    .flatten()
-                    .and_then(|document| serde_json::from_str(&document).ok())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .get_document("agent_run", id.to_string())
@@ -3625,11 +3216,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|runs| runs.list())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.list_documents("agent_run"))
-                    .map(deserialize_storage_records)
-                    .unwrap_or_default()
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .list_documents("agent_run")
                 .map(deserialize_storage_records)
@@ -3648,13 +3234,6 @@ impl RuntimeStorageRepositories {
                     events.append(event);
                 }
                 Ok(())
-            }
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.upsert(
-                    "agent_run_event",
-                    event.id.clone(),
-                    serialize_storage_record(&event)?,
-                ))
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert(
                 "agent_run_event",
@@ -3676,11 +3255,6 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|events| events.list())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Libsql(control_plane) => {
-                block_on_storage(control_plane.list_documents("agent_run_event"))
-                    .map(deserialize_storage_records)
-                    .unwrap_or_default()
-            }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .list_documents("agent_run_event")
                 .map(deserialize_storage_records)
@@ -3704,32 +3278,6 @@ fn deserialize_storage_records<T: for<'de> Deserialize<'de>>(documents: Vec<Stri
         .into_iter()
         .filter_map(|document| serde_json::from_str(&document).ok())
         .collect()
-}
-
-fn block_on_storage<T: Send>(
-    future: impl Future<Output = Result<T, StorageError>> + Send,
-) -> Result<T, StorageError> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-            return tokio::task::block_in_place(|| handle.block_on(future));
-        }
-    }
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| StorageError::Libsql(error.to_string()))?
-                    .block_on(future)
-            })
-            .join()
-            .map_err(|_| StorageError::Libsql("storage runtime thread panicked".into()))?
-    })
-}
-
-fn libsql_error(error: libsql::Error) -> StorageError {
-    StorageError::Libsql(error.to_string())
 }
 
 fn postgres_error(error: postgres::Error) -> StorageError {
@@ -3817,28 +3365,6 @@ impl<T> StoragePage<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn turso_libsql_empty(
-        provider_order: Vec<StorageProviderKind>,
-        required: bool,
-        url: String,
-        auth_token: Option<String>,
-        initialize_schema: bool,
-        request_log_retention_records: usize,
-        audit_event_retention_records: usize,
-    ) -> Result<RuntimeStorageRepositories, StorageError> {
-        RuntimeStorageRepositories::turso_libsql(
-            LibsqlStorageConfig { url, auth_token },
-            runtime_options_empty(
-                provider_order,
-                required,
-                initialize_schema,
-                request_log_retention_records,
-                audit_event_retention_records,
-            ),
-        )
-        .await
-    }
 
     fn postgres_empty(
         provider_order: Vec<StorageProviderKind>,
@@ -4118,16 +3644,14 @@ mod tests {
             evidence.provider_order,
             vec![
                 StorageProviderKind::Supabase,
-                StorageProviderKind::TursoLibsql,
                 StorageProviderKind::Postgres,
                 StorageProviderKind::Mysql,
             ]
         );
 
-        let turso_backend =
-            RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, true, Vec::new()).unwrap();
-        assert!(turso_backend.evidence().durable);
-        assert!(turso_backend.evidence().implemented);
+        assert!(
+            RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, true, Vec::new()).is_err()
+        );
 
         let supabase_backend =
             RuntimeStorageBackend::new(StorageProviderKind::Supabase, true, Vec::new()).unwrap();
@@ -4306,212 +3830,5 @@ mod tests {
             })
             .unwrap();
         assert_eq!(repositories.usage_aggregates()[0].usage.total_tokens, 3);
-    }
-
-    #[test]
-    fn libsql_file_store_persists_tool_approval_documents() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("ferrogate-control-plane.db");
-        let url = format!("file://{}", db_path.display());
-        let approval_json = r#"{"id":"approval-1","tool_name":"github.search","status":"pending"}"#;
-
-        let repositories = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url.clone(),
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-        repositories
-            .upsert_control_plane_tool_approval("approval-1", approval_json.to_string())
-            .unwrap();
-
-        let reopened = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url,
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-
-        assert_eq!(
-            reopened
-                .control_plane_tool_approval("approval-1")
-                .unwrap()
-                .as_deref(),
-            Some(approval_json)
-        );
-        assert!(reopened
-            .control_plane_tool_approvals()
-            .unwrap()
-            .iter()
-            .any(|document| document.contains("\"tool_name\":\"github.search\"")));
-    }
-
-    #[test]
-    fn libsql_file_store_persists_agent_run_records() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("ferrogate-agent-runs.db");
-        let url = format!("file://{}", db_path.display());
-        let tenant = TenantContext {
-            organization_id: Some("org_demo".into()),
-            project_id: Some("project_gateway".into()),
-            api_key_id: Some("agent-client".into()),
-            ..TenantContext::default()
-        };
-
-        let repositories = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url.clone(),
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-        repositories
-            .upsert_agent_run(StoredAgentRun {
-                id: "agent-run-1".into(),
-                request_id: "fg-1".into(),
-                trace_id: Some("fg-1".into()),
-                tenant: tenant.clone(),
-                status: "completed".into(),
-                provider: "ferrogate.default".into(),
-                turns_executed: 1,
-                output_recorded: true,
-                started_at_unix: Some(10),
-                completed_at_unix: Some(11),
-            })
-            .unwrap();
-        repositories
-            .append_agent_run_event(StoredAgentRunEvent {
-                id: "agent-run-1:0001:run-completed".into(),
-                run_id: "agent-run-1".into(),
-                request_id: "fg-1".into(),
-                trace_id: Some("fg-1".into()),
-                tenant,
-                turn: 1,
-                kind: "run_completed".into(),
-                target: "agent_run:agent-run-1".into(),
-                outcome: "success".into(),
-                tool_call_id: None,
-                message: Some("agent run completed".into()),
-                occurred_at_unix: Some(11),
-            })
-            .unwrap();
-
-        let reopened = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url,
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-
-        let run = reopened.agent_run("agent-run-1").unwrap();
-        assert_eq!(run.status, "completed");
-        assert_eq!(run.tenant.api_key_id.as_deref(), Some("agent-client"));
-        let events = reopened.agent_run_events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].run_id, "agent-run-1");
-        assert_eq!(events[0].kind, "run_completed");
-    }
-
-    #[test]
-    fn libsql_file_store_persists_plugin_registration_documents() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("ferrogate-control-plane.db");
-        let url = format!("file://{}", db_path.display());
-        let plugin_json = r#"{"id":"tool.echo","kind":"tool_provider","enabled":true,"source":"builtin","order":10,"approval_policy":"never","permissions":{"tools":["tool.echo"],"network":[],"filesystem":false,"shell":false},"config":{"timeout_ms":30000}}"#;
-
-        let repositories = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url.clone(),
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-        repositories
-            .upsert_control_plane_plugin_registration("tool.echo", plugin_json.to_string())
-            .unwrap();
-
-        let reopened = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url,
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-
-        assert!(reopened
-            .control_plane_snapshot()
-            .unwrap()
-            .plugin_registrations
-            .iter()
-            .any(|document| document == plugin_json));
-    }
-
-    #[test]
-    fn libsql_schema_initialization_creates_control_plane_tables() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("ferrogate-schema-init.db");
-        let url = format!("file://{}", db_path.display());
-
-        let repositories = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url.clone(),
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-
-        repositories
-            .upsert_control_plane_api_key(
-                "init-key",
-                r#"{"id":"init-key","name":"Init"}"#.to_string(),
-            )
-            .unwrap();
-        let reopened = block_on_storage(turso_libsql_empty(
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            true,
-            url,
-            None,
-            true,
-            10,
-            10,
-        ))
-        .unwrap();
-
-        assert!(reopened
-            .control_plane_snapshot()
-            .unwrap()
-            .api_keys
-            .iter()
-            .any(|document| document.contains("\"id\":\"init-key\"")));
-        assert!(reopened
-            .control_plane_snapshot()
-            .unwrap()
-            .api_keys
-            .iter()
-            .all(|document| document.contains("\"name\":\"Init\"")));
     }
 }

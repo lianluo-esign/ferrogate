@@ -51,7 +51,6 @@ http = "1"
 instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }
 pingora = { version = "0.8", features = ["proxy", "rustls"] }
 redis = "0.25"
-libsql = { version = "0.10.0-pre.4", default-features = false, features = ["core", "remote", "tls"] }
 mysql = { version = "28.0.0", features = ["native-tls"] }
 native-tls = "0.2"
 postgres = "0.19"

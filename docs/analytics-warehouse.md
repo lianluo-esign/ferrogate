@@ -147,7 +147,8 @@ analytics target.
 
 ## Local Verification Commands
 
-Run deterministic local API coverage plus the local libSQL durability test:
+Run deterministic local API coverage plus Supabase/PostgreSQL/MySQL durability
+tests:
 
 ```bash
 ./target/debug/ferrogate-test ci
