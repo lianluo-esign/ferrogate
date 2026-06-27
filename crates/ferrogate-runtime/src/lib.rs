@@ -8,6 +8,7 @@
 
 mod agent;
 mod isolation;
+mod managed_worker;
 mod reload;
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -26,6 +27,11 @@ pub use isolation::{
     IsolationLifecycleEvidence, IsolationNetworkPolicy, IsolationPolicy, IsolationPrepareRequest,
     IsolationPrepared, IsolationResourceLimits, IsolationResult, IsolationSnapshotOutcome,
     IsolationStarted, IsolationStopOutcome,
+};
+pub use managed_worker::{
+    AgentWorkerControlClient, ManagedWorkerError, ManagedWorkerExecution, ManagedWorkerRunRequest,
+    ManagedWorkerScheduler, ManagedWorkerSchedulerConfig, ManagedWorkerSession,
+    ManagedWorkerSessionRequest, ManagedWorkerSessionStatus, WorkerTemplate,
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 #[cfg(feature = "wasm")]
