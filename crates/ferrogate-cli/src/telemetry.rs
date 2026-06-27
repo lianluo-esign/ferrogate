@@ -831,6 +831,13 @@ fn agent_timeline_as_otlp_spans(timeline: &crate::state::AgentRunTimeline) -> Ve
         end_time_unix_nano: unix_seconds_to_nanos(end.max(start)),
         attributes: agent_run_attributes(timeline),
     }];
+    if timeline
+        .run
+        .as_ref()
+        .is_some_and(|run| run.provider == "ferrogate.wasm")
+    {
+        spans.push(agent_wasm_execute_span(timeline, &trace_id, &root_span_id));
+    }
 
     spans.extend(
         timeline
@@ -925,6 +932,34 @@ fn agent_audit_span(
         start_time_unix_nano: unix_seconds_to_nanos(timestamp),
         end_time_unix_nano: unix_seconds_to_nanos(timestamp),
         attributes: audit_event_attributes(event),
+    }
+}
+
+fn agent_wasm_execute_span(
+    timeline: &crate::state::AgentRunTimeline,
+    trace_id: &str,
+    root_span_id: &str,
+) -> OtlpSpanRecord {
+    let start = timeline
+        .run
+        .as_ref()
+        .and_then(|run| run.started_at_unix)
+        .or(timeline.summary.first_seen_unix)
+        .unwrap_or_else(now_unix_seconds);
+    let end = timeline
+        .run
+        .as_ref()
+        .and_then(|run| run.completed_at_unix)
+        .or(timeline.summary.last_seen_unix)
+        .unwrap_or(start);
+    OtlpSpanRecord {
+        trace_id: trace_id.to_string(),
+        span_id: stable_span_id(&format!("agent-wasm-execute:{}", timeline.id)),
+        parent_span_id: Some(root_span_id.to_string()),
+        name: "ferrogate.agent.wasm.execute".to_string(),
+        start_time_unix_nano: unix_seconds_to_nanos(start),
+        end_time_unix_nano: unix_seconds_to_nanos(end.max(start)),
+        attributes: agent_run_attributes(timeline),
     }
 }
 
@@ -1024,6 +1059,7 @@ fn agent_event_span_name(event: &StoredAgentRunEvent) -> String {
 
 fn agent_audit_span_name(event: &StoredAuditEvent) -> String {
     match event.action.as_str() {
+        action if action.starts_with("agent.wasm.") => "ferrogate.agent.wasm.host_abi",
         action if action.contains("approval") => "ferrogate.tool.approval.wait",
         action if action.contains("billing") || action.contains("metering") => {
             "ferrogate.billing.write"
@@ -1509,6 +1545,23 @@ mod tests {
             started_at_unix: Some(1),
             completed_at_unix: Some(3),
         });
+        state.record_agent_run(StoredAgentRun {
+            id: "agent-run-wasm".into(),
+            request_id: "fg-wasm".into(),
+            trace_id: Some("fg-wasm".into()),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            status: "completed".into(),
+            provider: "ferrogate.wasm".into(),
+            turns_executed: 1,
+            output_recorded: true,
+            started_at_unix: Some(4),
+            completed_at_unix: Some(6),
+        });
         state.record_agent_run_event(StoredAgentRunEvent {
             id: "agent-event-1".into(),
             run_id: "agent-run-1".into(),
@@ -1578,6 +1631,25 @@ mod tests {
             outcome: "error".into(),
             message: "policy denied request".into(),
         });
+        state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
+            request_id: "fg-wasm".into(),
+            trace_id: Some("fg-wasm".into()),
+            agent_run_id: Some("agent-run-wasm".into()),
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            actor_api_key_id: Some("key".into()),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            action: "agent.wasm.tool_dispatch".into(),
+            target: "agent_run:agent-run-wasm/tool_handle:1".into(),
+            outcome: "success".into(),
+            message: "wasm tool handle 1 executed tool.echo".into(),
+        });
         state
             .record_estimated_billing_event(
                 &ferrogate_core::RequestContext {
@@ -1611,8 +1683,11 @@ mod tests {
         assert!(bodies.contains("ferrogate.agent.run"));
         assert!(bodies.contains("ferrogate.agent.turn"));
         assert!(bodies.contains("ferrogate.agent.provider.step"));
+        assert!(bodies.contains("ferrogate.agent.wasm.execute"));
+        assert!(bodies.contains("ferrogate.agent.wasm.host_abi"));
         assert!(bodies.contains("ferrogate.billing.write"));
         assert!(bodies.contains("agent-run-1"));
+        assert!(bodies.contains("agent-run-wasm"));
         assert!(bodies.contains("event_family"));
         assert!(bodies.contains("request"));
         assert!(bodies.contains("audit"));
