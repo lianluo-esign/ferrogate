@@ -476,6 +476,63 @@ mod tests {
         assert!(!cleanup.evidence.network_policy.direct_public_egress);
     }
 
+    #[test]
+    fn fake_backend_reports_explicit_provision_and_cleanup_failures() {
+        let mut prepare_failure = FakeIsolationBackend::new("agent-worker-test-1");
+        prepare_failure.fail_prepare = true;
+
+        let error = prepare_failure
+            .prepare(prepare_request(IsolationPolicy::default()))
+            .unwrap_err();
+
+        assert!(matches!(error, IsolationError::Backend(_)));
+        assert!(error.to_string().contains("prepare failed"));
+        assert_eq!(prepare_failure.calls, vec!["prepare"]);
+
+        let mut cleanup_failure = FakeIsolationBackend::new("agent-worker-test-1");
+        let prepared = cleanup_failure
+            .prepare(prepare_request(IsolationPolicy::default()))
+            .unwrap();
+        let started = cleanup_failure.start(prepared).unwrap();
+        cleanup_failure.fail_cleanup = true;
+
+        let error = cleanup_failure.cleanup(&started.instance_id).unwrap_err();
+
+        assert!(matches!(error, IsolationError::Backend(_)));
+        assert!(error.to_string().contains("cleanup failed"));
+        assert_eq!(cleanup_failure.calls, vec!["prepare", "start", "cleanup"]);
+    }
+
+    #[test]
+    fn fake_backend_failure_evidence_marks_failure_reason() {
+        let mut backend = FakeIsolationBackend::new("agent-worker-test-1");
+        let prepared = backend
+            .prepare(prepare_request(IsolationPolicy::default()))
+            .unwrap();
+        let started = backend.start(prepared).unwrap();
+
+        let evidence = backend.failure_evidence(Some(&started.instance_id), "timeout");
+
+        assert_eq!(evidence.outcome, "failed");
+        assert_eq!(evidence.failure_reason.as_deref(), Some("timeout"));
+        assert_eq!(
+            evidence.isolation_instance_id.as_deref(),
+            Some("instance-run-1")
+        );
+        assert_eq!(evidence.agent_worker_id, "agent-worker-test-1");
+    }
+
+    fn prepare_request(policy: IsolationPolicy) -> IsolationPrepareRequest {
+        IsolationPrepareRequest {
+            session_id: "session-1".to_string(),
+            run_id: "run-1".to_string(),
+            worker_template_id: "template-1".to_string(),
+            framework_adapter: "codex".to_string(),
+            capability_envelope_id: "cap-1".to_string(),
+            policy,
+        }
+    }
+
     fn descriptor(backend_name: &str, kind: IsolationBackendKind) -> IsolationBackendDescriptor {
         IsolationBackendDescriptor {
             backend_name: backend_name.to_string(),
@@ -491,6 +548,9 @@ mod tests {
         policy: Option<IsolationPolicy>,
         capability_envelope_id: Option<String>,
         calls: Vec<&'static str>,
+        fail_prepare: bool,
+        fail_start: bool,
+        fail_cleanup: bool,
     }
 
     impl FakeIsolationBackend {
@@ -501,6 +561,9 @@ mod tests {
                 policy: None,
                 capability_envelope_id: None,
                 calls: Vec::new(),
+                fail_prepare: false,
+                fail_start: false,
+                fail_cleanup: false,
             }
         }
 
@@ -522,6 +585,16 @@ mod tests {
                 failure_reason: None,
             }
         }
+
+        fn failure_evidence(
+            &self,
+            instance_id: Option<&str>,
+            reason: &str,
+        ) -> IsolationLifecycleEvidence {
+            let mut evidence = self.evidence(instance_id, "failed");
+            evidence.failure_reason = Some(reason.to_string());
+            evidence
+        }
     }
 
     impl IsolationBackendLifecycle for FakeIsolationBackend {
@@ -537,6 +610,11 @@ mod tests {
             self.calls.push("prepare");
             self.policy = Some(request.policy);
             self.capability_envelope_id = Some(request.capability_envelope_id);
+            if self.fail_prepare {
+                return Err(IsolationError::Backend(
+                    "prepare failed in fake backend".to_string(),
+                ));
+            }
             Ok(IsolationPrepared {
                 prepared_id: format!("prepared-{}", request.run_id),
                 evidence: self.evidence(None, "prepared"),
@@ -545,6 +623,11 @@ mod tests {
 
         fn start(&mut self, prepared: IsolationPrepared) -> IsolationResult<IsolationStarted> {
             self.calls.push("start");
+            if self.fail_start {
+                return Err(IsolationError::Backend(
+                    "start failed in fake backend".to_string(),
+                ));
+            }
             let instance_id = prepared.prepared_id.replacen("prepared", "instance", 1);
             Ok(IsolationStarted {
                 instance_id: instance_id.clone(),
@@ -616,6 +699,11 @@ mod tests {
 
         fn cleanup(&mut self, instance_id: &str) -> IsolationResult<IsolationCleanupOutcome> {
             self.calls.push("cleanup");
+            if self.fail_cleanup {
+                return Err(IsolationError::Backend(
+                    "cleanup failed in fake backend".to_string(),
+                ));
+            }
             Ok(IsolationCleanupOutcome {
                 instance_id: instance_id.to_string(),
                 evidence: self.evidence(Some(instance_id), "cleaned_up"),
