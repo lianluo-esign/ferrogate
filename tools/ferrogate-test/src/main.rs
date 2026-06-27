@@ -30,7 +30,7 @@ use cli::{
     AuthArgs, DockerScenario, LocalArgs, SupabaseLiveRestartArgs, SupabaseLiveToken4aiProviderArgs,
     IMAGE_TAG,
 };
-use http::{http_request, http_request_addr};
+use http::{free_addr, free_port, http_request, http_request_addr};
 const NETWORK_NAME: &str = "ferrogate-e2e-net";
 const PROVIDER_CONTAINER: &str = "ferrogate-e2e-provider";
 const REDIS_CONTAINER: &str = "ferrogate-e2e-redis";
@@ -5190,16 +5190,6 @@ bindings:
       api_key_id: client
 "#
     .to_string()
-}
-
-fn free_addr() -> Result<String> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.to_string())
-}
-
-fn free_port() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
 }
 
 fn spawn_local_provider_upstream(

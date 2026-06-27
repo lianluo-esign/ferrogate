@@ -7,7 +7,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     thread,
     time::{Duration, Instant},
 };
@@ -16,6 +16,16 @@ pub(crate) struct HttpResponse {
     pub(crate) status: u16,
     pub(crate) body: String,
     pub(crate) raw: String,
+}
+
+pub(crate) fn free_addr() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.to_string())
+}
+
+pub(crate) fn free_port() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
 }
 
 pub(crate) fn http_request(
