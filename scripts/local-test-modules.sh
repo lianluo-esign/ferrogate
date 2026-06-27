@@ -126,10 +126,13 @@ run_supabase_storage() {
   ./target/debug/ferrogate-test supabase-restart
   if [[ -n "${FERROGATE_SUPABASE_DSN:-}" ]]; then
     args=()
+    if [[ -n "${FERROGATE_SUPABASE_TLS_MODE:-}" ]]; then
+      args+=(--tls-mode "$FERROGATE_SUPABASE_TLS_MODE")
+    fi
     if [[ -n "${FERROGATE_SUPABASE_TLS_CA_CERT_PATH:-}" ]]; then
       args+=(--tls-ca-cert-path "$FERROGATE_SUPABASE_TLS_CA_CERT_PATH")
     fi
-    ./target/debug/ferrogate-test supabase-live-restart "${args[@]}"
+    ./target/debug/ferrogate-test supabase-live-smoke "${args[@]}"
   else
     echo "FERROGATE_SUPABASE_DSN is not configured; skipping optional live Supabase restart scenario."
   fi

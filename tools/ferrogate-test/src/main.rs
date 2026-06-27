@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, supabase-live-restart (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
+                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -67,6 +67,7 @@ fn main() -> Result<()> {
         Commands::LibsqlFileRestart(args) => run_libsql_file_restart(&args),
         Commands::LibsqlServerRestart(args) => run_libsql_server_restart(&args),
         Commands::SupabaseRestart(args) => run_supabase_restart(&args),
+        Commands::SupabaseLiveSmoke(args) => run_supabase_live_smoke(&args),
         Commands::SupabaseLiveRestart(args) => run_supabase_live_restart(&args),
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
@@ -133,6 +134,8 @@ enum Commands {
     LibsqlServerRestart(LocalArgs),
     /// Run local Supabase-compatible Postgres restart durability coverage.
     SupabaseRestart(LocalArgs),
+    /// Opt-in live Supabase connection, migration, status, and minimal persistence smoke.
+    SupabaseLiveSmoke(SupabaseLiveRestartArgs),
     /// Opt-in live Supabase restart durability scenario.
     SupabaseLiveRestart(SupabaseLiveRestartArgs),
     /// Run local Docker-backed PostgreSQL restart durability coverage.
@@ -221,6 +224,13 @@ struct SupabaseLiveRestartArgs {
     /// Supabase direct or session-pooler Postgres DSN. Prefer FERROGATE_SUPABASE_DSN in shell/CI.
     #[arg(long, env = "FERROGATE_SUPABASE_DSN")]
     supabase_dsn: String,
+    /// PostgreSQL TLS mode for the live Supabase connection.
+    #[arg(
+        long,
+        env = "FERROGATE_SUPABASE_TLS_MODE",
+        default_value = "verify_full"
+    )]
+    tls_mode: String,
     /// Optional root CA path for private CA deployments.
     #[arg(long, env = "FERROGATE_SUPABASE_TLS_CA_CERT_PATH")]
     tls_ca_cert_path: Option<PathBuf>,
@@ -2339,7 +2349,7 @@ fn run_supabase_live_restart(args: &SupabaseLiveRestartArgs) -> Result<()> {
         &args.local.ferrogate_bin,
         dsn,
         PostgresRestartTls {
-            mode: "verify_full",
+            mode: supabase_live_tls_mode(&args.tls_mode)?,
             ca_cert_path: args.tls_ca_cert_path.as_deref(),
         },
         "ferrogate-supabase-live-test",
@@ -2347,6 +2357,91 @@ fn run_supabase_live_restart(args: &SupabaseLiveRestartArgs) -> Result<()> {
     )?;
     println!("supabase-live-restart scenario passed");
     Ok(())
+}
+
+fn run_supabase_live_smoke(args: &SupabaseLiveRestartArgs) -> Result<()> {
+    let dsn = args.supabase_dsn.trim();
+    if dsn.is_empty() {
+        bail!("--supabase-dsn must not be empty");
+    }
+    let tls = PostgresRestartTls {
+        mode: supabase_live_tls_mode(&args.tls_mode)?,
+        ca_cert_path: args.tls_ca_cert_path.as_deref(),
+    };
+    let resource_id = format!(
+        "ferrogate-supabase-live-smoke-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before UNIX epoch")?
+            .as_millis()
+    );
+    let api_key_body = serde_json::json!({
+        "id": resource_id,
+        "name": "Supabase live smoke key",
+        "key": format!("{resource_id}-secret"),
+        "scopes": ["models.read"],
+        "allowed_models": ["fast-chat"],
+        "organization_id": "org_supabase_live",
+        "project_id": "project_smoke"
+    })
+    .to_string();
+    let storage = ControlPlaneRestartStorage::Supabase { dsn, tls };
+
+    {
+        let case = TursoRestartHarness::start(&args.local.ferrogate_bin, storage, false, false)?;
+        case.expect_storage_status()?;
+        case.expect_json(
+            "POST",
+            "/admin/v1/api-keys",
+            &[ADMIN_AUTH, JSON_CONTENT],
+            &api_key_body,
+            201,
+            |body| {
+                assert_eq!(body["key"]["id"], resource_id);
+                assert_eq!(body["key"]["key_source"], "inline");
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        case.expect_api_key_named(&resource_id, "Supabase live smoke key")?;
+    }
+
+    {
+        let case = TursoRestartHarness::start_with_migration_mode(
+            &args.local.ferrogate_bin,
+            storage,
+            false,
+            false,
+            StorageMigrationMode::ValidateOnly,
+        )?;
+        case.expect_storage_status()?;
+        case.expect_api_key_named(&resource_id, "Supabase live smoke key")?;
+        case.expect_json(
+            "DELETE",
+            &format!("/admin/v1/api-keys/{resource_id}"),
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                assert_eq!(body["deleted"], true);
+                Ok(())
+            },
+        )?;
+    }
+
+    println!("supabase-live-smoke scenario passed");
+    Ok(())
+}
+
+fn supabase_live_tls_mode(mode: &str) -> Result<&'static str> {
+    match mode.trim() {
+        "require" => Ok("require"),
+        "verify_ca" | "verify-ca" => Ok("verify_ca"),
+        "verify_full" | "verify-full" => Ok("verify_full"),
+        other => bail!(
+            "--tls-mode must be require, verify_ca, or verify_full for live Supabase, got {other}"
+        ),
+    }
 }
 
 fn run_postgres_restart(args: &LocalArgs) -> Result<()> {
@@ -3248,6 +3343,10 @@ impl TursoRestartHarness {
     }
 
     fn expect_api_key(&self, id: &str) -> Result<()> {
+        self.expect_api_key_named(id, "Durable storage restart test key")
+    }
+
+    fn expect_api_key_named(&self, id: &str, name: &str) -> Result<()> {
         self.expect_json(
             "GET",
             &format!("/admin/v1/api-keys/{id}"),
@@ -3256,7 +3355,7 @@ impl TursoRestartHarness {
             200,
             |body| {
                 assert_eq!(body["key"]["id"], id);
-                assert_eq!(body["key"]["name"], "Durable storage restart test key");
+                assert_eq!(body["key"]["name"], name);
                 assert_eq!(body["key"]["key_source"], "inline");
                 assert_secret_redacted(&body.to_string());
                 Ok(())
@@ -7454,10 +7553,7 @@ fn http_request_addr(
     write!(stream, "\r\n{body}")
         .with_context(|| format!("failed to write request body to {addr} for {method} {path}"))?;
 
-    let mut raw = String::new();
-    stream
-        .read_to_string(&mut raw)
-        .with_context(|| format!("failed to read response from {addr} for {method} {path}"))?;
+    let raw = read_http_response(&mut stream, addr, method, path)?;
     let status = raw
         .lines()
         .next()
@@ -7469,6 +7565,65 @@ fn http_request_addr(
         .map(|(_, body)| body.to_string())
         .unwrap_or_default();
     Ok(HttpResponse { status, body, raw })
+}
+
+fn read_http_response(
+    stream: &mut TcpStream,
+    addr: &str,
+    method: &str,
+    path: &str,
+) -> Result<String> {
+    let started = Instant::now();
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                raw.extend_from_slice(&buffer[..count]);
+                if http_response_complete(&raw) {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if started.elapsed() > Duration::from_secs(60) {
+                    bail!("timed out reading response from {addr} for {method} {path}");
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read response from {addr} for {method} {path}")
+                });
+            }
+        }
+    }
+    String::from_utf8(raw)
+        .with_context(|| format!("failed to decode response from {addr} for {method} {path}"))
+}
+
+fn http_response_complete(raw: &[u8]) -> bool {
+    let Some(header_end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&raw[..header_end]);
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    });
+    match content_length {
+        Some(length) => raw.len() >= header_end + 4 + length,
+        None => false,
+    }
 }
 
 fn docker<const N: usize>(args: [&str; N]) -> Result<()> {
@@ -7581,5 +7736,20 @@ impl Drop for Cleanup {
             return;
         }
         cleanup_containers();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_response_complete_uses_content_length_without_waiting_for_eof() {
+        assert!(!http_response_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe"
+        ));
+        assert!(http_response_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+        ));
     }
 }

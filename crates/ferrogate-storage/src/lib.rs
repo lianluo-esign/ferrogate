@@ -1127,13 +1127,17 @@ fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresCli
     });
 
     let mut client = match config.tls_mode {
-        PostgresTlsMode::Disable => pg_config.connect(NoTls).map_err(postgres_error)?,
+        PostgresTlsMode::Disable => pg_config
+            .connect(NoTls)
+            .map_err(postgres_connection_error)?,
         PostgresTlsMode::Prefer
         | PostgresTlsMode::Require
         | PostgresTlsMode::VerifyCa
         | PostgresTlsMode::VerifyFull => {
             let connector = build_postgres_tls_connector(config)?;
-            pg_config.connect(connector).map_err(postgres_error)?
+            pg_config
+                .connect(connector)
+                .map_err(postgres_connection_error)?
         }
     };
     initialize_postgres_session(&mut client, config)?;
@@ -2964,6 +2968,61 @@ fn postgres_error(error: postgres::Error) -> StorageError {
     StorageError::Postgres(error.to_string())
 }
 
+fn postgres_connection_error(error: postgres::Error) -> StorageError {
+    StorageError::Postgres(sanitize_storage_error(&error.to_string()))
+}
+
+fn sanitize_storage_error(error: &str) -> String {
+    let mut sanitized = error.to_string();
+    for marker in ["password=", "passfile=", "sslpassword="] {
+        sanitized = redact_marker_value(&sanitized, marker);
+    }
+    redact_url_passwords(&sanitized)
+}
+
+fn redact_marker_value(input: &str, marker: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find(marker) {
+        output.push_str(&rest[..start + marker.len()]);
+        output.push_str("[redacted]");
+        let value_start = start + marker.len();
+        let value_rest = &rest[value_start..];
+        let value_end = value_rest
+            .find(|ch: char| ch.is_whitespace() || ch == '\'' || ch == '"' || ch == ';')
+            .unwrap_or(value_rest.len());
+        rest = &value_rest[value_end..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn redact_url_passwords(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(scheme_marker) = rest.find("://") {
+        let authority_start = scheme_marker + 3;
+        let Some(at_relative) = rest[authority_start..].find('@') else {
+            output.push_str(rest);
+            return output;
+        };
+        let at = authority_start + at_relative;
+        let authority = &rest[authority_start..at];
+        let Some(colon_relative) = authority.rfind(':') else {
+            output.push_str(&rest[..=at]);
+            rest = &rest[at + 1..];
+            continue;
+        };
+        let colon = authority_start + colon_relative;
+        output.push_str(&rest[..colon + 1]);
+        output.push_str("[redacted]");
+        output.push('@');
+        rest = &rest[at + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
 fn mysql_error(error: mysql::Error) -> StorageError {
     StorageError::Mysql(error.to_string())
 }
@@ -3341,6 +3400,21 @@ mod tests {
         assert!(error
             .to_string()
             .contains("storage.postgres_tls_ca_cert_path"));
+    }
+
+    #[test]
+    fn storage_error_sanitizer_redacts_postgres_credentials() {
+        let keyword = sanitize_storage_error(
+            "connection failed for host=db.example user=postgres password=super-secret dbname=postgres",
+        );
+        assert!(keyword.contains("password=[redacted]"));
+        assert!(!keyword.contains("super-secret"));
+
+        let url = sanitize_storage_error(
+            "failed to connect to postgresql://postgres:service-role-token@db.example:5432/postgres",
+        );
+        assert!(url.contains("postgresql://postgres:[redacted]@db.example:5432/postgres"));
+        assert!(!url.contains("service-role-token"));
     }
 
     #[test]

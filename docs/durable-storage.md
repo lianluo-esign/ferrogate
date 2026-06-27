@@ -96,6 +96,10 @@ Runtime behavior:
   without exposing credentials.
 - `supabase_dsn_env` is required for Supabase so credentials stay secret-backed.
 - Supabase requires `postgres_tls_mode: require`, `verify_ca`, or `verify_full`.
+- `verify_full` is the preferred production mode when the host certificate and
+  CA chain validate cleanly. `require` is encrypted but does not verify the
+  certificate chain or hostname; reserve it for test environments or managed
+  setups where the CA bundle is not available to the runner.
 - Direct and session-pooler DSNs are supported first. Transaction-pooler mode
   must not rely on prepared statements unless the selected Rust client path is
   explicitly verified for that mode.
@@ -119,17 +123,50 @@ Least-privilege guidance:
 - Do not use the Supabase service-role key as a gateway database credential.
   FerroGate needs a PostgreSQL DSN for the configured control schema, not a
   Supabase REST service-role token.
+- Browser `anon` keys are not runtime database credentials. They are intended
+  for client-facing Supabase APIs and RLS-mediated application access, while
+  FerroGate is a server-side gateway that reads and writes internal control
+  tables through PostgreSQL.
 - Create a database role scoped to the FerroGate control schema and grant only
   the privileges needed for the chosen migration posture: DDL plus DML for
   `migration_mode: auto`, or DML on the pre-created tables for
   `validate_only`/`disabled`.
 - Keep Supabase RLS policies for application-facing tables separate from the
-  gateway control schema. FerroGate's agent, tool, and API calls must still
-  enter through the AI Gateway so auth, policy, billing, audit, and
-  observability remain the security boundary.
+  gateway control schema. The recommended posture is to keep RLS disabled for
+  FerroGate-owned internal control tables and isolate access with schema
+  ownership plus a least-privilege database role. If operators require RLS on
+  the control schema, every policy must explicitly grant the FerroGate database
+  role the same CRUD surface the Admin API needs; do not replace gateway policy
+  with Supabase client-key policies.
+- FerroGate's agent, tool, and API calls must still enter through the AI
+  Gateway so auth, policy, billing, audit, and observability remain the
+  security boundary.
+
+Failure and redaction expectations:
+
+- Admin/status returns provider, required flag, migration mode, health, provider
+  order, contract version, and schema checksum/name/version. It never returns
+  the Supabase DSN, password, service-role token, pooler password, or CA file
+  contents.
+- Missing `storage.supabase_dsn_env` or a missing environment variable reports
+  the field/env name only. It must not print the secret value.
+- PostgreSQL connection failures are rendered with DSN password material
+  redacted before they reach startup stderr or harness failure output.
 
 The schema file is
 [`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
+
+When `postgres_schema: ferrogate_control` is set, FerroGate creates the tables
+under the `ferrogate_control` schema, not under Supabase's default `public`
+schema. In the Supabase dashboard, switch the table/schema selector to
+`ferrogate_control`, or verify with:
+
+```sql
+select table_schema, table_name
+from information_schema.tables
+where table_schema = 'ferrogate_control'
+order by table_name;
+```
 
 Supabase table ownership:
 
@@ -346,16 +383,26 @@ container:
 The focused `rust-supabase-storage-tests` CI module runs that deterministic
 scenario without cloud credentials. If repository secrets provide
 `FERROGATE_SUPABASE_DSN`, the same module also runs the opt-in live Supabase
-restart scenario:
+smoke scenario. The smoke starts a local FerroGate process, initializes the
+real Supabase schema with `migration_mode: auto`, writes a real control-plane
+API-key row, restarts with `validate_only`, and verifies the row through the
+Admin API:
 
 ```bash
 FERROGATE_SUPABASE_DSN="postgresql://..." \
-./target/debug/ferrogate-test supabase-live-restart
+./target/debug/ferrogate-test supabase-live-smoke
 ```
+
+The heavier `supabase-live-restart` scenario remains available for full remote
+CRUD/reload coverage, but it can be slow on externally hosted test databases.
 
 Set `FERROGATE_SUPABASE_TLS_CA_CERT` in GitHub secrets only when the live
 Supabase deployment requires a private root CA; the workflow writes it to a
 temporary file and passes `FERROGATE_SUPABASE_TLS_CA_CERT_PATH` to the harness.
+Set `FERROGATE_SUPABASE_TLS_MODE` only when the live test environment needs to
+override the default `verify_full` posture, for example `require` on a
+controlled test database where encrypted transport is required but runner CA
+validation is not available.
 
 Run the Docker-backed PostgreSQL restart test:
 
