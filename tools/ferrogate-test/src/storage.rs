@@ -1135,6 +1135,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "control_plane_resources",
         "agent_runs",
         "agent_run_events",
+        "managed_worker_templates",
+        "agent_worker_instances",
+        "managed_worker_sessions",
+        "managed_worker_lifecycle_events",
         "request_logs",
         "audit_events",
         "billing_metering_events",
@@ -1162,6 +1166,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         ("control_plane_resources", "document_json"),
         ("agent_runs", "run_json"),
         ("agent_run_events", "event_json"),
+        ("agent_worker_instances", "process_json"),
+        ("managed_worker_sessions", "capability_envelope_json"),
+        ("managed_worker_sessions", "resource_limits_json"),
+        ("managed_worker_lifecycle_events", "evidence_json"),
         ("request_logs", "request_json"),
         ("audit_events", "audit_json"),
     ];
@@ -1182,6 +1190,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_control_plane_resources_document_gin",
         "idx_agent_runs_tenant_started",
         "idx_agent_run_events_run_time",
+        "idx_managed_worker_templates_enabled_adapter",
+        "idx_agent_worker_instances_status_seen",
+        "idx_managed_worker_sessions_tenant_status",
+        "idx_managed_worker_lifecycle_session_time",
         "idx_request_logs_model_provider_started",
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
@@ -1206,11 +1218,11 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
     let migration_versions = postgres_scalar(&format!(
         "SELECT string_agg(version::text || ':' || name, ',' ORDER BY version) \
          FROM {}.storage_schema_migrations \
-         WHERE version IN (1, 2, 3)",
+         WHERE version IN (1, 2, 3, 4)",
         quote_ident(schema)
     ))?;
     if migration_versions.trim()
-        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence,3:003_supabase_structured_metering_usage"
+        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence,3:003_supabase_structured_metering_usage,4:004_supabase_managed_worker_lifecycle"
     {
         bail!("unexpected Supabase migration versions: {migration_versions}");
     }
@@ -1894,10 +1906,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][2], "mysql");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 3);
+                assert_eq!(body["storage"]["schema"]["version"], 4);
                 assert_eq!(
                     body["storage"]["schema"]["name"],
-                    "003_supabase_structured_metering_usage"
+                    "004_supabase_managed_worker_lifecycle"
                 );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]

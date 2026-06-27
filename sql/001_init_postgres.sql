@@ -84,6 +84,85 @@ CREATE INDEX IF NOT EXISTS idx_agent_run_events_request
 CREATE INDEX IF NOT EXISTS idx_agent_run_events_trace
     ON agent_run_events(trace_id);
 
+CREATE TABLE IF NOT EXISTS managed_worker_templates (
+    id TEXT PRIMARY KEY,
+    framework_adapter TEXT NOT NULL,
+    isolation_backend_kind TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    max_tenant_sessions BIGINT,
+    max_workspace_sessions BIGINT,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_templates_enabled_adapter
+    ON managed_worker_templates(enabled, framework_adapter);
+
+CREATE TABLE IF NOT EXISTS agent_worker_instances (
+    id TEXT PRIMARY KEY,
+    process_name TEXT NOT NULL,
+    host_id TEXT,
+    worker_version TEXT,
+    status TEXT NOT NULL,
+    started_at_unix BIGINT NOT NULL,
+    last_seen_at_unix BIGINT,
+    process_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_worker_instances_status_seen
+    ON agent_worker_instances(status, last_seen_at_unix DESC);
+
+CREATE TABLE IF NOT EXISTS managed_worker_sessions (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    worker_template_id TEXT NOT NULL REFERENCES managed_worker_templates(id),
+    agent_worker_instance_id TEXT REFERENCES agent_worker_instances(id),
+    status TEXT NOT NULL,
+    isolation_backend_kind TEXT NOT NULL,
+    microvm_id TEXT,
+    capability_envelope_id TEXT NOT NULL,
+    requested_at_unix BIGINT NOT NULL,
+    started_at_unix BIGINT,
+    completed_at_unix BIGINT,
+    cleanup_completed_at_unix BIGINT,
+    capability_envelope_json JSONB NOT NULL DEFAULT '{}'::JSONB,
+    resource_limits_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_sessions_tenant_status
+    ON managed_worker_sessions(tenant, status, requested_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_sessions_workspace_status
+    ON managed_worker_sessions(workspace_id, status, requested_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_sessions_agent_worker
+    ON managed_worker_sessions(agent_worker_instance_id, requested_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_sessions_run
+    ON managed_worker_sessions(run_id);
+
+CREATE TABLE IF NOT EXISTS managed_worker_lifecycle_events (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES managed_worker_sessions(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    agent_worker_instance_id TEXT REFERENCES agent_worker_instances(id),
+    status TEXT NOT NULL,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    occurred_at_unix BIGINT NOT NULL,
+    evidence_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_lifecycle_session_time
+    ON managed_worker_lifecycle_events(session_id, occurred_at_unix ASC);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_lifecycle_tenant_time
+    ON managed_worker_lifecycle_events(tenant, occurred_at_unix DESC);
+
 CREATE TABLE IF NOT EXISTS request_logs (
     request_id TEXT PRIMARY KEY,
     trace_id TEXT,
@@ -304,5 +383,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (3, '003_supabase_structured_metering_usage')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (4, '004_supabase_managed_worker_lifecycle')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

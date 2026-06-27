@@ -186,4 +186,14 @@ fn print_migration_report(mode: &str, counts: &StorageMigrationCounts) {
     println!("audit_events={}", counts.audit_events);
     println!("agent_runs={}", counts.agent_runs);
     println!("agent_run_events={}", counts.agent_run_events);
+    println!(
+        "managed_worker_templates={}",
+        counts.managed_worker_templates
+    );
+    println!("agent_worker_instances={}", counts.agent_worker_instances);
+    println!("managed_worker_sessions={}", counts.managed_worker_sessions);
+    println!(
+        "managed_worker_lifecycle_events={}",
+        counts.managed_worker_lifecycle_events
+    );
 }

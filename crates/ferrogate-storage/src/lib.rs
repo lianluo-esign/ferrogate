@@ -157,6 +157,10 @@ pub struct StorageMigrationSnapshot {
     pub audit_events: Vec<StoredAuditEvent>,
     pub agent_runs: Vec<StoredAgentRun>,
     pub agent_run_events: Vec<StoredAgentRunEvent>,
+    pub managed_worker_templates: Vec<StoredManagedWorkerTemplate>,
+    pub agent_worker_instances: Vec<StoredAgentWorkerInstance>,
+    pub managed_worker_sessions: Vec<StoredManagedWorkerSession>,
+    pub managed_worker_lifecycle_events: Vec<StoredManagedWorkerLifecycleEvent>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +182,10 @@ pub struct StorageMigrationCounts {
     pub audit_events: usize,
     pub agent_runs: usize,
     pub agent_run_events: usize,
+    pub managed_worker_templates: usize,
+    pub agent_worker_instances: usize,
+    pub managed_worker_sessions: usize,
+    pub managed_worker_lifecycle_events: usize,
 }
 
 impl StorageMigrationSnapshot {
@@ -200,6 +208,10 @@ impl StorageMigrationSnapshot {
             audit_events: self.audit_events.len(),
             agent_runs: self.agent_runs.len(),
             agent_run_events: self.agent_run_events.len(),
+            managed_worker_templates: self.managed_worker_templates.len(),
+            agent_worker_instances: self.agent_worker_instances.len(),
+            managed_worker_sessions: self.managed_worker_sessions.len(),
+            managed_worker_lifecycle_events: self.managed_worker_lifecycle_events.len(),
         }
     }
 }
@@ -271,8 +283,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 3;
-const POSTGRES_SCHEMA_NAME: &str = "003_supabase_structured_metering_usage";
+const POSTGRES_SCHEMA_VERSION: u64 = 4;
+const POSTGRES_SCHEMA_NAME: &str = "004_supabase_managed_worker_lifecycle";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -399,6 +411,17 @@ pub trait AgentRunRepository: Repository<StoredAgentRun> {}
 
 pub trait AgentRunEventRepository: AppendRepository<StoredAgentRunEvent> {}
 
+pub trait ManagedWorkerTemplateRepository: Repository<StoredManagedWorkerTemplate> {}
+
+pub trait AgentWorkerInstanceRepository: Repository<StoredAgentWorkerInstance> {}
+
+pub trait ManagedWorkerSessionRepository: Repository<StoredManagedWorkerSession> {}
+
+pub trait ManagedWorkerLifecycleEventRepository:
+    AppendRepository<StoredManagedWorkerLifecycleEvent>
+{
+}
+
 pub trait AppendRepository<T> {
     fn append(&mut self, record: T);
     fn list(&self) -> Vec<T>;
@@ -453,6 +476,65 @@ pub struct StoredAgentRunEvent {
     pub tool_call_id: Option<String>,
     pub message: Option<String>,
     pub occurred_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredManagedWorkerTemplate {
+    pub id: String,
+    pub framework_adapter: String,
+    pub isolation_backend_kind: String,
+    pub enabled: bool,
+    pub max_tenant_sessions: Option<u32>,
+    pub max_workspace_sessions: Option<u32>,
+    pub created_at_unix: Option<u64>,
+    pub updated_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAgentWorkerInstance {
+    pub id: String,
+    pub process_name: String,
+    pub host_id: Option<String>,
+    pub worker_version: Option<String>,
+    pub status: String,
+    pub started_at_unix: Option<u64>,
+    pub last_seen_at_unix: Option<u64>,
+    pub process_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredManagedWorkerSession {
+    pub id: String,
+    pub run_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub worker_template_id: String,
+    pub agent_worker_instance_id: Option<String>,
+    pub status: String,
+    pub isolation_backend_kind: String,
+    pub microvm_id: Option<String>,
+    pub capability_envelope_id: String,
+    pub requested_at_unix: Option<u64>,
+    pub started_at_unix: Option<u64>,
+    pub completed_at_unix: Option<u64>,
+    pub cleanup_completed_at_unix: Option<u64>,
+    pub capability_envelope_json: String,
+    pub resource_limits_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredManagedWorkerLifecycleEvent {
+    pub id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub agent_worker_instance_id: Option<String>,
+    pub status: String,
+    pub action: String,
+    pub outcome: String,
+    pub occurred_at_unix: Option<u64>,
+    pub evidence_json: String,
 }
 
 #[derive(Debug)]
@@ -1119,6 +1201,247 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    fn upsert_managed_worker_template(
+        &self,
+        template: &StoredManagedWorkerTemplate,
+    ) -> Result<(), StorageError> {
+        let max_tenant_sessions = template.max_tenant_sessions.map(i64::from);
+        let max_workspace_sessions = template.max_workspace_sessions.map(i64::from);
+        let created_at_unix =
+            saturating_i64(template.created_at_unix.unwrap_or_else(now_unix_seconds));
+        let updated_at_unix =
+            saturating_i64(template.updated_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO managed_worker_templates \
+                 (id, framework_adapter, isolation_backend_kind, enabled, max_tenant_sessions, \
+                  max_workspace_sessions, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 framework_adapter = EXCLUDED.framework_adapter, \
+                 isolation_backend_kind = EXCLUDED.isolation_backend_kind, \
+                 enabled = EXCLUDED.enabled, \
+                 max_tenant_sessions = EXCLUDED.max_tenant_sessions, \
+                 max_workspace_sessions = EXCLUDED.max_workspace_sessions, \
+                 updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &template.id,
+                    &template.framework_adapter,
+                    &template.isolation_backend_kind,
+                    &template.enabled,
+                    &max_tenant_sessions,
+                    &max_workspace_sessions,
+                    &created_at_unix,
+                    &updated_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn managed_worker_templates(&self) -> Result<Vec<StoredManagedWorkerTemplate>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, framework_adapter, isolation_backend_kind, enabled, \
+                        max_tenant_sessions, max_workspace_sessions, created_at_unix, \
+                        updated_at_unix \
+                     FROM managed_worker_templates \
+                     ORDER BY id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(managed_worker_template_from_row)
+                .collect())
+        })
+    }
+
+    fn upsert_agent_worker_instance(
+        &self,
+        instance: &StoredAgentWorkerInstance,
+    ) -> Result<(), StorageError> {
+        let started_at_unix =
+            saturating_i64(instance.started_at_unix.unwrap_or_else(now_unix_seconds));
+        let last_seen_at_unix = instance.last_seen_at_unix.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO agent_worker_instances \
+                 (id, process_name, host_id, worker_version, status, started_at_unix, \
+                  last_seen_at_unix, process_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 process_name = EXCLUDED.process_name, \
+                 host_id = EXCLUDED.host_id, \
+                 worker_version = EXCLUDED.worker_version, \
+                 status = EXCLUDED.status, \
+                 last_seen_at_unix = EXCLUDED.last_seen_at_unix, \
+                 process_json = EXCLUDED.process_json",
+                &[
+                    &instance.id,
+                    &instance.process_name,
+                    &instance.host_id,
+                    &instance.worker_version,
+                    &instance.status,
+                    &started_at_unix,
+                    &last_seen_at_unix,
+                    &instance.process_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn agent_worker_instances(&self) -> Result<Vec<StoredAgentWorkerInstance>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, process_name, host_id, worker_version, status, started_at_unix, \
+                        last_seen_at_unix, process_json::text \
+                     FROM agent_worker_instances \
+                     ORDER BY started_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(agent_worker_instance_from_row)
+                .collect())
+        })
+    }
+
+    fn upsert_managed_worker_session(
+        &self,
+        session: &StoredManagedWorkerSession,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&session.tenant);
+        let requested_at_unix =
+            saturating_i64(session.requested_at_unix.unwrap_or_else(now_unix_seconds));
+        let started_at_unix = session.started_at_unix.map(saturating_i64);
+        let completed_at_unix = session.completed_at_unix.map(saturating_i64);
+        let cleanup_completed_at_unix = session.cleanup_completed_at_unix.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO managed_worker_sessions \
+                 (id, run_id, tenant, workspace_id, worker_template_id, \
+                  agent_worker_instance_id, status, isolation_backend_kind, microvm_id, \
+                  capability_envelope_id, requested_at_unix, started_at_unix, completed_at_unix, \
+                  cleanup_completed_at_unix, capability_envelope_json, resource_limits_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
+                         $15::text::jsonb, $16::text::jsonb) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 run_id = EXCLUDED.run_id, \
+                 tenant = EXCLUDED.tenant, \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 worker_template_id = EXCLUDED.worker_template_id, \
+                 agent_worker_instance_id = EXCLUDED.agent_worker_instance_id, \
+                 status = EXCLUDED.status, \
+                 isolation_backend_kind = EXCLUDED.isolation_backend_kind, \
+                 microvm_id = EXCLUDED.microvm_id, \
+                 capability_envelope_id = EXCLUDED.capability_envelope_id, \
+                 started_at_unix = EXCLUDED.started_at_unix, \
+                 completed_at_unix = EXCLUDED.completed_at_unix, \
+                 cleanup_completed_at_unix = EXCLUDED.cleanup_completed_at_unix, \
+                 capability_envelope_json = EXCLUDED.capability_envelope_json, \
+                 resource_limits_json = EXCLUDED.resource_limits_json",
+                &[
+                    &session.id,
+                    &session.run_id,
+                    &tenant_context_id,
+                    &session.workspace_id,
+                    &session.worker_template_id,
+                    &session.agent_worker_instance_id,
+                    &session.status,
+                    &session.isolation_backend_kind,
+                    &session.microvm_id,
+                    &session.capability_envelope_id,
+                    &requested_at_unix,
+                    &started_at_unix,
+                    &completed_at_unix,
+                    &cleanup_completed_at_unix,
+                    &session.capability_envelope_json,
+                    &session.resource_limits_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn managed_worker_sessions(&self) -> Result<Vec<StoredManagedWorkerSession>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, run_id, tenant, workspace_id, worker_template_id, \
+                        agent_worker_instance_id, status, isolation_backend_kind, microvm_id, \
+                        capability_envelope_id, requested_at_unix, started_at_unix, \
+                        completed_at_unix, cleanup_completed_at_unix, \
+                        capability_envelope_json::text, resource_limits_json::text \
+                     FROM managed_worker_sessions \
+                     ORDER BY requested_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(managed_worker_session_from_row)
+                .collect())
+        })
+    }
+
+    fn append_managed_worker_lifecycle_event(
+        &self,
+        event: &StoredManagedWorkerLifecycleEvent,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&event.tenant);
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO managed_worker_lifecycle_events \
+                 (id, session_id, run_id, tenant, workspace_id, agent_worker_instance_id, status, \
+                  action, outcome, occurred_at_unix, evidence_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &event.id,
+                    &event.session_id,
+                    &event.run_id,
+                    &tenant_context_id,
+                    &event.workspace_id,
+                    &event.agent_worker_instance_id,
+                    &event.status,
+                    &event.action,
+                    &event.outcome,
+                    &occurred_at_unix,
+                    &event.evidence_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn managed_worker_lifecycle_events(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerLifecycleEvent>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, session_id, run_id, tenant, workspace_id, \
+                        agent_worker_instance_id, status, action, outcome, occurred_at_unix, \
+                        evidence_json::text \
+                     FROM managed_worker_lifecycle_events \
+                     ORDER BY occurred_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(managed_worker_lifecycle_event_from_row)
+                .collect())
+        })
+    }
+
     fn billing_events_page(
         &self,
         offset: usize,
@@ -1684,6 +2007,10 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "control_plane_resources",
         "agent_runs",
         "agent_run_events",
+        "managed_worker_templates",
+        "agent_worker_instances",
+        "managed_worker_sessions",
+        "managed_worker_lifecycle_events",
         "request_logs",
         "audit_events",
         "billing_metering_events",
@@ -1711,6 +2038,10 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         ("control_plane_resources", "document_json"),
         ("agent_runs", "run_json"),
         ("agent_run_events", "event_json"),
+        ("agent_worker_instances", "process_json"),
+        ("managed_worker_sessions", "capability_envelope_json"),
+        ("managed_worker_sessions", "resource_limits_json"),
+        ("managed_worker_lifecycle_events", "evidence_json"),
         ("request_logs", "request_json"),
         ("audit_events", "audit_json"),
     ];
@@ -1736,6 +2067,10 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_control_plane_resources_document_gin",
         "idx_agent_runs_tenant_started",
         "idx_agent_run_events_run_time",
+        "idx_managed_worker_templates_enabled_adapter",
+        "idx_agent_worker_instances_status_seen",
+        "idx_managed_worker_sessions_tenant_status",
+        "idx_managed_worker_lifecycle_session_time",
         "idx_request_logs_model_provider_started",
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
@@ -2005,6 +2340,99 @@ fn usage_aggregate_from_row(row: PostgresRow) -> StoredUsageAggregate {
             total_tokens: nonnegative_u64(row.get(8)),
         },
     }
+}
+
+fn managed_worker_template_from_row(row: PostgresRow) -> StoredManagedWorkerTemplate {
+    StoredManagedWorkerTemplate {
+        id: row.get(0),
+        framework_adapter: row.get(1),
+        isolation_backend_kind: row.get(2),
+        enabled: row.get(3),
+        max_tenant_sessions: row
+            .get::<_, Option<i64>>(4)
+            .and_then(|value| u32::try_from(value).ok()),
+        max_workspace_sessions: row
+            .get::<_, Option<i64>>(5)
+            .and_then(|value| u32::try_from(value).ok()),
+        created_at_unix: Some(nonnegative_u64(row.get(6))),
+        updated_at_unix: Some(nonnegative_u64(row.get(7))),
+    }
+}
+
+fn agent_worker_instance_from_row(row: PostgresRow) -> StoredAgentWorkerInstance {
+    StoredAgentWorkerInstance {
+        id: row.get(0),
+        process_name: row.get(1),
+        host_id: row.get(2),
+        worker_version: row.get(3),
+        status: row.get(4),
+        started_at_unix: Some(nonnegative_u64(row.get(5))),
+        last_seen_at_unix: row.get::<_, Option<i64>>(6).map(nonnegative_u64),
+        process_json: row.get(7),
+    }
+}
+
+fn managed_worker_session_from_row(row: PostgresRow) -> StoredManagedWorkerSession {
+    StoredManagedWorkerSession {
+        id: row.get(0),
+        run_id: row.get(1),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(2).as_deref()),
+        workspace_id: row.get(3),
+        worker_template_id: row.get(4),
+        agent_worker_instance_id: row.get(5),
+        status: row.get(6),
+        isolation_backend_kind: row.get(7),
+        microvm_id: row.get(8),
+        capability_envelope_id: row.get(9),
+        requested_at_unix: Some(nonnegative_u64(row.get(10))),
+        started_at_unix: row.get::<_, Option<i64>>(11).map(nonnegative_u64),
+        completed_at_unix: row.get::<_, Option<i64>>(12).map(nonnegative_u64),
+        cleanup_completed_at_unix: row.get::<_, Option<i64>>(13).map(nonnegative_u64),
+        capability_envelope_json: row.get(14),
+        resource_limits_json: row.get(15),
+    }
+}
+
+fn managed_worker_lifecycle_event_from_row(row: PostgresRow) -> StoredManagedWorkerLifecycleEvent {
+    StoredManagedWorkerLifecycleEvent {
+        id: row.get(0),
+        session_id: row.get(1),
+        run_id: row.get(2),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(3).as_deref()),
+        workspace_id: row.get(4),
+        agent_worker_instance_id: row.get(5),
+        status: row.get(6),
+        action: row.get(7),
+        outcome: row.get(8),
+        occurred_at_unix: Some(nonnegative_u64(row.get(9))),
+        evidence_json: row.get(10),
+    }
+}
+
+fn tenant_from_storage_key(value: Option<&str>) -> TenantContext {
+    let mut tenant = TenantContext::default();
+    let Some(value) = value else {
+        return tenant;
+    };
+    for part in value.split('|') {
+        let Some((name, raw_value)) = part.split_once(':') else {
+            continue;
+        };
+        let parsed = if raw_value.is_empty() {
+            None
+        } else {
+            Some(raw_value.to_string())
+        };
+        match name {
+            "org" => tenant.organization_id = parsed,
+            "team" => tenant.team_id = parsed,
+            "project" => tenant.project_id = parsed,
+            "user" => tenant.user_id = parsed,
+            "api_key" => tenant.api_key_id = parsed,
+            _ => {}
+        }
+    }
+    tenant
 }
 
 fn billing_usage_source_from_str(value: &str) -> ferrogate_billing::BillingUsageSource {
@@ -2500,6 +2928,12 @@ impl UsageAggregateRepository for InMemoryRepository<StoredUsageAggregate> {}
 
 impl AgentRunRepository for InMemoryRepository<StoredAgentRun> {}
 
+impl ManagedWorkerTemplateRepository for InMemoryRepository<StoredManagedWorkerTemplate> {}
+
+impl AgentWorkerInstanceRepository for InMemoryRepository<StoredAgentWorkerInstance> {}
+
+impl ManagedWorkerSessionRepository for InMemoryRepository<StoredManagedWorkerSession> {}
+
 #[derive(Debug, Default)]
 pub struct InMemoryAppendRepository<T> {
     records: VecDeque<T>,
@@ -2582,6 +3016,11 @@ impl BillingEventRepository for InMemoryAppendRepository<BillingEvent> {}
 
 impl AgentRunEventRepository for InMemoryAppendRepository<StoredAgentRunEvent> {}
 
+impl ManagedWorkerLifecycleEventRepository
+    for InMemoryAppendRepository<StoredManagedWorkerLifecycleEvent>
+{
+}
+
 #[derive(Debug)]
 pub struct RuntimeStorageRepositories {
     backend: RuntimeStorageBackend,
@@ -2591,6 +3030,11 @@ pub struct RuntimeStorageRepositories {
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
     agent_runs: Mutex<InMemoryRepository<StoredAgentRun>>,
     agent_run_events: Mutex<InMemoryAppendRepository<StoredAgentRunEvent>>,
+    managed_worker_templates: Mutex<InMemoryRepository<StoredManagedWorkerTemplate>>,
+    agent_worker_instances: Mutex<InMemoryRepository<StoredAgentWorkerInstance>>,
+    managed_worker_sessions: Mutex<InMemoryRepository<StoredManagedWorkerSession>>,
+    managed_worker_lifecycle_events:
+        Mutex<InMemoryAppendRepository<StoredManagedWorkerLifecycleEvent>>,
 }
 
 impl RuntimeStorageRepositories {
@@ -2612,6 +3056,10 @@ impl RuntimeStorageRepositories {
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
             agent_runs: Mutex::new(InMemoryRepository::new()),
             agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
+            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
+            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
+            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
         }
     }
 
@@ -2679,6 +3127,10 @@ impl RuntimeStorageRepositories {
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
             agent_runs: Mutex::new(InMemoryRepository::new()),
             agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
+            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
+            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
+            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
         })
     }
 
@@ -2735,6 +3187,10 @@ impl RuntimeStorageRepositories {
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
             agent_runs: Mutex::new(InMemoryRepository::new()),
             agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
+            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
+            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
+            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
         })
     }
 
@@ -2767,6 +3223,10 @@ impl RuntimeStorageRepositories {
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
             agent_runs: Mutex::new(InMemoryRepository::new()),
             agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
+            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
+            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
+            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
         })
     }
 
@@ -2804,6 +3264,10 @@ impl RuntimeStorageRepositories {
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
             agent_runs: Mutex::new(InMemoryRepository::new()),
             agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
+            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
+            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
+            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
+            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
         })
     }
 
@@ -2897,6 +3361,10 @@ impl RuntimeStorageRepositories {
             audit_events: self.audit_events(),
             agent_runs: self.agent_runs(),
             agent_run_events: self.agent_run_events(),
+            managed_worker_templates: self.managed_worker_templates(),
+            agent_worker_instances: self.agent_worker_instances(),
+            managed_worker_sessions: self.managed_worker_sessions(),
+            managed_worker_lifecycle_events: self.managed_worker_lifecycle_events(),
         })
     }
 
@@ -2925,6 +3393,18 @@ impl RuntimeStorageRepositories {
         }
         for event in snapshot.agent_run_events {
             self.append_agent_run_event(event)?;
+        }
+        for template in snapshot.managed_worker_templates {
+            self.upsert_managed_worker_template(template)?;
+        }
+        for instance in snapshot.agent_worker_instances {
+            self.upsert_agent_worker_instance(instance)?;
+        }
+        for session in snapshot.managed_worker_sessions {
+            self.upsert_managed_worker_session(session)?;
+        }
+        for event in snapshot.managed_worker_lifecycle_events {
+            self.append_managed_worker_lifecycle_event(event)?;
         }
         Ok(())
     }
@@ -3616,6 +4096,162 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
         }
     }
+
+    pub fn upsert_managed_worker_template(
+        &self,
+        template: StoredManagedWorkerTemplate,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut templates) = self.managed_worker_templates.lock() {
+                    templates.insert(template.id.clone(), template);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_managed_worker_template(&template)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "managed_worker_template",
+                template.id.clone(),
+                serialize_storage_record(&template)?,
+            ),
+        }
+    }
+
+    pub fn managed_worker_templates(&self) -> Vec<StoredManagedWorkerTemplate> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .managed_worker_templates
+                .lock()
+                .map(|templates| templates.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.managed_worker_templates().unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("managed_worker_template")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn upsert_agent_worker_instance(
+        &self,
+        instance: StoredAgentWorkerInstance,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut instances) = self.agent_worker_instances.lock() {
+                    instances.insert(instance.id.clone(), instance);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_agent_worker_instance(&instance)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "agent_worker_instance",
+                instance.id.clone(),
+                serialize_storage_record(&instance)?,
+            ),
+        }
+    }
+
+    pub fn agent_worker_instances(&self) -> Vec<StoredAgentWorkerInstance> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .agent_worker_instances
+                .lock()
+                .map(|instances| instances.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.agent_worker_instances().unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("agent_worker_instance")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn upsert_managed_worker_session(
+        &self,
+        session: StoredManagedWorkerSession,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut sessions) = self.managed_worker_sessions.lock() {
+                    sessions.insert(session.id.clone(), session);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_managed_worker_session(&session)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "managed_worker_session",
+                session.id.clone(),
+                serialize_storage_record(&session)?,
+            ),
+        }
+    }
+
+    pub fn managed_worker_sessions(&self) -> Vec<StoredManagedWorkerSession> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .managed_worker_sessions
+                .lock()
+                .map(|sessions| sessions.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.managed_worker_sessions().unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("managed_worker_session")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn append_managed_worker_lifecycle_event(
+        &self,
+        event: StoredManagedWorkerLifecycleEvent,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut events) = self.managed_worker_lifecycle_events.lock() {
+                    events.append(event);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.append_managed_worker_lifecycle_event(&event)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "managed_worker_lifecycle_event",
+                event.id.clone(),
+                serialize_storage_record(&event)?,
+            ),
+        }
+    }
+
+    pub fn managed_worker_lifecycle_events(&self) -> Vec<StoredManagedWorkerLifecycleEvent> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .managed_worker_lifecycle_events
+                .lock()
+                .map(|events| events.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .managed_worker_lifecycle_events()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("managed_worker_lifecycle_event")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
 }
 
 fn serialize_storage_record<T: Serialize>(record: &T) -> Result<String, StorageError> {
@@ -4032,6 +4668,187 @@ mod tests {
         assert_eq!(events[0].kind, "capability.denied");
         assert_eq!(events[0].target, "cli:bash");
         assert_eq!(events[0].outcome, "denied");
+    }
+
+    #[test]
+    fn runtime_repositories_keep_managed_worker_lifecycle_records() {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        let tenant = TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        };
+
+        repositories
+            .upsert_managed_worker_template(StoredManagedWorkerTemplate {
+                id: "template-firecracker-codex".into(),
+                framework_adapter: "codex".into(),
+                isolation_backend_kind: "firecracker_micro_vm".into(),
+                enabled: true,
+                max_tenant_sessions: Some(12),
+                max_workspace_sessions: Some(4),
+                created_at_unix: Some(10),
+                updated_at_unix: Some(11),
+            })
+            .unwrap();
+        repositories
+            .upsert_agent_worker_instance(StoredAgentWorkerInstance {
+                id: "agent-worker-1".into(),
+                process_name: "agent-worker".into(),
+                host_id: Some("host-a".into()),
+                worker_version: Some("0.1.0".into()),
+                status: "online".into(),
+                started_at_unix: Some(12),
+                last_seen_at_unix: Some(13),
+                process_json: r#"{"pid":4242}"#.into(),
+            })
+            .unwrap();
+        repositories
+            .upsert_managed_worker_session(StoredManagedWorkerSession {
+                id: "session-1".into(),
+                run_id: "run-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                worker_template_id: "template-firecracker-codex".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                status: "running".into(),
+                isolation_backend_kind: "firecracker_micro_vm".into(),
+                microvm_id: Some("fc-vm-1".into()),
+                capability_envelope_id: "capability-envelope-1".into(),
+                requested_at_unix: Some(14),
+                started_at_unix: Some(15),
+                completed_at_unix: None,
+                cleanup_completed_at_unix: None,
+                capability_envelope_json: r#"{"id":"capability-envelope-1"}"#.into(),
+                resource_limits_json: r#"{"vcpu":2,"memory_mib":1024}"#.into(),
+            })
+            .unwrap();
+        repositories
+            .append_managed_worker_lifecycle_event(StoredManagedWorkerLifecycleEvent {
+                id: "lifecycle-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                tenant,
+                workspace_id: "workspace-1".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                status: "running".into(),
+                action: "start".into(),
+                outcome: "succeeded".into(),
+                occurred_at_unix: Some(16),
+                evidence_json: r#"{"microvm_id":"fc-vm-1"}"#.into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            repositories.managed_worker_templates()[0].isolation_backend_kind,
+            "firecracker_micro_vm"
+        );
+        assert_eq!(
+            repositories.agent_worker_instances()[0].process_name,
+            "agent-worker"
+        );
+        assert_eq!(
+            repositories.managed_worker_sessions()[0]
+                .microvm_id
+                .as_deref(),
+            Some("fc-vm-1")
+        );
+        assert_eq!(
+            repositories.managed_worker_lifecycle_events()[0].action,
+            "start"
+        );
+    }
+
+    #[test]
+    fn migration_snapshot_includes_managed_worker_lifecycle_records() {
+        let source =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        let tenant = TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        };
+
+        source
+            .upsert_managed_worker_template(StoredManagedWorkerTemplate {
+                id: "template-1".into(),
+                framework_adapter: "codex".into(),
+                isolation_backend_kind: "firecracker_micro_vm".into(),
+                enabled: true,
+                max_tenant_sessions: Some(24),
+                max_workspace_sessions: Some(6),
+                created_at_unix: Some(1),
+                updated_at_unix: Some(2),
+            })
+            .unwrap();
+        source
+            .upsert_agent_worker_instance(StoredAgentWorkerInstance {
+                id: "agent-worker-1".into(),
+                process_name: "agent-worker".into(),
+                host_id: Some("host-a".into()),
+                worker_version: Some("0.1.0".into()),
+                status: "online".into(),
+                started_at_unix: Some(3),
+                last_seen_at_unix: Some(4),
+                process_json: "{}".into(),
+            })
+            .unwrap();
+        source
+            .upsert_managed_worker_session(StoredManagedWorkerSession {
+                id: "session-1".into(),
+                run_id: "run-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                worker_template_id: "template-1".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                status: "cleaned_up".into(),
+                isolation_backend_kind: "firecracker_micro_vm".into(),
+                microvm_id: Some("fc-vm-1".into()),
+                capability_envelope_id: "capability-envelope-1".into(),
+                requested_at_unix: Some(5),
+                started_at_unix: Some(6),
+                completed_at_unix: Some(7),
+                cleanup_completed_at_unix: Some(8),
+                capability_envelope_json: "{}".into(),
+                resource_limits_json: "{}".into(),
+            })
+            .unwrap();
+        source
+            .append_managed_worker_lifecycle_event(StoredManagedWorkerLifecycleEvent {
+                id: "lifecycle-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                tenant,
+                workspace_id: "workspace-1".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                status: "cleaned_up".into(),
+                action: "cleanup".into(),
+                outcome: "succeeded".into(),
+                occurred_at_unix: Some(9),
+                evidence_json: "{}".into(),
+            })
+            .unwrap();
+
+        let snapshot = source.export_migration_snapshot().unwrap();
+        let counts = snapshot.counts();
+        assert_eq!(counts.managed_worker_templates, 1);
+        assert_eq!(counts.agent_worker_instances, 1);
+        assert_eq!(counts.managed_worker_sessions, 1);
+        assert_eq!(counts.managed_worker_lifecycle_events, 1);
+
+        let target =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        target.import_migration_snapshot(snapshot).unwrap();
+
+        assert_eq!(target.managed_worker_templates().len(), 1);
+        assert_eq!(target.agent_worker_instances().len(), 1);
+        assert_eq!(target.managed_worker_sessions().len(), 1);
+        assert_eq!(target.managed_worker_lifecycle_events().len(), 1);
     }
 
     #[test]
