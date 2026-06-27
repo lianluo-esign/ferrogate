@@ -157,7 +157,7 @@ pub(crate) enum Commands {
     /// Run FerroGate side services.
     Auth(AuthArgs),
     /// Operate durable storage and migration tooling.
-    Storage(StorageArgs),
+    Storage(Box<StorageArgs>),
     /// Validate configuration and print a summary.
     #[command(alias = "check")]
     Validate(ConfigArgs),
