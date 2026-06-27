@@ -27,10 +27,30 @@ pub enum SupportedFramework {
     NativeHarness,
 }
 
+impl SupportedFramework {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude_code",
+            Self::Codex => "codex",
+            Self::Hermes => "hermes",
+            Self::NativeHarness => "native_harness",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameworkAdapterMode {
     Managed,
     SelfHosted,
+}
+
+impl FrameworkAdapterMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::SelfHosted => "self_hosted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -186,6 +206,34 @@ pub enum FrameworkAdapterEventKind {
     SessionClosed,
 }
 
+impl FrameworkAdapterEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStarted => "session.started",
+            Self::RunStarted => "run.started",
+            Self::CapabilityRequested => "capability.requested",
+            Self::CapabilityAllowed => "capability.allowed",
+            Self::CapabilityDenied => "capability.denied",
+            Self::ModelRequested => "model.requested",
+            Self::ToolRequested => "tool.requested",
+            Self::ToolApproved => "tool.approved",
+            Self::ToolDenied => "tool.denied",
+            Self::ToolCompleted => "tool.completed",
+            Self::McpToolRequested => "mcp.tool.requested",
+            Self::CliRequested => "cli.requested",
+            Self::RestRequested => "rest.requested",
+            Self::MemoryRead => "memory.read",
+            Self::MemoryWrite => "memory.write",
+            Self::CheckpointCreated => "checkpoint.created",
+            Self::ArtifactCreated => "artifact.created",
+            Self::RunCompleted => "run.completed",
+            Self::RunFailed => "run.failed",
+            Self::RunCancelled => "run.cancelled",
+            Self::SessionClosed => "session.closed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedFrameworkEvent {
     pub session_id: String,
@@ -197,6 +245,122 @@ pub struct NormalizedFrameworkEvent {
     pub kind: FrameworkAdapterEventKind,
     pub message: Option<String>,
     pub metadata: BTreeMap<String, String>,
+}
+
+impl NormalizedFrameworkEvent {
+    pub fn timeline_record(&self) -> Result<FrameworkEventTimelineRecord, FrameworkAdapterError> {
+        validate_event_field("session_id", &self.session_id)?;
+        validate_event_field("run_id", &self.run_id)?;
+        validate_event_field("adapter_name", &self.adapter_name)?;
+        validate_event_field("adapter_version", &self.adapter_version)?;
+        let event_json = serde_json::to_string(&self.canonical_json())
+            .map_err(|error| FrameworkAdapterError::InvalidRequest(error.to_string()))?;
+        let event_hash = fnv1a64_hex(&event_json);
+        Ok(FrameworkEventTimelineRecord {
+            event_id: format!(
+                "framework:{}:{}:{}:{}:{}",
+                self.run_id,
+                self.session_id,
+                self.adapter_name,
+                self.kind.as_str(),
+                event_hash
+            ),
+            run_id: self.run_id.clone(),
+            kind: self.kind.as_str().to_string(),
+            target: self.timeline_target(),
+            outcome: self.timeline_outcome().to_string(),
+            message: self.message.clone(),
+            event_json,
+        })
+    }
+
+    pub fn canonical_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": self.session_id,
+            "run_id": self.run_id,
+            "adapter_name": self.adapter_name,
+            "adapter_version": self.adapter_version,
+            "framework": self.framework.as_str(),
+            "mode": self.mode.as_str(),
+            "kind": self.kind.as_str(),
+            "message": self.message,
+            "metadata": self.metadata,
+        })
+    }
+
+    fn timeline_target(&self) -> String {
+        if let Some(target) = self
+            .metadata
+            .get("target")
+            .filter(|value| !value.is_empty())
+        {
+            return target.clone();
+        }
+        if let Some(tool) = self.metadata.get("tool").filter(|value| !value.is_empty()) {
+            return format!("tool:{tool}");
+        }
+        if let Some(artifact_id) = self
+            .metadata
+            .get("artifact_id")
+            .filter(|value| !value.is_empty())
+        {
+            return format!("artifact:{artifact_id}");
+        }
+        if let Some(checkpoint_id) = self
+            .metadata
+            .get("checkpoint_id")
+            .filter(|value| !value.is_empty())
+        {
+            return format!("checkpoint:{checkpoint_id}");
+        }
+        format!("adapter:{}", self.adapter_name)
+    }
+
+    fn timeline_outcome(&self) -> &'static str {
+        if let Some(decision) = self.metadata.get("decision") {
+            return match decision.as_str() {
+                "allowed" => "allowed",
+                "denied" => "denied",
+                "approval_required" => "approval_required",
+                _ => "recorded",
+            };
+        }
+        match self.kind {
+            FrameworkAdapterEventKind::SessionStarted
+            | FrameworkAdapterEventKind::RunStarted
+            | FrameworkAdapterEventKind::CapabilityRequested
+            | FrameworkAdapterEventKind::ModelRequested
+            | FrameworkAdapterEventKind::ToolRequested
+            | FrameworkAdapterEventKind::McpToolRequested
+            | FrameworkAdapterEventKind::CliRequested
+            | FrameworkAdapterEventKind::RestRequested => "requested",
+            FrameworkAdapterEventKind::CapabilityAllowed
+            | FrameworkAdapterEventKind::ToolApproved => "allowed",
+            FrameworkAdapterEventKind::CapabilityDenied | FrameworkAdapterEventKind::ToolDenied => {
+                "denied"
+            }
+            FrameworkAdapterEventKind::ToolCompleted
+            | FrameworkAdapterEventKind::MemoryRead
+            | FrameworkAdapterEventKind::MemoryWrite
+            | FrameworkAdapterEventKind::CheckpointCreated
+            | FrameworkAdapterEventKind::ArtifactCreated
+            | FrameworkAdapterEventKind::RunCompleted
+            | FrameworkAdapterEventKind::SessionClosed => "success",
+            FrameworkAdapterEventKind::RunFailed => "failed",
+            FrameworkAdapterEventKind::RunCancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkEventTimelineRecord {
+    pub event_id: String,
+    pub run_id: String,
+    pub kind: String,
+    pub target: String,
+    pub outcome: String,
+    pub message: Option<String>,
+    pub event_json: String,
 }
 
 pub trait FrameworkAdapter {
@@ -554,6 +718,15 @@ fn require_request_field(field: &str, value: &str) -> Result<(), FrameworkAdapte
     Ok(())
 }
 
+fn validate_event_field(field: &str, value: &str) -> Result<(), FrameworkAdapterError> {
+    if value.trim().is_empty() {
+        return Err(FrameworkAdapterError::InvalidRequest(format!(
+            "framework event {field} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
 fn normalized_event<'a>(
     session: &FrameworkAdapterSession,
     kind: FrameworkAdapterEventKind,
@@ -632,6 +805,15 @@ fn self_hosted_trust_level_label(trust_level: SelfHostedTelemetryTrustLevel) -> 
             "reported_by_self_hosted_worker"
         }
     }
+}
+
+fn fnv1a64_hex(input: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]
@@ -740,7 +922,7 @@ mod tests {
         let actual = serde_json::to_value(
             events
                 .iter()
-                .map(canonical_event_json)
+                .map(NormalizedFrameworkEvent::canonical_json)
                 .collect::<Vec<serde_json::Value>>(),
         )
         .unwrap();
@@ -823,6 +1005,7 @@ mod tests {
 
         assert_eq!(evidence.decision, CapabilityAuthorizationDecision::Allowed);
         assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityAllowed);
+        assert_eq!(event.kind.as_str(), "capability.allowed");
         assert_eq!(
             event.metadata.get("decision").map(String::as_str),
             Some("allowed")
@@ -852,6 +1035,7 @@ mod tests {
 
         assert_eq!(evidence.decision, CapabilityAuthorizationDecision::Denied);
         assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityDenied);
+        assert_eq!(event.kind.as_str(), "capability.denied");
         assert_eq!(
             event.metadata.get("decision").map(String::as_str),
             Some("denied")
@@ -884,6 +1068,7 @@ mod tests {
             CapabilityAuthorizationDecision::ApprovalRequired
         );
         assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityRequested);
+        assert_eq!(event.kind.as_str(), "capability.requested");
         assert_eq!(
             event.metadata.get("decision").map(String::as_str),
             Some("approval_required")
@@ -929,10 +1114,58 @@ mod tests {
         .unwrap();
 
         assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityRequested);
+        assert_eq!(event.kind.as_str(), "capability.requested");
         assert_eq!(
             event.metadata.get("trust_level").map(String::as_str),
             Some("reported_by_self_hosted_worker")
         );
+    }
+
+    #[test]
+    fn managed_capability_event_projects_to_timeline_record() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        let authorizer = crate::SimpleCapabilityAuthorizer::default();
+
+        let (_, event) = authorize_framework_capability(
+            &authorizer,
+            FrameworkCapabilityRequest {
+                session,
+                action: CapabilityAction::Cli,
+                target: "bash".to_string(),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+
+        let record = event.timeline_record().unwrap();
+
+        assert_eq!(
+            record.event_id.split(':').take(5).collect::<Vec<_>>(),
+            vec![
+                "framework",
+                "run-1",
+                "session-1",
+                "native-harness",
+                "capability.denied"
+            ]
+        );
+        assert_eq!(record.event_id.rsplit(':').next().unwrap().len(), 16);
+        assert_eq!(record.run_id, "run-1");
+        assert_eq!(record.kind, "capability.denied");
+        assert_eq!(record.target, "bash");
+        assert_eq!(record.outcome, "denied");
+        assert!(record
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("not allowed by capability policy"));
+        let event_json: serde_json::Value = serde_json::from_str(&record.event_json).unwrap();
+        assert_eq!(event_json["framework"], "native_harness");
+        assert_eq!(event_json["mode"], "managed");
+        assert_eq!(event_json["kind"], "capability.denied");
+        assert_eq!(event_json["metadata"]["decision"], "denied");
+        assert_eq!(event_json["metadata"]["isolation_backend"], "firecracker");
     }
 
     fn session_request() -> FrameworkAdapterSessionRequest {
@@ -950,62 +1183,6 @@ mod tests {
                 artifacts: true,
                 ..FrameworkAdapterCapabilities::default()
             },
-        }
-    }
-
-    fn canonical_event_json(event: &NormalizedFrameworkEvent) -> serde_json::Value {
-        serde_json::json!({
-            "session_id": event.session_id,
-            "run_id": event.run_id,
-            "adapter_name": event.adapter_name,
-            "adapter_version": event.adapter_version,
-            "framework": framework_label(event.framework),
-            "mode": adapter_mode_label(event.mode),
-            "kind": event_kind_label(event.kind),
-            "message": event.message,
-            "metadata": event.metadata,
-        })
-    }
-
-    fn framework_label(framework: SupportedFramework) -> &'static str {
-        match framework {
-            SupportedFramework::ClaudeCode => "claude_code",
-            SupportedFramework::Codex => "codex",
-            SupportedFramework::Hermes => "hermes",
-            SupportedFramework::NativeHarness => "native_harness",
-        }
-    }
-
-    fn adapter_mode_label(mode: FrameworkAdapterMode) -> &'static str {
-        match mode {
-            FrameworkAdapterMode::Managed => "managed",
-            FrameworkAdapterMode::SelfHosted => "self_hosted",
-        }
-    }
-
-    fn event_kind_label(kind: FrameworkAdapterEventKind) -> &'static str {
-        match kind {
-            FrameworkAdapterEventKind::SessionStarted => "session.started",
-            FrameworkAdapterEventKind::RunStarted => "run.started",
-            FrameworkAdapterEventKind::CapabilityRequested => "capability.requested",
-            FrameworkAdapterEventKind::CapabilityAllowed => "capability.allowed",
-            FrameworkAdapterEventKind::CapabilityDenied => "capability.denied",
-            FrameworkAdapterEventKind::ModelRequested => "model.requested",
-            FrameworkAdapterEventKind::ToolRequested => "tool.requested",
-            FrameworkAdapterEventKind::ToolApproved => "tool.approved",
-            FrameworkAdapterEventKind::ToolDenied => "tool.denied",
-            FrameworkAdapterEventKind::ToolCompleted => "tool.completed",
-            FrameworkAdapterEventKind::McpToolRequested => "mcp.tool.requested",
-            FrameworkAdapterEventKind::CliRequested => "cli.requested",
-            FrameworkAdapterEventKind::RestRequested => "rest.requested",
-            FrameworkAdapterEventKind::MemoryRead => "memory.read",
-            FrameworkAdapterEventKind::MemoryWrite => "memory.write",
-            FrameworkAdapterEventKind::CheckpointCreated => "checkpoint.created",
-            FrameworkAdapterEventKind::ArtifactCreated => "artifact.created",
-            FrameworkAdapterEventKind::RunCompleted => "run.completed",
-            FrameworkAdapterEventKind::RunFailed => "run.failed",
-            FrameworkAdapterEventKind::RunCancelled => "run.cancelled",
-            FrameworkAdapterEventKind::SessionClosed => "session.closed",
         }
     }
 }
