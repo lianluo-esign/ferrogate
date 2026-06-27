@@ -558,6 +558,36 @@ mod tests {
     }
 
     #[test]
+    fn native_harness_event_stream_matches_golden_fixture() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, started) = adapter.start_session(session_request()).unwrap();
+        let mut events = vec![started];
+        events.extend(
+            adapter
+                .submit_run(FrameworkAdapterRunRequest {
+                    session: session.clone(),
+                    input_ref: "input://run-1".to_string(),
+                })
+                .unwrap(),
+        );
+        events.push(adapter.close_session(&session).unwrap());
+
+        let actual = serde_json::to_value(
+            events
+                .iter()
+                .map(canonical_event_json)
+                .collect::<Vec<serde_json::Value>>(),
+        )
+        .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/native_harness_events.golden.json"
+        ))
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn denies_session_when_required_capability_is_missing() {
         let mut adapter = NativeHarnessAdapter::default();
         let request = FrameworkAdapterSessionRequest {
@@ -703,6 +733,62 @@ mod tests {
                 artifacts: true,
                 ..FrameworkAdapterCapabilities::default()
             },
+        }
+    }
+
+    fn canonical_event_json(event: &NormalizedFrameworkEvent) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": event.session_id,
+            "run_id": event.run_id,
+            "adapter_name": event.adapter_name,
+            "adapter_version": event.adapter_version,
+            "framework": framework_label(event.framework),
+            "mode": adapter_mode_label(event.mode),
+            "kind": event_kind_label(event.kind),
+            "message": event.message,
+            "metadata": event.metadata,
+        })
+    }
+
+    fn framework_label(framework: SupportedFramework) -> &'static str {
+        match framework {
+            SupportedFramework::ClaudeCode => "claude_code",
+            SupportedFramework::Codex => "codex",
+            SupportedFramework::Hermes => "hermes",
+            SupportedFramework::NativeHarness => "native_harness",
+        }
+    }
+
+    fn adapter_mode_label(mode: FrameworkAdapterMode) -> &'static str {
+        match mode {
+            FrameworkAdapterMode::Managed => "managed",
+            FrameworkAdapterMode::SelfHosted => "self_hosted",
+        }
+    }
+
+    fn event_kind_label(kind: FrameworkAdapterEventKind) -> &'static str {
+        match kind {
+            FrameworkAdapterEventKind::SessionStarted => "session.started",
+            FrameworkAdapterEventKind::RunStarted => "run.started",
+            FrameworkAdapterEventKind::CapabilityRequested => "capability.requested",
+            FrameworkAdapterEventKind::CapabilityAllowed => "capability.allowed",
+            FrameworkAdapterEventKind::CapabilityDenied => "capability.denied",
+            FrameworkAdapterEventKind::ModelRequested => "model.requested",
+            FrameworkAdapterEventKind::ToolRequested => "tool.requested",
+            FrameworkAdapterEventKind::ToolApproved => "tool.approved",
+            FrameworkAdapterEventKind::ToolDenied => "tool.denied",
+            FrameworkAdapterEventKind::ToolCompleted => "tool.completed",
+            FrameworkAdapterEventKind::McpToolRequested => "mcp.tool.requested",
+            FrameworkAdapterEventKind::CliRequested => "cli.requested",
+            FrameworkAdapterEventKind::RestRequested => "rest.requested",
+            FrameworkAdapterEventKind::MemoryRead => "memory.read",
+            FrameworkAdapterEventKind::MemoryWrite => "memory.write",
+            FrameworkAdapterEventKind::CheckpointCreated => "checkpoint.created",
+            FrameworkAdapterEventKind::ArtifactCreated => "artifact.created",
+            FrameworkAdapterEventKind::RunCompleted => "run.completed",
+            FrameworkAdapterEventKind::RunFailed => "run.failed",
+            FrameworkAdapterEventKind::RunCancelled => "run.cancelled",
+            FrameworkAdapterEventKind::SessionClosed => "session.closed",
         }
     }
 }
