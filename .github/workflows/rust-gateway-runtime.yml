@@ -19,7 +19,7 @@ env:
 jobs:
   gateway-runtime:
     name: rust-gateway-runtime / ${{ matrix.slice }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, archlinux]
     strategy:
       fail-fast: false
       matrix:
@@ -31,11 +31,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config
 
       - name: Install Rust toolchain
         run: |

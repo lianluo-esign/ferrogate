@@ -62,7 +62,7 @@ jobs:
 
   rust-ci:
     name: rust-ci
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, archlinux]
     needs:
       - quality
       - core-policy-tests
