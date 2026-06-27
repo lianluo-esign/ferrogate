@@ -7,6 +7,7 @@
 //! Pingora runtime boundary.
 
 mod agent;
+mod capability_boundary;
 mod framework_adapter;
 mod isolation;
 mod managed_worker;
@@ -20,6 +21,12 @@ pub use agent::{
     AgentRunEvent, AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome,
     AgentRunStatus, AgentRuntimeError, AgentRuntimeResult, AgentStep, AgentToolDispatchRequest,
     ExternalAgentProvider, ExternalAgentProviderConfig, GovernedAgentToolDispatcher,
+};
+pub use capability_boundary::{
+    self_hosted_trust_level_for_capability_report, CapabilityAction,
+    CapabilityAuthorizationDecision, CapabilityAuthorizationEvidence,
+    CapabilityAuthorizationOutcome, CapabilityAuthorizer, CapabilityBoundaryError,
+    CapabilityPolicy, ManagedCapabilityRequest, SimpleCapabilityAuthorizer,
 };
 pub use framework_adapter::{
     FrameworkAdapter, FrameworkAdapterCapabilities, FrameworkAdapterDescriptor,
