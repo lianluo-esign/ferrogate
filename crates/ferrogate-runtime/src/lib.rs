@@ -7,6 +7,7 @@
 //! Pingora runtime boundary.
 
 mod agent;
+mod framework_adapter;
 mod isolation;
 mod managed_worker;
 mod reload;
@@ -19,6 +20,12 @@ pub use agent::{
     AgentRunEvent, AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome,
     AgentRunStatus, AgentRuntimeError, AgentRuntimeResult, AgentStep, AgentToolDispatchRequest,
     ExternalAgentProvider, ExternalAgentProviderConfig, GovernedAgentToolDispatcher,
+};
+pub use framework_adapter::{
+    FrameworkAdapter, FrameworkAdapterCapabilities, FrameworkAdapterDescriptor,
+    FrameworkAdapterError, FrameworkAdapterEventKind, FrameworkAdapterMode,
+    FrameworkAdapterRunRequest, FrameworkAdapterSession, FrameworkAdapterSessionRequest,
+    NativeHarnessAdapter, NormalizedFrameworkEvent, SupportedFramework,
 };
 pub use isolation::{
     select_isolation_backend, CollectedIsolationArtifacts, CollectedIsolationLogs,
