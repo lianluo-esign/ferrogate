@@ -1186,6 +1186,63 @@ impl AuditEventSink {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TimelineEventContext {
+    request_id: String,
+    trace_id: Option<String>,
+    tenant: ferrogate_core::TenantContext,
+    turn: u32,
+    occurred_at_unix: Option<u64>,
+}
+
+impl TimelineEventContext {
+    fn new(
+        request_id: impl Into<String>,
+        trace_id: Option<String>,
+        tenant: ferrogate_core::TenantContext,
+        turn: u32,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            trace_id,
+            tenant,
+            turn,
+            occurred_at_unix: Some(now_unix_seconds()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TimelineEventRecord {
+    id: String,
+    run_id: String,
+    kind: String,
+    target: String,
+    outcome: String,
+    tool_call_id: Option<String>,
+    message: Option<String>,
+}
+
+fn stored_timeline_event(
+    context: TimelineEventContext,
+    record: TimelineEventRecord,
+) -> StoredAgentRunEvent {
+    StoredAgentRunEvent {
+        id: record.id,
+        run_id: record.run_id,
+        request_id: context.request_id,
+        trace_id: context.trace_id,
+        tenant: context.tenant,
+        turn: context.turn,
+        kind: record.kind,
+        target: record.target,
+        outcome: record.outcome,
+        tool_call_id: record.tool_call_id,
+        message: record.message,
+        occurred_at_unix: context.occurred_at_unix,
+    }
+}
+
 impl AgentRunEventSink for AuditEventSink {
     fn record(&mut self, event: AgentRunEvent) {
         let (action, outcome) = match event.kind {
@@ -1208,20 +1265,23 @@ impl AgentRunEventSink for AuditEventSink {
                 event.turn
             )
         });
-        self.state.record_agent_run_event(StoredAgentRunEvent {
-            id: event.id,
-            run_id: event.run_id.clone(),
-            request_id: self.request_id.clone(),
-            trace_id: self.trace_id.clone(),
-            tenant: self.tenant.clone(),
-            turn: event.turn,
-            kind: agent_event_kind(&event.kind).to_string(),
-            target: target.clone(),
-            outcome: outcome.to_string(),
-            tool_call_id: event.tool_call_id,
-            message: Some(message.clone()),
-            occurred_at_unix: Some(now_unix_seconds()),
-        });
+        self.state.record_agent_run_event(stored_timeline_event(
+            TimelineEventContext::new(
+                self.request_id.clone(),
+                self.trace_id.clone(),
+                self.tenant.clone(),
+                event.turn,
+            ),
+            TimelineEventRecord {
+                id: event.id,
+                run_id: event.run_id.clone(),
+                kind: agent_event_kind(&event.kind).to_string(),
+                target: target.clone(),
+                outcome: outcome.to_string(),
+                tool_call_id: event.tool_call_id,
+                message: Some(message.clone()),
+            },
+        ));
         self.state.record_admin_audit_event(AdminAuditEventDraft {
             request_id: self.request_id.clone(),
             trace_id: self.trace_id.clone(),
@@ -1310,5 +1370,89 @@ fn agent_event_kind(kind: &AgentRunEventKind) -> &'static str {
         AgentRunEventKind::ToolCallCompleted => "tool_call_completed",
         AgentRunEventKind::RunCompleted => "run_completed",
         AgentRunEventKind::RunStopped => "run_stopped",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrogate_core::TenantContext;
+    use ferrogate_runtime::{
+        authorize_framework_capability, CapabilityAction, FrameworkAdapter,
+        FrameworkAdapterCapabilities, FrameworkAdapterMode, FrameworkAdapterSessionRequest,
+        FrameworkCapabilityRequest, NativeHarnessAdapter, SimpleCapabilityAuthorizer,
+    };
+
+    #[test]
+    fn managed_framework_capability_event_converts_to_stored_timeline_event() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter
+            .start_session(FrameworkAdapterSessionRequest {
+                session_id: "session-1".to_string(),
+                run_id: "run-1".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "worker-1".to_string(),
+                isolation_backend: "firecracker".to_string(),
+                mode: FrameworkAdapterMode::Managed,
+                required_capabilities: FrameworkAdapterCapabilities {
+                    tools: true,
+                    ..FrameworkAdapterCapabilities::default()
+                },
+            })
+            .unwrap();
+        let (_, event) = authorize_framework_capability(
+            &SimpleCapabilityAuthorizer::default(),
+            FrameworkCapabilityRequest {
+                session,
+                action: CapabilityAction::Cli,
+                target: "bash".to_string(),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+        let record = event.timeline_record().unwrap();
+        let mut context = TimelineEventContext::new(
+            "fg-1",
+            Some("trace-1".to_string()),
+            TenantContext {
+                organization_id: Some("org".to_string()),
+                team_id: None,
+                project_id: Some("project".to_string()),
+                user_id: None,
+                api_key_id: Some("key".to_string()),
+            },
+            0,
+        );
+        context.occurred_at_unix = Some(42);
+        let stored = stored_timeline_event(
+            context,
+            TimelineEventRecord {
+                id: record.event_id,
+                run_id: record.run_id,
+                kind: record.kind,
+                target: record.target,
+                outcome: record.outcome,
+                tool_call_id: None,
+                message: record.message,
+            },
+        );
+
+        assert!(stored
+            .id
+            .starts_with("framework:run-1:session-1:native-harness:capability.denied:"));
+        assert_eq!(stored.run_id, "run-1");
+        assert_eq!(stored.request_id, "fg-1");
+        assert_eq!(stored.trace_id.as_deref(), Some("trace-1"));
+        assert_eq!(stored.kind, "capability.denied");
+        assert_eq!(stored.target, "bash");
+        assert_eq!(stored.outcome, "denied");
+        assert_eq!(stored.turn, 0);
+        assert_eq!(stored.occurred_at_unix, Some(42));
+        assert!(stored
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("not allowed by capability policy"));
     }
 }
