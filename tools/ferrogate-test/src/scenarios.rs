@@ -84,6 +84,33 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     )?;
     case.expect_json(
         "GET",
+        "/admin/v1/managed-workers",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["data"][0]["process_name"], "agent-worker");
+            assert_eq!(body["data"][0]["process_boundary"], "external_process");
+            assert_eq!(
+                body["data"][0]["agent_worker_role"],
+                "microvm_lifecycle_controller"
+            );
+            assert_eq!(body["data"][0]["capability_boundary"], "gateway_mediated");
+            assert_eq!(
+                body["data"][0]["isolation_backends"][0]["kind"],
+                "firecracker_microvm"
+            );
+            assert_eq!(
+                body["data"][0]["isolation_backends"][0]["host_lifecycle_owner"],
+                "agent-worker"
+            );
+            assert_eq!(body["data"][0]["persistence"]["provider"], "memory");
+            assert_eq!(body["data"][0]["persistence"]["implemented"], false);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
         "/admin/v1/provider-models?provider=openai",
         &[ADMIN_AUTH],
         "",

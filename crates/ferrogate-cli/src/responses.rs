@@ -86,6 +86,36 @@ pub(crate) struct AdminList<T> {
     pub(crate) limit: Option<usize>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminManagedWorkerRuntime {
+    pub(crate) id: &'static str,
+    pub(crate) status: &'static str,
+    pub(crate) process_name: &'static str,
+    pub(crate) process_boundary: &'static str,
+    pub(crate) gateway_role: &'static str,
+    pub(crate) agent_worker_role: &'static str,
+    pub(crate) lifecycle_actions: Vec<&'static str>,
+    pub(crate) isolation_backends: Vec<AdminManagedWorkerIsolationBackend>,
+    pub(crate) capability_boundary: &'static str,
+    pub(crate) persistence: AdminManagedWorkerPersistence,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminManagedWorkerIsolationBackend {
+    pub(crate) kind: &'static str,
+    pub(crate) backend_name: &'static str,
+    pub(crate) commercial_preference: u8,
+    pub(crate) host_lifecycle_owner: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminManagedWorkerPersistence {
+    pub(crate) provider: ferrogate_storage::StorageProviderKind,
+    pub(crate) durable: bool,
+    pub(crate) implemented: bool,
+    pub(crate) contract_version: u32,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {

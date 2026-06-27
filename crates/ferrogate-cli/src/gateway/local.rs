@@ -30,13 +30,14 @@ use crate::{
         AdminConfigValidateRequest, AdminConfigValidateResponse, AdminDeleteResponse,
         AdminDrainRequest, AdminDrainResponse, AdminGatewayConfigMutation,
         AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile, AdminList,
-        AdminMcpServerMutationResponse, AdminPlugin, AdminPluginMutation,
-        AdminPluginMutationResponse, AdminPolicyMutation, AdminPolicyMutationResponse,
-        AdminPromptTemplate, AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse,
-        AdminProvider, AdminProviderModelCandidate, AdminProviderModelCatalog, AdminSkillPackage,
-        AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery,
-        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
-        ReadinessResponse,
+        AdminManagedWorkerIsolationBackend, AdminManagedWorkerPersistence,
+        AdminManagedWorkerRuntime, AdminMcpServerMutationResponse, AdminPlugin,
+        AdminPluginMutation, AdminPluginMutationResponse, AdminPolicyMutation,
+        AdminPolicyMutationResponse, AdminPromptTemplate, AdminPromptTemplateMutation,
+        AdminPromptTemplateMutationResponse, AdminProvider, AdminProviderModelCandidate,
+        AdminProviderModelCatalog, AdminSkillPackage, AdminSkillPackageMutationResponse,
+        AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery, HealthResponse, OpenAiModel,
+        OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
     },
     state::{AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord},
 };
@@ -3692,6 +3693,89 @@ impl FerroGateway {
                     let body = AdminList::new(catalogs);
                     write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                 }
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_managed_workers(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let storage = state.storage_status();
+                let body = AdminList::new(vec![AdminManagedWorkerRuntime {
+                    id: "managed-worker-runtime",
+                    status: "contract_ready",
+                    process_name: "agent-worker",
+                    process_boundary: "external_process",
+                    gateway_role:
+                        "policy_quota_template_isolation_selection_capability_envelope_evidence",
+                    agent_worker_role: "microvm_lifecycle_controller",
+                    lifecycle_actions: vec![
+                        "prepare",
+                        "start",
+                        "exec_or_attach",
+                        "stop",
+                        "snapshot_or_checkpoint",
+                        "collect_logs",
+                        "collect_artifacts",
+                        "cleanup",
+                    ],
+                    isolation_backends: vec![
+                        AdminManagedWorkerIsolationBackend {
+                            kind: "firecracker_microvm",
+                            backend_name: "firecracker",
+                            commercial_preference: 1,
+                            host_lifecycle_owner: "agent-worker",
+                        },
+                        AdminManagedWorkerIsolationBackend {
+                            kind: "kata_containers",
+                            backend_name: "kata",
+                            commercial_preference: 2,
+                            host_lifecycle_owner: "agent-worker",
+                        },
+                        AdminManagedWorkerIsolationBackend {
+                            kind: "gvisor",
+                            backend_name: "gvisor",
+                            commercial_preference: 3,
+                            host_lifecycle_owner: "agent-worker",
+                        },
+                        AdminManagedWorkerIsolationBackend {
+                            kind: "rootless_docker",
+                            backend_name: "rootless-docker",
+                            commercial_preference: 4,
+                            host_lifecycle_owner: "agent-worker",
+                        },
+                        AdminManagedWorkerIsolationBackend {
+                            kind: "wasm_sandbox",
+                            backend_name: "wasm",
+                            commercial_preference: 5,
+                            host_lifecycle_owner: "agent-worker",
+                        },
+                    ],
+                    capability_boundary: "gateway_mediated",
+                    persistence: AdminManagedWorkerPersistence {
+                        provider: storage.provider,
+                        durable: storage.durable,
+                        implemented: false,
+                        contract_version: storage.contract_version,
+                    },
+                }]);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
                 write_json_error(

@@ -412,6 +412,33 @@
         }
       }
     },
+    "/admin/v1/managed-workers": {
+      "get": {
+        "operationId": "listAdminManagedWorkers",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List managed worker runtime contracts and agent-worker process boundary evidence.",
+        "responses": {
+          "200": {
+            "description": "Managed worker runtime contract list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminManagedWorkerRuntimeList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/observability": {
       "get": {
         "operationId": "listAdminObservability",
@@ -9102,6 +9129,159 @@
             }
           }
         }
+      },
+      "AdminManagedWorkerRuntimeList": {
+        "$ref": "#/components/schemas/AdminList_AdminManagedWorkerRuntime"
+      },
+      "AdminList_AdminManagedWorkerRuntime": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminManagedWorkerRuntime"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminManagedWorkerRuntime": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "process_name",
+          "process_boundary",
+          "gateway_role",
+          "agent_worker_role",
+          "lifecycle_actions",
+          "isolation_backends",
+          "capability_boundary",
+          "persistence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "contract_ready"
+            ]
+          },
+          "process_name": {
+            "type": "string",
+            "const": "agent-worker"
+          },
+          "process_boundary": {
+            "type": "string",
+            "const": "external_process"
+          },
+          "gateway_role": {
+            "type": "string"
+          },
+          "agent_worker_role": {
+            "type": "string",
+            "const": "microvm_lifecycle_controller"
+          },
+          "lifecycle_actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "prepare",
+                "start",
+                "exec_or_attach",
+                "stop",
+                "snapshot_or_checkpoint",
+                "collect_logs",
+                "collect_artifacts",
+                "cleanup"
+              ]
+            }
+          },
+          "isolation_backends": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminManagedWorkerIsolationBackend"
+            }
+          },
+          "capability_boundary": {
+            "type": "string",
+            "const": "gateway_mediated"
+          },
+          "persistence": {
+            "$ref": "#/components/schemas/AdminManagedWorkerPersistence"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminManagedWorkerIsolationBackend": {
+        "type": "object",
+        "required": [
+          "kind",
+          "backend_name",
+          "commercial_preference",
+          "host_lifecycle_owner"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "firecracker_microvm",
+              "kata_containers",
+              "gvisor",
+              "rootless_docker",
+              "wasm_sandbox"
+            ]
+          },
+          "backend_name": {
+            "type": "string"
+          },
+          "commercial_preference": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "host_lifecycle_owner": {
+            "type": "string",
+            "const": "agent-worker"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminManagedWorkerPersistence": {
+        "type": "object",
+        "required": [
+          "provider",
+          "durable",
+          "implemented",
+          "contract_version"
+        ],
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/StorageProviderKind"
+          },
+          "durable": {
+            "type": "boolean"
+          },
+          "implemented": {
+            "type": "boolean",
+            "description": "False until managed worker session/run/evidence records are persisted through the Supabase-backed control-plane storage path."
+          },
+          "contract_version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

@@ -230,6 +230,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/managed-workers" {
+            let headers = req.headers.clone();
+            self.handle_admin_managed_workers(session, ctx, &headers)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/agent-upstreams" || path.starts_with("/admin/v1/agent-upstreams/") {
             let headers = req.headers.clone();
             let method = req.method.clone();
