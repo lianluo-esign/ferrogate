@@ -107,6 +107,31 @@ pub struct ManagedWorkerCancellation {
     pub cleanup: IsolationCleanupOutcome,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedWorkerLifecycleRecord {
+    pub session_id: String,
+    pub run_id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_template_id: String,
+    pub agent_worker_id: String,
+    pub isolation_backend_kind: crate::IsolationBackendKind,
+    pub isolation_instance_id: Option<String>,
+    pub capability_envelope_id: String,
+    pub status: ManagedWorkerSessionStatus,
+    pub action: ManagedWorkerLifecycleAction,
+    pub outcome: String,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedWorkerLifecycleAction {
+    ExecOrAttach,
+    Stop,
+    Cleanup,
+    Failure,
+}
+
 pub trait AgentWorkerControlClient {
     fn backends(&mut self) -> &[IsolationBackendDescriptor];
     fn provision_managed_worker(
@@ -446,6 +471,94 @@ impl ManagedWorkerSession {
     }
 }
 
+impl ManagedWorkerExecution {
+    pub fn lifecycle_records(&self) -> Vec<ManagedWorkerLifecycleRecord> {
+        [
+            (
+                ManagedWorkerLifecycleAction::ExecOrAttach,
+                &self.exec.evidence,
+            ),
+            (ManagedWorkerLifecycleAction::Stop, &self.stop.evidence),
+            (
+                ManagedWorkerLifecycleAction::Cleanup,
+                &self.cleanup.evidence,
+            ),
+        ]
+        .into_iter()
+        .map(|(action, evidence)| self.session.lifecycle_record(action, evidence))
+        .collect()
+    }
+}
+
+impl ManagedWorkerCancellation {
+    pub fn lifecycle_records(&self) -> Vec<ManagedWorkerLifecycleRecord> {
+        [
+            (ManagedWorkerLifecycleAction::Stop, &self.stop.evidence),
+            (
+                ManagedWorkerLifecycleAction::Cleanup,
+                &self.cleanup.evidence,
+            ),
+        ]
+        .into_iter()
+        .map(|(action, evidence)| self.session.lifecycle_record(action, evidence))
+        .collect()
+    }
+}
+
+impl ManagedWorkerFailedExecution {
+    pub fn lifecycle_records(&self) -> Vec<ManagedWorkerLifecycleRecord> {
+        let mut records = Vec::new();
+        if let Some(stop) = &self.stop {
+            records.push(
+                self.session
+                    .lifecycle_record(ManagedWorkerLifecycleAction::Stop, &stop.evidence),
+            );
+        }
+        if self.cleanup.evidence.outcome == "not_started" {
+            let mut record = self.session.lifecycle_record(
+                ManagedWorkerLifecycleAction::Failure,
+                &self.cleanup.evidence,
+            );
+            record.outcome = "failed".to_string();
+            record.failure_reason = Some(self.error.to_string());
+            records.push(record);
+        } else {
+            records.push(self.session.lifecycle_record(
+                ManagedWorkerLifecycleAction::Cleanup,
+                &self.cleanup.evidence,
+            ));
+        }
+        records
+    }
+}
+
+impl ManagedWorkerSession {
+    fn lifecycle_record(
+        &self,
+        action: ManagedWorkerLifecycleAction,
+        evidence: &crate::IsolationLifecycleEvidence,
+    ) -> ManagedWorkerLifecycleRecord {
+        ManagedWorkerLifecycleRecord {
+            session_id: self.session_id.clone(),
+            run_id: self.run_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            workspace_id: self.workspace_id.clone(),
+            worker_template_id: self.worker_template_id.clone(),
+            agent_worker_id: evidence.agent_worker_id.clone(),
+            isolation_backend_kind: self.selected_backend.kind.clone(),
+            isolation_instance_id: evidence
+                .isolation_instance_id
+                .clone()
+                .or_else(|| Some(self.instance_id.clone()).filter(|value| !value.is_empty())),
+            capability_envelope_id: evidence.capability_envelope_id.clone(),
+            status: self.status,
+            action,
+            outcome: evidence.outcome.clone(),
+            failure_reason: evidence.failure_reason.clone(),
+        }
+    }
+}
+
 impl IsolationCleanupOutcome {
     fn not_started() -> Self {
         Self {
@@ -560,6 +673,29 @@ mod tests {
             execution.cleanup.evidence.isolation_instance_id.as_deref(),
             Some("instance-run-1")
         );
+        let records = execution.lifecycle_records();
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records[0].action,
+            ManagedWorkerLifecycleAction::ExecOrAttach
+        );
+        assert_eq!(records[0].session_id, "session-1");
+        assert_eq!(records[0].run_id, "run-1");
+        assert_eq!(records[0].tenant_id, "tenant-1");
+        assert_eq!(records[0].workspace_id, "workspace-1");
+        assert_eq!(records[0].worker_template_id, "template-codex");
+        assert_eq!(records[0].agent_worker_id, "agent-worker-fake-1");
+        assert_eq!(
+            records[0].isolation_backend_kind,
+            IsolationBackendKind::FirecrackerMicroVm
+        );
+        assert_eq!(
+            records[0].isolation_instance_id.as_deref(),
+            Some("instance-run-1")
+        );
+        assert_eq!(records[0].capability_envelope_id, "capability-1");
+        assert_eq!(records[2].action, ManagedWorkerLifecycleAction::Cleanup);
+        assert_eq!(records[2].outcome, "cleaned_up");
     }
 
     #[test]
@@ -580,6 +716,33 @@ mod tests {
 
         assert!(matches!(error, ManagedWorkerError::QuotaExceeded(_)));
         assert!(agent_worker.calls.is_empty());
+    }
+
+    #[test]
+    fn failed_before_start_projects_auditable_failure_lifecycle_record() {
+        let scheduler = scheduler();
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+        let request = ManagedWorkerSessionRequest {
+            active_tenant_sessions: 1,
+            ..session_request()
+        };
+
+        let failure = scheduler
+            .run_with_cleanup(request, run_request(), &mut agent_worker)
+            .unwrap_err();
+
+        assert!(agent_worker.calls.is_empty());
+        let records = failure.lifecycle_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, ManagedWorkerLifecycleAction::Failure);
+        assert_eq!(records[0].outcome, "failed");
+        assert!(records[0]
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("tenant managed worker concurrency exceeded")));
     }
 
     #[test]
@@ -651,6 +814,11 @@ mod tests {
         );
         assert!(failure.stop.is_some());
         assert_eq!(failure.cleanup.evidence.outcome, "cleaned_up");
+        let records = failure.lifecycle_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].action, ManagedWorkerLifecycleAction::Stop);
+        assert_eq!(records[1].action, ManagedWorkerLifecycleAction::Cleanup);
+        assert_eq!(records[1].outcome, "cleaned_up");
     }
 
     #[test]
@@ -682,6 +850,12 @@ mod tests {
             "stopped:operator_cancelled"
         );
         assert_eq!(cancellation.cleanup.evidence.outcome, "cleaned_up");
+        let records = cancellation.lifecycle_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].action, ManagedWorkerLifecycleAction::Stop);
+        assert_eq!(records[0].outcome, "stopped:operator_cancelled");
+        assert_eq!(records[1].action, ManagedWorkerLifecycleAction::Cleanup);
+        assert_eq!(records[1].outcome, "cleaned_up");
     }
 
     #[test]
