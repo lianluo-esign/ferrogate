@@ -121,6 +121,39 @@ pub struct FrameworkAdapterRunRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkAdapterResumeRequest {
+    pub session: FrameworkAdapterSession,
+    pub checkpoint_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkAdapterStreamRequest {
+    pub session: FrameworkAdapterSession,
+    pub after_event_id: Option<String>,
+    pub max_events: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkAdapterArtifactRequest {
+    pub session: FrameworkAdapterSession,
+    pub artifact_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkAdapterArtifact {
+    pub artifact_id: String,
+    pub name: String,
+    pub media_type: String,
+    pub byte_len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkAdapterArtifacts {
+    pub artifacts: Vec<FrameworkAdapterArtifact>,
+    pub event: NormalizedFrameworkEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameworkCapabilityRequest {
     pub session: FrameworkAdapterSession,
     pub action: CapabilityAction,
@@ -176,6 +209,18 @@ pub trait FrameworkAdapter {
         &mut self,
         request: FrameworkAdapterRunRequest,
     ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>;
+    fn resume_run(
+        &mut self,
+        request: FrameworkAdapterResumeRequest,
+    ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>;
+    fn stream_events(
+        &mut self,
+        request: FrameworkAdapterStreamRequest,
+    ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>;
+    fn collect_artifacts(
+        &mut self,
+        request: FrameworkAdapterArtifactRequest,
+    ) -> Result<FrameworkAdapterArtifacts, FrameworkAdapterError>;
     fn cancel_run(
         &mut self,
         session: &FrameworkAdapterSession,
@@ -300,6 +345,78 @@ impl FrameworkAdapter for NativeHarnessAdapter {
             Some("native harness run cancelled".to_string()),
             [],
         ))
+    }
+
+    fn resume_run(
+        &mut self,
+        request: FrameworkAdapterResumeRequest,
+    ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError> {
+        require_request_field("checkpoint_id", &request.checkpoint_id)?;
+        let session = request.session;
+        Ok(vec![
+            normalized_event(
+                &session,
+                FrameworkAdapterEventKind::RunStarted,
+                Some("native harness run resumed".to_string()),
+                [("checkpoint_id", request.checkpoint_id.as_str())],
+            ),
+            normalized_event(
+                &session,
+                FrameworkAdapterEventKind::RunCompleted,
+                Some("native harness resumed run completed".to_string()),
+                [],
+            ),
+        ])
+    }
+
+    fn stream_events(
+        &mut self,
+        request: FrameworkAdapterStreamRequest,
+    ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError> {
+        if request.max_events == 0 {
+            return Err(FrameworkAdapterError::InvalidRequest(
+                "max_events must be greater than zero".to_string(),
+            ));
+        }
+        let session = request.session;
+        Ok(vec![normalized_event(
+            &session,
+            FrameworkAdapterEventKind::RunStarted,
+            Some("native harness stream replay".to_string()),
+            [
+                (
+                    "after_event_id",
+                    request.after_event_id.as_deref().unwrap_or(""),
+                ),
+                ("max_events", &request.max_events.to_string()),
+            ],
+        )])
+    }
+
+    fn collect_artifacts(
+        &mut self,
+        request: FrameworkAdapterArtifactRequest,
+    ) -> Result<FrameworkAdapterArtifacts, FrameworkAdapterError> {
+        let artifact_id = request
+            .artifact_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or("native-artifact");
+        let event = normalized_event(
+            &request.session,
+            FrameworkAdapterEventKind::ArtifactCreated,
+            Some("native harness artifact collected".to_string()),
+            [("artifact_id", artifact_id)],
+        );
+        Ok(FrameworkAdapterArtifacts {
+            artifacts: vec![FrameworkAdapterArtifact {
+                artifact_id: artifact_id.to_string(),
+                name: "native-artifact.txt".to_string(),
+                media_type: "text/plain".to_string(),
+                byte_len: 0,
+            }],
+            event,
+        })
     }
 
     fn close_session(
@@ -555,6 +672,54 @@ mod tests {
         assert_eq!(session.workspace_id, "workspace-1");
         assert_eq!(session.worker_id, "worker-1");
         assert_eq!(closed.kind, FrameworkAdapterEventKind::SessionClosed);
+    }
+
+    #[test]
+    fn native_harness_resume_stream_and_artifact_contracts_are_normalized() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+
+        let resumed = adapter
+            .resume_run(FrameworkAdapterResumeRequest {
+                session: session.clone(),
+                checkpoint_id: "native-checkpoint".to_string(),
+            })
+            .unwrap();
+        let streamed = adapter
+            .stream_events(FrameworkAdapterStreamRequest {
+                session: session.clone(),
+                after_event_id: Some("event-1".to_string()),
+                max_events: 1,
+            })
+            .unwrap();
+        let artifacts = adapter
+            .collect_artifacts(FrameworkAdapterArtifactRequest {
+                session,
+                artifact_id: Some("native-artifact".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            resumed.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                FrameworkAdapterEventKind::RunStarted,
+                FrameworkAdapterEventKind::RunCompleted,
+            ]
+        );
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(
+            streamed[0]
+                .metadata
+                .get("after_event_id")
+                .map(String::as_str),
+            Some("event-1")
+        );
+        assert_eq!(
+            artifacts.event.kind,
+            FrameworkAdapterEventKind::ArtifactCreated
+        );
+        assert_eq!(artifacts.artifacts[0].artifact_id, "native-artifact");
+        assert_eq!(artifacts.artifacts[0].media_type, "text/plain");
     }
 
     #[test]

@@ -30,10 +30,12 @@ pub use capability_boundary::{
 };
 pub use framework_adapter::{
     authorize_framework_capability, self_hosted_framework_capability_report, FrameworkAdapter,
+    FrameworkAdapterArtifact, FrameworkAdapterArtifactRequest, FrameworkAdapterArtifacts,
     FrameworkAdapterCapabilities, FrameworkAdapterDescriptor, FrameworkAdapterError,
-    FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterRunRequest,
-    FrameworkAdapterSession, FrameworkAdapterSessionRequest, FrameworkCapabilityRequest,
-    NativeHarnessAdapter, NormalizedFrameworkEvent, SupportedFramework,
+    FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterResumeRequest,
+    FrameworkAdapterRunRequest, FrameworkAdapterSession, FrameworkAdapterSessionRequest,
+    FrameworkAdapterStreamRequest, FrameworkCapabilityRequest, NativeHarnessAdapter,
+    NormalizedFrameworkEvent, SupportedFramework,
 };
 pub use isolation::{
     select_isolation_backend, CollectedIsolationArtifacts, CollectedIsolationLogs,
