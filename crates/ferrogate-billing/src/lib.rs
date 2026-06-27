@@ -82,6 +82,15 @@ pub enum BillingUsageSource {
     GatewayEstimate,
 }
 
+impl BillingUsageSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BillingUsageSource::ProviderUsage => "provider_usage",
+            BillingUsageSource::GatewayEstimate => "gateway_estimate",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BillingEvent {
     pub request_id: String,

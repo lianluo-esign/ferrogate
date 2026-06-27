@@ -27,6 +27,8 @@ use mysql::{
 };
 use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
 use postgres::config::SslMode as PostgresSslMode;
+use postgres::row::Row as PostgresRow;
+use postgres::Transaction as PostgresTransaction;
 use postgres::{Client as PostgresClient, NoTls};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
@@ -222,8 +224,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 2;
-const POSTGRES_SCHEMA_NAME: &str = "002_supabase_control_plane_billing_evidence";
+const POSTGRES_SCHEMA_VERSION: u64 = 3;
+const POSTGRES_SCHEMA_NAME: &str = "003_supabase_structured_metering_usage";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -809,6 +811,190 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    fn append_billing_event(&self, event: &BillingEvent) -> Result<bool, StorageError> {
+        let tenant_context_id = tenant_storage_key(&event.tenant);
+        let occurred_at_unix = event.occurred_at_unix.unwrap_or_else(now_unix_seconds);
+        let workflow_version = event.workflow_version.map(|value| value as i32);
+        let prompt_tokens = saturating_i64(event.usage.prompt_tokens);
+        let completion_tokens = saturating_i64(event.usage.completion_tokens);
+        let total_tokens = saturating_i64(event.usage.total_tokens);
+        let status_code = i32::from(event.status_code);
+        let usage_source = event.usage_source.as_str();
+        self.with_client(|client| {
+            let mut transaction = client.transaction()?;
+            upsert_tenant_context(&mut transaction, &tenant_context_id, &event.tenant)?;
+            let inserted = transaction.execute(
+                "INSERT INTO metering_events \
+                 (request_id, tenant_context_id, trace_id, agent_run_id, workflow_id, \
+                  workflow_version, workflow_node_id, cluster_id, node_id, status_code, \
+                  occurred_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+                 ON CONFLICT (request_id) DO NOTHING",
+                &[
+                    &event.request_id,
+                    &tenant_context_id,
+                    &event.trace_id,
+                    &event.agent_run_id,
+                    &event.workflow_id,
+                    &workflow_version,
+                    &event.workflow_node_id,
+                    &event.cluster_id,
+                    &event.node_id,
+                    &status_code,
+                    &saturating_i64(occurred_at_unix),
+                ],
+            )?;
+            if inserted == 1 {
+                transaction.execute(
+                    "INSERT INTO metering_event_routes \
+                     (request_id, logical_model, provider, provider_model) \
+                     VALUES ($1, $2, $3, $4)",
+                    &[
+                        &event.request_id,
+                        &event.logical_model,
+                        &event.provider,
+                        &event.provider_model,
+                    ],
+                )?;
+                transaction.execute(
+                    "INSERT INTO metering_event_usage \
+                     (request_id, prompt_tokens, completion_tokens, total_tokens, usage_source) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &event.request_id,
+                        &prompt_tokens,
+                        &completion_tokens,
+                        &total_tokens,
+                        &usage_source,
+                    ],
+                )?;
+                let rollup = UsageRollupUpsert {
+                    id: &usage_aggregate_id(&event.tenant, &event.logical_model, &event.provider),
+                    tenant_context_id: &tenant_context_id,
+                    logical_model: &event.logical_model,
+                    provider: &event.provider,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                };
+                upsert_usage_rollup_delta(&mut transaction, &rollup)?;
+            }
+            transaction.commit()?;
+            Ok(inserted == 1)
+        })
+    }
+
+    fn billing_events_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<StoragePage<BillingEvent>, StorageError> {
+        let offset = saturating_i64(offset as u64);
+        let limit = saturating_i64(limit as u64);
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT e.request_id, e.trace_id, e.agent_run_id, e.workflow_id, \
+                        e.workflow_version, e.workflow_node_id, e.cluster_id, e.node_id, \
+                        e.status_code, e.occurred_at_unix, \
+                        t.organization_id, t.team_id, t.project_id, t.user_id, t.api_key_id, \
+                        r.logical_model, r.provider, r.provider_model, \
+                        u.prompt_tokens, u.completion_tokens, u.total_tokens, u.usage_source, \
+                        count(*) OVER() \
+                 FROM metering_events e \
+                 JOIN tenant_contexts t ON t.id = e.tenant_context_id \
+                 JOIN metering_event_routes r ON r.request_id = e.request_id \
+                 JOIN metering_event_usage u ON u.request_id = e.request_id \
+                 ORDER BY e.occurred_at_unix ASC, e.request_id ASC \
+                 OFFSET $1 LIMIT $2",
+                    &[&offset, &limit],
+                )
+                .map_err(postgres_error)?;
+            let total = rows
+                .first()
+                .map(|row| row.get::<_, i64>(22))
+                .unwrap_or_default();
+            Ok(StoragePage {
+                data: rows.into_iter().map(billing_event_from_row).collect(),
+                total: usize::try_from(total).unwrap_or(usize::MAX),
+                offset: usize::try_from(offset).unwrap_or(usize::MAX),
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            })
+        })
+    }
+
+    fn billing_events(&self) -> Result<Vec<BillingEvent>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT e.request_id, e.trace_id, e.agent_run_id, e.workflow_id, \
+                        e.workflow_version, e.workflow_node_id, e.cluster_id, e.node_id, \
+                        e.status_code, e.occurred_at_unix, \
+                        t.organization_id, t.team_id, t.project_id, t.user_id, t.api_key_id, \
+                        r.logical_model, r.provider, r.provider_model, \
+                        u.prompt_tokens, u.completion_tokens, u.total_tokens, u.usage_source \
+                 FROM metering_events e \
+                 JOIN tenant_contexts t ON t.id = e.tenant_context_id \
+                 JOIN metering_event_routes r ON r.request_id = e.request_id \
+                 JOIN metering_event_usage u ON u.request_id = e.request_id \
+                 ORDER BY e.occurred_at_unix ASC, e.request_id ASC",
+                &[],
+            )?;
+            Ok(rows.into_iter().map(billing_event_from_row).collect())
+        })
+    }
+
+    fn upsert_usage_aggregate(&self, aggregate: &StoredUsageAggregate) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_parts_storage_key(
+            aggregate.organization_id.as_deref(),
+            None,
+            aggregate.project_id.as_deref(),
+            None,
+            aggregate.api_key_id.as_deref(),
+        );
+        let prompt_tokens = saturating_i64(aggregate.usage.prompt_tokens);
+        let completion_tokens = saturating_i64(aggregate.usage.completion_tokens);
+        let total_tokens = saturating_i64(aggregate.usage.total_tokens);
+        self.with_client(|client| {
+            let mut transaction = client.transaction()?;
+            upsert_tenant_context_parts(
+                &mut transaction,
+                &tenant_context_id,
+                aggregate.organization_id.as_deref(),
+                None,
+                aggregate.project_id.as_deref(),
+                None,
+                aggregate.api_key_id.as_deref(),
+            )?;
+            let rollup = UsageRollupUpsert {
+                id: &aggregate.id,
+                tenant_context_id: &tenant_context_id,
+                logical_model: &aggregate.logical_model,
+                provider: &aggregate.provider,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+            };
+            replace_usage_rollup(&mut transaction, &rollup)?;
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    fn usage_aggregates(&self) -> Result<Vec<StoredUsageAggregate>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT a.id, t.organization_id, t.project_id, t.api_key_id, \
+                        a.logical_model, a.provider, \
+                        a.prompt_tokens, a.completion_tokens, a.total_tokens \
+                 FROM usage_aggregate_rollups a \
+                 JOIN tenant_contexts t ON t.id = a.tenant_context_id \
+                 ORDER BY a.id ASC",
+                &[],
+            )?;
+            Ok(rows.into_iter().map(usage_aggregate_from_row).collect())
+        })
+    }
+
     fn with_client<T: Send>(
         &self,
         action: impl FnOnce(&mut PostgresClient) -> Result<T, postgres::Error> + Send,
@@ -1236,6 +1422,11 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "audit_events",
         "billing_metering_events",
         "usage_aggregates",
+        "tenant_contexts",
+        "metering_events",
+        "metering_event_routes",
+        "metering_event_usage",
+        "usage_aggregate_rollups",
         "storage_schema_migrations",
     ];
     for table in TABLES {
@@ -1256,8 +1447,6 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         ("agent_run_events", "event_json"),
         ("request_logs", "request_json"),
         ("audit_events", "audit_json"),
-        ("billing_metering_events", "event_json"),
-        ("usage_aggregates", "usage_json"),
     ];
     for (table, column) in JSONB_COLUMNS {
         let data_type = client
@@ -1285,6 +1474,10 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
         "idx_usage_aggregates_tenant_model_provider",
+        "idx_tenant_contexts_api_key",
+        "idx_metering_events_tenant_time",
+        "idx_metering_event_routes_model_provider",
+        "idx_usage_rollups_tenant_model_provider",
     ];
     for index in INDEXES {
         let count = client
@@ -1324,6 +1517,225 @@ fn fnv1a64_hex(input: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn nonnegative_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or_default()
+}
+
+fn tenant_storage_key(tenant: &TenantContext) -> String {
+    tenant_parts_storage_key(
+        tenant.organization_id.as_deref(),
+        tenant.team_id.as_deref(),
+        tenant.project_id.as_deref(),
+        tenant.user_id.as_deref(),
+        tenant.api_key_id.as_deref(),
+    )
+}
+
+fn tenant_parts_storage_key(
+    organization_id: Option<&str>,
+    team_id: Option<&str>,
+    project_id: Option<&str>,
+    user_id: Option<&str>,
+    api_key_id: Option<&str>,
+) -> String {
+    [
+        ("org", organization_id),
+        ("team", team_id),
+        ("project", project_id),
+        ("user", user_id),
+        ("api_key", api_key_id),
+    ]
+    .into_iter()
+    .map(|(name, value)| format!("{name}:{}", value.unwrap_or("")))
+    .collect::<Vec<_>>()
+    .join("|")
+}
+
+fn usage_aggregate_id(tenant: &TenantContext, logical_model: &str, provider: &str) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        tenant.organization_id.as_deref().unwrap_or("_"),
+        tenant.project_id.as_deref().unwrap_or("_"),
+        tenant.api_key_id.as_deref().unwrap_or("_"),
+        logical_model,
+        provider
+    )
+}
+
+fn upsert_tenant_context(
+    transaction: &mut PostgresTransaction<'_>,
+    id: &str,
+    tenant: &TenantContext,
+) -> Result<(), postgres::Error> {
+    upsert_tenant_context_parts(
+        transaction,
+        id,
+        tenant.organization_id.as_deref(),
+        tenant.team_id.as_deref(),
+        tenant.project_id.as_deref(),
+        tenant.user_id.as_deref(),
+        tenant.api_key_id.as_deref(),
+    )
+}
+
+fn upsert_tenant_context_parts(
+    transaction: &mut PostgresTransaction<'_>,
+    id: &str,
+    organization_id: Option<&str>,
+    team_id: Option<&str>,
+    project_id: Option<&str>,
+    user_id: Option<&str>,
+    api_key_id: Option<&str>,
+) -> Result<(), postgres::Error> {
+    transaction.execute(
+        "INSERT INTO tenant_contexts \
+         (id, organization_id, team_id, project_id, user_id, api_key_id) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         ON CONFLICT (id) DO NOTHING",
+        &[
+            &id,
+            &organization_id,
+            &team_id,
+            &project_id,
+            &user_id,
+            &api_key_id,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_usage_rollup_delta(
+    transaction: &mut PostgresTransaction<'_>,
+    rollup: &UsageRollupUpsert<'_>,
+) -> Result<(), postgres::Error> {
+    transaction.execute(
+        "INSERT INTO usage_aggregate_rollups \
+         (id, tenant_context_id, logical_model, provider, prompt_tokens, completion_tokens, \
+          total_tokens, updated_at_unix) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+         ON CONFLICT (id) DO UPDATE SET \
+         prompt_tokens = usage_aggregate_rollups.prompt_tokens + EXCLUDED.prompt_tokens, \
+         completion_tokens = usage_aggregate_rollups.completion_tokens + EXCLUDED.completion_tokens, \
+         total_tokens = usage_aggregate_rollups.total_tokens + EXCLUDED.total_tokens, \
+         updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
+        &[
+            &rollup.id,
+            &rollup.tenant_context_id,
+            &rollup.logical_model,
+            &rollup.provider,
+            &rollup.prompt_tokens,
+            &rollup.completion_tokens,
+            &rollup.total_tokens,
+        ],
+    )?;
+    Ok(())
+}
+
+fn replace_usage_rollup(
+    transaction: &mut PostgresTransaction<'_>,
+    rollup: &UsageRollupUpsert<'_>,
+) -> Result<(), postgres::Error> {
+    transaction.execute(
+        "INSERT INTO usage_aggregate_rollups \
+         (id, tenant_context_id, logical_model, provider, prompt_tokens, completion_tokens, \
+          total_tokens, updated_at_unix) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+         ON CONFLICT (id) DO UPDATE SET \
+         tenant_context_id = EXCLUDED.tenant_context_id, \
+         logical_model = EXCLUDED.logical_model, \
+         provider = EXCLUDED.provider, \
+         prompt_tokens = EXCLUDED.prompt_tokens, \
+         completion_tokens = EXCLUDED.completion_tokens, \
+         total_tokens = EXCLUDED.total_tokens, \
+         updated_at_unix = EXTRACT(EPOCH FROM NOW())::BIGINT",
+        &[
+            &rollup.id,
+            &rollup.tenant_context_id,
+            &rollup.logical_model,
+            &rollup.provider,
+            &rollup.prompt_tokens,
+            &rollup.completion_tokens,
+            &rollup.total_tokens,
+        ],
+    )?;
+    Ok(())
+}
+
+struct UsageRollupUpsert<'a> {
+    id: &'a str,
+    tenant_context_id: &'a str,
+    logical_model: &'a str,
+    provider: &'a str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+}
+
+fn billing_event_from_row(row: PostgresRow) -> BillingEvent {
+    BillingEvent {
+        request_id: row.get(0),
+        trace_id: row.get(1),
+        agent_run_id: row.get(2),
+        workflow_id: row.get(3),
+        workflow_version: row.get::<_, Option<i32>>(4).map(|value| value as u32),
+        workflow_node_id: row.get(5),
+        cluster_id: row.get(6),
+        node_id: row.get(7),
+        status_code: row.get::<_, i32>(8).clamp(0, i32::from(u16::MAX)) as u16,
+        occurred_at_unix: Some(nonnegative_u64(row.get(9))),
+        tenant: TenantContext {
+            organization_id: row.get(10),
+            team_id: row.get(11),
+            project_id: row.get(12),
+            user_id: row.get(13),
+            api_key_id: row.get(14),
+        },
+        logical_model: row.get(15),
+        provider: row.get(16),
+        provider_model: row.get(17),
+        usage: TokenUsage {
+            prompt_tokens: nonnegative_u64(row.get(18)),
+            completion_tokens: nonnegative_u64(row.get(19)),
+            total_tokens: nonnegative_u64(row.get(20)),
+        },
+        usage_source: billing_usage_source_from_str(row.get::<_, String>(21).as_str()),
+    }
+}
+
+fn usage_aggregate_from_row(row: PostgresRow) -> StoredUsageAggregate {
+    StoredUsageAggregate {
+        id: row.get(0),
+        organization_id: row.get(1),
+        project_id: row.get(2),
+        api_key_id: row.get(3),
+        logical_model: row.get(4),
+        provider: row.get(5),
+        usage: TokenUsage {
+            prompt_tokens: nonnegative_u64(row.get(6)),
+            completion_tokens: nonnegative_u64(row.get(7)),
+            total_tokens: nonnegative_u64(row.get(8)),
+        },
+    }
+}
+
+fn billing_usage_source_from_str(value: &str) -> ferrogate_billing::BillingUsageSource {
+    match value {
+        "gateway_estimate" => ferrogate_billing::BillingUsageSource::GatewayEstimate,
+        _ => ferrogate_billing::BillingUsageSource::ProviderUsage,
+    }
 }
 
 async fn build_libsql_database(
@@ -2736,6 +3148,71 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    pub fn append_billing_event(&self, event: BillingEvent) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.append_billing_event(&event)
+            }
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => {
+                self.upsert_in_memory_usage_aggregate(&event);
+                Ok(true)
+            }
+        }
+    }
+
+    fn upsert_in_memory_usage_aggregate(&self, event: &BillingEvent) {
+        if let Ok(mut aggregates) = self.usage_aggregates.lock() {
+            let id = usage_aggregate_id(&event.tenant, &event.logical_model, &event.provider);
+            let existing = aggregates.get(&id);
+            let mut aggregate = existing.unwrap_or_else(|| StoredUsageAggregate {
+                id: id.clone(),
+                organization_id: event.tenant.organization_id.clone(),
+                project_id: event.tenant.project_id.clone(),
+                api_key_id: event.tenant.api_key_id.clone(),
+                logical_model: event.logical_model.clone(),
+                provider: event.provider.clone(),
+                usage: TokenUsage::default(),
+            });
+            aggregate.usage.prompt_tokens = aggregate
+                .usage
+                .prompt_tokens
+                .saturating_add(event.usage.prompt_tokens);
+            aggregate.usage.completion_tokens = aggregate
+                .usage
+                .completion_tokens
+                .saturating_add(event.usage.completion_tokens);
+            aggregate.usage.total_tokens = aggregate
+                .usage
+                .total_tokens
+                .saturating_add(event.usage.total_tokens);
+            aggregates.insert(id, aggregate);
+        }
+    }
+
+    pub fn billing_events(&self) -> Vec<BillingEvent> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.billing_events().unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => Vec::new(),
+        }
+    }
+
+    pub fn billing_events_page(&self, offset: usize, limit: usize) -> StoragePage<BillingEvent> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .billing_events_page(offset, limit)
+                .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => StoragePage::empty(offset, limit),
+        }
+    }
+
     pub fn request_logs(&self) -> Vec<StoredRequestLog> {
         self.request_logs
             .lock()
@@ -2791,19 +3268,37 @@ impl RuntimeStorageRepositories {
         &self,
         id: impl Into<String>,
         build: impl FnOnce(Option<StoredUsageAggregate>) -> StoredUsageAggregate,
-    ) {
-        if let Ok(mut aggregates) = self.usage_aggregates.lock() {
-            let id = id.into();
+    ) -> Result<(), StorageError> {
+        let id = id.into();
+        let aggregate = if let Ok(mut aggregates) = self.usage_aggregates.lock() {
             let existing = aggregates.get(&id);
-            aggregates.insert(id, build(existing));
+            let aggregate = build(existing);
+            aggregates.insert(id, aggregate.clone());
+            aggregate
+        } else {
+            return Err(StorageError::Serialization(
+                "usage aggregate repository lock poisoned".into(),
+            ));
+        };
+        if let RuntimeControlPlaneBackend::Postgres(control_plane) = &self.control_plane {
+            control_plane.upsert_usage_aggregate(&aggregate)?;
         }
+        Ok(())
     }
 
     pub fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
-        self.usage_aggregates
-            .lock()
-            .map(|aggregates| aggregates.list())
-            .unwrap_or_default()
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.usage_aggregates().unwrap_or_default()
+            }
+            RuntimeControlPlaneBackend::Memory(_)
+            | RuntimeControlPlaneBackend::Libsql(_)
+            | RuntimeControlPlaneBackend::Mysql(_) => self
+                .usage_aggregates
+                .lock()
+                .map(|aggregates| aggregates.list())
+                .unwrap_or_default(),
+        }
     }
 
     pub fn upsert_agent_run(&self, run: StoredAgentRun) -> Result<(), StorageError> {
@@ -3526,8 +4021,8 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.data[0].request_id, "fg-2");
 
-        repositories.upsert_usage_aggregate("org:project:fast-chat:openai", |_| {
-            StoredUsageAggregate {
+        repositories
+            .upsert_usage_aggregate("org:project:fast-chat:openai", |_| StoredUsageAggregate {
                 id: "org:project:fast-chat:openai".into(),
                 organization_id: Some("org".into()),
                 project_id: Some("project".into()),
@@ -3535,8 +4030,8 @@ mod tests {
                 logical_model: "fast-chat".into(),
                 provider: "openai".into(),
                 usage: TokenUsage::new(1, 2, 3),
-            }
-        });
+            })
+            .unwrap();
         assert_eq!(repositories.usage_aggregates()[0].usage.total_tokens, 3);
     }
 

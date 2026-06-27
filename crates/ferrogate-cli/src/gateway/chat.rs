@@ -1127,6 +1127,15 @@ impl FerroGateway {
                                     error_code = %error.code,
                                     "billing event write failed"
                                 );
+                                write_json_error(
+                                    session,
+                                    StatusCode::BAD_GATEWAY,
+                                    error.code,
+                                    error.message,
+                                    &ctx.request_id,
+                                )
+                                .await?;
+                                return Ok(());
                             }
                         } else if let Err(error) = state.record_estimated_billing_event(
                             &policy_request,
@@ -1144,6 +1153,15 @@ impl FerroGateway {
                                 error_code = %error.code,
                                 "estimated billing event write failed"
                             );
+                            write_json_error(
+                                session,
+                                StatusCode::BAD_GATEWAY,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await?;
+                            return Ok(());
                         }
                         if let Some(reservation) = token_reservation.take() {
                             reservation.settle();

@@ -44,8 +44,8 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
-            );
+            "local: admin-api, auth-api, gateway-api, ci, libsql-file-restart, libsql-server-restart, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart, turso-libsql-restart (opt-in)"
+        );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
         }
@@ -69,6 +69,7 @@ fn main() -> Result<()> {
         Commands::SupabaseRestart(args) => run_supabase_restart(&args),
         Commands::SupabaseLiveSmoke(args) => run_supabase_live_smoke(&args),
         Commands::SupabaseLiveRestart(args) => run_supabase_live_restart(&args),
+        Commands::SupabaseLiveToken4aiProvider(args) => run_supabase_live_token4ai_provider(&args),
         Commands::PostgresRestart(args) => run_postgres_restart(&args),
         Commands::PostgresTlsRestart(args) => run_postgres_tls_restart(&args),
         Commands::MysqlRestart(args) => run_mysql_restart(&args),
@@ -138,6 +139,8 @@ enum Commands {
     SupabaseLiveSmoke(SupabaseLiveRestartArgs),
     /// Opt-in live Supabase restart durability scenario.
     SupabaseLiveRestart(SupabaseLiveRestartArgs),
+    /// Opt-in live Supabase and Token4AI OpenAI-compatible provider billing scenario.
+    SupabaseLiveToken4aiProvider(SupabaseLiveToken4aiProviderArgs),
     /// Run local Docker-backed PostgreSQL restart durability coverage.
     PostgresRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
@@ -234,6 +237,29 @@ struct SupabaseLiveRestartArgs {
     /// Optional root CA path for private CA deployments.
     #[arg(long, env = "FERROGATE_SUPABASE_TLS_CA_CERT_PATH")]
     tls_ca_cert_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SupabaseLiveToken4aiProviderArgs {
+    #[command(flatten)]
+    supabase: SupabaseLiveRestartArgs,
+    /// OpenAI-compatible provider base URL for Token4AI AI Gateway.
+    #[arg(
+        long,
+        env = "FERROGATE_TOKEN4AI_OPENAI_BASE_URL",
+        default_value = "https://api.token4ai.cloud/v1"
+    )]
+    provider_base_url: String,
+    /// Provider API key. Prefer FERROGATE_TOKEN4AI_OPENAI_API_KEY in shell/CI.
+    #[arg(long, env = "FERROGATE_TOKEN4AI_OPENAI_API_KEY")]
+    provider_api_key: String,
+    /// Live model to call through the Token4AI OpenAI-compatible API.
+    #[arg(
+        long,
+        env = "FERROGATE_TOKEN4AI_OPENAI_MODEL",
+        default_value = "gpt-4o-mini"
+    )]
+    provider_model: String,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -2301,6 +2327,7 @@ fn expect_supabase_validate_only_schema_failure(
             false,
             false,
             StorageMigrationMode::ValidateOnly,
+            None,
         ),
     )?;
 
@@ -2413,6 +2440,7 @@ fn run_supabase_live_smoke(args: &SupabaseLiveRestartArgs) -> Result<()> {
             false,
             false,
             StorageMigrationMode::ValidateOnly,
+            None,
         )?;
         case.expect_storage_status()?;
         case.expect_api_key_named(&resource_id, "Supabase live smoke key")?;
@@ -2430,6 +2458,67 @@ fn run_supabase_live_smoke(args: &SupabaseLiveRestartArgs) -> Result<()> {
     }
 
     println!("supabase-live-smoke scenario passed");
+    Ok(())
+}
+
+fn run_supabase_live_token4ai_provider(args: &SupabaseLiveToken4aiProviderArgs) -> Result<()> {
+    let dsn = args.supabase.supabase_dsn.trim();
+    if dsn.is_empty() {
+        bail!("--supabase-dsn must not be empty");
+    }
+    let provider_api_key = args.provider_api_key.trim();
+    if provider_api_key.is_empty() {
+        bail!("--provider-api-key must not be empty");
+    }
+    let provider_base_url = args.provider_base_url.trim();
+    if provider_base_url.is_empty() {
+        bail!("--provider-base-url must not be empty");
+    }
+    let provider_model = args.provider_model.trim();
+    if provider_model.is_empty() {
+        bail!("--provider-model must not be empty");
+    }
+
+    let tls = PostgresRestartTls {
+        mode: supabase_live_tls_mode(&args.supabase.tls_mode)?,
+        ca_cert_path: args.supabase.tls_ca_cert_path.as_deref(),
+    };
+    let resource_id = format!(
+        "ferrogate-token4ai-live-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before UNIX epoch")?
+            .as_millis()
+    );
+    let storage = ControlPlaneRestartStorage::Supabase { dsn, tls };
+
+    {
+        let case = TursoRestartHarness::start_live_token4ai_provider(
+            &args.supabase.local.ferrogate_bin,
+            storage,
+            provider_base_url,
+            provider_model,
+            provider_api_key,
+        )?;
+        case.expect_storage_status()?;
+        case.expect_live_token4ai_completion(&resource_id, provider_model)?;
+        case.expect_live_token4ai_metering_usage(&resource_id, provider_model)?;
+    }
+
+    {
+        let case = TursoRestartHarness::start_live_token4ai_provider_with_migration_mode(
+            &args.supabase.local.ferrogate_bin,
+            storage,
+            provider_base_url,
+            provider_model,
+            provider_api_key,
+            StorageMigrationMode::ValidateOnly,
+        )?;
+        case.expect_storage_status()?;
+        case.expect_live_token4ai_metering_usage(&resource_id, provider_model)?;
+    }
+
+    println!("supabase-live-token4ai-provider scenario passed");
     Ok(())
 }
 
@@ -2899,12 +2988,16 @@ fn run_control_plane_restart(
     }
 
     {
+        let (provider_addr, provider) =
+            spawn_local_provider_upstream(1).context("start durable metering provider")?;
+        let provider_base_url = format!("http://{provider_addr}/v1");
         let case = TursoRestartHarness::start_with_migration_mode(
             ferrogate_bin,
             storage,
             false,
             false,
             StorageMigrationMode::ValidateOnly,
+            Some(&provider_base_url),
         )?;
         case.expect_storage_status()?;
         case.expect_plugin("tool.echo")?;
@@ -2918,7 +3011,15 @@ fn run_control_plane_restart(
         case.expect_agent_upstream(&agent_upstream_id, true)?;
         case.expect_restored_prompt_template_render(&resource_id, &prompt_template_id)?;
         case.expect_restored_api_key_models_access(&resource_id)?;
-        case.expect_restored_gateway_config_selected(&resource_id, &gateway_config_id)?;
+        case.expect_metered_chat_completion(&resource_id, &gateway_config_id)?;
+        let provider_requests = provider.join().unwrap_or_default();
+        if !provider_requests
+            .iter()
+            .any(|request| request.contains("POST /v1/chat/completions "))
+        {
+            bail!("durable metering provider did not receive chat completion request");
+        }
+        case.expect_durable_metering_usage(&resource_id, 2)?;
         case.expect_json(
             "PATCH",
             &format!("/admin/v1/policies/{policy_name}"),
@@ -2998,6 +3099,7 @@ fn run_control_plane_restart(
             false,
             false,
             StorageMigrationMode::ValidateOnly,
+            None,
         )?;
         case.expect_storage_status()?;
         case.expect_plugin("tool.echo")?;
@@ -3008,6 +3110,7 @@ fn run_control_plane_restart(
             case.expect_missing_gateway_config(&gateway_config_id)?;
             case.expect_missing_policy(&policy_name)?;
         }
+        case.expect_durable_metering_usage(&resource_id, 2)?;
         case.expect_prompt_template(&prompt_template_id, "archived")?;
         case.expect_missing_agent_upstream(&agent_upstream_id)?;
     }
@@ -3185,6 +3288,7 @@ impl TursoRestartHarness {
             include_plugins,
             include_mcp_server,
             StorageMigrationMode::Auto,
+            None,
         )
     }
 
@@ -3194,6 +3298,7 @@ impl TursoRestartHarness {
         include_plugins: bool,
         include_mcp_server: bool,
         migration_mode: StorageMigrationMode,
+        provider_base_url: Option<&str>,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
@@ -3212,6 +3317,7 @@ impl TursoRestartHarness {
                 include_plugins,
                 include_mcp_server,
                 migration_mode,
+                provider_base_url,
             ),
         )?;
 
@@ -3220,6 +3326,81 @@ impl TursoRestartHarness {
             .args(["run", "--config"])
             .arg(&config_path)
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null());
+        if env::var("FERROGATE_TEST_DEBUG_STDERR").is_ok_and(|value| value == "1") {
+            command.stderr(Stdio::inherit());
+        } else {
+            command.stderr(Stdio::piped());
+        }
+        storage.apply_env(&mut command);
+        let gateway = command
+            .spawn()
+            .with_context(|| format!("failed to start {}", ferrogate_bin.display()))?;
+
+        let mut harness = Self {
+            _dir: dir,
+            gateway_addr,
+            gateway,
+            stderr: None,
+            expected_storage_provider: storage.provider_name(),
+            expected_migration_mode: migration_mode,
+        };
+        harness.stderr = harness.gateway.stderr.take();
+        harness.wait_for_gateway()?;
+        Ok(harness)
+    }
+
+    fn start_live_token4ai_provider(
+        ferrogate_bin: &Path,
+        storage: ControlPlaneRestartStorage<'_>,
+        provider_base_url: &str,
+        provider_model: &str,
+        provider_api_key: &str,
+    ) -> Result<Self> {
+        Self::start_live_token4ai_provider_with_migration_mode(
+            ferrogate_bin,
+            storage,
+            provider_base_url,
+            provider_model,
+            provider_api_key,
+            StorageMigrationMode::Auto,
+        )
+    }
+
+    fn start_live_token4ai_provider_with_migration_mode(
+        ferrogate_bin: &Path,
+        storage: ControlPlaneRestartStorage<'_>,
+        provider_base_url: &str,
+        provider_model: &str,
+        provider_api_key: &str,
+        migration_mode: StorageMigrationMode,
+    ) -> Result<Self> {
+        if !ferrogate_bin.exists() {
+            bail!(
+                "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
+                ferrogate_bin.display()
+            );
+        }
+
+        let gateway_addr = free_addr()?;
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("ferrogate-token4ai-live.yaml");
+        std::fs::write(
+            &config_path,
+            storage.live_token4ai_provider_config(
+                &gateway_addr,
+                provider_base_url,
+                provider_model,
+                migration_mode,
+            ),
+        )?;
+
+        let mut command = Command::new(ferrogate_bin);
+        command
+            .args(["run", "--config"])
+            .arg(&config_path)
+            .env("FERROGATE_PROVIDER_SECRET", provider_api_key)
             .stdin(Stdio::null())
             .stdout(Stdio::null());
         if env::var("FERROGATE_TEST_DEBUG_STDERR").is_ok_and(|value| value == "1") {
@@ -3325,10 +3506,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][3], "mysql");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 2);
+                assert_eq!(body["storage"]["schema"]["version"], 3);
                 assert_eq!(
                     body["storage"]["schema"]["name"],
-                    "002_supabase_control_plane_billing_evidence"
+                    "003_supabase_structured_metering_usage"
                 );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]
@@ -3393,29 +3574,204 @@ impl TursoRestartHarness {
         )
     }
 
-    fn expect_restored_gateway_config_selected(
-        &self,
-        api_key_id: &str,
-        profile_id: &str,
-    ) -> Result<()> {
+    fn expect_metered_chat_completion(&self, api_key_id: &str, profile_id: &str) -> Result<()> {
         let auth = format!("Authorization: Bearer {api_key_id}-secret");
         let profile = format!("x-ferrogate-config: {profile_id}");
         self.expect_json(
             "POST",
             "/v1/chat/completions",
             &[auth.as_str(), JSON_CONTENT, profile.as_str()],
-            r#"{"model":"fast-chat","messages":[{"role":"user","content":"durable gateway config check"}]}"#,
-            502,
+            r#"{"model":"fast-chat","messages":[{"role":"user","content":"durable metering check"}]}"#,
+            200,
             |body| {
-                assert_eq!(body["error"]["code"], "provider_dispatch_error");
-                let rendered = body.to_string();
-                assert!(!rendered.contains("gateway_config_not_found"), "{rendered}");
-                assert!(!rendered.contains("gateway_config_not_allowed"), "{rendered}");
-                assert!(!rendered.contains("invalid_api_key"), "{rendered}");
-                assert_secret_redacted(&rendered);
+                assert_eq!(body["object"], "chat.completion");
+                assert_eq!(body["usage"]["total_tokens"], 2);
+                assert_secret_redacted(&body.to_string());
                 Ok(())
             },
         )
+    }
+
+    fn expect_durable_metering_usage(&self, api_key_id: &str, expected_total: u64) -> Result<()> {
+        self.expect_json(
+            "GET",
+            "/admin/v1/metering-events?limit=100",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let events = body["data"]
+                    .as_array()
+                    .context("metering events response data must be an array")?;
+                let event = events
+                    .iter()
+                    .find(|event| {
+                        event["tenant"]["api_key_id"] == api_key_id
+                            && event["logical_model"] == "fast-chat"
+                            && event["provider"] == "openai"
+                    })
+                    .with_context(|| {
+                        format!("durable metering event for API key {api_key_id} was not found")
+                    })?;
+                assert_eq!(event["usage_source"], "provider_usage");
+                assert_eq!(event["usage"]["total_tokens"], expected_total);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+
+        self.expect_json(
+            "GET",
+            "/admin/v1/usage-aggregates",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let aggregates = body["data"]
+                    .as_array()
+                    .context("usage aggregates response data must be an array")?;
+                let aggregate = aggregates
+                    .iter()
+                    .find(|aggregate| {
+                        aggregate["api_key_id"] == api_key_id
+                            && aggregate["logical_model"] == "fast-chat"
+                            && aggregate["provider"] == "openai"
+                    })
+                    .with_context(|| {
+                        format!(
+                            "durable usage aggregate for API key {api_key_id} was not found in {body}"
+                        )
+                    })?;
+                assert_eq!(aggregate["usage"]["total_tokens"], expected_total);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_live_token4ai_completion(
+        &self,
+        request_marker: &str,
+        provider_model: &str,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "model": "live-chat",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": format!("Reply with exactly: ok. Marker: {request_marker}")
+                }
+            ],
+            "max_tokens": 64
+        })
+        .to_string();
+        self.expect_json(
+            "POST",
+            "/v1/chat/completions",
+            &[CLIENT_AUTH, JSON_CONTENT],
+            &body,
+            200,
+            |body| {
+                assert_eq!(body["object"], "chat.completion");
+                assert!(
+                    body["usage"]["total_tokens"].as_u64().unwrap_or_default() > 0,
+                    "provider usage total_tokens must be positive: {body}"
+                );
+                assert_secret_redacted(&body.to_string());
+                if let Some(model) = body["model"].as_str() {
+                    assert!(
+                        !model.trim().is_empty(),
+                        "provider response model must not be empty"
+                    );
+                } else {
+                    assert!(
+                        !provider_model.trim().is_empty(),
+                        "configured provider model must not be empty"
+                    );
+                }
+                Ok(())
+            },
+        )
+    }
+
+    fn expect_live_token4ai_metering_usage(
+        &self,
+        request_marker: &str,
+        provider_model: &str,
+    ) -> Result<()> {
+        let event_total = self.live_token4ai_metering_total(request_marker, provider_model)?;
+        if event_total == 0 {
+            bail!("live Token4AI metering total_tokens must be positive");
+        }
+
+        self.expect_json(
+            "GET",
+            "/admin/v1/usage-aggregates",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let aggregates = body["data"]
+                    .as_array()
+                    .context("usage aggregates response data must be an array")?;
+                let aggregate = aggregates
+                    .iter()
+                    .find(|aggregate| {
+                        aggregate["api_key_id"] == "client"
+                            && aggregate["logical_model"] == "live-chat"
+                            && aggregate["provider"] == "token4ai"
+                    })
+                    .with_context(|| {
+                        format!(
+                            "live Token4AI usage aggregate for marker {request_marker} was not found in {body}"
+                        )
+                    })?;
+                assert_eq!(aggregate["usage"]["total_tokens"], event_total);
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )
+    }
+
+    fn live_token4ai_metering_total(
+        &self,
+        request_marker: &str,
+        provider_model: &str,
+    ) -> Result<u64> {
+        let mut total = 0;
+        self.expect_json(
+            "GET",
+            "/admin/v1/metering-events?limit=100",
+            &[ADMIN_AUTH],
+            "",
+            200,
+            |body| {
+                let events = body["data"]
+                    .as_array()
+                    .context("metering events response data must be an array")?;
+                let event = events
+                    .iter()
+                    .rev()
+                    .find(|event| {
+                        event["tenant"]["api_key_id"] == "client"
+                            && event["logical_model"] == "live-chat"
+                            && event["provider"] == "token4ai"
+                    })
+                    .with_context(|| {
+                        format!(
+                            "live Token4AI metering event for marker {request_marker} was not found in {body}"
+                        )
+                    })?;
+                assert_eq!(event["provider_model"], provider_model);
+                assert_eq!(event["usage_source"], "provider_usage");
+                total = event["usage"]["total_tokens"]
+                    .as_u64()
+                    .context("metering event usage.total_tokens must be an integer")?;
+                assert_secret_redacted(&body.to_string());
+                Ok(())
+            },
+        )?;
+        Ok(total)
     }
 
     fn expect_policy(&self, name: &str) -> Result<()> {
@@ -4603,6 +4959,7 @@ impl ControlPlaneRestartStorage<'_> {
         include_plugins: bool,
         include_mcp_server: bool,
         migration_mode: StorageMigrationMode,
+        provider_base_url: Option<&str>,
     ) -> String {
         let plugins = if include_plugins {
             r#"
@@ -4638,6 +4995,7 @@ mcp_servers:
         } else {
             ""
         };
+        let provider_base_url = provider_base_url.unwrap_or("http://127.0.0.1:1/v1");
         format!(
             r#"
 listen: "{gateway_addr}"
@@ -4650,7 +5008,7 @@ reliability:
 providers:
   - name: openai
     kind: openai
-    base_url: "http://127.0.0.1:1/v1"
+    base_url: "{provider_base_url}"
     api_key_env: FERROGATE_PROVIDER_SECRET
 
 models:
@@ -4672,7 +5030,58 @@ api_keys:
 {plugins}
 {mcp_server}
 "#,
-            storage = self.storage_block_with_migration_mode(migration_mode)
+            storage = self.storage_block_with_migration_mode(migration_mode),
+            provider_base_url = provider_base_url
+        )
+    }
+
+    fn live_token4ai_provider_config(
+        self,
+        gateway_addr: &str,
+        provider_base_url: &str,
+        provider_model: &str,
+        migration_mode: StorageMigrationMode,
+    ) -> String {
+        format!(
+            r#"
+listen: "{gateway_addr}"
+
+{storage}
+
+providers:
+  - name: token4ai
+    kind: openai
+    base_url: "{provider_base_url}"
+    api_key_env: FERROGATE_PROVIDER_SECRET
+
+models:
+  - name: live-chat
+    provider: token4ai
+    provider_model: "{provider_model}"
+    capabilities:
+      - chat
+
+api_keys:
+  - id: client
+    name: Live Token4AI client
+    key: client-secret
+    scopes:
+      - models.read
+      - chat.completions
+    allowed_models:
+      - live-chat
+    organization_id: org_token4ai_live
+    project_id: project_gateway
+  - id: admin
+    name: Admin
+    key: admin-secret
+    scopes:
+      - admin.read
+      - admin.write
+"#,
+            storage = self.storage_block_with_migration_mode(migration_mode),
+            provider_base_url = provider_base_url,
+            provider_model = provider_model,
         )
     }
 }
@@ -7291,6 +7700,11 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "audit_events",
         "billing_metering_events",
         "usage_aggregates",
+        "tenant_contexts",
+        "metering_events",
+        "metering_event_routes",
+        "metering_event_usage",
+        "usage_aggregate_rollups",
         "storage_schema_migrations",
     ];
     for table in expected_tables {
@@ -7311,8 +7725,6 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         ("agent_run_events", "event_json"),
         ("request_logs", "request_json"),
         ("audit_events", "audit_json"),
-        ("billing_metering_events", "event_json"),
-        ("usage_aggregates", "usage_json"),
     ];
     for (table, column) in jsonb_columns {
         let data_type = postgres_scalar(&format!(
@@ -7335,6 +7747,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
         "idx_usage_aggregates_tenant_model_provider",
+        "idx_tenant_contexts_api_key",
+        "idx_metering_events_tenant_time",
+        "idx_metering_event_routes_model_provider",
+        "idx_usage_rollups_tenant_model_provider",
     ];
     for index in expected_indexes {
         let count = postgres_scalar(&format!(
@@ -7351,11 +7767,11 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
     let migration_versions = postgres_scalar(&format!(
         "SELECT string_agg(version::text || ':' || name, ',' ORDER BY version) \
          FROM {}.storage_schema_migrations \
-         WHERE version IN (1, 2)",
+         WHERE version IN (1, 2, 3)",
         quote_ident(schema)
     ))?;
     if migration_versions.trim()
-        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence"
+        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence,3:003_supabase_structured_metering_usage"
     {
         bail!("unexpected Supabase migration versions: {migration_versions}");
     }

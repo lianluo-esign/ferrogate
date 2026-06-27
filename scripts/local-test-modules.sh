@@ -133,6 +133,11 @@ run_supabase_storage() {
       args+=(--tls-ca-cert-path "$FERROGATE_SUPABASE_TLS_CA_CERT_PATH")
     fi
     ./target/debug/ferrogate-test supabase-live-smoke "${args[@]}"
+    if [[ -n "${FERROGATE_TOKEN4AI_OPENAI_API_KEY:-}" ]]; then
+      ./target/debug/ferrogate-test supabase-live-token4ai-provider "${args[@]}"
+    else
+      echo "FERROGATE_TOKEN4AI_OPENAI_API_KEY is not configured; skipping optional live Token4AI provider billing scenario."
+    fi
   else
     echo "FERROGATE_SUPABASE_DSN is not configured; skipping optional live Supabase restart scenario."
   fi

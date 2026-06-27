@@ -60,6 +60,7 @@ jobs:
       supabase_dsn: ${{ secrets.FERROGATE_SUPABASE_DSN }}
       supabase_tls_ca_cert: ${{ secrets.FERROGATE_SUPABASE_TLS_CA_CERT }}
       supabase_tls_mode: ${{ secrets.FERROGATE_SUPABASE_TLS_MODE }}
+      token4ai_openai_api_key: ${{ secrets.FERROGATE_TOKEN4AI_OPENAI_API_KEY }}
 
   rust-ci:
     name: rust-ci

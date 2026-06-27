@@ -215,6 +215,73 @@ CREATE INDEX IF NOT EXISTS idx_usage_aggregates_api_key_model_provider
 CREATE INDEX IF NOT EXISTS idx_usage_aggregates_tenant_model_provider
     ON usage_aggregates(tenant, logical_model, provider);
 
+CREATE TABLE IF NOT EXISTS tenant_contexts (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT,
+    team_id TEXT,
+    project_id TEXT,
+    user_id TEXT,
+    api_key_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_contexts_org_project
+    ON tenant_contexts(organization_id, project_id);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_contexts_api_key
+    ON tenant_contexts(api_key_id);
+
+CREATE TABLE IF NOT EXISTS metering_events (
+    request_id TEXT PRIMARY KEY,
+    tenant_context_id TEXT NOT NULL REFERENCES tenant_contexts(id),
+    trace_id TEXT,
+    agent_run_id TEXT,
+    workflow_id TEXT,
+    workflow_version INTEGER,
+    workflow_node_id TEXT,
+    cluster_id TEXT,
+    node_id TEXT,
+    status_code INTEGER NOT NULL,
+    occurred_at_unix BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_metering_events_tenant_time
+    ON metering_events(tenant_context_id, occurred_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_metering_events_trace
+    ON metering_events(trace_id);
+
+CREATE TABLE IF NOT EXISTS metering_event_routes (
+    request_id TEXT PRIMARY KEY REFERENCES metering_events(request_id) ON DELETE CASCADE,
+    logical_model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_model TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_metering_event_routes_model_provider
+    ON metering_event_routes(logical_model, provider);
+
+CREATE TABLE IF NOT EXISTS metering_event_usage (
+    request_id TEXT PRIMARY KEY REFERENCES metering_events(request_id) ON DELETE CASCADE,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    usage_source TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_aggregate_rollups (
+    id TEXT PRIMARY KEY,
+    tenant_context_id TEXT NOT NULL REFERENCES tenant_contexts(id),
+    logical_model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_rollups_tenant_model_provider
+    ON usage_aggregate_rollups(tenant_context_id, logical_model, provider);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -232,5 +299,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (2, '002_supabase_control_plane_billing_evidence')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (3, '003_supabase_structured_metering_usage')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

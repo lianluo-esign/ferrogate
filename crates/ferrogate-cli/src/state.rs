@@ -3800,16 +3800,22 @@ impl AppState {
             occurred_at_unix: None,
         };
         self.metering_events.record(event.clone())?;
+        let recorded = self
+            .repositories
+            .append_billing_event(event.clone())
+            .map_err(|error| {
+                ferrogate_billing::BillingError::new(
+                    "billing_persistence_failed",
+                    format!("failed to persist billing event: {error}"),
+                )
+            })?;
+        if !recorded {
+            return Ok(());
+        }
         self.record_billing_metrics(&event);
         if let Some(exporter) = &self.metering_exporter {
             exporter.export_event(event.clone());
         }
-        self.record_usage_aggregate(
-            &draft.request.tenant,
-            draft.logical_model,
-            draft.provider,
-            &usage,
-        );
         if let Some(api_key_id) = &draft.request.tenant.api_key_id {
             if let Err(error) = self
                 .cluster_counters
@@ -3828,13 +3834,30 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn billing_events(&self) -> Vec<BillingEvent> {
-        self.metering_events.list()
+        let persisted = self.repositories.billing_events();
+        if persisted.is_empty() {
+            self.metering_events.list()
+        } else {
+            persisted
+        }
     }
 
     pub(crate) fn metering_events_page(
         &self,
         pagination: AdminPagination,
     ) -> AdminPage<BillingEvent> {
+        let page = self
+            .repositories
+            .billing_events_page(pagination.offset, pagination.limit);
+        if page.total > 0 || !page.data.is_empty() {
+            return AdminPage {
+                data: page.data,
+                total: page.total,
+                offset: page.offset,
+                limit: page.limit,
+            };
+        }
+
         AdminPage {
             data: self
                 .metering_events
@@ -3854,32 +3877,6 @@ impl AppState {
 
     pub(crate) fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
         self.repositories.usage_aggregates()
-    }
-
-    fn record_usage_aggregate(
-        &self,
-        tenant: &ferrogate_core::TenantContext,
-        logical_model: &str,
-        provider: &str,
-        usage: &BillingTokenUsage,
-    ) {
-        let id = usage_aggregate_id(tenant, logical_model, provider);
-        self.repositories
-            .upsert_usage_aggregate(id.clone(), |existing| {
-                let mut aggregate = existing.unwrap_or_else(|| StoredUsageAggregate {
-                    id: id.clone(),
-                    organization_id: tenant.organization_id.clone(),
-                    project_id: tenant.project_id.clone(),
-                    api_key_id: tenant.api_key_id.clone(),
-                    logical_model: logical_model.to_string(),
-                    provider: provider.to_string(),
-                    usage: BillingTokenUsage::default(),
-                });
-                aggregate.usage.prompt_tokens += usage.prompt_tokens;
-                aggregate.usage.completion_tokens += usage.completion_tokens;
-                aggregate.usage.total_tokens += usage.total_tokens;
-                aggregate
-            });
     }
 
     pub(crate) fn record_request_log(&self, mut log: StoredRequestLog) {
@@ -5468,21 +5465,6 @@ fn resolve_cluster_node_id(configured: &str) -> String {
                 .filter(|value| !value.trim().is_empty())
         })
         .unwrap_or_else(|| format!("ferrogate-{}", std::process::id()))
-}
-
-fn usage_aggregate_id(
-    tenant: &ferrogate_core::TenantContext,
-    logical_model: &str,
-    provider: &str,
-) -> String {
-    format!(
-        "{}:{}:{}:{}:{}",
-        tenant.organization_id.as_deref().unwrap_or("_"),
-        tenant.project_id.as_deref().unwrap_or("_"),
-        tenant.api_key_id.as_deref().unwrap_or("_"),
-        logical_model,
-        provider
-    )
 }
 
 fn now_unix_seconds() -> Option<u64> {

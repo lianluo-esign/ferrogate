@@ -182,11 +182,28 @@ Supabase table ownership:
 - `audit_events`: operator- and runtime-visible security decisions including
   policy, tool, MCP, and Admin API mutations.
 - `billing_metering_events`: one row per metered gateway request with
-  tenant/model/provider token usage and usage-source evidence.
-- `usage_aggregates`: queryable rollups by organization, project, API key,
-  tenant, logical model, and provider.
+  tenant/model/provider token usage and usage-source evidence. This v2 table is
+  kept for migration compatibility.
+- `usage_aggregates`: compatibility rollups by organization, project, API key,
+  tenant, logical model, and provider. This v2 table is kept for migration
+  compatibility.
+- `tenant_contexts`: compact tenant dimension records reused by structured
+  metering and usage rollups.
+- `metering_events`, `metering_event_routes`, and `metering_event_usage`:
+  normalized v3 metering evidence. FerroGate writes one event row per request
+  and joins route plus token usage tables for Admin API reads, avoiding JSON
+  blobs for billing facts.
+- `usage_aggregate_rollups`: normalized v3 usage rollups keyed by tenant
+  context, logical model, and provider. Token counters are updated
+  incrementally from accepted metering events.
 - `storage_schema_migrations`: applied schema versions and migration names used
   by local validation and future admin status evidence.
+
+The schema is intentionally incremental: v3 adds structured billing/usage
+tables without dropping the older v2 compatibility tables. Document-style JSONB
+is reserved for control-plane resources and runtime evidence documents; billing
+facts use relational columns and joins so operators can query them directly in
+Supabase.
 
 Retention expectations:
 
@@ -392,6 +409,22 @@ Admin API:
 FERROGATE_SUPABASE_DSN="postgresql://..." \
 ./target/debug/ferrogate-test supabase-live-smoke
 ```
+
+For live model-provider billing coverage, the harness can route a real
+OpenAI-compatible chat completion through Token4AI AI Gateway and verify that
+provider-reported token usage is persisted to Supabase metering and usage
+rollup tables before and after a `validate_only` restart:
+
+```bash
+FERROGATE_SUPABASE_DSN="postgresql://..." \
+FERROGATE_TOKEN4AI_OPENAI_API_KEY="..." \
+./target/debug/ferrogate-test supabase-live-token4ai-provider
+```
+
+The provider base URL defaults to `https://api.token4ai.cloud/v1`. Override it
+with `FERROGATE_TOKEN4AI_OPENAI_BASE_URL` only for controlled test endpoints.
+Do not commit provider API keys; pass them through environment variables or CI
+secrets.
 
 The heavier `supabase-live-restart` scenario remains available for full remote
 CRUD/reload coverage, but it can be slow on externally hosted test databases.
