@@ -61,6 +61,8 @@ run_quality() {
   cargo fmt --all -- --check
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo metadata --locked --format-version=1 >/dev/null
+  cargo test -p ferrogate-cli --all-features config::tests
+  cargo test -p ferrogate-cli --all-features config::validation_tests
   python3 scripts/check-openapi.py
   scripts/check-kubernetes-examples.sh
 }

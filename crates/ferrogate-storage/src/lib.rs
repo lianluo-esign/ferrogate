@@ -154,6 +154,7 @@ pub struct RuntimeStorageOptions {
     pub provider_order: Vec<StorageProviderKind>,
     pub required: bool,
     pub initialize_schema: bool,
+    pub migration_mode: String,
     pub control_plane: ControlPlaneDocuments,
     pub request_log_retention_records: usize,
     pub audit_event_retention_records: usize,
@@ -192,6 +193,8 @@ pub struct StorageBackendEvidence {
     pub durable: bool,
     pub implemented: bool,
     pub required: bool,
+    pub migration_mode: String,
+    pub health: String,
     pub provider_order: Vec<StorageProviderKind>,
     pub contract_version: u32,
     pub schema: Option<StorageSchemaEvidence>,
@@ -226,6 +229,8 @@ const POSTGRES_SCHEMA_NAME: &str = "002_supabase_control_plane_billing_evidence"
 pub struct RuntimeStorageBackend {
     provider: StorageProviderKind,
     required: bool,
+    migration_mode: String,
+    health: String,
     provider_order: Vec<StorageProviderKind>,
     contract_version: u32,
 }
@@ -236,12 +241,23 @@ impl RuntimeStorageBackend {
         required: bool,
         provider_order: Vec<StorageProviderKind>,
     ) -> Result<Self, StorageError> {
+        Self::new_with_migration_mode(provider, required, provider_order, "disabled".into())
+    }
+
+    pub fn new_with_migration_mode(
+        provider: StorageProviderKind,
+        required: bool,
+        provider_order: Vec<StorageProviderKind>,
+        migration_mode: String,
+    ) -> Result<Self, StorageError> {
         if !provider.implemented() {
             return Err(StorageError::UnsupportedProvider { provider, required });
         }
         Ok(Self {
             provider,
             required,
+            migration_mode,
+            health: "ok".into(),
             provider_order,
             contract_version: 1,
         })
@@ -251,6 +267,8 @@ impl RuntimeStorageBackend {
         Self {
             provider: StorageProviderKind::Memory,
             required: false,
+            migration_mode: "disabled".into(),
+            health: "ok".into(),
             provider_order,
             contract_version: 1,
         }
@@ -262,6 +280,8 @@ impl RuntimeStorageBackend {
             durable: self.provider.is_durable(),
             implemented: self.provider.implemented(),
             required: self.required,
+            migration_mode: self.migration_mode.clone(),
+            health: self.health.clone(),
             provider_order: self.provider_order.clone(),
             contract_version: self.contract_version,
             schema: None,
@@ -2045,10 +2065,11 @@ impl RuntimeStorageRepositories {
         config: LibsqlStorageConfig,
         options: RuntimeStorageOptions,
     ) -> Result<Self, StorageError> {
-        let backend = RuntimeStorageBackend::new(
+        let backend = RuntimeStorageBackend::new_with_migration_mode(
             StorageProviderKind::TursoLibsql,
             options.required,
             options.provider_order,
+            options.migration_mode,
         )?;
         let request_log_retention_records = options.request_log_retention_records;
         let audit_event_retention_records = options.audit_event_retention_records;
@@ -2092,8 +2113,12 @@ impl RuntimeStorageRepositories {
         config: PostgresStorageConfig,
         options: RuntimeStorageOptions,
     ) -> Result<Self, StorageError> {
-        let backend =
-            RuntimeStorageBackend::new(provider, options.required, options.provider_order)?;
+        let backend = RuntimeStorageBackend::new_with_migration_mode(
+            provider,
+            options.required,
+            options.provider_order,
+            options.migration_mode,
+        )?;
         let request_log_retention_records = options.request_log_retention_records;
         let audit_event_retention_records = options.audit_event_retention_records;
         let bootstrap = options.control_plane;
@@ -2127,10 +2152,11 @@ impl RuntimeStorageRepositories {
         config: MySqlStorageConfig,
         options: RuntimeStorageOptions,
     ) -> Result<Self, StorageError> {
-        let backend = RuntimeStorageBackend::new(
+        let backend = RuntimeStorageBackend::new_with_migration_mode(
             StorageProviderKind::Mysql,
             options.required,
             options.provider_order,
+            options.migration_mode,
         )?;
         let request_log_retention_records = options.request_log_retention_records;
         let audit_event_retention_records = options.audit_event_retention_records;
@@ -3018,6 +3044,11 @@ mod tests {
             provider_order,
             required,
             initialize_schema,
+            migration_mode: if initialize_schema {
+                "auto".into()
+            } else {
+                "validate_only".into()
+            },
             control_plane: ControlPlaneDocuments::default(),
             request_log_retention_records,
             audit_event_retention_records,

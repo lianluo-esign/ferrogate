@@ -8,7 +8,7 @@
 
 ---
 title: Durable Control-Plane Storage
-description: Supabase, Turso/libSQL, PostgreSQL, and MySQL storage guidance for FerroGate control-plane state.
+description: Supabase-first durable storage guidance for FerroGate control-plane state.
 permalink: /durable-storage/
 ---
 
@@ -91,6 +91,9 @@ Runtime behavior:
   operators manage Supabase migrations outside the gateway process. In those
   modes the checked-in schema must already exist before startup.
 - Admin/status evidence reports `provider: supabase` without returning the DSN.
+- Admin/status evidence also reports non-secret `required`, `migration_mode`,
+  `health`, and checked schema fields so operators can debug startup posture
+  without exposing credentials.
 - `supabase_dsn_env` is required for Supabase so credentials stay secret-backed.
 - Supabase requires `postgres_tls_mode: require`, `verify_ca`, or `verify_full`.
 - Direct and session-pooler DSNs are supported first. Transaction-pooler mode
@@ -98,6 +101,32 @@ Runtime behavior:
   explicitly verified for that mode.
 - Control-plane resource documents are stored as `JSONB` in
   `control_plane_resources`.
+
+Pooler guidance:
+
+- Direct DSNs are simplest and best for low-frequency Admin API control-plane
+  CRUD when the gateway replica count is small.
+- Session-pooler DSNs are the preferred managed-cloud posture for horizontally
+  scaled gateways because each FerroGate process still expects session-level
+  settings such as statement timeout and search path.
+- Transaction-pooler DSNs need explicit validation with the Rust PostgreSQL
+  client behavior before production use; do not assume session settings,
+  prepared statement behavior, or advisory-lock style migration coordination
+  survives transaction pooling.
+
+Least-privilege guidance:
+
+- Do not use the Supabase service-role key as a gateway database credential.
+  FerroGate needs a PostgreSQL DSN for the configured control schema, not a
+  Supabase REST service-role token.
+- Create a database role scoped to the FerroGate control schema and grant only
+  the privileges needed for the chosen migration posture: DDL plus DML for
+  `migration_mode: auto`, or DML on the pre-created tables for
+  `validate_only`/`disabled`.
+- Keep Supabase RLS policies for application-facing tables separate from the
+  gateway control schema. FerroGate's agent, tool, and API calls must still
+  enter through the AI Gateway so auth, policy, billing, audit, and
+  observability remain the security boundary.
 
 The schema file is
 [`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
@@ -132,9 +161,15 @@ Retention expectations:
 - Usage aggregates are durable billing state and should be retained for the
   billing/audit window, not pruned with high-volume telemetry exports.
 
-## Turso Cloud / Remote libSQL
+## Legacy libSQL Compatibility
 
-Use a `libsql://` URL and keep the auth token in an environment variable:
+The `turso_libsql` provider remains implemented for compatibility and
+deterministic local/provider-contract coverage. It is not the current
+commercial control-plane target; use Supabase for new production control-table
+deployments.
+
+For compatibility testing, use a `libsql://` URL and keep the auth token in an
+environment variable:
 
 ```yaml
 storage:
@@ -283,8 +318,8 @@ storage:
 ```
 
 `file://` uses the libSQL client local database path and does not require an
-auth token. This is not a replacement for Turso Cloud in production. It exists
-to prove the provider contract locally without depending on external network
+auth token. This is not a production control-plane target. It exists to prove
+the provider contract locally without depending on external network
 availability.
 
 ## Verification
@@ -361,8 +396,8 @@ restart, MySQL restart, and MySQL TLS restart tests:
 ./target/debug/ferrogate-test ci
 ```
 
-The live Turso Cloud restart test is intentionally opt-in because it requires a
-real cloud database and secret:
+The live remote-libSQL restart test is intentionally opt-in because it requires
+a real cloud database and secret:
 
 ```bash
 FERROGATE_LIBSQL_URL="libsql://your-database.aws-ap-northeast-1.turso.io" \
@@ -379,8 +414,8 @@ For Supabase, use Supabase managed backups/PITR for the database behind
 `storage.supabase_dsn_env`. FerroGate does not copy control-plane state into the
 analytics warehouse.
 
-For Turso Cloud, use the provider's managed backup/export workflow for the
-database that backs `storage.libsql_url`.
+For legacy remote libSQL deployments, use the provider's managed backup/export
+workflow for the database that backs `storage.libsql_url`.
 
 For PostgreSQL, use your managed PostgreSQL backup/PITR workflow for the
 database behind `storage.postgres_dsn_env`.

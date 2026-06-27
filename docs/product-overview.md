@@ -48,9 +48,10 @@ work belongs in [`roadmap.md`](roadmap.md).
   timelines, metering events, aggregates, audit events, gateway config
   profiles, provider health, plugins/extensions, tools, MCP servers, config
   validation, reload, readiness, and drain.
-- **Durable control-plane storage** through memory, file-backed libSQL, libSQL
+- **Durable control-plane storage** with Supabase-compatible PostgreSQL as the
+  production target, plus memory, file-backed libSQL, libSQL
   server/Turso-compatible protocol, PostgreSQL, PostgreSQL TLS, MySQL, and
-  MySQL TLS providers.
+  MySQL TLS compatibility providers.
 - **Analytics delivery boundary** through either Vector-to-ClickHouse pipeline
   mode or direct ClickHouse warehouse mode.
 - **Cluster operations** for multi-node deployments with node identity, shared
@@ -92,9 +93,10 @@ Validated end to end:
   metrics, MCP tool metrics, Prometheus, OTLP export, and ClickHouse analytics.
 - Admin API, API key and policy CRUD, static dashboard, config validation,
   reload, status, readiness, and drain.
-- Durable control-plane restart behavior for Supabase-compatible PostgreSQL TLS,
-  libSQL file, libSQL server, PostgreSQL, PostgreSQL TLS, MySQL, and MySQL TLS
-  storage providers.
+- Durable control-plane restart behavior for Supabase-compatible PostgreSQL TLS
+  as the default production target, with libSQL file/server, PostgreSQL,
+  PostgreSQL TLS, MySQL, and MySQL TLS retained as compatibility and local test
+  providers.
 - Manual TLS, ACME HTTP-01, ACME DNS-01, renewal scheduling, and listener-level
   graceful upgrade handoff.
 - Cluster identity, shared file state, Redis counters, readiness, and drain
@@ -102,8 +104,9 @@ Validated end to end:
 
 Still intentionally scoped as next-stage production work:
 
-- Production hardening beyond the implemented Supabase, Turso/libSQL,
-  PostgreSQL, and MySQL control-plane providers.
+- Production hardening beyond the implemented Supabase control-plane path;
+  Turso/libSQL, generic PostgreSQL, and MySQL remain compatibility providers
+  until their operator boundaries are separately hardened.
 - Full hosted Admin API control plane beyond the current implemented resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.
 - Expanded DNS provider set beyond the built-in Cloudflare provider and the
@@ -127,8 +130,10 @@ needs its own auth or endpoint shape.
   `export_endpoint` at an OpenMeter-compatible CloudEvents ingestion endpoint.
 - Reusable gateway config profiles can be selected per request with
   `x-ferrogate-config`; profile evidence is recorded in request logs.
-- MCP tool execution is deny-by-default and still runs through gateway auth,
-  policy, billing, audit, and observability.
+- MCP tool execution, agent operations, and external API calls are
+  deny-by-default and must run through gateway auth, policy, billing, audit,
+  and observability. Direct agent/tool bypass paths are outside the supported
+  security boundary.
 - Multi-node rate limits and token-budget reservation/settlement should use
   `cluster.counter_backend = "redis"`. Redis counters are fail-closed.
 - Process-local reload is used only when the listen socket and TLS listener

@@ -33,13 +33,14 @@ profiles, prompt templates, and tool approval records. See
 
 | Scenario | Better fit |
 | --- | --- |
-| API key / policy / config point lookup | SQLite / Turso / PostgreSQL |
-| Control-plane CRUD | SQLite / Turso / PostgreSQL |
+| API key / policy / config point lookup | Supabase control-plane storage |
+| Control-plane CRUD | Supabase control-plane storage |
+| Billing, request, audit, usage, and agent-run evidence needed by Admin API | Supabase control-plane storage |
 | Recent request list, small-scale local testing | SQLite can be acceptable |
 | Massive request logs | ClickHouse |
 | Traces / spans queries | ClickHouse |
 | Usage metrics aggregation | ClickHouse |
-| Billing / metering analytics | ClickHouse |
+| High-volume billing / metering analytics | ClickHouse |
 | Dashboard chart statistics | ClickHouse |
 
 ## Pipeline Mode: FerroGate To Vector To ClickHouse
@@ -116,8 +117,11 @@ analytics evidence.
 - last successful export time;
 - last export error.
 
-Export failures update analytics status. They do not belong in the
-control-plane database and they do not turn Turso/libSQL into a warehouse.
+Export failures update analytics status. They do not make the analytics
+warehouse the control-plane system of record, and they do not turn
+Turso/libSQL compatibility storage into a production warehouse. Supabase keeps
+the normalized Admin API evidence tables; ClickHouse remains the high-volume
+analytics target.
 
 ## Local Verification Commands
 

@@ -1069,6 +1069,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         provider_order: storage.provider_order.clone(),
         required: storage.required,
         initialize_schema: storage.migration_mode == StorageMigrationMode::Auto,
+        migration_mode: storage.migration_mode.as_str().into(),
         control_plane,
         request_log_retention_records: config.analytics.request_log_retention_records,
         audit_event_retention_records: config.analytics.audit_event_retention_records,

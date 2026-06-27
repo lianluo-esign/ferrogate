@@ -301,6 +301,9 @@ fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert_eq!(body["storage"]["provider"], "memory");
         assert_eq!(body["storage"]["durable"], false);
         assert_eq!(body["storage"]["implemented"], true);
+        assert_eq!(body["storage"]["required"], false);
+        assert_eq!(body["storage"]["migration_mode"], "disabled");
+        assert_eq!(body["storage"]["health"], "ok");
         assert_eq!(body["storage"]["contract_version"], 1);
         assert_eq!(body["storage"]["provider_order"][0], "supabase");
         assert_eq!(body["storage"]["provider_order"][1], "turso_libsql");
@@ -2965,6 +2968,7 @@ struct TursoRestartHarness {
     gateway: Child,
     stderr: Option<std::process::ChildStderr>,
     expected_storage_provider: &'static str,
+    expected_migration_mode: StorageMigrationMode,
 }
 
 #[derive(Clone, Copy)]
@@ -3139,6 +3143,7 @@ impl TursoRestartHarness {
             gateway,
             stderr: None,
             expected_storage_provider: storage.provider_name(),
+            expected_migration_mode: migration_mode,
         };
         harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
@@ -3214,6 +3219,11 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["durable"], true);
             assert_eq!(body["storage"]["implemented"], true);
             assert_eq!(body["storage"]["required"], true);
+            assert_eq!(
+                body["storage"]["migration_mode"],
+                self.expected_migration_mode.as_str()
+            );
+            assert_eq!(body["storage"]["health"], "ok");
             assert_eq!(body["storage"]["provider_order"][0], "supabase");
             assert_eq!(body["storage"]["provider_order"][1], "turso_libsql");
             assert_eq!(body["storage"]["provider_order"][2], "postgres");

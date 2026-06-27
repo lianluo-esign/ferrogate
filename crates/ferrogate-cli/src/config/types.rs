@@ -950,6 +950,16 @@ pub(crate) enum StorageMigrationMode {
     Disabled,
 }
 
+impl StorageMigrationMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            StorageMigrationMode::Auto => "auto",
+            StorageMigrationMode::ValidateOnly => "validate_only",
+            StorageMigrationMode::Disabled => "disabled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ReliabilityConfig {
     #[serde(default)]

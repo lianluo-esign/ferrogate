@@ -109,7 +109,7 @@ These areas are implemented in the current open-source gateway:
 
 | Theme | Goal | Tracking |
 | --- | --- | --- |
-| Database providers | Harden MySQL production options behind the same storage contract used by Turso/libSQL and PostgreSQL, including managed-cloud compatibility and charset/collation guidance. | [#68](https://github.com/lianluo-esign/ferrogate/issues/68) |
+| Database providers | Keep Supabase as the durable control-plane target while hardening or retiring compatibility providers behind the same storage contract. MySQL production hardening remains tracked separately. | [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#94](https://github.com/lianluo-esign/ferrogate/issues/94) |
 | External service boundaries | Keep tenant RBAC and billing integrations behind explicit service/provider boundaries instead of moving that complexity into the gateway hot path. | [#54](https://github.com/lianluo-esign/ferrogate/issues/54) |
 | Agent graph governance | Add workflow graph policy and execution budgets so multi-step agent runs can be governed at graph/run level, not only per request. | [#50](https://github.com/lianluo-esign/ferrogate/issues/50) |
 | Agent protocol ingress | Add A2A and broader agent protocol ingress governance while reusing auth, policy, approvals, billing, and observability surfaces. Current slice covers registered agent upstream control-plane storage plus discovery metadata. | [#48](https://github.com/lianluo-esign/ferrogate/issues/48) |
@@ -145,9 +145,11 @@ Use analytics delivery for high-write observability data:
 - billing and metering analytics;
 - dashboard chart statistics.
 
-The current direction is Turso/libSQL first for the commercial cloud-friendly
-control plane, then PostgreSQL and MySQL. Analytics can flow through Vector to
-ClickHouse or directly to ClickHouse when operators want fewer moving parts.
+The current direction is Supabase-first for commercial durable control-plane
+tables and operator evidence. Turso/libSQL, generic PostgreSQL, and MySQL are
+compatibility paths until their separate hardening or removal issues close.
+Analytics can flow through Vector to ClickHouse or directly to ClickHouse when
+operators want fewer moving parts.
 
 ## Non-Goals
 

@@ -38,8 +38,10 @@
   Key、租户、策略、请求日志、agent run timeline、metering event、aggregate、审计事件、
   gateway config profile、供应商健康、plugin/extension、tool、MCP server、配置验证、
   reload、readiness 和 drain。
-- **Durable control-plane storage**：支持 memory、file-backed libSQL、libSQL
-  server/Turso-compatible protocol、PostgreSQL、PostgreSQL TLS、MySQL 和 MySQL TLS。
+- **Durable control-plane storage**：以 Supabase-compatible PostgreSQL 作为生产
+  控制面目标，同时保留 memory、file-backed libSQL、libSQL
+  server/Turso-compatible protocol、PostgreSQL、PostgreSQL TLS、MySQL 和 MySQL TLS
+  兼容 provider。
 - **Analytics delivery boundary**：支持 Vector-to-ClickHouse pipeline mode 或
   direct ClickHouse warehouse mode。
 - **集群运维**：多节点部署的节点身份、共享文件控制面状态、Redis 请求和 Token
@@ -76,14 +78,16 @@
   指标、Prometheus、OTLP export 和 ClickHouse analytics。
 - Admin API、API key 和 policy CRUD、静态 Dashboard、配置验证、reload、status、
   readiness 和 drain。
-- Supabase-compatible PostgreSQL TLS、libSQL file、libSQL server、PostgreSQL、
-  PostgreSQL TLS、MySQL 和 MySQL TLS storage provider 的控制面重启行为。
+- 以 Supabase-compatible PostgreSQL TLS 为默认生产目标的控制面重启行为，同时保留
+  libSQL file/server、PostgreSQL、PostgreSQL TLS、MySQL 和 MySQL TLS 作为兼容和
+  本地测试 provider。
 - 手动 TLS、ACME HTTP-01、ACME DNS-01、续期调度和监听器级 graceful upgrade handoff。
 - 集群身份、共享文件状态、Redis 计数器、readiness 和 drain runbook。
 
 仍有意留作下一阶段生产工作的范围：
 
-- 在已实现的 Supabase、Turso/libSQL、PostgreSQL、MySQL 控制面 provider 之上的生产硬化。
+- 已实现的 Supabase 控制面路径之上的生产硬化；Turso/libSQL、generic PostgreSQL 和
+  MySQL 在各自运维边界单独硬化前保留为兼容 provider。
 - 当前已实现资源之外的完整 hosted Admin API control plane。
 - Semantic/vector cache matching。当前已实现的缓存是 exact-match。
 - 内置 Cloudflare provider 和通用外部 hook 边界之外的更多 DNS provider。
@@ -104,8 +108,9 @@ Responses API dispatch 路径。可选的 `openrouter_http_referer` 和
   `export_endpoint` 指向 OpenMeter-compatible CloudEvents ingestion endpoint。
 - 可复用 gateway config profile 可通过 `x-ferrogate-config` 按请求选择；profile
   evidence 会记录到 request log。
-- MCP tool execution 默认拒绝，并且仍然经过 gateway auth、policy、billing、audit
-  和 observability。
+- MCP tool execution、agent 操作和外部 API 调用默认拒绝，并且必须经过 gateway auth、
+  policy、billing、audit 和 observability。直接绕过 gateway 的 agent/tool 路径不在
+  支持的安全边界内。
 - 多节点 rate limit 和 token-budget reservation/settlement 应使用
   `cluster.counter_backend = "redis"`。Redis 计数器是 fail-closed。
 - 只有 listen socket 和 TLS listener 指纹不变时才使用 process-local reload。

@@ -4110,6 +4110,8 @@
           "durable",
           "implemented",
           "required",
+          "migration_mode",
+          "health",
           "provider_order",
           "contract_version",
           "schema"
@@ -4126,6 +4128,22 @@
           },
           "required": {
             "type": "boolean"
+          },
+          "migration_mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "validate_only",
+              "disabled"
+            ],
+            "description": "Configured schema migration posture. Secrets and DSNs are never returned."
+          },
+          "health": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ],
+            "description": "Active storage backend health for the running process. Startup fails instead of returning degraded durable storage when storage.required is true."
           },
           "provider_order": {
             "type": "array",

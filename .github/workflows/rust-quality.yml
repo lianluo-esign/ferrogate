@@ -38,6 +38,11 @@ jobs:
       - name: Check locked metadata
         run: cargo metadata --locked --format-version=1 >/dev/null
 
+      - name: Run config validation tests
+        run: |
+          cargo test -p ferrogate-cli --all-features config::tests
+          cargo test -p ferrogate-cli --all-features config::validation_tests
+
       - name: Validate OpenAPI schemas
         run: python3 scripts/check-openapi.py
 
