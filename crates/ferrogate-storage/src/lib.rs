@@ -999,6 +999,126 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    fn upsert_agent_run(&self, run: &StoredAgentRun) -> Result<(), StorageError> {
+        let run_json = serialize_storage_document(run)?;
+        let tenant_context_id = tenant_storage_key(&run.tenant);
+        let started_at_unix = saturating_i64(run.started_at_unix.unwrap_or_else(now_unix_seconds));
+        let completed_at_unix = run.completed_at_unix.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO agent_runs \
+                 (id, request_id, trace_id, tenant, status, provider, started_at_unix, \
+                  completed_at_unix, run_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::jsonb) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 request_id = EXCLUDED.request_id, \
+                 trace_id = EXCLUDED.trace_id, \
+                 tenant = EXCLUDED.tenant, \
+                 status = EXCLUDED.status, \
+                 provider = EXCLUDED.provider, \
+                 started_at_unix = EXCLUDED.started_at_unix, \
+                 completed_at_unix = EXCLUDED.completed_at_unix, \
+                 run_json = EXCLUDED.run_json",
+                &[
+                    &run.id,
+                    &run.request_id,
+                    &run.trace_id,
+                    &tenant_context_id,
+                    &run.status,
+                    &run.provider,
+                    &started_at_unix,
+                    &completed_at_unix,
+                    &run_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn agent_run(&self, id: &str) -> Result<Option<StoredAgentRun>, StorageError> {
+        self.with_client_storage(|client| {
+            let row = client
+                .query_opt(
+                    "SELECT run_json::text FROM agent_runs WHERE id = $1",
+                    &[&id],
+                )
+                .map_err(postgres_error)?;
+            row.map(|row| deserialize_storage_document(row.get::<_, String>(0).as_str()))
+                .transpose()
+        })
+    }
+
+    fn agent_runs(&self) -> Result<Vec<StoredAgentRun>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT run_json::text \
+                     FROM agent_runs \
+                     ORDER BY started_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            let mut runs = Vec::with_capacity(rows.len());
+            for row in rows {
+                runs.push(deserialize_storage_document(
+                    row.get::<_, String>(0).as_str(),
+                )?);
+            }
+            Ok(runs)
+        })
+    }
+
+    fn append_agent_run_event(&self, event: &StoredAgentRunEvent) -> Result<(), StorageError> {
+        let event_json = serialize_storage_document(event)?;
+        let tenant_context_id = tenant_storage_key(&event.tenant);
+        let turn = saturating_i64(u64::from(event.turn));
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO agent_run_events \
+                 (id, run_id, request_id, trace_id, tenant, turn, kind, target, outcome, \
+                  occurred_at_unix, event_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &event.id,
+                    &event.run_id,
+                    &event.request_id,
+                    &event.trace_id,
+                    &tenant_context_id,
+                    &turn,
+                    &event.kind,
+                    &event.target,
+                    &event.outcome,
+                    &occurred_at_unix,
+                    &event_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn agent_run_events(&self) -> Result<Vec<StoredAgentRunEvent>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT event_json::text \
+                     FROM agent_run_events \
+                     ORDER BY occurred_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            let mut events = Vec::with_capacity(rows.len());
+            for row in rows {
+                events.push(deserialize_storage_document(
+                    row.get::<_, String>(0).as_str(),
+                )?);
+            }
+            Ok(events)
+        })
+    }
+
     fn billing_events_page(
         &self,
         offset: usize,
@@ -3420,7 +3540,7 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?)
+                control_plane.upsert_agent_run(&run)
             }
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?)
@@ -3433,11 +3553,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Memory(_) => {
                 self.agent_runs.lock().ok().and_then(|runs| runs.get(id))
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .get_document("agent_run", id.to_string())
-                .ok()
-                .flatten()
-                .and_then(|document| serde_json::from_str(&document).ok()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.agent_run(id).unwrap_or_default()
+            }
             RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
                 .get_document("agent_run", id.to_string())
                 .ok()
@@ -3453,10 +3571,9 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|runs| runs.list())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .list_documents("agent_run")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.agent_runs().unwrap_or_default()
+            }
             RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
                 .list_documents("agent_run")
                 .map(deserialize_storage_records)
@@ -3472,11 +3589,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert(
-                "agent_run_event",
-                event.id.clone(),
-                serialize_storage_record(&event)?,
-            ),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.append_agent_run_event(&event)
+            }
             RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
                 "agent_run_event",
                 event.id.clone(),
@@ -3492,10 +3607,9 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|events| events.list())
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .list_documents("agent_run_event")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.agent_run_events().unwrap_or_default()
+            }
             RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
                 .list_documents("agent_run_event")
                 .map(deserialize_storage_records)
@@ -3866,6 +3980,58 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].outcome, "accepted");
         assert_eq!(events[1].outcome, "rejected");
+    }
+
+    #[test]
+    fn runtime_repositories_keep_agent_run_timeline_events() {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        let tenant = TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        };
+
+        repositories
+            .upsert_agent_run(StoredAgentRun {
+                id: "run-1".into(),
+                request_id: "fg-1".into(),
+                trace_id: Some("trace-1".into()),
+                tenant: tenant.clone(),
+                status: "running".into(),
+                provider: "managed.native-harness".into(),
+                turns_executed: 0,
+                output_recorded: false,
+                started_at_unix: Some(10),
+                completed_at_unix: None,
+            })
+            .unwrap();
+        repositories
+            .append_agent_run_event(StoredAgentRunEvent {
+                id: "event-1".into(),
+                run_id: "run-1".into(),
+                request_id: "fg-1".into(),
+                trace_id: Some("trace-1".into()),
+                tenant,
+                turn: 0,
+                kind: "capability.denied".into(),
+                target: "cli:bash".into(),
+                outcome: "denied".into(),
+                tool_call_id: None,
+                message: Some("cli is not allowed by capability policy".into()),
+                occurred_at_unix: Some(11),
+            })
+            .unwrap();
+
+        let run = repositories.agent_run("run-1").unwrap();
+        assert_eq!(run.provider, "managed.native-harness");
+        let events = repositories.agent_run_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "capability.denied");
+        assert_eq!(events[0].target, "cli:bash");
+        assert_eq!(events[0].outcome, "denied");
     }
 
     #[test]
