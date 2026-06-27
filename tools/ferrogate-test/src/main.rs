@@ -2823,6 +2823,16 @@ enum ControlPlaneRestartStorage<'a> {
     },
 }
 
+impl ControlPlaneRestartStorage<'_> {
+    fn supports_durable_metering(self) -> bool {
+        matches!(
+            self,
+            ControlPlaneRestartStorage::Postgres { .. }
+                | ControlPlaneRestartStorage::Supabase { .. }
+        )
+    }
+}
+
 fn run_control_plane_restart(
     ferrogate_bin: &Path,
     storage: ControlPlaneRestartStorage<'_>,
@@ -3019,7 +3029,9 @@ fn run_control_plane_restart(
         {
             bail!("durable metering provider did not receive chat completion request");
         }
-        case.expect_durable_metering_usage(&resource_id, 2)?;
+        if storage.supports_durable_metering() {
+            case.expect_durable_metering_usage(&resource_id, 2)?;
+        }
         case.expect_json(
             "PATCH",
             &format!("/admin/v1/policies/{policy_name}"),
@@ -3110,7 +3122,9 @@ fn run_control_plane_restart(
             case.expect_missing_gateway_config(&gateway_config_id)?;
             case.expect_missing_policy(&policy_name)?;
         }
-        case.expect_durable_metering_usage(&resource_id, 2)?;
+        if storage.supports_durable_metering() {
+            case.expect_durable_metering_usage(&resource_id, 2)?;
+        }
         case.expect_prompt_template(&prompt_template_id, "archived")?;
         case.expect_missing_agent_upstream(&agent_upstream_id)?;
     }
