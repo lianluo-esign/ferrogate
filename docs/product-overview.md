@@ -41,8 +41,8 @@ work belongs in [`roadmap.md`](roadmap.md).
   and gateway estimates when needed.
 - **Observability** with structured request logs, token metering events,
   configurable retention, usage aggregates, provider health, cache metrics, MCP
-  tool metrics, Prometheus metrics, request/trace ID propagation, and OTLP/HTTP
-  export.
+  tool metrics, agent-run OTLP spans, Prometheus metrics, request/trace ID
+  propagation, and OTLP/HTTP export.
 - **Admin API and dashboard** for status, providers, model catalog discovery,
   configured models, API keys, tenants, policies, request logs, agent run
   timelines, metering events, aggregates, audit events, gateway config
@@ -87,10 +87,13 @@ Validated end to end:
 - Agent discovery, A2A-style agent upstream invocation and streaming, bounded
   agent runs, workflow graph execution, workflow budgets, tool-call limits,
   immutable approval/audit evidence, and agent run timelines.
+- Agent run timelines exported as reconstructable OTLP trace trees with agent
+  root, provider-step, billing-write, audit/tool, and WASM host-ABI spans.
 - Plugin registration, plugin-owned tool exposure, skill package compatibility
   metadata, and skill-owned resource materialization.
 - Request logs, token metering events, usage aggregates, provider health, cache
-  metrics, MCP tool metrics, Prometheus, OTLP export, and ClickHouse analytics.
+  metrics, MCP tool metrics, Prometheus, W3C-correlated agent-run OTLP export,
+  and ClickHouse analytics.
 - Admin API, API key and policy CRUD, static dashboard, config validation,
   reload, status, readiness, and drain.
 - Durable control-plane restart behavior for Supabase-compatible PostgreSQL TLS

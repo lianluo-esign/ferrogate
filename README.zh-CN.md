@@ -32,7 +32,8 @@ run、WASM 沙箱化 agent 执行、可观测性、Admin API、集群运维和�
   显式 `POST /v1/agent-runs`、受治理的工具执行、插件注册、可选 WASM 沙箱执行和
   审计事件。
 - **运维可见性：** 请求日志、usage/metering 事件、供应商健康、缓存/工具指标、
-  agent run timeline、Prometheus、OTLP 导出、Admin API 和 Dashboard。
+  agent run timeline、结构化 agent-run OTLP span、Prometheus、OTLP 导出、Admin API
+  和 Dashboard。
 - **生产运维：** durable control-plane storage、analytics warehouse、reload/drain
   readiness、集群计数器、Docker、Kubernetes manifests、Helm chart 和 ACME HTTPS。
 
@@ -119,6 +120,9 @@ upstream、workflow、skill、prompt 和 plugin 控制面显式开启。
 - durable `agent_run` / `agent_run_event` 记录，以及
   `GET /admin/v1/agent-runs` 和 `GET /admin/v1/agent-runs/{run_id}` timeline，
   用于查看 request、billing、audit、tool 和 run-event 证据。
+- agent run timeline 会导出为结构化 OTLP trace，包含 `ferrogate.agent.run`、
+  provider-step、billing-write、audit/tool 和 WASM host-ABI span，并保留 W3C trace
+  context 以便外部链路关联。
 
 ## 配置
 

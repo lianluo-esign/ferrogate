@@ -1992,8 +1992,11 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"http-search","arguments":{"query":"ferrogate"}}}"#,
         200,
         |body| {
-            assert_eq!(body["result"]["content"][0]["type"], "text");
-            assert_eq!(body["result"]["content"][0]["text"], "ferrogate-result");
+            let content = body["result"]["content"]
+                .as_array()
+                .with_context(|| format!("MCP tools/call response missing content array: {body}"))?;
+            assert_eq!(content[0]["type"], "text");
+            assert_eq!(content[0]["text"], "ferrogate-result");
             assert_eq!(body["result"]["isError"], false);
             Ok(())
         },
@@ -2073,6 +2076,7 @@ fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     )?;
     case.expect_openmeter_export()?;
     case.wait_for_metering_export_status()?;
+    case.expect_agent_run_otlp_trace_export("agent-run-e2e")?;
 
     println!("gateway-api scenario passed");
     Ok(())
@@ -4721,6 +4725,43 @@ impl LocalHarness {
         assert!(!raw.contains("test-secret"));
         Ok(())
     }
+
+    fn expect_agent_run_otlp_trace_export(&self, agent_run_id: &str) -> Result<()> {
+        let Some(observability) = &self.observability else {
+            bail!("observability provider mock is not configured");
+        };
+        let mut trace_payloads = Vec::new();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(12) {
+            match observability
+                .received
+                .recv_timeout(Duration::from_millis(500))
+            {
+                Ok(request) => {
+                    if !request.starts_with("POST /v1/traces ") {
+                        continue;
+                    }
+                    let payload = http_request_body(&request)?.to_string();
+                    trace_payloads.push(payload.clone());
+                    let body = serde_json::from_str::<Value>(&payload).with_context(|| {
+                        format!("failed to parse OTLP trace payload: {payload}")
+                    })?;
+                    if agent_run_otlp_trace_is_reconstructable(&body, agent_run_id)? {
+                        assert_secret_redacted(&payload);
+                        assert!(!payload.contains("provider-secret"));
+                        assert!(!payload.contains("test-secret"));
+                        return Ok(());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        bail!(
+            "timed out waiting for reconstructable OTLP trace for agent run {agent_run_id}; trace payloads: {}",
+            trace_payloads.join("\n---otlp-trace-payload---\n")
+        )
+    }
 }
 
 impl Drop for LocalHarness {
@@ -5775,6 +5816,76 @@ fn parse_jsonl(body: &str) -> Result<Vec<Value>> {
                 .with_context(|| format!("failed to parse JSONL line: {line}"))
         })
         .collect()
+}
+
+fn agent_run_otlp_trace_is_reconstructable(body: &Value, agent_run_id: &str) -> Result<bool> {
+    let spans = otlp_spans(body);
+    let Some(root) = spans.iter().copied().find(|span| {
+        span["name"] == "ferrogate.agent.run"
+            && otlp_attribute(span, "agent_run_id").as_deref() == Some(agent_run_id)
+    }) else {
+        return Ok(false);
+    };
+    let root_span_id = root["spanId"]
+        .as_str()
+        .context("agent run OTLP root span is missing spanId")?;
+    let trace_id = root["traceId"]
+        .as_str()
+        .context("agent run OTLP root span is missing traceId")?;
+
+    let child_spans = spans
+        .iter()
+        .copied()
+        .filter(|span| {
+            span["traceId"].as_str() == Some(trace_id)
+                && span["parentSpanId"].as_str() == Some(root_span_id)
+                && otlp_attribute(span, "agent_run_id").as_deref() == Some(agent_run_id)
+        })
+        .collect::<Vec<_>>();
+
+    let provider_step = child_spans.iter().copied().any(|span| {
+        span["name"] == "ferrogate.agent.provider.step"
+            && otlp_attribute(span, "route").as_deref() == Some("openai.chat.completions")
+            && otlp_attribute(span, "logical_model").as_deref() == Some("fast-chat")
+            && otlp_attribute(span, "provider").as_deref() == Some("openai")
+            && otlp_attribute(span, "provider_model").as_deref() == Some("gpt-4o-mini")
+    });
+    let billing_write = child_spans.iter().copied().any(|span| {
+        span["name"] == "ferrogate.billing.write"
+            && otlp_attribute(span, "logical_model").as_deref() == Some("fast-chat")
+            && otlp_attribute(span, "provider").as_deref() == Some("openai")
+            && otlp_attribute(span, "provider_model").as_deref() == Some("gpt-4o-mini")
+            && otlp_attribute(span, "total_tokens").as_deref() == Some("2")
+    });
+
+    Ok(provider_step && billing_write)
+}
+
+fn otlp_spans(body: &Value) -> Vec<&Value> {
+    body["resourceSpans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|resource| {
+            resource["scopeSpans"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|scope| scope["spans"].as_array().into_iter().flatten())
+        })
+        .collect()
+}
+
+fn otlp_attribute(span: &Value, key: &str) -> Option<String> {
+    span["attributes"].as_array()?.iter().find_map(|attribute| {
+        (attribute["key"].as_str()? == key)
+            .then(|| {
+                attribute["value"]["stringValue"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .flatten()
+    })
 }
 
 fn list_contains(body: &Value, field: &str, expected: &str) -> bool {

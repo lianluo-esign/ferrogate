@@ -36,8 +36,8 @@ For the longer capability inventory and current implementation status, read the
   JSON-RPC ingress, explicit `POST /v1/agent-runs`, governed tool execution,
   plugin registration, opt-in WASM sandbox execution, and audit events.
 - **Operator visibility:** request logs, usage and metering events, provider
-  health, cache/tool metrics, agent run timelines, Prometheus, OTLP export,
-  Admin API, and dashboard.
+  health, cache/tool metrics, agent run timelines, structured agent-run OTLP
+  spans, Prometheus, OTLP export, Admin API, and dashboard.
 - **Production operations:** durable control-plane storage options, analytics
   warehouse delivery, reload/drain readiness, cluster counters, Docker,
   Kubernetes manifests, Helm chart, and ACME HTTPS.
@@ -130,6 +130,9 @@ Implemented agentic gateway surfaces include:
 - Durable `agent_run` and `agent_run_event` records, plus
   `GET /admin/v1/agent-runs` and `GET /admin/v1/agent-runs/{run_id}` timelines
   for request, billing, audit, tool, and run-event evidence.
+- Agent run timelines export as structured OTLP traces with
+  `ferrogate.agent.run`, provider-step, billing-write, audit/tool, and WASM
+  host-ABI spans, while preserving W3C trace context for external correlation.
 
 ## Configuration
 

@@ -32,8 +32,8 @@
   预算。
 - **Token usage metering events**：优先使用供应商返回的 usage，缺失时由网关估算。
 - **可观测性**：结构化请求日志、token metering event、可配置 retention、usage
-  aggregate、供应商健康、缓存指标、MCP 工具指标、Prometheus、请求/Trace ID
-  传播和 OTLP/HTTP 导出。
+  aggregate、供应商健康、缓存指标、MCP 工具指标、agent-run OTLP span、Prometheus、
+  请求/Trace ID 传播和 OTLP/HTTP 导出。
 - **Admin API 与 Dashboard**：状态、供应商、模型目录发现、已配置模型、API
   Key、租户、策略、请求日志、agent run timeline、metering event、aggregate、审计事件、
   gateway config profile、供应商健康、plugin/extension、tool、MCP server、配置验证、
@@ -72,10 +72,12 @@
 - Agent discovery、A2A-style agent upstream invocation/streaming、bounded agent
   run、workflow graph execution、workflow budget、tool-call limit、immutable
   approval/audit evidence 和 agent run timeline。
+- agent run timeline 会导出为可重建的 OTLP trace tree，包含 agent root、
+  provider-step、billing-write、audit/tool 和 WASM host-ABI span。
 - Plugin registration、plugin-owned tool exposure、skill package compatibility
   metadata 和 skill-owned resource materialization。
 - 请求日志、token metering event、usage aggregate、供应商健康、缓存指标、MCP 工具
-  指标、Prometheus、OTLP export 和 ClickHouse analytics。
+  指标、Prometheus、支持 W3C 关联的 agent-run OTLP export 和 ClickHouse analytics。
 - Admin API、API key 和 policy CRUD、静态 Dashboard、配置验证、reload、status、
   readiness 和 drain。
 - 以 Supabase-compatible PostgreSQL TLS 为默认生产目标的控制面重启行为，同时保留
