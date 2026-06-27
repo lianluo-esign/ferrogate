@@ -10,7 +10,9 @@ use ferrogate_observability::{
     build_otlp_logs_request, build_otlp_metrics_request, build_otlp_traces_request, OtlpAttribute,
     OtlpHttpRequest, OtlpLogRecord, OtlpSpanRecord,
 };
-use ferrogate_storage::{StoredAuditEvent, StoredRequestLog, StoredUsageAggregate};
+use ferrogate_storage::{
+    StoredAgentRunEvent, StoredAuditEvent, StoredRequestLog, StoredUsageAggregate,
+};
 use http::{StatusCode, Uri};
 use rustls::{pki_types::ServerName, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde::Serialize;
@@ -106,13 +108,10 @@ pub(crate) fn export_otlp_once(state: &AppState, endpoint: &str) -> AnyResult<()
             timeout,
         )?;
     }
-    if !request_logs.is_empty() {
+    let spans = otlp_trace_spans(state, &request_logs, &audit_events, &billing_events);
+    if !spans.is_empty() {
         dispatch_otlp_request(
-            &build_otlp_traces_request(
-                endpoint,
-                &snapshot.service_name,
-                &request_logs_as_otlp_spans(&request_logs),
-            )?,
+            &build_otlp_traces_request(endpoint, &snapshot.service_name, &spans)?,
             timeout,
         )?;
     }
@@ -156,13 +155,10 @@ fn export_otlp_once_since(
         *exported_audit_events = audit_events.len();
         *exported_billing_events = billing_events.len();
     }
-    if !new_logs.is_empty() {
+    let spans = otlp_trace_spans(state, &new_logs, &new_audit_events, &new_billing_events);
+    if !spans.is_empty() {
         dispatch_otlp_request(
-            &build_otlp_traces_request(
-                endpoint,
-                &snapshot.service_name,
-                &request_logs_as_otlp_spans(&new_logs),
-            )?,
+            &build_otlp_traces_request(endpoint, &snapshot.service_name, &spans)?,
             timeout,
         )?;
         *exported_request_logs = request_logs.len();
@@ -749,6 +745,295 @@ fn request_logs_as_otlp_spans(logs: &[StoredRequestLog]) -> Vec<OtlpSpanRecord> 
         .collect()
 }
 
+fn otlp_trace_spans(
+    state: &AppState,
+    request_logs: &[StoredRequestLog],
+    audit_events: &[StoredAuditEvent],
+    billing_events: &[BillingEvent],
+) -> Vec<OtlpSpanRecord> {
+    let mut spans = request_logs_as_otlp_spans(request_logs);
+    let mut agent_run_ids = request_logs
+        .iter()
+        .filter_map(|log| log.agent_run_id.clone())
+        .chain(
+            audit_events
+                .iter()
+                .filter_map(|event| event.agent_run_id.clone()),
+        )
+        .chain(
+            billing_events
+                .iter()
+                .filter_map(|event| event.agent_run_id.clone()),
+        )
+        .collect::<Vec<_>>();
+    agent_run_ids.sort();
+    agent_run_ids.dedup();
+
+    for agent_run_id in agent_run_ids {
+        if let Some(timeline) =
+            state.agent_run_timeline(&agent_run_id, crate::state::AgentRunFilter::default())
+        {
+            spans.extend(agent_timeline_as_otlp_spans(&timeline));
+        }
+    }
+
+    spans
+}
+
+fn agent_timeline_as_otlp_spans(timeline: &crate::state::AgentRunTimeline) -> Vec<OtlpSpanRecord> {
+    let trace_source = timeline
+        .run
+        .as_ref()
+        .and_then(|run| run.trace_id.as_deref())
+        .or_else(|| {
+            timeline
+                .agent_events
+                .iter()
+                .find_map(|event| event.trace_id.as_deref())
+        })
+        .or_else(|| {
+            timeline
+                .requests
+                .iter()
+                .find_map(|log| log.trace_id.as_deref())
+        })
+        .or_else(|| {
+            timeline
+                .billing_events
+                .iter()
+                .find_map(|event| event.trace_id.as_deref())
+        })
+        .or_else(|| {
+            timeline
+                .audit_events
+                .iter()
+                .find_map(|event| event.trace_id.as_deref())
+        })
+        .unwrap_or(&timeline.id);
+    let trace_id = stable_trace_id(trace_source);
+    let root_span_id = stable_span_id(&format!("agent-run:{}", timeline.id));
+    let start = timeline
+        .summary
+        .first_seen_unix
+        .or_else(|| timeline.run.as_ref().and_then(|run| run.started_at_unix))
+        .unwrap_or_else(now_unix_seconds);
+    let end = timeline
+        .summary
+        .last_seen_unix
+        .or_else(|| timeline.run.as_ref().and_then(|run| run.completed_at_unix))
+        .unwrap_or(start);
+    let mut spans = vec![OtlpSpanRecord {
+        trace_id: trace_id.clone(),
+        span_id: root_span_id.clone(),
+        parent_span_id: None,
+        name: "ferrogate.agent.run".to_string(),
+        start_time_unix_nano: unix_seconds_to_nanos(start),
+        end_time_unix_nano: unix_seconds_to_nanos(end.max(start)),
+        attributes: agent_run_attributes(timeline),
+    }];
+
+    spans.extend(
+        timeline
+            .agent_events
+            .iter()
+            .map(|event| agent_event_span(event, &trace_id, &root_span_id)),
+    );
+    spans.extend(
+        timeline
+            .requests
+            .iter()
+            .map(|log| agent_request_span(log, &trace_id, &root_span_id)),
+    );
+    spans.extend(
+        timeline
+            .billing_events
+            .iter()
+            .map(|event| agent_billing_span(event, &trace_id, &root_span_id)),
+    );
+    spans.extend(
+        timeline
+            .audit_events
+            .iter()
+            .map(|event| agent_audit_span(event, &trace_id, &root_span_id)),
+    );
+
+    spans
+}
+
+fn agent_event_span(
+    event: &StoredAgentRunEvent,
+    trace_id: &str,
+    root_span_id: &str,
+) -> OtlpSpanRecord {
+    let timestamp = event.occurred_at_unix.unwrap_or_else(now_unix_seconds);
+    OtlpSpanRecord {
+        trace_id: trace_id.to_string(),
+        span_id: stable_span_id(&format!("agent-run-event:{}", event.id)),
+        parent_span_id: Some(root_span_id.to_string()),
+        name: agent_event_span_name(event),
+        start_time_unix_nano: unix_seconds_to_nanos(timestamp),
+        end_time_unix_nano: unix_seconds_to_nanos(timestamp),
+        attributes: agent_event_attributes(event),
+    }
+}
+
+fn agent_request_span(
+    log: &StoredRequestLog,
+    trace_id: &str,
+    root_span_id: &str,
+) -> OtlpSpanRecord {
+    let start = log.started_at_unix.unwrap_or_else(now_unix_seconds);
+    let end = log.completed_at_unix.unwrap_or(start);
+    OtlpSpanRecord {
+        trace_id: trace_id.to_string(),
+        span_id: stable_span_id(&format!("agent-request:{}", log.request_id)),
+        parent_span_id: Some(root_span_id.to_string()),
+        name: "ferrogate.agent.provider.step".to_string(),
+        start_time_unix_nano: unix_seconds_to_nanos(start),
+        end_time_unix_nano: unix_seconds_to_nanos(end.max(start)),
+        attributes: request_log_attributes(log),
+    }
+}
+
+fn agent_billing_span(event: &BillingEvent, trace_id: &str, root_span_id: &str) -> OtlpSpanRecord {
+    let timestamp = event.occurred_at_unix.unwrap_or_else(now_unix_seconds);
+    OtlpSpanRecord {
+        trace_id: trace_id.to_string(),
+        span_id: stable_span_id(&format!(
+            "agent-billing:{}:{}:{}",
+            event.request_id, event.logical_model, event.provider
+        )),
+        parent_span_id: Some(root_span_id.to_string()),
+        name: "ferrogate.billing.write".to_string(),
+        start_time_unix_nano: unix_seconds_to_nanos(timestamp),
+        end_time_unix_nano: unix_seconds_to_nanos(timestamp),
+        attributes: billing_event_attributes(event),
+    }
+}
+
+fn agent_audit_span(
+    event: &StoredAuditEvent,
+    trace_id: &str,
+    root_span_id: &str,
+) -> OtlpSpanRecord {
+    let timestamp = event.occurred_at_unix.unwrap_or_else(now_unix_seconds);
+    OtlpSpanRecord {
+        trace_id: trace_id.to_string(),
+        span_id: stable_span_id(&format!("agent-audit:{}", event.id)),
+        parent_span_id: Some(root_span_id.to_string()),
+        name: agent_audit_span_name(event),
+        start_time_unix_nano: unix_seconds_to_nanos(timestamp),
+        end_time_unix_nano: unix_seconds_to_nanos(timestamp),
+        attributes: audit_event_attributes(event),
+    }
+}
+
+fn agent_run_attributes(timeline: &crate::state::AgentRunTimeline) -> Vec<OtlpAttribute> {
+    let mut attributes = vec![
+        OtlpAttribute::new("event_family", "agent_run"),
+        OtlpAttribute::new("agent_run_id", timeline.id.as_str()),
+        OtlpAttribute::new("agent_status", timeline.summary.status),
+        OtlpAttribute::new("request_count", timeline.summary.request_count.to_string()),
+        OtlpAttribute::new(
+            "billing_event_count",
+            timeline.summary.billing_event_count.to_string(),
+        ),
+        OtlpAttribute::new(
+            "audit_event_count",
+            timeline.summary.audit_event_count.to_string(),
+        ),
+        OtlpAttribute::new(
+            "agent_event_count",
+            timeline.summary.agent_event_count.to_string(),
+        ),
+    ];
+    push_optional_attribute(
+        &mut attributes,
+        "organization_id",
+        timeline.summary.tenant.organization_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "project_id",
+        timeline.summary.tenant.project_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "api_key_id",
+        timeline.summary.tenant.api_key_id.as_deref(),
+    );
+    if let Some(run) = &timeline.run {
+        push_optional_attribute(&mut attributes, "request_id", Some(run.request_id.as_str()));
+        push_optional_attribute(&mut attributes, "trace_id", run.trace_id.as_deref());
+        push_optional_attribute(&mut attributes, "provider", Some(run.provider.as_str()));
+        attributes.push(OtlpAttribute::new(
+            "turns_executed",
+            run.turns_executed.to_string(),
+        ));
+        attributes.push(OtlpAttribute::new(
+            "output_recorded",
+            run.output_recorded.to_string(),
+        ));
+    }
+    attributes
+}
+
+fn agent_event_attributes(event: &StoredAgentRunEvent) -> Vec<OtlpAttribute> {
+    let mut attributes = vec![
+        OtlpAttribute::new("event_family", "agent_run_event"),
+        OtlpAttribute::new("agent_run_id", event.run_id.as_str()),
+        OtlpAttribute::new("request_id", event.request_id.as_str()),
+        OtlpAttribute::new("agent_event_kind", event.kind.as_str()),
+        OtlpAttribute::new("agent_event_outcome", event.outcome.as_str()),
+        OtlpAttribute::new("turn", event.turn.to_string()),
+        OtlpAttribute::new("target", event.target.as_str()),
+    ];
+    push_optional_attribute(&mut attributes, "trace_id", event.trace_id.as_deref());
+    push_optional_attribute(
+        &mut attributes,
+        "tool_call_id",
+        event.tool_call_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "organization_id",
+        event.tenant.organization_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "project_id",
+        event.tenant.project_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "api_key_id",
+        event.tenant.api_key_id.as_deref(),
+    );
+    attributes
+}
+
+fn agent_event_span_name(event: &StoredAgentRunEvent) -> String {
+    match event.kind.as_str() {
+        "turn_started" => "ferrogate.agent.turn",
+        "tool_call_requested" | "tool_call_completed" => "ferrogate.agent.tool.dispatch",
+        "run_started" | "run_completed" | "run_stopped" => "ferrogate.agent.run.event",
+        _ => "ferrogate.agent.event",
+    }
+    .to_string()
+}
+
+fn agent_audit_span_name(event: &StoredAuditEvent) -> String {
+    match event.action.as_str() {
+        action if action.contains("approval") => "ferrogate.tool.approval.wait",
+        action if action.contains("billing") || action.contains("metering") => {
+            "ferrogate.billing.write"
+        }
+        action if action.contains("tool") => "ferrogate.agent.tool.dispatch",
+        _ => "ferrogate.agent.audit",
+    }
+    .to_string()
+}
+
 fn request_log_attributes(log: &StoredRequestLog) -> Vec<OtlpAttribute> {
     let mut attributes = vec![
         OtlpAttribute::new("event_family", "request"),
@@ -800,6 +1085,16 @@ fn request_log_attributes(log: &StoredRequestLog) -> Vec<OtlpAttribute> {
         ));
     }
     push_optional_attribute(&mut attributes, "error_code", log.error_code.as_deref());
+    push_optional_attribute(&mut attributes, "agent_run_id", log.agent_run_id.as_deref());
+    push_optional_attribute(&mut attributes, "workflow_id", log.workflow_id.as_deref());
+    if let Some(version) = log.workflow_version {
+        attributes.push(OtlpAttribute::new("workflow_version", version.to_string()));
+    }
+    push_optional_attribute(
+        &mut attributes,
+        "workflow_node_id",
+        log.workflow_node_id.as_deref(),
+    );
 
     attributes
 }
@@ -835,6 +1130,20 @@ fn audit_event_attributes(event: &StoredAuditEvent) -> Vec<OtlpAttribute> {
         &mut attributes,
         "tenant_api_key_id",
         event.tenant.api_key_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "agent_run_id",
+        event.agent_run_id.as_deref(),
+    );
+    push_optional_attribute(&mut attributes, "workflow_id", event.workflow_id.as_deref());
+    if let Some(version) = event.workflow_version {
+        attributes.push(OtlpAttribute::new("workflow_version", version.to_string()));
+    }
+    push_optional_attribute(
+        &mut attributes,
+        "workflow_node_id",
+        event.workflow_node_id.as_deref(),
     );
     attributes
 }
@@ -872,6 +1181,20 @@ fn billing_event_attributes(event: &BillingEvent) -> Vec<OtlpAttribute> {
         &mut attributes,
         "api_key_id",
         event.tenant.api_key_id.as_deref(),
+    );
+    push_optional_attribute(
+        &mut attributes,
+        "agent_run_id",
+        event.agent_run_id.as_deref(),
+    );
+    push_optional_attribute(&mut attributes, "workflow_id", event.workflow_id.as_deref());
+    if let Some(version) = event.workflow_version {
+        attributes.push(OtlpAttribute::new("workflow_version", version.to_string()));
+    }
+    push_optional_attribute(
+        &mut attributes,
+        "workflow_node_id",
+        event.workflow_node_id.as_deref(),
     );
     attributes
 }
@@ -1111,6 +1434,7 @@ mod tests {
     use super::*;
     use crate::{config::Config, state::AppState};
     use ferrogate_core::TenantContext;
+    use ferrogate_storage::{StoredAgentRun, StoredAgentRunEvent};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -1150,10 +1474,46 @@ mod tests {
         });
 
         let state = AppState::new(Config::default());
+        state.record_agent_run(StoredAgentRun {
+            id: "agent-run-1".into(),
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            status: "completed".into(),
+            provider: "default".into(),
+            turns_executed: 1,
+            output_recorded: true,
+            started_at_unix: Some(1),
+            completed_at_unix: Some(3),
+        });
+        state.record_agent_run_event(StoredAgentRunEvent {
+            id: "agent-event-1".into(),
+            run_id: "agent-run-1".into(),
+            request_id: "fg-1".into(),
+            trace_id: Some("fg-1".into()),
+            tenant: TenantContext {
+                organization_id: Some("org".into()),
+                project_id: Some("project".into()),
+                api_key_id: Some("key".into()),
+                ..TenantContext::default()
+            },
+            turn: 1,
+            kind: "turn_started".into(),
+            target: "agent_run:agent-run-1".into(),
+            outcome: "started".into(),
+            tool_call_id: None,
+            message: Some("turn started".into()),
+            occurred_at_unix: Some(1),
+        });
         state.record_request_log(StoredRequestLog {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
-            agent_run_id: None,
+            agent_run_id: Some("agent-run-1".into()),
             workflow_id: None,
             workflow_version: None,
             workflow_node_id: None,
@@ -1184,7 +1544,7 @@ mod tests {
         state.record_admin_audit_event(crate::state::AdminAuditEventDraft {
             request_id: "fg-1".into(),
             trace_id: Some("fg-1".into()),
-            agent_run_id: None,
+            agent_run_id: Some("agent-run-1".into()),
             workflow_id: None,
             workflow_version: None,
             workflow_node_id: None,
@@ -1205,6 +1565,7 @@ mod tests {
                 &ferrogate_core::RequestContext {
                     request_id: "fg-1".into(),
                     trace_id: Some("fg-1".into()),
+                    agent_run_id: Some("agent-run-1".into()),
                     tenant: TenantContext {
                         organization_id: Some("org".into()),
                         project_id: Some("project".into()),
@@ -1229,6 +1590,11 @@ mod tests {
         assert!(bodies.contains("resourceLogs"));
         assert!(bodies.contains("resourceSpans"));
         assert!(bodies.contains("ferrogate.gateway.request"));
+        assert!(bodies.contains("ferrogate.agent.run"));
+        assert!(bodies.contains("ferrogate.agent.turn"));
+        assert!(bodies.contains("ferrogate.agent.provider.step"));
+        assert!(bodies.contains("ferrogate.billing.write"));
+        assert!(bodies.contains("agent-run-1"));
         assert!(bodies.contains("event_family"));
         assert!(bodies.contains("request"));
         assert!(bodies.contains("audit"));
