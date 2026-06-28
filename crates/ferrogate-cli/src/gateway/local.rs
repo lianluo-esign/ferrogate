@@ -35,12 +35,17 @@ use crate::{
         AdminPluginMutation, AdminPluginMutationResponse, AdminPolicyMutation,
         AdminPolicyMutationResponse, AdminPromptTemplate, AdminPromptTemplateMutation,
         AdminPromptTemplateMutationResponse, AdminProvider, AdminProviderModelCandidate,
-        AdminProviderModelCatalog, AdminSelfHostedWorkerPersistence, AdminSelfHostedWorkerRuntime,
-        AdminSelfHostedWorkerSurface, AdminSkillPackage, AdminSkillPackageMutationResponse,
-        AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery, HealthResponse, OpenAiModel,
-        OpenAiModelList, PromptTemplateRenderRequest, ReadinessResponse,
+        AdminProviderModelCatalog, AdminSelfHostedWorkerPersistence,
+        AdminSelfHostedWorkerRegistrationRequest, AdminSelfHostedWorkerRegistrationResponse,
+        AdminSelfHostedWorkerRuntime, AdminSelfHostedWorkerSurface, AdminSkillPackage,
+        AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery,
+        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
+        ReadinessResponse,
     },
-    state::{AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord},
+    state::{
+        AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord,
+        SelfHostedWorkerRegistrationError,
+    },
 };
 use ferrogate_providers::provider_compatibility_kind;
 use ferrogate_providers::{ProviderHeader, SecretValue};
@@ -3919,60 +3924,199 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        method: &Method,
     ) -> PingoraResult<()> {
-        let state = self.state.current();
-        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let storage = state.storage_status();
-                let body = AdminList::new(vec![AdminSelfHostedWorkerRuntime {
-                    id: "self-hosted-worker-runtime",
-                    status: "contract_ready",
-                    execution_owner: "customer",
-                    enforcement_boundary: "customer_owned_host",
-                    trust_level: "reported_by_self_hosted_worker",
-                    identity_scope: vec!["tenant_id", "workspace_id", "worker_id"],
-                    transport_actions: vec![
-                        "register_worker",
-                        "probe_worker",
-                        "heartbeat",
-                        "stream_events",
-                        "upload_artifact",
-                        "fetch_checkpoint",
-                    ],
-                    telemetry_kinds: vec![
-                        "lifecycle",
-                        "log",
-                        "tool_call",
-                        "mcp_call",
-                        "cli_command",
-                        "skill_invocation",
-                        "artifact",
-                        "checkpoint",
-                        "usage",
-                    ],
-                    registration_api: AdminSelfHostedWorkerSurface {
-                        implemented: false,
-                        planned_paths: vec![
-                            "/admin/v1/self-hosted-workers",
-                            "/admin/v1/self-hosted-workers/{id}",
-                            "/admin/v1/self-hosted-workers/{id}/rotate",
-                        ],
-                    },
-                    persistence: AdminSelfHostedWorkerPersistence {
-                        provider: storage.provider,
-                        durable: storage.durable,
-                        implemented: false,
-                        contract_version: storage.contract_version,
-                    },
-                }]);
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+        match *method {
+            Method::GET => {
+                let state = self.state.current();
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => {
+                        let storage = state.storage_status();
+                        let body = AdminList::new(vec![AdminSelfHostedWorkerRuntime {
+                            id: "self-hosted-worker-runtime",
+                            status: "contract_ready",
+                            execution_owner: "customer",
+                            enforcement_boundary: "customer_owned_host",
+                            trust_level: "reported_by_self_hosted_worker",
+                            identity_scope: vec!["tenant_id", "workspace_id", "worker_id"],
+                            transport_actions: vec![
+                                "register_worker",
+                                "probe_worker",
+                                "heartbeat",
+                                "stream_events",
+                                "upload_artifact",
+                                "fetch_checkpoint",
+                            ],
+                            telemetry_kinds: vec![
+                                "lifecycle",
+                                "log",
+                                "tool_call",
+                                "mcp_call",
+                                "cli_command",
+                                "skill_invocation",
+                                "artifact",
+                                "checkpoint",
+                                "usage",
+                            ],
+                            registration_api: AdminSelfHostedWorkerSurface {
+                                implemented: true,
+                                planned_paths: vec![
+                                    "/admin/v1/self-hosted-workers",
+                                    "/admin/v1/self-hosted-workers/{id}",
+                                    "/admin/v1/self-hosted-workers/{id}/rotate",
+                                ],
+                            },
+                            persistence: AdminSelfHostedWorkerPersistence {
+                                provider: storage.provider,
+                                durable: storage.durable,
+                                implemented: false,
+                                contract_version: storage.contract_version,
+                            },
+                        }]);
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
             }
-            Err(error) => {
+            Method::POST => {
+                let state = self.state.current();
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+
+                let body = match read_request_body(session, 64 * 1024).await? {
+                    Ok(body) => body,
+                    Err(limit) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "self_hosted_worker.register",
+                            "new",
+                            "error",
+                            format!(
+                                "request body exceeds maximum size of {} bytes",
+                                limit.max_bytes
+                            ),
+                        ));
+                        return write_json_error_and_close(
+                            session,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "payload_too_large",
+                            format!(
+                                "request body exceeds maximum size of {} bytes",
+                                limit.max_bytes
+                            ),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let payload =
+                    match serde_json::from_slice::<AdminSelfHostedWorkerRegistrationRequest>(&body)
+                    {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                                ctx,
+                                &auth,
+                                "self_hosted_worker.register",
+                                "new",
+                                "error",
+                                format!("invalid request body: {error}"),
+                            ));
+                            return write_json_error(
+                                session,
+                                StatusCode::BAD_REQUEST,
+                                "invalid_json",
+                                format!("invalid request body: {error}"),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    };
+                match state.register_self_hosted_worker(payload) {
+                    Ok(worker) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "self_hosted_worker.register",
+                            &worker.id,
+                            "success",
+                            format!(
+                                "registered self-hosted worker {} for workspace {}",
+                                worker.worker_name, worker.workspace_id
+                            ),
+                        ));
+                        let body = AdminSelfHostedWorkerRegistrationResponse {
+                            object: "self_hosted_worker",
+                            worker,
+                        };
+                        write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id)
+                            .await
+                    }
+                    Err(SelfHostedWorkerRegistrationError::InvalidRequest(message)) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "self_hosted_worker.register",
+                            "new",
+                            "rejected",
+                            message.clone(),
+                        ));
+                        write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_self_hosted_worker_registration",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(SelfHostedWorkerRegistrationError::Storage(message)) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "self_hosted_worker.register",
+                            "new",
+                            "error",
+                            message.clone(),
+                        ));
+                        write_json_error(
+                            session,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "self_hosted_worker_registration_failed",
+                            message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            _ => {
                 write_json_error(
                     session,
-                    error.status,
-                    error.code,
-                    error.message,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "self-hosted worker endpoint supports GET and POST",
                     &ctx.request_id,
                 )
                 .await

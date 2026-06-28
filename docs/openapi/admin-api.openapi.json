@@ -288,6 +288,47 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "operationId": "registerAdminSelfHostedWorker",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Register a self-hosted worker in durable control-plane storage.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSelfHostedWorkerRegistrationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Self-hosted worker registration record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerRegistrationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
       }
     },
     "/admin/status": {
@@ -9703,6 +9744,61 @@
       },
       "AdminSelfHostedWorkerRecordList": {
         "$ref": "#/components/schemas/AdminList_AdminSelfHostedWorkerRecord"
+      },
+      "AdminSelfHostedWorkerRegistrationRequest": {
+        "type": "object",
+        "required": [
+          "tenant",
+          "workspace_id",
+          "worker_name",
+          "identity_fingerprint"
+        ],
+        "properties": {
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "workspace_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "worker_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "identity_fingerprint": {
+            "type": "string",
+            "minLength": 1
+          },
+          "orchestration_enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "capability_envelope_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional worker capability envelope document encoded as JSON. It remains customer-reported metadata for self-hosted workers."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerRegistrationResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "worker"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_worker"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+          }
+        },
+        "additionalProperties": false
       },
       "AdminList_AdminSelfHostedWorkerRecord": {
         "type": "object",

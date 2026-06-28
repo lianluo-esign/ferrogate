@@ -184,7 +184,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 "reported_by_self_hosted_worker"
             );
             assert_eq!(body["data"][0]["transport_actions"][0], "register_worker");
-            assert_eq!(body["data"][0]["registration_api"]["implemented"], false);
+            assert_eq!(body["data"][0]["registration_api"]["implemented"], true);
             assert_eq!(body["data"][0]["persistence"]["implemented"], false);
             assert_eq!(body["data"][0]["persistence"]["provider"], "memory");
             Ok(())
@@ -201,6 +201,69 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["data"].as_array().map(Vec::len), Some(0));
             assert_eq!(body["total"], 0);
             assert_eq!(body["offset"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/self-hosted-workers",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "tenant": {
+            "organization_id": "org_demo",
+            "project_id": "project_gateway",
+            "api_key_id": "key_admin"
+          },
+          "workspace_id": "workspace-1",
+          "worker_name": "customer-worker-a",
+          "identity_fingerprint": "sha256:test-worker",
+          "orchestration_enabled": true,
+          "capability_envelope_json": "{\"frameworks\":[\"codex\"]}"
+        }"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker");
+            assert!(body["worker"]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("self-hosted-worker-")));
+            assert_eq!(body["worker"]["workspace_id"], "workspace-1");
+            assert_eq!(body["worker"]["worker_name"], "customer-worker-a");
+            assert_eq!(body["worker"]["status"], "registered");
+            assert_eq!(body["worker"]["identity_fingerprint"], "sha256:test-worker");
+            assert_eq!(body["worker"]["orchestration_enabled"], true);
+            assert_eq!(
+                body["worker"]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["worker"]["telemetry_event_count"], 0);
+            assert_eq!(body["worker"]["artifact_count"], 0);
+            assert_eq!(body["worker"]["checkpoint_count"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/self-hosted-worker-records",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "list");
+            assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+            assert_eq!(body["total"], 1);
+            assert_eq!(body["offset"], 0);
+            assert_eq!(body["data"][0]["workspace_id"], "workspace-1");
+            assert_eq!(body["data"][0]["worker_name"], "customer-worker-a");
+            assert_eq!(body["data"][0]["status"], "registered");
+            assert_eq!(
+                body["data"][0]["identity_fingerprint"],
+                "sha256:test-worker"
+            );
+            assert_eq!(body["data"][0]["orchestration_enabled"], true);
+            assert_eq!(
+                body["data"][0]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
             Ok(())
         },
     )?;

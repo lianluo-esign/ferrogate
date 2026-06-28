@@ -261,7 +261,8 @@ impl FerroGateway {
 
         if path == "/admin/v1/self-hosted-workers" {
             let headers = req.headers.clone();
-            self.handle_admin_self_hosted_workers(session, ctx, &headers)
+            let method = req.method.clone();
+            self.handle_admin_self_hosted_workers(session, ctx, &headers, &method)
                 .await?;
             return Ok(true);
         }

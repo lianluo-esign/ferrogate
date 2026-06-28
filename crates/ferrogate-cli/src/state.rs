@@ -59,12 +59,13 @@ use ferrogate_storage::{
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
     StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
-    StoredRequestLog, StoredSelfHostedWorkerHeartbeat, StoredUsageAggregate,
+    StoredRequestLog, StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
+    StoredUsageAggregate,
 };
 #[cfg(test)]
 use ferrogate_storage::{
     StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
-    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent,
+    StoredSelfHostedWorkerTelemetryEvent,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -2354,6 +2355,67 @@ fn latest_self_hosted_heartbeat(
         .cloned()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelfHostedWorkerRegistrationError {
+    InvalidRequest(String),
+    Storage(String),
+}
+
+impl std::fmt::Display for SelfHostedWorkerRegistrationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelfHostedWorkerRegistrationError::InvalidRequest(message) => {
+                write!(formatter, "{message}")
+            }
+            SelfHostedWorkerRegistrationError::Storage(message) => write!(formatter, "{message}"),
+        }
+    }
+}
+
+fn validate_self_hosted_registration_request(
+    request: &crate::responses::AdminSelfHostedWorkerRegistrationRequest,
+) -> Result<(), SelfHostedWorkerRegistrationError> {
+    require_self_hosted_field("workspace_id", &request.workspace_id)?;
+    require_self_hosted_field("worker_name", &request.worker_name)?;
+    require_self_hosted_field("identity_fingerprint", &request.identity_fingerprint)?;
+    if !request
+        .capability_envelope_json
+        .as_deref()
+        .unwrap_or("{}")
+        .trim()
+        .is_empty()
+        && serde_json::from_str::<serde_json::Value>(
+            request.capability_envelope_json.as_deref().unwrap_or("{}"),
+        )
+        .is_err()
+    {
+        return Err(SelfHostedWorkerRegistrationError::InvalidRequest(
+            "capability_envelope_json must be valid JSON when provided".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_self_hosted_field(
+    field: &str,
+    value: &str,
+) -> Result<(), SelfHostedWorkerRegistrationError> {
+    if value.trim().is_empty() {
+        return Err(SelfHostedWorkerRegistrationError::InvalidRequest(format!(
+            "{field} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn next_self_hosted_worker_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("self-hosted-worker-{nanos}-{}", std::process::id())
+}
+
 impl AppState {
     #[cfg(test)]
     pub(crate) fn new(config: Config) -> Self {
@@ -4509,12 +4571,71 @@ impl AppState {
         &self,
         pagination: AdminPagination,
     ) -> AdminPage<crate::responses::AdminSelfHostedWorkerRecord> {
+        let mut records = self.self_hosted_worker_records();
+        records.sort_by(|left, right| {
+            right
+                .last_seen_at_unix
+                .or(right.registered_at_unix)
+                .cmp(&left.last_seen_at_unix.or(left.registered_at_unix))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let total = records.len();
+        let data = records
+            .into_iter()
+            .skip(pagination.offset)
+            .take(pagination.limit)
+            .collect();
+        AdminPage {
+            data,
+            total,
+            offset: pagination.offset,
+            limit: pagination.limit,
+        }
+    }
+
+    pub(crate) fn register_self_hosted_worker(
+        &self,
+        request: crate::responses::AdminSelfHostedWorkerRegistrationRequest,
+    ) -> Result<crate::responses::AdminSelfHostedWorkerRecord, SelfHostedWorkerRegistrationError>
+    {
+        validate_self_hosted_registration_request(&request)?;
+        let id = next_self_hosted_worker_id();
+        let now = now_unix_seconds();
+        let registration = StoredSelfHostedWorkerRegistration {
+            id: id.clone(),
+            tenant: request.tenant,
+            workspace_id: request.workspace_id.trim().to_string(),
+            worker_name: request.worker_name.trim().to_string(),
+            status: "registered".into(),
+            identity_fingerprint: request.identity_fingerprint.trim().to_string(),
+            orchestration_enabled: request.orchestration_enabled,
+            registered_at_unix: now,
+            last_seen_at_unix: None,
+            trust_level: "reported_by_self_hosted_worker".into(),
+            capability_envelope_json: request
+                .capability_envelope_json
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "{}".into()),
+        };
+        self.repositories
+            .upsert_self_hosted_worker_registration(registration)
+            .map_err(|error| SelfHostedWorkerRegistrationError::Storage(error.to_string()))?;
+        self.self_hosted_worker_records()
+            .into_iter()
+            .find(|record| record.id == id)
+            .ok_or_else(|| {
+                SelfHostedWorkerRegistrationError::Storage(
+                    "self-hosted worker registration was not readable after write".into(),
+                )
+            })
+    }
+
+    fn self_hosted_worker_records(&self) -> Vec<crate::responses::AdminSelfHostedWorkerRecord> {
         let heartbeats = self.repositories.self_hosted_worker_heartbeats();
         let telemetry_events = self.repositories.self_hosted_worker_telemetry_events();
         let artifacts = self.repositories.self_hosted_worker_artifacts();
         let checkpoints = self.repositories.self_hosted_worker_checkpoints();
-        let mut records = self
-            .repositories
+        self.repositories
             .self_hosted_worker_registrations()
             .into_iter()
             .map(|registration| {
@@ -4567,26 +4688,7 @@ impl AppState {
                         .max(),
                 }
             })
-            .collect::<Vec<_>>();
-        records.sort_by(|left, right| {
-            right
-                .last_seen_at_unix
-                .or(right.registered_at_unix)
-                .cmp(&left.last_seen_at_unix.or(left.registered_at_unix))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        let total = records.len();
-        let data = records
-            .into_iter()
-            .skip(pagination.offset)
-            .take(pagination.limit)
-            .collect();
-        AdminPage {
-            data,
-            total,
-            offset: pagination.offset,
-            limit: pagination.limit,
-        }
+            .collect()
     }
 
     pub(crate) fn agent_run_timeline(
@@ -7321,6 +7423,101 @@ mod tests {
         let heartbeat = page.data[0].latest_heartbeat.as_ref().unwrap();
         assert_eq!(heartbeat.id, "heartbeat-new");
         assert_eq!(heartbeat.status, "degraded");
+    }
+
+    #[test]
+    fn register_self_hosted_worker_writes_durable_registration_record() {
+        let state = AppState::new(Config::default());
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext {
+                        organization_id: Some("org".into()),
+                        team_id: None,
+                        project_id: Some("project".into()),
+                        user_id: None,
+                        api_key_id: Some("key".into()),
+                    },
+                    workspace_id: " workspace-1 ".into(),
+                    worker_name: " customer-worker ".into(),
+                    identity_fingerprint: " sha256:worker ".into(),
+                    orchestration_enabled: true,
+                    capability_envelope_json: Some(r#"{"frameworks":["codex"]}"#.into()),
+                },
+            )
+            .expect("registration should be accepted");
+
+        assert!(worker.id.starts_with("self-hosted-worker-"));
+        assert_eq!(worker.workspace_id, "workspace-1");
+        assert_eq!(worker.worker_name, "customer-worker");
+        assert_eq!(worker.status, "registered");
+        assert_eq!(worker.identity_fingerprint, "sha256:worker");
+        assert!(worker.orchestration_enabled);
+        assert_eq!(worker.trust_level, "reported_by_self_hosted_worker");
+        assert!(worker.registered_at_unix.is_some());
+        assert_eq!(worker.last_seen_at_unix, None);
+        assert!(worker.latest_heartbeat.is_none());
+
+        let records = state.repositories.self_hosted_worker_registrations();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, worker.id);
+        assert_eq!(records[0].tenant.organization_id.as_deref(), Some("org"));
+        assert_eq!(records[0].workspace_id, "workspace-1");
+        assert_eq!(records[0].worker_name, "customer-worker");
+        assert_eq!(records[0].identity_fingerprint, "sha256:worker");
+        assert_eq!(
+            records[0].capability_envelope_json,
+            r#"{"frameworks":["codex"]}"#
+        );
+    }
+
+    #[test]
+    fn register_self_hosted_worker_rejects_invalid_registration_payloads() {
+        let state = AppState::new(Config::default());
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        };
+
+        let blank_workspace = state.register_self_hosted_worker(
+            crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                tenant: tenant.clone(),
+                workspace_id: " ".into(),
+                worker_name: "customer-worker".into(),
+                identity_fingerprint: "sha256:worker".into(),
+                orchestration_enabled: false,
+                capability_envelope_json: None,
+            },
+        );
+        assert!(matches!(
+            blank_workspace,
+            Err(SelfHostedWorkerRegistrationError::InvalidRequest(message))
+                if message == "workspace_id must not be empty"
+        ));
+
+        let invalid_json = state.register_self_hosted_worker(
+            crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                tenant,
+                workspace_id: "workspace-1".into(),
+                worker_name: "customer-worker".into(),
+                identity_fingerprint: "sha256:worker".into(),
+                orchestration_enabled: false,
+                capability_envelope_json: Some("{not-json".into()),
+            },
+        );
+        assert!(matches!(
+            invalid_json,
+            Err(SelfHostedWorkerRegistrationError::InvalidRequest(message))
+                if message == "capability_envelope_json must be valid JSON when provided"
+        ));
+
+        assert!(state
+            .repositories
+            .self_hosted_worker_registrations()
+            .is_empty());
     }
 
     #[test]

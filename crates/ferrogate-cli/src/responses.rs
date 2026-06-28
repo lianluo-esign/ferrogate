@@ -224,6 +224,25 @@ pub(crate) struct AdminSelfHostedWorkerHeartbeat {
     pub(crate) observed_at_unix: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminSelfHostedWorkerRegistrationRequest {
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) workspace_id: String,
+    pub(crate) worker_name: String,
+    pub(crate) identity_fingerprint: String,
+    #[serde(default)]
+    pub(crate) orchestration_enabled: bool,
+    #[serde(default)]
+    pub(crate) capability_envelope_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) worker: AdminSelfHostedWorkerRecord,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {
