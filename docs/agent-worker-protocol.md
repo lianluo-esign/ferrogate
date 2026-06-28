@@ -343,6 +343,24 @@ execution step; the command itself still does not execute the external action.
 Denied, approval-required, invalid, or self-hosted requests fail closed before
 handler execution.
 
+The worker-side transport contract for the real gateway/control-plane
+authorizer uses the same JSON body wrapped as
+`GatewayExternalActionTransportRequest`:
+
+- `request_id`: stable request identity derived from run, session, worker,
+  adapter, and action kind.
+- `authorization`: the `ExternalActionAuthorizationRequest` body.
+
+The gateway replies with `GatewayExternalActionTransportResponse`, echoing the
+same `request_id` and carrying the same authorization response shape used by the
+stdin smoke. The standalone worker client rejects mismatched response ids,
+missing accepted-event evidence, malformed canonical event JSON, denied
+decisions, approval-required decisions, and transport failures before handler
+execution. The first concrete transport is a local Unix socket client/server
+contract used for local gateway-to-worker integration tests; production
+deployment can wrap the same request/response body in stronger process
+management and symmetric encryption without changing handler semantics.
+
 The current typed action specs are:
 
 - `ManagedToolAction`: governed built-in or plugin tool call with argument
