@@ -266,6 +266,21 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/self-hosted-worker-records" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_self_hosted_worker_records(
+                session,
+                ctx,
+                &headers,
+                &method,
+                query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/agent-upstreams" || path.starts_with("/admin/v1/agent-upstreams/") {
             let headers = req.headers.clone();
             let method = req.method.clone();

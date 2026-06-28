@@ -493,6 +493,41 @@
         }
       }
     },
+    "/admin/v1/self-hosted-worker-records": {
+      "get": {
+        "operationId": "listAdminSelfHostedWorkerRecords",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List persisted self-hosted worker records without fabricating registrations.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated self-hosted worker records backed by storage evidence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerRecordList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/observability": {
       "get": {
         "operationId": "listAdminObservability",
@@ -9662,6 +9697,176 @@
           "contract_version": {
             "type": "integer",
             "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerRecordList": {
+        "$ref": "#/components/schemas/AdminList_AdminSelfHostedWorkerRecord"
+      },
+      "AdminList_AdminSelfHostedWorkerRecord": {
+        "type": "object",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenant",
+          "workspace_id",
+          "worker_name",
+          "status",
+          "identity_fingerprint",
+          "orchestration_enabled",
+          "trust_level",
+          "latest_heartbeat",
+          "telemetry_event_count",
+          "artifact_count",
+          "checkpoint_count"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "worker_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "identity_fingerprint": {
+            "type": "string"
+          },
+          "orchestration_enabled": {
+            "type": "boolean"
+          },
+          "registered_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "last_seen_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "latest_heartbeat": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AdminSelfHostedWorkerHeartbeat"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "telemetry_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "artifact_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "checkpoint_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "latest_event_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "latest_artifact_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "latest_checkpoint_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerHeartbeat": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "reported_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "observed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         },
         "additionalProperties": false

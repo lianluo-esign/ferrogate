@@ -195,6 +195,35 @@ pub(crate) struct AdminSelfHostedWorkerPersistence {
     pub(crate) contract_version: u32,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerRecord {
+    pub(crate) id: String,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) workspace_id: String,
+    pub(crate) worker_name: String,
+    pub(crate) status: String,
+    pub(crate) identity_fingerprint: String,
+    pub(crate) orchestration_enabled: bool,
+    pub(crate) registered_at_unix: Option<u64>,
+    pub(crate) last_seen_at_unix: Option<u64>,
+    pub(crate) trust_level: String,
+    pub(crate) latest_heartbeat: Option<AdminSelfHostedWorkerHeartbeat>,
+    pub(crate) telemetry_event_count: usize,
+    pub(crate) artifact_count: usize,
+    pub(crate) checkpoint_count: usize,
+    pub(crate) latest_event_at_unix: Option<u64>,
+    pub(crate) latest_artifact_at_unix: Option<u64>,
+    pub(crate) latest_checkpoint_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerHeartbeat {
+    pub(crate) id: String,
+    pub(crate) status: String,
+    pub(crate) reported_at_unix: Option<u64>,
+    pub(crate) observed_at_unix: Option<u64>,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {

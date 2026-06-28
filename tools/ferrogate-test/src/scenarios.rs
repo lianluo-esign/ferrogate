@@ -192,6 +192,20 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     )?;
     case.expect_json(
         "GET",
+        "/admin/v1/self-hosted-worker-records",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "list");
+            assert_eq!(body["data"].as_array().map(Vec::len), Some(0));
+            assert_eq!(body["total"], 0);
+            assert_eq!(body["offset"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
         "/admin/v1/provider-models?provider=openai",
         &[ADMIN_AUTH],
         "",

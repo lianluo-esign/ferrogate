@@ -59,7 +59,12 @@ use ferrogate_storage::{
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
     StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
-    StoredRequestLog, StoredUsageAggregate,
+    StoredRequestLog, StoredSelfHostedWorkerHeartbeat, StoredUsageAggregate,
+};
+#[cfg(test)]
+use ferrogate_storage::{
+    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -2334,6 +2339,21 @@ pub(crate) struct ProviderHealthCheck {
     pub(crate) cluster_observations: Option<ProviderRoutingHealth>,
 }
 
+fn latest_self_hosted_heartbeat(
+    heartbeats: &[StoredSelfHostedWorkerHeartbeat],
+    worker_id: &str,
+) -> Option<StoredSelfHostedWorkerHeartbeat> {
+    heartbeats
+        .iter()
+        .filter(|heartbeat| heartbeat.worker_id == worker_id)
+        .max_by(|left, right| {
+            left.reported_at_unix
+                .cmp(&right.reported_at_unix)
+                .then_with(|| left.id.cmp(&right.id))
+        })
+        .cloned()
+}
+
 impl AppState {
     #[cfg(test)]
     pub(crate) fn new(config: Config) -> Self {
@@ -4473,6 +4493,90 @@ impl AppState {
         });
         let total = sessions.len();
         let data = sessions
+            .into_iter()
+            .skip(pagination.offset)
+            .take(pagination.limit)
+            .collect();
+        AdminPage {
+            data,
+            total,
+            offset: pagination.offset,
+            limit: pagination.limit,
+        }
+    }
+
+    pub(crate) fn self_hosted_worker_records_page(
+        &self,
+        pagination: AdminPagination,
+    ) -> AdminPage<crate::responses::AdminSelfHostedWorkerRecord> {
+        let heartbeats = self.repositories.self_hosted_worker_heartbeats();
+        let telemetry_events = self.repositories.self_hosted_worker_telemetry_events();
+        let artifacts = self.repositories.self_hosted_worker_artifacts();
+        let checkpoints = self.repositories.self_hosted_worker_checkpoints();
+        let mut records = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .map(|registration| {
+                let latest_heartbeat = latest_self_hosted_heartbeat(&heartbeats, &registration.id);
+                let worker_telemetry = telemetry_events
+                    .iter()
+                    .filter(|event| event.worker_id == registration.id)
+                    .collect::<Vec<_>>();
+                let worker_artifacts = artifacts
+                    .iter()
+                    .filter(|artifact| artifact.worker_id == registration.id)
+                    .collect::<Vec<_>>();
+                let worker_checkpoints = checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.worker_id == registration.id)
+                    .collect::<Vec<_>>();
+                crate::responses::AdminSelfHostedWorkerRecord {
+                    id: registration.id,
+                    tenant: registration.tenant,
+                    workspace_id: registration.workspace_id,
+                    worker_name: registration.worker_name,
+                    status: registration.status,
+                    identity_fingerprint: registration.identity_fingerprint,
+                    orchestration_enabled: registration.orchestration_enabled,
+                    registered_at_unix: registration.registered_at_unix,
+                    last_seen_at_unix: registration.last_seen_at_unix,
+                    trust_level: registration.trust_level,
+                    latest_heartbeat: latest_heartbeat.map(|heartbeat| {
+                        crate::responses::AdminSelfHostedWorkerHeartbeat {
+                            id: heartbeat.id,
+                            status: heartbeat.status,
+                            reported_at_unix: heartbeat.reported_at_unix,
+                            observed_at_unix: heartbeat.observed_at_unix,
+                        }
+                    }),
+                    telemetry_event_count: worker_telemetry.len(),
+                    artifact_count: worker_artifacts.len(),
+                    checkpoint_count: worker_checkpoints.len(),
+                    latest_event_at_unix: worker_telemetry
+                        .iter()
+                        .filter_map(|event| event.occurred_at_unix)
+                        .max(),
+                    latest_artifact_at_unix: worker_artifacts
+                        .iter()
+                        .filter_map(|artifact| artifact.created_at_unix)
+                        .max(),
+                    latest_checkpoint_at_unix: worker_checkpoints
+                        .iter()
+                        .filter_map(|checkpoint| checkpoint.created_at_unix)
+                        .max(),
+                }
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            right
+                .last_seen_at_unix
+                .or(right.registered_at_unix)
+                .cmp(&left.last_seen_at_unix.or(left.registered_at_unix))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let total = records.len();
+        let data = records
             .into_iter()
             .skip(pagination.offset)
             .take(pagination.limit)
@@ -7095,6 +7199,128 @@ mod tests {
         assert!(events[0]
             .evidence_json
             .contains("\"isolation_backend_kind\":\"firecracker_microvm\""));
+    }
+
+    #[test]
+    fn self_hosted_worker_records_page_reads_storage_evidence() {
+        let state = AppState::new(Config::default());
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        };
+
+        state
+            .repositories
+            .upsert_self_hosted_worker_registration(StoredSelfHostedWorkerRegistration {
+                id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                worker_name: "customer-worker".into(),
+                status: "online".into(),
+                identity_fingerprint: "sha256:worker".into(),
+                orchestration_enabled: true,
+                registered_at_unix: Some(10),
+                last_seen_at_unix: Some(20),
+                trust_level: "reported_by_self_hosted_worker".into(),
+                capability_envelope_json: "{}".into(),
+            })
+            .unwrap();
+        state
+            .repositories
+            .append_self_hosted_worker_heartbeat(StoredSelfHostedWorkerHeartbeat {
+                id: "heartbeat-old".into(),
+                worker_id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                status: "online".into(),
+                reported_at_unix: Some(21),
+                observed_at_unix: Some(22),
+                heartbeat_json: "{}".into(),
+            })
+            .unwrap();
+        state
+            .repositories
+            .append_self_hosted_worker_heartbeat(StoredSelfHostedWorkerHeartbeat {
+                id: "heartbeat-new".into(),
+                worker_id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                status: "degraded".into(),
+                reported_at_unix: Some(23),
+                observed_at_unix: Some(24),
+                heartbeat_json: "{}".into(),
+            })
+            .unwrap();
+        state
+            .repositories
+            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                id: "telemetry-1".into(),
+                worker_id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                session_id: Some("session-1".into()),
+                run_id: Some("run-1".into()),
+                kind: "log".into(),
+                trust_level: "reported_by_self_hosted_worker".into(),
+                occurred_at_unix: Some(25),
+                ingested_at_unix: Some(26),
+                event_json: "{}".into(),
+            })
+            .unwrap();
+        state
+            .repositories
+            .upsert_self_hosted_worker_artifact(StoredSelfHostedWorkerArtifact {
+                id: "artifact-1".into(),
+                worker_id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                artifact_name: "stdout.log".into(),
+                content_type: Some("text/plain".into()),
+                size_bytes: 128,
+                trust_level: "reported_by_self_hosted_worker".into(),
+                created_at_unix: Some(27),
+                artifact_json: "{}".into(),
+            })
+            .unwrap();
+        state
+            .repositories
+            .upsert_self_hosted_worker_checkpoint(StoredSelfHostedWorkerCheckpoint {
+                id: "checkpoint-1".into(),
+                worker_id: "worker-1".into(),
+                tenant,
+                workspace_id: "workspace-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                checkpoint_name: "resume-state".into(),
+                size_bytes: 256,
+                trust_level: "reported_by_self_hosted_worker".into(),
+                created_at_unix: Some(28),
+                checkpoint_json: "{}".into(),
+            })
+            .unwrap();
+
+        let page = state.self_hosted_worker_records_page(AdminPagination {
+            offset: 0,
+            limit: 50,
+        });
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.data[0].id, "worker-1");
+        assert_eq!(page.data[0].worker_name, "customer-worker");
+        assert_eq!(page.data[0].telemetry_event_count, 1);
+        assert_eq!(page.data[0].artifact_count, 1);
+        assert_eq!(page.data[0].checkpoint_count, 1);
+        assert_eq!(page.data[0].latest_event_at_unix, Some(25));
+        assert_eq!(page.data[0].latest_artifact_at_unix, Some(27));
+        assert_eq!(page.data[0].latest_checkpoint_at_unix, Some(28));
+        let heartbeat = page.data[0].latest_heartbeat.as_ref().unwrap();
+        assert_eq!(heartbeat.id, "heartbeat-new");
+        assert_eq!(heartbeat.status, "degraded");
     }
 
     #[test]
