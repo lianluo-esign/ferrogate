@@ -9,7 +9,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -68,6 +68,9 @@ enum Command {
         /// Number of management requests to accept before exiting.
         #[arg(long, default_value_t = 1)]
         max_requests: usize,
+        /// Exit after this many idle milliseconds without a new management connection.
+        #[arg(long)]
+        idle_timeout_millis: Option<u64>,
     },
 }
 
@@ -87,12 +90,14 @@ fn main() -> Result<()> {
             shared_secret,
             now_unix_millis,
             max_requests,
+            idle_timeout_millis,
         } => serve_management_unix_command(
             &socket_path,
             &key_id,
             &shared_secret,
             now_unix_millis,
             max_requests,
+            idle_timeout_millis,
         ),
     }
 }
@@ -149,6 +154,7 @@ fn serve_management_unix_command(
     shared_secret: &str,
     now_unix_millis: Option<u64>,
     max_requests: usize,
+    idle_timeout_millis: Option<u64>,
 ) -> Result<()> {
     let responses = serve_management_unix(
         socket_path,
@@ -156,16 +162,18 @@ fn serve_management_unix_command(
         shared_secret,
         now_unix_millis,
         max_requests,
+        idle_timeout_millis,
     )?;
-    let Some(response) = responses.last() else {
-        anyhow::bail!("max_requests must be greater than zero");
-    };
-    println!(
-        "agent-worker unix management served requests={} last_request_id={} last_accepted={}",
-        responses.len(),
-        response.request_id,
-        response.accepted
-    );
+    if let Some(response) = responses.last() {
+        println!(
+            "agent-worker unix management served requests={} last_request_id={} last_accepted={}",
+            responses.len(),
+            response.request_id,
+            response.accepted
+        );
+    } else {
+        println!("agent-worker unix management served requests=0 idle_timeout=true");
+    }
     Ok(())
 }
 
@@ -175,6 +183,7 @@ fn serve_management_unix(
     shared_secret: &str,
     now_unix_millis: Option<u64>,
     max_requests: usize,
+    idle_timeout_millis: Option<u64>,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -192,15 +201,48 @@ fn serve_management_unix(
         ])?);
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
     let mut responses = Vec::with_capacity(max_requests);
-    for _ in 0..max_requests {
-        responses.push(accept_one_management_unix_connection(
-            &listener,
-            &mut transport,
-            now_unix_millis,
-        )?);
+    let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
+    if let Some(timeout) = idle_timeout {
+        if timeout.is_zero() {
+            anyhow::bail!("idle_timeout_millis must be greater than zero");
+        }
+        listener.set_nonblocking(true)?;
+    }
+    let mut idle_started = Instant::now();
+    while responses.len() < max_requests {
+        match accept_one_management_unix_connection(&listener, &mut transport, now_unix_millis) {
+            Ok(response) => {
+                responses.push(response);
+                idle_started = Instant::now();
+            }
+            Err(error)
+                if idle_timeout.is_some()
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(is_idle_accept_error) =>
+            {
+                let timeout = idle_timeout.expect("guarded by idle_timeout.is_some()");
+                if idle_started.elapsed() >= timeout {
+                    break;
+                }
+                std::thread::sleep(
+                    timeout
+                        .saturating_sub(idle_started.elapsed())
+                        .min(Duration::from_millis(10)),
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
     let _ = std::fs::remove_file(socket_path);
     Ok(responses)
+}
+
+fn is_idle_accept_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
 }
 
 fn accept_one_management_unix_connection(
@@ -209,6 +251,7 @@ fn accept_one_management_unix_connection(
     now_unix_millis: u64,
 ) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
     let (mut stream, _) = listener.accept()?;
+    stream.set_nonblocking(false)?;
     let mut input = String::new();
     stream.read_to_string(&mut input)?;
     let envelope: AgentWorkerManagementEnvelope = serde_json::from_str(&input)?;
@@ -523,6 +566,7 @@ mod tests {
                 SMOKE_SHARED_SECRET,
                 Some(1_000),
                 1,
+                None,
             )
             .unwrap()
         });
@@ -557,6 +601,7 @@ mod tests {
                 SMOKE_SHARED_SECRET,
                 Some(1_000),
                 2,
+                None,
             )
             .unwrap()
         });
@@ -581,6 +626,24 @@ mod tests {
         assert_eq!(server_responses.len(), 2);
         assert!(server_responses[0].accepted);
         assert!(!server_responses[1].accepted);
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn unix_socket_server_exits_and_cleans_up_after_idle_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("agent-worker-management.sock");
+        let responses = serve_management_unix(
+            &socket_path,
+            "agent-worker-smoke-key",
+            SMOKE_SHARED_SECRET,
+            Some(1_000),
+            2,
+            Some(25),
+        )
+        .unwrap();
+
+        assert!(responses.is_empty());
         assert!(!socket_path.exists());
     }
 

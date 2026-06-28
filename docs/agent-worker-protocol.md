@@ -204,19 +204,24 @@ agent-worker serve-management-unix \
   --socket-path "$AGENT_WORKER_MANAGEMENT_SOCKET" \
   --key-id "$AGENT_WORKER_MANAGEMENT_KEY_ID" \
   --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET" \
-  --max-requests 1
+  --max-requests 1 \
+  --idle-timeout-millis 1000
 ```
 
 This command accepts signed JSON envelopes over the socket, verifies them
 through the same management verifier, writes one JSON response per request,
 removes the socket file, and exits after `--max-requests` requests. The default
-is one request for deterministic contract smokes. The same server instance keeps
-verifier state across accepted connections, so nonce replay and idempotency
-checks are not reset per connection. The envelope should use
-`security.transport_security=local_unix_socket` for this transport. It proves
-the `agent-worker` process can receive management requests over an explicit
-same-host process boundary. It is not the final long-running lifecycle server,
-does not provide cross-host encryption, and does not boot Firecracker.
+is one request for deterministic contract smokes. When
+`--idle-timeout-millis` is set, the server exits cleanly after that idle period
+without a new connection and still removes the socket file. The same server
+instance keeps verifier state across accepted connections, so nonce replay and
+idempotency checks are not reset per connection. The envelope should use
+`security.transport_security=local_unix_socket` for this transport.
+
+This proves the `agent-worker` process can receive management requests over an
+explicit same-host process boundary and can shut down cleanly without leaving a
+stale socket. It is not the final unbounded concurrent lifecycle server, does
+not provide cross-host encryption, and does not boot Firecracker.
 
 Until lifecycle handlers land, this server only accepts `probe_handlers`.
 Authenticated lifecycle requests such as `provision`, `exec_or_attach`, `stop`,
