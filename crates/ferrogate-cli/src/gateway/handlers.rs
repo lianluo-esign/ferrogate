@@ -237,6 +237,21 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/managed-worker-sessions" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_managed_worker_sessions(
+                session,
+                ctx,
+                &headers,
+                &method,
+                query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/framework-adapters" {
             let headers = req.headers.clone();
             self.handle_admin_framework_adapters(session, ctx, &headers)

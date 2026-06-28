@@ -3348,6 +3348,41 @@
           }
         }
       }
+    },
+    "/admin/v1/managed-worker-sessions": {
+      "get": {
+        "operationId": "listAdminManagedWorkerSessions",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List persisted managed worker sessions and lifecycle events without fabricating sessions.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated managed worker session list backed by storage records.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminManagedWorkerSessionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -9626,6 +9661,203 @@
           "contract_version": {
             "type": "integer",
             "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminManagedWorkerSessionList": {
+        "$ref": "#/components/schemas/AdminList_AdminManagedWorkerSession"
+      },
+      "AdminList_AdminManagedWorkerSession": {
+        "type": "object",
+        "required": [
+          "object",
+          "data",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminManagedWorkerSession"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminManagedWorkerSession": {
+        "type": "object",
+        "required": [
+          "id",
+          "run_id",
+          "tenant",
+          "workspace_id",
+          "worker_template_id",
+          "status",
+          "isolation_backend_kind",
+          "capability_envelope_id",
+          "lifecycle_events"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "tenant": {
+            "$ref": "#/components/schemas/TenantContext"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "worker_template_id": {
+            "type": "string"
+          },
+          "agent_worker_instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "cancelled",
+              "failed",
+              "cleaned_up"
+            ]
+          },
+          "isolation_backend_kind": {
+            "type": "string",
+            "enum": [
+              "firecracker_microvm",
+              "kata_containers",
+              "gvisor",
+              "rootless_docker",
+              "wasm_sandbox"
+            ]
+          },
+          "microvm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capability_envelope_id": {
+            "type": "string"
+          },
+          "requested_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "started_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "completed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cleanup_completed_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "lifecycle_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminManagedWorkerLifecycleEvent"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminManagedWorkerLifecycleEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "run_id",
+          "status",
+          "action",
+          "outcome"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "cancelled",
+              "failed",
+              "cleaned_up"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "exec_or_attach",
+              "stop",
+              "cleanup",
+              "failure"
+            ]
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "occurred_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "agent_worker_instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

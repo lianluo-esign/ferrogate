@@ -3797,6 +3797,44 @@ impl FerroGateway {
         }
     }
 
+    pub(super) async fn handle_admin_managed_worker_sessions(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        if method != Method::GET {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "managed worker session visibility supports GET only",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let page = state.managed_worker_sessions_page(state.admin_pagination(query));
+                let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_admin_framework_adapters(
         &self,
         session: &mut Session,

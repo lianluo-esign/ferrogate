@@ -121,6 +121,37 @@ pub(crate) struct AdminManagedWorkerPersistence {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct AdminManagedWorkerSession {
+    pub(crate) id: String,
+    pub(crate) run_id: String,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) workspace_id: String,
+    pub(crate) worker_template_id: String,
+    pub(crate) agent_worker_instance_id: Option<String>,
+    pub(crate) status: String,
+    pub(crate) isolation_backend_kind: String,
+    pub(crate) microvm_id: Option<String>,
+    pub(crate) capability_envelope_id: String,
+    pub(crate) requested_at_unix: Option<u64>,
+    pub(crate) started_at_unix: Option<u64>,
+    pub(crate) completed_at_unix: Option<u64>,
+    pub(crate) cleanup_completed_at_unix: Option<u64>,
+    pub(crate) lifecycle_events: Vec<AdminManagedWorkerLifecycleEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminManagedWorkerLifecycleEvent {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) status: String,
+    pub(crate) action: String,
+    pub(crate) outcome: String,
+    pub(crate) occurred_at_unix: Option<u64>,
+    pub(crate) agent_worker_instance_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AdminFrameworkAdapterRuntime {
     pub(crate) id: &'static str,
     pub(crate) framework: &'static str,

@@ -4418,6 +4418,69 @@ impl AppState {
         }
     }
 
+    pub(crate) fn managed_worker_sessions_page(
+        &self,
+        pagination: AdminPagination,
+    ) -> AdminPage<crate::responses::AdminManagedWorkerSession> {
+        let lifecycle_events = self.repositories.managed_worker_lifecycle_events();
+        let mut sessions = self
+            .repositories
+            .managed_worker_sessions()
+            .into_iter()
+            .map(|session| {
+                let events = lifecycle_events
+                    .iter()
+                    .filter(|event| event.session_id == session.id)
+                    .map(|event| crate::responses::AdminManagedWorkerLifecycleEvent {
+                        id: event.id.clone(),
+                        session_id: event.session_id.clone(),
+                        run_id: event.run_id.clone(),
+                        status: event.status.clone(),
+                        action: event.action.clone(),
+                        outcome: event.outcome.clone(),
+                        occurred_at_unix: event.occurred_at_unix,
+                        agent_worker_instance_id: event.agent_worker_instance_id.clone(),
+                    })
+                    .collect();
+                crate::responses::AdminManagedWorkerSession {
+                    id: session.id,
+                    run_id: session.run_id,
+                    tenant: session.tenant,
+                    workspace_id: session.workspace_id,
+                    worker_template_id: session.worker_template_id,
+                    agent_worker_instance_id: session.agent_worker_instance_id,
+                    status: session.status,
+                    isolation_backend_kind: session.isolation_backend_kind,
+                    microvm_id: session.microvm_id,
+                    capability_envelope_id: session.capability_envelope_id,
+                    requested_at_unix: session.requested_at_unix,
+                    started_at_unix: session.started_at_unix,
+                    completed_at_unix: session.completed_at_unix,
+                    cleanup_completed_at_unix: session.cleanup_completed_at_unix,
+                    lifecycle_events: events,
+                }
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by(|left, right| {
+            right
+                .requested_at_unix
+                .cmp(&left.requested_at_unix)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let total = sessions.len();
+        let data = sessions
+            .into_iter()
+            .skip(pagination.offset)
+            .take(pagination.limit)
+            .collect();
+        AdminPage {
+            data,
+            total,
+            offset: pagination.offset,
+            limit: pagination.limit,
+        }
+    }
+
     pub(crate) fn agent_run_timeline(
         &self,
         id: &str,
