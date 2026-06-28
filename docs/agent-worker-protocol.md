@@ -112,6 +112,7 @@ envelope with stable snake_case enum values. The envelope carries:
 - `security.nonce`
 - `security.signature`
 - `security.algorithm`
+- `security.transport_security`
 - `security.encrypted`
 
 The initial standard actions are `probe_handlers`, `list_backends`,
@@ -131,9 +132,22 @@ The management API fails closed:
 
 The supported MAC algorithms are `shared_secret_blake2b` and
 `mtls_bound_blake2b`. The MAC proves request authenticity and integrity. It
-does not encrypt payloads. Management traffic must also run over encrypted
-transport or an mTLS-bound channel. If the request is not marked encrypted and
-is not mTLS-bound, `agent-worker` rejects it with
+does not encrypt payloads.
+
+The `security.transport_security` value is part of the signed canonical input.
+Supported values are:
+
+- `local_unix_socket`: same-host process boundary only. This is acceptable for
+  the local gateway-to-worker control plane because the socket path is local to
+  the host and the request is still MAC-verified.
+- `mutual_tls`: network-capable management channel bound to mutual TLS.
+- `symmetric_aead`: network-capable management channel with authenticated
+  symmetric payload encryption. These requests must also set
+  `security.encrypted=true`.
+
+Network or cross-host management traffic must use `mutual_tls` or
+`symmetric_aead`; a shared-secret MAC alone is not payload encryption. Requests
+that do not present an accepted transport security mode fail closed with
 `transport_security_required`.
 
 The standalone worker binary exposes a local contract entrypoint for this
@@ -149,6 +163,23 @@ The command reads one signed management envelope from stdin and writes one
 `AgentWorkerManagementResponse` JSON object to stdout. It verifies the same
 contract future HTTP, gRPC, or Unix-socket transports must use; it does not
 execute Firecracker lifecycle actions by itself.
+
+The first concrete process transport is a Unix-domain socket contract smoke:
+
+```bash
+agent-worker serve-management-unix \
+  --socket-path "$AGENT_WORKER_MANAGEMENT_SOCKET" \
+  --key-id "$AGENT_WORKER_MANAGEMENT_KEY_ID" \
+  --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET"
+```
+
+This one-shot command accepts one JSON envelope over the socket, verifies it
+through the same management verifier, writes one JSON response, removes the
+socket file, and exits. The envelope should use
+`security.transport_security=local_unix_socket` for this transport. It proves
+the `agent-worker` process can receive management requests over an explicit
+same-host process boundary. It is not the final long-running lifecycle server,
+does not provide cross-host encryption, and does not boot Firecracker.
 
 ### Core Objects
 

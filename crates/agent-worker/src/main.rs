@@ -6,8 +6,9 @@
 
 use std::{
     env,
-    io::{self, Read},
-    path::Path,
+    io::{self, Read, Write},
+    os::unix::net::UnixListener,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,7 +17,7 @@ use clap::{Parser, Subcommand};
 use ferrogate_runtime::{
     AgentWorkerFrameworkHandler, AgentWorkerManagementAction, AgentWorkerManagementEnvelope,
     AgentWorkerManagementKey, AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
-    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
+    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
     InMemoryAgentWorkerManagementTransport, AGENT_WORKER_PROTOCOL_VERSION,
 };
 use serde_json::json;
@@ -49,6 +50,21 @@ enum Command {
         #[arg(long)]
         now_unix_millis: Option<u64>,
     },
+    /// Serve one signed management JSON request over a Unix domain socket.
+    ServeManagementUnix {
+        /// Unix socket path used for the management transport.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_SOCKET")]
+        socket_path: PathBuf,
+        /// Management key id expected in the signed envelope.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_KEY_ID")]
+        key_id: String,
+        /// Shared secret used to verify the envelope MAC.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_SHARED_SECRET")]
+        shared_secret: String,
+        /// Verification time override for deterministic contract tests.
+        #[arg(long)]
+        now_unix_millis: Option<u64>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -61,6 +77,12 @@ fn main() -> Result<()> {
             shared_secret,
             now_unix_millis,
         } => accept_management_json_command(&key_id, &shared_secret, now_unix_millis),
+        Command::ServeManagementUnix {
+            socket_path,
+            key_id,
+            shared_secret,
+            now_unix_millis,
+        } => serve_management_unix_command(&socket_path, &key_id, &shared_secret, now_unix_millis),
     }
 }
 
@@ -108,6 +130,56 @@ fn accept_management_json_command(
     )?;
     println!("{response}");
     Ok(())
+}
+
+fn serve_management_unix_command(
+    socket_path: &Path,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: Option<u64>,
+) -> Result<()> {
+    let response = serve_one_management_unix(socket_path, key_id, shared_secret, now_unix_millis)?;
+    println!(
+        "agent-worker unix management accepted request_id={} accepted={}",
+        response.request_id, response.accepted
+    );
+    Ok(())
+}
+
+fn serve_one_management_unix(
+    socket_path: &Path,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: Option<u64>,
+) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+    let listener = UnixListener::bind(socket_path)?;
+    let result = accept_one_management_unix_connection(
+        &listener,
+        key_id,
+        shared_secret,
+        now_unix_millis.unwrap_or_else(current_unix_millis),
+    );
+    let _ = std::fs::remove_file(socket_path);
+    result
+}
+
+fn accept_one_management_unix_connection(
+    listener: &UnixListener,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: u64,
+) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
+    let (mut stream, _) = listener.accept()?;
+    let mut input = String::new();
+    stream.read_to_string(&mut input)?;
+    let response_json = accept_management_json(&input, key_id, shared_secret, now_unix_millis)?;
+    stream.write_all(response_json.as_bytes())?;
+    stream.write_all(b"\n")?;
+    let response = serde_json::from_str(&response_json)?;
+    Ok(response)
 }
 
 fn accept_management_json(
@@ -242,6 +314,7 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
             nonce: "agent-worker-smoke-nonce".to_string(),
             signature: String::new(),
             algorithm: AgentWorkerSecurityAlgorithm::SharedSecretBlake2b,
+            transport_security: AgentWorkerTransportSecurity::LocalUnixSocket,
             encrypted: true,
         },
     };
@@ -252,6 +325,8 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
 
     #[test]
     fn smoke_envelope_uses_signed_management_contract() {
@@ -331,6 +406,7 @@ mod tests {
     fn rejects_management_json_with_unencrypted_channel_marker() {
         let mut envelope = smoke_envelope().unwrap();
         envelope.security.encrypted = false;
+        envelope.security.transport_security = AgentWorkerTransportSecurity::SymmetricAead;
         envelope.security.signature = envelope
             .shared_secret_signature(SMOKE_SHARED_SECRET)
             .unwrap();
@@ -344,5 +420,54 @@ mod tests {
         assert_eq!(response["accepted"], false);
         assert_eq!(response["error"]["code"], "transport_security_required");
         assert_eq!(response["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn accepts_signed_management_json_over_unix_socket_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("agent-worker-management.sock");
+        let socket_for_server = socket_path.clone();
+        let server = thread::spawn(move || {
+            serve_one_management_unix(
+                &socket_for_server,
+                "agent-worker-smoke-key",
+                SMOKE_SHARED_SECRET,
+                Some(1_000),
+            )
+            .unwrap()
+        });
+
+        wait_for_socket(&socket_path);
+        let mut stream = UnixStream::connect(&socket_path).unwrap();
+        let request = serde_json::to_string(&smoke_envelope().unwrap()).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response_json = String::new();
+        stream.read_to_string(&mut response_json).unwrap();
+        let response: serde_json::Value = serde_json::from_str(response_json.trim()).unwrap();
+
+        assert_eq!(response["accepted"], true);
+        assert_eq!(response["request_id"], "agent-worker-smoke-request");
+        assert_eq!(response["action"], "probe_handlers");
+        assert_eq!(
+            response["error"],
+            serde_json::Value::Null,
+            "local Unix socket management transport should be accepted after MAC verification"
+        );
+
+        let server_response = server.join().unwrap();
+        assert!(server_response.accepted);
+        assert_eq!(server_response.request_id, "agent-worker-smoke-request");
+        assert!(!socket_path.exists());
+    }
+
+    fn wait_for_socket(socket_path: &Path) {
+        for _ in 0..100 {
+            if socket_path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("unix socket was not created at {}", socket_path.display());
     }
 }

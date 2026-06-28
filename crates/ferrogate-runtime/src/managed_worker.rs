@@ -221,6 +221,8 @@ pub struct AgentWorkerManagementSecurity {
     pub nonce: String,
     pub signature: String,
     pub algorithm: AgentWorkerSecurityAlgorithm,
+    #[serde(default = "default_agent_worker_transport_security")]
+    pub transport_security: AgentWorkerTransportSecurity,
     pub encrypted: bool,
 }
 
@@ -238,6 +240,35 @@ impl AgentWorkerSecurityAlgorithm {
             Self::MtlsBoundBlake2b => "mtls_bound_blake2b",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWorkerTransportSecurity {
+    LocalUnixSocket,
+    MutualTls,
+    SymmetricAead,
+}
+
+impl AgentWorkerTransportSecurity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalUnixSocket => "local_unix_socket",
+            Self::MutualTls => "mutual_tls",
+            Self::SymmetricAead => "symmetric_aead",
+        }
+    }
+
+    pub fn is_secure_process_boundary(self) -> bool {
+        matches!(
+            self,
+            Self::LocalUnixSocket | Self::MutualTls | Self::SymmetricAead
+        )
+    }
+}
+
+fn default_agent_worker_transport_security() -> AgentWorkerTransportSecurity {
+    AgentWorkerTransportSecurity::SymmetricAead
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,12 +306,23 @@ impl AgentWorkerManagementEnvelope {
         require_management_non_empty("security.key_id", &self.security.key_id)?;
         require_management_non_empty("security.nonce", &self.security.nonce)?;
         require_management_non_empty("security.signature", &self.security.signature)?;
-        if !self.security.encrypted
-            && self.security.algorithm != AgentWorkerSecurityAlgorithm::MtlsBoundBlake2b
+        if !self
+            .security
+            .transport_security
+            .is_secure_process_boundary()
         {
             return Err(ManagedWorkerError::management_protocol(
                 AgentWorkerManagementErrorCode::TransportSecurityRequired,
-                "agent-worker management requests must be encrypted or mTLS-bound".to_string(),
+                "agent-worker management requests must use a local Unix socket, mTLS, or symmetric AEAD transport".to_string(),
+            ));
+        }
+        if self.security.transport_security == AgentWorkerTransportSecurity::SymmetricAead
+            && !self.security.encrypted
+        {
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::TransportSecurityRequired,
+                "agent-worker symmetric AEAD management transport must carry encrypted payloads"
+                    .to_string(),
             ));
         }
         if self.deadline_unix_millis <= self.issued_at_unix_millis {
@@ -322,6 +364,7 @@ impl AgentWorkerManagementEnvelope {
             self.security.key_id.clone(),
             self.security.nonce.clone(),
             self.security.algorithm.as_str().to_string(),
+            self.security.transport_security.as_str().to_string(),
             self.security.encrypted.to_string(),
         ]
         .join("\n")
@@ -1509,9 +1552,16 @@ mod tests {
             envelope.security.algorithm.as_str(),
             "shared_secret_blake2b"
         );
+        assert_eq!(
+            envelope.security.transport_security.as_str(),
+            "local_unix_socket"
+        );
         assert!(envelope
             .canonical_signature_input()
             .contains("provision\nrequest-1\nidempotency-1"));
+        assert!(envelope
+            .canonical_signature_input()
+            .contains("shared_secret_blake2b\nlocal_unix_socket\ntrue"));
         assert!(envelope.security.signature.starts_with("blake2b-mac:"));
 
         let mut missing_signature = envelope.clone();
@@ -1524,11 +1574,28 @@ mod tests {
 
         let mut unencrypted = envelope.clone();
         unencrypted.security.encrypted = false;
+        unencrypted.security.transport_security = AgentWorkerTransportSecurity::SymmetricAead;
+        unencrypted.security.signature = unencrypted
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
         assert!(unencrypted
             .validate(1_000)
             .unwrap_err()
             .to_string()
-            .contains("encrypted or mTLS-bound"));
+            .contains("symmetric AEAD"));
+        assert_eq!(
+            unencrypted.security.transport_security.as_str(),
+            "symmetric_aead"
+        );
+
+        let mut unsigned_transport = envelope.clone();
+        unsigned_transport.security.encrypted = false;
+        unsigned_transport.security.transport_security =
+            AgentWorkerTransportSecurity::LocalUnixSocket;
+        unsigned_transport.security.signature = unsigned_transport
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        assert!(unsigned_transport.validate(1_000).is_ok());
 
         let mut wrong_signature = envelope.clone();
         wrong_signature.security.signature = "blake2b-mac:bad".to_string();
@@ -1760,6 +1827,7 @@ mod tests {
         let encoded = serde_json::to_string(&envelope).unwrap();
         assert!(encoded.contains(r#""action":"probe_handlers""#));
         assert!(encoded.contains(r#""algorithm":"shared_secret_blake2b""#));
+        assert!(encoded.contains(r#""transport_security":"local_unix_socket""#));
 
         let decoded: AgentWorkerManagementEnvelope = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, envelope);
@@ -1857,6 +1925,7 @@ mod tests {
                 nonce: nonce.to_string(),
                 signature: String::new(),
                 algorithm: AgentWorkerSecurityAlgorithm::SharedSecretBlake2b,
+                transport_security: AgentWorkerTransportSecurity::LocalUnixSocket,
                 encrypted: true,
             },
         };

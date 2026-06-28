@@ -24,3 +24,6 @@ anyhow.workspace = true
 clap.workspace = true
 ferrogate-runtime = { path = "../ferrogate-runtime" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

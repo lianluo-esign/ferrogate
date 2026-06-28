@@ -50,7 +50,7 @@ pub use managed_worker::{
     AgentWorkerManagementEnvelope, AgentWorkerManagementError, AgentWorkerManagementErrorCode,
     AgentWorkerManagementKey, AgentWorkerManagementResponse, AgentWorkerManagementSecurity,
     AgentWorkerManagementTransport, AgentWorkerManagementVerification,
-    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
+    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
     InMemoryAgentWorkerManagementTransport, ManagedWorkerCancellation, ManagedWorkerError,
     ManagedWorkerExecution, ManagedWorkerFailedExecution, ManagedWorkerFailure,
     ManagedWorkerLifecycleAction, ManagedWorkerLifecycleRecord, ManagedWorkerRunRequest,

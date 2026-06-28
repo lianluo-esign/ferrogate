@@ -25,6 +25,7 @@ dependencies = [
  "clap",
  "ferrogate-runtime",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
