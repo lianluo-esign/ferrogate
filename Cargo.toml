@@ -45,8 +45,10 @@ attribution = "Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-nat
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
+base64 = "0.22.1"
 blake2 = "0.10"
 bytes = "1.7"
+chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
 http = "1"
 instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }

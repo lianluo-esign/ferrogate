@@ -48,9 +48,10 @@ pub use isolation::{
 #[cfg(unix)]
 pub use managed_worker::AgentWorkerUnixManagementClient;
 pub use managed_worker::{
-    AgentWorkerControlClient, AgentWorkerFrameworkHandler, AgentWorkerIsolationBackendReport,
-    AgentWorkerManagementAction, AgentWorkerManagementEnvelope, AgentWorkerManagementError,
-    AgentWorkerManagementErrorCode, AgentWorkerManagementKey, AgentWorkerManagementResponse,
+    AgentWorkerControlClient, AgentWorkerEncryptedPayload, AgentWorkerFrameworkHandler,
+    AgentWorkerIsolationBackendReport, AgentWorkerManagementAction, AgentWorkerManagementEnvelope,
+    AgentWorkerManagementError, AgentWorkerManagementErrorCode, AgentWorkerManagementFrame,
+    AgentWorkerManagementFrameEncoding, AgentWorkerManagementKey, AgentWorkerManagementResponse,
     AgentWorkerManagementResult, AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
     AgentWorkerManagementVerification, AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
     AgentWorkerTransportSecurity, InMemoryAgentWorkerManagementTransport,
@@ -59,7 +60,8 @@ pub use managed_worker::{
     ManagedWorkerLifecycleRecord, ManagedWorkerRunRequest, ManagedWorkerScheduler,
     ManagedWorkerSchedulerConfig, ManagedWorkerSession, ManagedWorkerSessionRequest,
     ManagedWorkerSessionStatus, WorkerTemplate, AGENT_WORKER_CLOCK_SKEW_MILLIS,
-    AGENT_WORKER_PROTOCOL_VERSION,
+    AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES, AGENT_WORKER_PROTOCOL_VERSION,
+    AGENT_WORKER_SYMMETRIC_AEAD_ALGORITHM,
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 pub use self_hosted_worker::{

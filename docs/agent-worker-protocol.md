@@ -101,8 +101,14 @@ idempotent, and encoded with stable wire values. Any new transport or lifecycle
 action must preserve this contract instead of adding side-channel arguments or
 transport-specific behavior.
 
-Every gateway-to-`agent-worker` management request uses a versioned JSON
-envelope with stable snake_case enum values. The envelope carries:
+Every gateway-to-`agent-worker` management request is either a local plaintext
+JSON envelope or a standard `AgentWorkerManagementFrame`. The plaintext form is
+allowed only for same-host Unix socket contract smokes. Network-capable
+transports should send a frame with `encoding=encrypted_json`; the frame carries
+the routing identity in clear associated data and the signed envelope as an
+AEAD-authenticated encrypted payload.
+
+The signed envelope uses stable snake_case enum values and carries:
 
 - `protocol_version`
 - `action`
@@ -122,12 +128,20 @@ envelope with stable snake_case enum values. The envelope carries:
 - `security.transport_security`
 - `security.encrypted`
 
+Lifecycle actions (`provision`, `exec_or_attach`, `stop`, `cleanup`,
+`stream_status`, and `collect_artifacts`) must include both `session_id` and
+`run_id`. Discovery actions (`probe_handlers` and `list_backends`) may omit
+them. This prevents a lifecycle command from being detached from the durable run
+record the gateway will audit and bill.
+
 The initial standard actions are `probe_handlers`, `list_backends`,
 `provision`, `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and
 `collect_artifacts`.
 
-Every response uses the same envelope identity fields plus `accepted`,
-`duplicate_idempotency_key`, an optional action-specific `result`, and an
+Every response uses the same envelope identity fields (`request_id`,
+`idempotency_key`, `action`, `tenant_id`, `workspace_id`, `worker_id`,
+`session_id`, and `run_id`) plus `accepted`, `duplicate_idempotency_key`, an
+optional action-specific `result`, and an
 optional standardized error object. Successful action payloads are tagged with a
 stable `result.kind` value so future actions can add typed data without changing
 the response envelope. The current executable `probe_handlers` action returns
@@ -142,8 +156,9 @@ Stable error codes include `invalid_request`, `unsupported_protocol_version`,
 `quota_exceeded`, `incompatible_backend`, `handler_unavailable`, `worker_busy`,
 `provision_failed`, `run_failed`, `timeout`, `cancelled`, `cleanup_failed`,
 `invalid_signature`, `unknown_key`, `nonce_replay`, and
-`idempotency_conflict`. Callers must use the structured `retryable` flag instead
-of string-matching error messages.
+`idempotency_conflict`, `message_too_large`, `invalid_frame`, and
+`decryption_failed`. Callers must use the structured `retryable` flag instead of
+string-matching error messages.
 
 The management API fails closed:
 
@@ -178,13 +193,19 @@ Network or cross-host management traffic must use `mutual_tls` or
 that do not present an accepted transport security mode fail closed with
 `transport_security_required`.
 
-`symmetric_aead` is a contract marker for authenticated payload encryption, not
-a boolean flag pretending encryption happened. A real network transport must
-define the AEAD algorithm, key derivation or key lookup by `key_id`, nonce
-construction, associated data, rotation window, maximum message size, and
-decryption failure mapping before it is accepted for cross-host traffic. Until
-that exists, cross-host deployments should use `mutual_tls` and keep the MAC as
-request-level authenticity evidence.
+`symmetric_aead` uses `AgentWorkerManagementFrame` with
+`encoding=encrypted_json`. The current standard algorithm is
+`xchacha20poly1305`. The frame's associated data is the newline-joined
+`protocol_version`, `action`, `request_id`, `tenant_id`, `workspace_id`,
+`worker_id`, optional `session_id`, and optional `run_id`. The encrypted payload
+contains the signed `AgentWorkerManagementEnvelope` JSON. Decryption must fail
+closed when the frame identity is changed, the wrong shared secret is used, the
+nonce is malformed, or the decrypted envelope identity does not match the frame.
+
+Management messages have a 1 MiB maximum encoded size. Production key rotation
+and durable nonce/idempotency storage are still required before unbounded
+cross-host deployments; in-memory verifier state is acceptable only for local
+contract smokes.
 
 Nonce replay and idempotency state must eventually be durable for long-running
 servers. In-memory state is acceptable only for deterministic local contract
@@ -201,10 +222,10 @@ agent-worker accept-management-json \
   --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET"
 ```
 
-The command reads one signed management envelope from stdin and writes one
-`AgentWorkerManagementResponse` JSON object to stdout. It verifies the same
-contract future HTTP, gRPC, or Unix-socket transports must use; it does not
-execute Firecracker lifecycle actions by itself.
+The command reads one signed management envelope or management frame from stdin
+and writes one `AgentWorkerManagementResponse` JSON object to stdout. It
+verifies the same contract future HTTP, gRPC, or Unix-socket transports must
+use; it does not execute Firecracker lifecycle actions by itself.
 
 The first concrete process transport is a Unix-domain socket contract smoke:
 
@@ -249,13 +270,13 @@ Lifecycle, status, and artifact actions such as
 Adding a lifecycle action requires both the handler implementation and contract
 coverage for the reported response.
 
-The gateway/control-plane side uses the same wire contract through
+The gateway/control-plane side uses the same local wire contract through
 `AgentWorkerUnixManagementClient`. The client serializes an
-`AgentWorkerManagementEnvelope`, sends it to the configured Unix socket, shuts
-down the request side of the stream, reads one
-`AgentWorkerManagementResponse`, and maps IPC failures to `AgentWorker`
-control errors. It does not verify signatures or execute lifecycle actions;
-those remain worker-side responsibilities behind the management API.
+`AgentWorkerManagementEnvelope`, enforces the management message size limit,
+sends it to the configured Unix socket, shuts down the request side of the
+stream, reads one `AgentWorkerManagementResponse`, and maps IPC failures to
+`AgentWorker` control errors. It does not verify signatures or execute lifecycle
+actions; those remain worker-side responsibilities behind the management API.
 
 ### Core Objects
 

@@ -23,9 +23,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use blake2::{
     digest::{KeyInit, Mac},
     Blake2bMac512,
+};
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    XChaCha20Poly1305,
 };
 use serde::{Deserialize, Serialize};
 
@@ -151,6 +156,8 @@ pub enum ManagedWorkerLifecycleAction {
 
 pub const AGENT_WORKER_PROTOCOL_VERSION: u32 = 1;
 pub const AGENT_WORKER_CLOCK_SKEW_MILLIS: u64 = 30_000;
+pub const AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const AGENT_WORKER_SYMMETRIC_AEAD_ALGORITHM: &str = "xchacha20poly1305";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +184,18 @@ impl AgentWorkerManagementAction {
             Self::StreamStatus => "stream_status",
             Self::CollectArtifacts => "collect_artifacts",
         }
+    }
+
+    pub fn requires_lifecycle_context(self) -> bool {
+        matches!(
+            self,
+            Self::Provision
+                | Self::ExecOrAttach
+                | Self::Stop
+                | Self::Cleanup
+                | Self::StreamStatus
+                | Self::CollectArtifacts
+        )
     }
 }
 
@@ -207,6 +226,9 @@ pub enum AgentWorkerManagementErrorCode {
     UnknownKey,
     NonceReplay,
     IdempotencyConflict,
+    MessageTooLarge,
+    InvalidFrame,
+    DecryptionFailed,
 }
 
 impl AgentWorkerManagementErrorCode {
@@ -236,6 +258,9 @@ impl AgentWorkerManagementErrorCode {
             Self::UnknownKey => "unknown_key",
             Self::NonceReplay => "nonce_replay",
             Self::IdempotencyConflict => "idempotency_conflict",
+            Self::MessageTooLarge => "message_too_large",
+            Self::InvalidFrame => "invalid_frame",
+            Self::DecryptionFailed => "decryption_failed",
         }
     }
 
@@ -261,6 +286,273 @@ pub struct AgentWorkerManagementSecurity {
     #[serde(default = "default_agent_worker_transport_security")]
     pub transport_security: AgentWorkerTransportSecurity,
     pub encrypted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWorkerManagementFrame {
+    pub protocol_version: u32,
+    pub action: AgentWorkerManagementAction,
+    pub request_id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub encoding: AgentWorkerManagementFrameEncoding,
+    pub plaintext_json: Option<String>,
+    pub encrypted_payload: Option<AgentWorkerEncryptedPayload>,
+}
+
+impl AgentWorkerManagementFrame {
+    pub fn from_plaintext_envelope(
+        envelope: &AgentWorkerManagementEnvelope,
+    ) -> Result<Self, ManagedWorkerError> {
+        envelope.validate_message_size()?;
+        Ok(Self {
+            protocol_version: envelope.protocol_version,
+            action: envelope.action,
+            request_id: envelope.request_id.clone(),
+            tenant_id: envelope.tenant_id.clone(),
+            workspace_id: envelope.workspace_id.clone(),
+            worker_id: envelope.worker_id.clone(),
+            session_id: envelope.session_id.clone(),
+            run_id: envelope.run_id.clone(),
+            encoding: AgentWorkerManagementFrameEncoding::PlaintextJson,
+            plaintext_json: Some(serde_json::to_string(envelope).map_err(|error| {
+                ManagedWorkerError::management_protocol(
+                    AgentWorkerManagementErrorCode::InvalidFrame,
+                    format!("agent-worker management envelope serialization failed: {error}"),
+                )
+            })?),
+            encrypted_payload: None,
+        })
+    }
+
+    pub fn encrypt_envelope(
+        envelope: &AgentWorkerManagementEnvelope,
+        shared_secret: &str,
+        nonce: [u8; 24],
+    ) -> Result<Self, ManagedWorkerError> {
+        envelope.validate_message_size()?;
+        if envelope.security.transport_security != AgentWorkerTransportSecurity::SymmetricAead
+            || !envelope.security.encrypted
+        {
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::TransportSecurityRequired,
+                "agent-worker encrypted frames require symmetric_aead transport_security and encrypted=true",
+            ));
+        }
+        let plaintext = serde_json::to_vec(envelope).map_err(|error| {
+            ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::InvalidFrame,
+                format!("agent-worker management envelope serialization failed: {error}"),
+            )
+        })?;
+        let aad = envelope.frame_associated_data();
+        let cipher = management_aead_cipher(shared_secret)?;
+        let ciphertext = cipher
+            .encrypt(
+                (&nonce).into(),
+                Payload {
+                    msg: &plaintext,
+                    aad: aad.as_bytes(),
+                },
+            )
+            .map_err(|_| {
+                ManagedWorkerError::management_protocol(
+                    AgentWorkerManagementErrorCode::InvalidFrame,
+                    "agent-worker management frame encryption failed".to_string(),
+                )
+            })?;
+        Ok(Self {
+            protocol_version: envelope.protocol_version,
+            action: envelope.action,
+            request_id: envelope.request_id.clone(),
+            tenant_id: envelope.tenant_id.clone(),
+            workspace_id: envelope.workspace_id.clone(),
+            worker_id: envelope.worker_id.clone(),
+            session_id: envelope.session_id.clone(),
+            run_id: envelope.run_id.clone(),
+            encoding: AgentWorkerManagementFrameEncoding::EncryptedJson,
+            plaintext_json: None,
+            encrypted_payload: Some(AgentWorkerEncryptedPayload {
+                algorithm: AGENT_WORKER_SYMMETRIC_AEAD_ALGORITHM.to_string(),
+                nonce: BASE64_STANDARD.encode(nonce),
+                ciphertext: BASE64_STANDARD.encode(ciphertext),
+            }),
+        })
+    }
+
+    pub fn decode_envelope(
+        &self,
+        shared_secret: &str,
+    ) -> Result<AgentWorkerManagementEnvelope, ManagedWorkerError> {
+        match self.encoding {
+            AgentWorkerManagementFrameEncoding::PlaintextJson => {
+                if self.encrypted_payload.is_some() {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "plaintext agent-worker frame must not carry encrypted_payload",
+                    ));
+                }
+                let Some(plaintext_json) = &self.plaintext_json else {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "plaintext agent-worker frame missing plaintext_json",
+                    ));
+                };
+                if plaintext_json.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::MessageTooLarge,
+                        "agent-worker plaintext frame exceeds maximum message size",
+                    ));
+                }
+                let envelope: AgentWorkerManagementEnvelope = serde_json::from_str(plaintext_json)
+                    .map_err(|error| {
+                        ManagedWorkerError::management_protocol(
+                            AgentWorkerManagementErrorCode::InvalidFrame,
+                            format!("agent-worker plaintext frame decode failed: {error}"),
+                        )
+                    })?;
+                self.validate_envelope_identity(&envelope)?;
+                Ok(envelope)
+            }
+            AgentWorkerManagementFrameEncoding::EncryptedJson => {
+                if self.plaintext_json.is_some() {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "encrypted agent-worker frame must not carry plaintext_json",
+                    ));
+                }
+                let Some(payload) = &self.encrypted_payload else {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "encrypted agent-worker frame missing encrypted_payload",
+                    ));
+                };
+                if payload.algorithm != AGENT_WORKER_SYMMETRIC_AEAD_ALGORITHM {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        format!(
+                            "unsupported agent-worker AEAD algorithm {}",
+                            payload.algorithm
+                        ),
+                    ));
+                }
+                let nonce = BASE64_STANDARD.decode(&payload.nonce).map_err(|_| {
+                    ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "agent-worker encrypted frame nonce is not valid base64",
+                    )
+                })?;
+                if nonce.len() != 24 {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "agent-worker encrypted frame nonce must be 24 bytes",
+                    ));
+                }
+                let nonce: [u8; 24] = nonce.try_into().map_err(|_| {
+                    ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "agent-worker encrypted frame nonce must be 24 bytes",
+                    )
+                })?;
+                let ciphertext = BASE64_STANDARD.decode(&payload.ciphertext).map_err(|_| {
+                    ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::InvalidFrame,
+                        "agent-worker encrypted frame ciphertext is not valid base64",
+                    )
+                })?;
+                if ciphertext.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::MessageTooLarge,
+                        "agent-worker encrypted frame exceeds maximum message size",
+                    ));
+                }
+                let cipher = management_aead_cipher(shared_secret)?;
+                let plaintext = cipher
+                    .decrypt(
+                        (&nonce).into(),
+                        Payload {
+                            msg: &ciphertext,
+                            aad: self.associated_data().as_bytes(),
+                        },
+                    )
+                    .map_err(|_| {
+                        ManagedWorkerError::management_protocol(
+                            AgentWorkerManagementErrorCode::DecryptionFailed,
+                            "agent-worker encrypted management frame failed authentication",
+                        )
+                    })?;
+                if plaintext.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+                    return Err(ManagedWorkerError::management_protocol(
+                        AgentWorkerManagementErrorCode::MessageTooLarge,
+                        "agent-worker decrypted frame exceeds maximum message size",
+                    ));
+                }
+                let envelope: AgentWorkerManagementEnvelope = serde_json::from_slice(&plaintext)
+                    .map_err(|error| {
+                        ManagedWorkerError::management_protocol(
+                            AgentWorkerManagementErrorCode::InvalidFrame,
+                            format!(
+                                "agent-worker encrypted frame plaintext decode failed: {error}"
+                            ),
+                        )
+                    })?;
+                self.validate_envelope_identity(&envelope)?;
+                Ok(envelope)
+            }
+        }
+    }
+
+    pub fn associated_data(&self) -> String {
+        [
+            self.protocol_version.to_string(),
+            self.action.as_str().to_string(),
+            self.request_id.clone(),
+            self.tenant_id.clone(),
+            self.workspace_id.clone(),
+            self.worker_id.clone(),
+            self.session_id.clone().unwrap_or_default(),
+            self.run_id.clone().unwrap_or_default(),
+        ]
+        .join("\n")
+    }
+
+    fn validate_envelope_identity(
+        &self,
+        envelope: &AgentWorkerManagementEnvelope,
+    ) -> Result<(), ManagedWorkerError> {
+        if self.protocol_version != envelope.protocol_version
+            || self.action != envelope.action
+            || self.request_id != envelope.request_id
+            || self.tenant_id != envelope.tenant_id
+            || self.workspace_id != envelope.workspace_id
+            || self.worker_id != envelope.worker_id
+            || self.session_id != envelope.session_id
+            || self.run_id != envelope.run_id
+        {
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::InvalidFrame,
+                "agent-worker management frame identity does not match enclosed envelope",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWorkerManagementFrameEncoding {
+    PlaintextJson,
+    EncryptedJson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWorkerEncryptedPayload {
+    pub algorithm: String,
+    pub nonce: String,
+    pub ciphertext: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +618,7 @@ pub struct AgentWorkerManagementEnvelope {
 
 impl AgentWorkerManagementEnvelope {
     pub fn validate(&self, now_unix_millis: u64) -> Result<(), ManagedWorkerError> {
+        self.validate_message_size()?;
         if self.protocol_version != AGENT_WORKER_PROTOCOL_VERSION {
             return Err(ManagedWorkerError::management_protocol(
                 AgentWorkerManagementErrorCode::UnsupportedProtocolVersion,
@@ -343,6 +636,13 @@ impl AgentWorkerManagementEnvelope {
         require_management_non_empty("security.key_id", &self.security.key_id)?;
         require_management_non_empty("security.nonce", &self.security.nonce)?;
         require_management_non_empty("security.signature", &self.security.signature)?;
+        if self.action.requires_lifecycle_context() {
+            require_management_non_empty(
+                "session_id",
+                self.session_id.as_deref().unwrap_or_default(),
+            )?;
+            require_management_non_empty("run_id", self.run_id.as_deref().unwrap_or_default())?;
+        }
         if !self
             .security
             .transport_security
@@ -385,6 +685,22 @@ impl AgentWorkerManagementEnvelope {
         Ok(())
     }
 
+    pub fn validate_message_size(&self) -> Result<(), ManagedWorkerError> {
+        let encoded = serde_json::to_vec(self).map_err(|error| {
+            ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::InvalidFrame,
+                format!("agent-worker management envelope serialization failed: {error}"),
+            )
+        })?;
+        if encoded.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::MessageTooLarge,
+                "agent-worker management envelope exceeds maximum message size",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn canonical_signature_input(&self) -> String {
         [
             self.protocol_version.to_string(),
@@ -405,6 +721,23 @@ impl AgentWorkerManagementEnvelope {
             self.security.encrypted.to_string(),
         ]
         .join("\n")
+    }
+
+    pub fn frame_associated_data(&self) -> String {
+        AgentWorkerManagementFrame {
+            protocol_version: self.protocol_version,
+            action: self.action,
+            request_id: self.request_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            workspace_id: self.workspace_id.clone(),
+            worker_id: self.worker_id.clone(),
+            session_id: self.session_id.clone(),
+            run_id: self.run_id.clone(),
+            encoding: AgentWorkerManagementFrameEncoding::EncryptedJson,
+            plaintext_json: None,
+            encrypted_payload: None,
+        }
+        .associated_data()
     }
 
     pub fn shared_secret_signature(
@@ -477,6 +810,11 @@ pub struct AgentWorkerManagementVerification {
     pub key_id: String,
     pub nonce: String,
     pub action: AgentWorkerManagementAction,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
     pub duplicate_idempotency_key: bool,
 }
 
@@ -503,6 +841,11 @@ pub struct AgentWorkerManagementResponse {
     pub request_id: String,
     pub idempotency_key: String,
     pub action: AgentWorkerManagementAction,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
     pub accepted: bool,
     pub duplicate_idempotency_key: bool,
     pub result: Option<AgentWorkerManagementResult>,
@@ -516,6 +859,11 @@ impl AgentWorkerManagementResponse {
             request_id: verification.request_id,
             idempotency_key: verification.idempotency_key,
             action: verification.action,
+            tenant_id: verification.tenant_id,
+            workspace_id: verification.workspace_id,
+            worker_id: verification.worker_id,
+            session_id: verification.session_id,
+            run_id: verification.run_id,
             accepted: true,
             duplicate_idempotency_key: verification.duplicate_idempotency_key,
             result: None,
@@ -534,6 +882,11 @@ impl AgentWorkerManagementResponse {
             request_id: envelope.request_id.clone(),
             idempotency_key: envelope.idempotency_key.clone(),
             action: envelope.action,
+            tenant_id: envelope.tenant_id.clone(),
+            workspace_id: envelope.workspace_id.clone(),
+            worker_id: envelope.worker_id.clone(),
+            session_id: envelope.session_id.clone(),
+            run_id: envelope.run_id.clone(),
             accepted: false,
             duplicate_idempotency_key: false,
             result: None,
@@ -648,6 +1001,11 @@ impl AgentWorkerManagementVerifier {
             key_id: envelope.security.key_id.clone(),
             nonce: envelope.security.nonce.clone(),
             action: envelope.action,
+            tenant_id: envelope.tenant_id.clone(),
+            workspace_id: envelope.workspace_id.clone(),
+            worker_id: envelope.worker_id.clone(),
+            session_id: envelope.session_id.clone(),
+            run_id: envelope.run_id.clone(),
             duplicate_idempotency_key,
         })
     }
@@ -737,6 +1095,12 @@ impl AgentWorkerUnixManagementClient {
                 "agent-worker Unix management request serialization failed: {error}"
             ))
         })?;
+        if request.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+            return Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::MessageTooLarge,
+                "agent-worker Unix management request exceeds maximum message size",
+            ));
+        }
         stream.write_all(request.as_bytes()).map_err(|error| {
             ManagedWorkerError::AgentWorker(format!(
                 "agent-worker Unix management request write failed: {error}"
@@ -753,6 +1117,12 @@ impl AgentWorkerUnixManagementClient {
                 "agent-worker Unix management response read failed: {error}"
             ))
         })?;
+        if response.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+            return Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::MessageTooLarge,
+                "agent-worker Unix management response exceeds maximum message size",
+            ));
+        }
         serde_json::from_str(response.trim()).map_err(|error| {
             ManagedWorkerError::AgentWorker(format!(
                 "agent-worker Unix management response decode failed: {error}"
@@ -1289,6 +1659,25 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
+fn management_aead_cipher(shared_secret: &str) -> Result<XChaCha20Poly1305, ManagedWorkerError> {
+    require_non_empty("shared_secret", shared_secret)?;
+    let mut mac =
+        <Blake2bMac512 as KeyInit>::new_from_slice(shared_secret.as_bytes()).map_err(|_| {
+            ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::InvalidMacKey,
+                "shared_secret is not a valid AEAD key source".to_string(),
+            )
+        })?;
+    mac.update(b"ferrogate-agent-worker-management-aead-v1");
+    let derived = mac.finalize().into_bytes();
+    <XChaCha20Poly1305 as chacha20poly1305::KeyInit>::new_from_slice(&derived[..32]).map_err(|_| {
+        ManagedWorkerError::management_protocol(
+            AgentWorkerManagementErrorCode::InvalidMacKey,
+            "derived agent-worker AEAD key is invalid".to_string(),
+        )
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedWorkerError {
     InvalidConfig(String),
@@ -1758,6 +2147,11 @@ mod tests {
         assert_eq!(verified.idempotency_key, "idempotency-1");
         assert_eq!(verified.key_id, "agent-worker-key-1");
         assert_eq!(verified.nonce, "nonce-1");
+        assert_eq!(verified.tenant_id, "tenant-1");
+        assert_eq!(verified.workspace_id, "workspace-1");
+        assert_eq!(verified.worker_id, "agent-worker-fake-1");
+        assert_eq!(verified.session_id.as_deref(), Some("session-1"));
+        assert_eq!(verified.run_id.as_deref(), Some("run-1"));
         assert!(!verified.duplicate_idempotency_key);
 
         let replayed_nonce = management_envelope_with(
@@ -1822,6 +2216,11 @@ mod tests {
         assert_eq!(response.request_id, "request-1");
         assert_eq!(response.idempotency_key, "idempotency-1");
         assert_eq!(response.action, AgentWorkerManagementAction::Provision);
+        assert_eq!(response.tenant_id, "tenant-1");
+        assert_eq!(response.workspace_id, "workspace-1");
+        assert_eq!(response.worker_id, "agent-worker-fake-1");
+        assert_eq!(response.session_id.as_deref(), Some("session-1"));
+        assert_eq!(response.run_id.as_deref(), Some("run-1"));
         assert!(!response.duplicate_idempotency_key);
         assert!(response.result.is_none());
         assert!(response.error.is_none());
@@ -2108,6 +2507,116 @@ mod tests {
             assert_eq!(rejected_json["error"]["code"], expected_wire_code);
             assert_eq!(rejected_json["error"]["retryable"], expected_retryable);
         }
+    }
+
+    #[test]
+    fn lifecycle_actions_require_session_and_run_context() {
+        let mut lifecycle = management_envelope(AgentWorkerManagementAction::Provision);
+        lifecycle.session_id = None;
+        lifecycle.security.signature = lifecycle
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+
+        let error = lifecycle.validate(1_000).unwrap_err();
+
+        assert!(error.to_string().contains("session_id"));
+
+        let mut probe = management_envelope(AgentWorkerManagementAction::ProbeHandlers);
+        probe.session_id = None;
+        probe.run_id = None;
+        probe.security.signature = probe
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+
+        probe.validate(1_000).unwrap();
+    }
+
+    #[test]
+    fn management_frame_encrypts_envelope_with_context_bound_aead() {
+        let mut envelope = management_envelope(AgentWorkerManagementAction::Provision);
+        envelope.security.transport_security = AgentWorkerTransportSecurity::SymmetricAead;
+        envelope.security.encrypted = true;
+        envelope.security.signature = envelope
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        let frame = AgentWorkerManagementFrame::encrypt_envelope(
+            &envelope,
+            "agent-worker-shared-secret",
+            [7_u8; 24],
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame.encoding,
+            AgentWorkerManagementFrameEncoding::EncryptedJson
+        );
+        assert!(frame.plaintext_json.is_none());
+        assert_eq!(
+            frame
+                .encrypted_payload
+                .as_ref()
+                .map(|payload| payload.algorithm.as_str()),
+            Some(AGENT_WORKER_SYMMETRIC_AEAD_ALGORITHM)
+        );
+
+        let decoded = frame.decode_envelope("agent-worker-shared-secret").unwrap();
+
+        assert_eq!(decoded, envelope);
+        decoded.validate(1_000).unwrap();
+        decoded
+            .verify_shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+    }
+
+    #[test]
+    fn management_frame_rejects_tampered_aad_or_wrong_secret() {
+        let mut envelope = management_envelope(AgentWorkerManagementAction::Provision);
+        envelope.security.transport_security = AgentWorkerTransportSecurity::SymmetricAead;
+        envelope.security.encrypted = true;
+        envelope.security.signature = envelope
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        let mut frame = AgentWorkerManagementFrame::encrypt_envelope(
+            &envelope,
+            "agent-worker-shared-secret",
+            [9_u8; 24],
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame
+                .decode_envelope("wrong-agent-worker-shared-secret")
+                .unwrap_err()
+                .management_error()
+                .code,
+            AgentWorkerManagementErrorCode::DecryptionFailed
+        );
+
+        frame.worker_id = "other-agent-worker".to_string();
+        assert_eq!(
+            frame
+                .decode_envelope("agent-worker-shared-secret")
+                .unwrap_err()
+                .management_error()
+                .code,
+            AgentWorkerManagementErrorCode::DecryptionFailed
+        );
+    }
+
+    #[test]
+    fn plaintext_management_frame_rejects_identity_mismatch() {
+        let envelope = management_envelope(AgentWorkerManagementAction::ProbeHandlers);
+        let mut frame = AgentWorkerManagementFrame::from_plaintext_envelope(&envelope).unwrap();
+        frame.request_id = "different-request".to_string();
+
+        let error = frame
+            .decode_envelope("agent-worker-shared-secret")
+            .unwrap_err();
+
+        assert_eq!(
+            error.management_error().code,
+            AgentWorkerManagementErrorCode::InvalidFrame
+        );
     }
 
     fn scheduler() -> ManagedWorkerScheduler {
