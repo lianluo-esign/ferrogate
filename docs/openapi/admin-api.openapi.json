@@ -3614,6 +3614,63 @@
           }
         }
       }
+    },
+    "/admin/v1/self-hosted-workers/{id}/artifacts": {
+      "post": {
+        "operationId": "recordAdminSelfHostedWorkerArtifact",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Record self-hosted worker artifact metadata in durable control-plane storage.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSelfHostedWorkerArtifactRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded self-hosted worker artifact metadata and updated worker projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerArtifactResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10482,6 +10539,133 @@
               "string",
               "null"
             ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerArtifactRequest": {
+        "type": "object",
+        "required": [
+          "artifact_id",
+          "session_id",
+          "run_id",
+          "artifact_name",
+          "size_bytes"
+        ],
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "artifact_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16777216
+          },
+          "created_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "artifact_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional customer-reported artifact metadata document encoded as JSON. Binary artifact upload is not implemented by this metadata endpoint."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerArtifactResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "worker",
+          "artifact"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_worker_artifact"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+          },
+          "artifact": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerArtifact"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerArtifact": {
+        "type": "object",
+        "required": [
+          "id",
+          "worker_id",
+          "session_id",
+          "run_id",
+          "artifact_name",
+          "size_bytes",
+          "trust_level"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "artifact_name": {
+            "type": "string"
+          },
+          "content_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "created_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         },
         "additionalProperties": false

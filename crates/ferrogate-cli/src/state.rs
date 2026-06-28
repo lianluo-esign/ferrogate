@@ -54,16 +54,16 @@ use ferrogate_providers::{
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
+#[cfg(test)]
+use ferrogate_storage::StoredSelfHostedWorkerCheckpoint;
 use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
     StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
-    StoredRequestLog, StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
-    StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
+    StoredRequestLog, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerHeartbeat,
+    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
 };
-#[cfg(test)]
-use ferrogate_storage::{StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
 use redis::Commands;
@@ -74,6 +74,7 @@ use tracing::warn;
 
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
 pub(crate) const RELOAD_MODE_LISTENER_LEVEL_REQUIRED: &str = "listener-level-required";
+const SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) struct ToolApprovalCreateRequest<'a> {
     pub(crate) tool: &'a ToolExecutionRequest,
@@ -2456,6 +2457,43 @@ fn validate_self_hosted_telemetry_event_request(
     Ok(())
 }
 
+fn validate_self_hosted_artifact_request(
+    request: &crate::responses::AdminSelfHostedWorkerArtifactRequest,
+) -> Result<(), SelfHostedWorkerRecordError> {
+    require_self_hosted_field("artifact_id", &request.artifact_id)?;
+    require_self_hosted_field("session_id", &request.session_id)?;
+    require_self_hosted_field("run_id", &request.run_id)?;
+    require_self_hosted_field("artifact_name", &request.artifact_name)?;
+    if let Some(content_type) = request.content_type.as_deref() {
+        if content_type.trim().is_empty() {
+            return Err(SelfHostedWorkerRecordError::InvalidRequest(
+                "content_type must not be empty when provided".into(),
+            ));
+        }
+    }
+    if request.size_bytes > SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES {
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
+            "size_bytes must be less than or equal to {SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES}"
+        )));
+    }
+    if !request
+        .artifact_json
+        .as_deref()
+        .unwrap_or("{}")
+        .trim()
+        .is_empty()
+        && serde_json::from_str::<serde_json::Value>(
+            request.artifact_json.as_deref().unwrap_or("{}"),
+        )
+        .is_err()
+    {
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(
+            "artifact_json must be valid JSON when provided".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn require_self_hosted_field(field: &str, value: &str) -> Result<(), SelfHostedWorkerRecordError> {
     if value.trim().is_empty() {
         return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
@@ -4817,6 +4855,68 @@ impl AppState {
             ingested_at_unix: stored_event.ingested_at_unix,
         };
         Ok((worker, event))
+    }
+
+    pub(crate) fn record_self_hosted_worker_artifact(
+        &self,
+        worker_id: &str,
+        request: crate::responses::AdminSelfHostedWorkerArtifactRequest,
+    ) -> Result<
+        (
+            crate::responses::AdminSelfHostedWorkerRecord,
+            crate::responses::AdminSelfHostedWorkerArtifact,
+        ),
+        SelfHostedWorkerRecordError,
+    > {
+        validate_self_hosted_artifact_request(&request)?;
+        let registration = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .find(|registration| registration.id == worker_id)
+            .ok_or_else(|| {
+                SelfHostedWorkerRecordError::NotFound(format!(
+                    "self-hosted worker {worker_id} was not found"
+                ))
+            })?;
+        let created_at_unix = request.created_at_unix.or_else(now_unix_seconds);
+        let stored_artifact = StoredSelfHostedWorkerArtifact {
+            id: request.artifact_id.trim().to_string(),
+            worker_id: registration.id.clone(),
+            tenant: registration.tenant,
+            workspace_id: registration.workspace_id,
+            session_id: request.session_id.trim().to_string(),
+            run_id: request.run_id.trim().to_string(),
+            artifact_name: request.artifact_name.trim().to_string(),
+            content_type: request.content_type.map(|value| value.trim().to_string()),
+            size_bytes: request.size_bytes,
+            trust_level: "reported_by_self_hosted_worker".into(),
+            created_at_unix,
+            artifact_json: request
+                .artifact_json
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "{}".into()),
+        };
+        self.repositories
+            .upsert_self_hosted_worker_artifact(stored_artifact.clone())
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
+            SelfHostedWorkerRecordError::Storage(
+                "self-hosted worker was not readable after artifact write".into(),
+            )
+        })?;
+        let artifact = crate::responses::AdminSelfHostedWorkerArtifact {
+            id: stored_artifact.id,
+            worker_id: stored_artifact.worker_id,
+            session_id: stored_artifact.session_id,
+            run_id: stored_artifact.run_id,
+            artifact_name: stored_artifact.artifact_name,
+            content_type: stored_artifact.content_type,
+            size_bytes: stored_artifact.size_bytes,
+            trust_level: stored_artifact.trust_level,
+            created_at_unix: stored_artifact.created_at_unix,
+        };
+        Ok((worker, artifact))
     }
 
     pub(crate) fn self_hosted_worker_record(
@@ -7987,6 +8087,159 @@ mod tests {
             .repositories
             .self_hosted_worker_telemetry_events()
             .is_empty());
+    }
+
+    #[test]
+    fn record_self_hosted_worker_artifact_updates_artifact_projection() {
+        let state = AppState::new(Config::default());
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext {
+                        organization_id: Some("org".into()),
+                        team_id: None,
+                        project_id: Some("project".into()),
+                        user_id: None,
+                        api_key_id: Some("key".into()),
+                    },
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: true,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+
+        let (updated_worker, artifact) = state
+            .record_self_hosted_worker_artifact(
+                &worker.id,
+                crate::responses::AdminSelfHostedWorkerArtifactRequest {
+                    artifact_id: "artifact-1".into(),
+                    session_id: "session-1".into(),
+                    run_id: "run-1".into(),
+                    artifact_name: "stdout.log".into(),
+                    content_type: Some("text/plain".into()),
+                    size_bytes: 128,
+                    created_at_unix: Some(789),
+                    artifact_json: Some(r#"{"sha256":"abc"}"#.into()),
+                },
+            )
+            .expect("artifact should be accepted");
+
+        assert_eq!(artifact.id, "artifact-1");
+        assert_eq!(artifact.worker_id, worker.id);
+        assert_eq!(artifact.session_id, "session-1");
+        assert_eq!(artifact.run_id, "run-1");
+        assert_eq!(artifact.artifact_name, "stdout.log");
+        assert_eq!(artifact.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(artifact.size_bytes, 128);
+        assert_eq!(artifact.trust_level, "reported_by_self_hosted_worker");
+        assert_eq!(artifact.created_at_unix, Some(789));
+        assert_eq!(updated_worker.id, worker.id);
+        assert_eq!(updated_worker.artifact_count, 1);
+        assert_eq!(updated_worker.latest_artifact_at_unix, Some(789));
+
+        let stored_artifacts = state.repositories.self_hosted_worker_artifacts();
+        assert_eq!(stored_artifacts.len(), 1);
+        assert_eq!(stored_artifacts[0].id, "artifact-1");
+        assert_eq!(stored_artifacts[0].worker_id, worker.id);
+        assert_eq!(stored_artifacts[0].artifact_json, r#"{"sha256":"abc"}"#);
+    }
+
+    #[test]
+    fn record_self_hosted_worker_artifact_rejects_missing_or_invalid_payloads() {
+        let state = AppState::new(Config::default());
+
+        let missing = state.record_self_hosted_worker_artifact(
+            "missing-worker",
+            crate::responses::AdminSelfHostedWorkerArtifactRequest {
+                artifact_id: "artifact-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                artifact_name: "stdout.log".into(),
+                content_type: None,
+                size_bytes: 128,
+                created_at_unix: None,
+                artifact_json: None,
+            },
+        );
+        assert!(matches!(
+            missing,
+            Err(SelfHostedWorkerRecordError::NotFound(message))
+                if message == "self-hosted worker missing-worker was not found"
+        ));
+
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext::default(),
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: false,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+        let blank_name = state.record_self_hosted_worker_artifact(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerArtifactRequest {
+                artifact_id: "artifact-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                artifact_name: " ".into(),
+                content_type: None,
+                size_bytes: 128,
+                created_at_unix: None,
+                artifact_json: None,
+            },
+        );
+        assert!(matches!(
+            blank_name,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "artifact_name must not be empty"
+        ));
+
+        let oversized = state.record_self_hosted_worker_artifact(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerArtifactRequest {
+                artifact_id: "artifact-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                artifact_name: "stdout.log".into(),
+                content_type: None,
+                size_bytes: SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES + 1,
+                created_at_unix: None,
+                artifact_json: None,
+            },
+        );
+        assert!(matches!(
+            oversized,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message.contains("size_bytes must be less than or equal to")
+        ));
+
+        let invalid_json = state.record_self_hosted_worker_artifact(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerArtifactRequest {
+                artifact_id: "artifact-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                artifact_name: "stdout.log".into(),
+                content_type: Some("text/plain".into()),
+                size_bytes: 128,
+                created_at_unix: None,
+                artifact_json: Some("{not-json".into()),
+            },
+        );
+        assert!(matches!(
+            invalid_json,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "artifact_json must be valid JSON when provided"
+        ));
+
+        assert!(state.repositories.self_hosted_worker_artifacts().is_empty());
     }
 
     #[test]
