@@ -588,6 +588,29 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/v1/self-hosted-workers/heartbeat",
         &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_heartbeat_body_with_payload(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "online",
+            125,
+            "{not-json",
+        ),
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_heartbeat"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("heartbeat_json")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/heartbeat",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
         &self_hosted_worker_heartbeat_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
@@ -685,6 +708,26 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert!(body["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("kind must be one of")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/events",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_event_body_with_payload(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "lifecycle",
+            450,
+            "{not-json",
+        ),
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_event");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("event_json")));
             Ok(())
         },
     )?;
@@ -799,6 +842,28 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert!(body["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("size_bytes")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/artifacts",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_artifact_body_with_payload(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "artifact-transport-invalid-json",
+            "transport-invalid-json.log",
+            64,
+            787,
+            "{not-json",
+        ),
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_artifact");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("artifact_json")));
             Ok(())
         },
     )?;
@@ -936,6 +1001,31 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert!(body["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("size_bytes")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/checkpoints",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_checkpoint_body_with_payload(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "checkpoint-transport-invalid-json",
+            "transport-invalid-json-state",
+            192,
+            889,
+            "{not-json",
+        ),
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_checkpoint"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("checkpoint_json")));
             Ok(())
         },
     )?;
@@ -1674,6 +1764,22 @@ fn self_hosted_worker_heartbeat_body(
     status: &str,
     reported_at_unix: u64,
 ) -> String {
+    self_hosted_worker_heartbeat_body_with_payload(
+        worker_id,
+        identity_fingerprint,
+        status,
+        reported_at_unix,
+        r#"{"load":0.24}"#,
+    )
+}
+
+fn self_hosted_worker_heartbeat_body_with_payload(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    status: &str,
+    reported_at_unix: u64,
+    heartbeat_json: &str,
+) -> String {
     format!(
         r#"{{
           "identity": {{
@@ -1685,7 +1791,7 @@ fn self_hosted_worker_heartbeat_body(
           }},
           "status": "{status}",
           "reported_at_unix": {reported_at_unix},
-          "heartbeat_json": "{{\"load\":0.24}}"
+          "heartbeat_json": {heartbeat_json:?}
         }}"#
     )
 }
@@ -1695,6 +1801,22 @@ fn self_hosted_worker_event_body(
     identity_fingerprint: &str,
     kind: &str,
     occurred_at_unix: u64,
+) -> String {
+    self_hosted_worker_event_body_with_payload(
+        worker_id,
+        identity_fingerprint,
+        kind,
+        occurred_at_unix,
+        r#"{"message":"worker transport event"}"#,
+    )
+}
+
+fn self_hosted_worker_event_body_with_payload(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    kind: &str,
+    occurred_at_unix: u64,
+    event_json: &str,
 ) -> String {
     format!(
         r#"{{
@@ -1709,7 +1831,7 @@ fn self_hosted_worker_event_body(
           "run_id": "run-transport",
           "kind": "{kind}",
           "occurred_at_unix": {occurred_at_unix},
-          "event_json": "{{\"message\":\"worker transport event\"}}"
+          "event_json": {event_json:?}
         }}"#
     )
 }
@@ -1721,6 +1843,26 @@ fn self_hosted_worker_artifact_body(
     artifact_name: &str,
     size_bytes: u64,
     created_at_unix: u64,
+) -> String {
+    self_hosted_worker_artifact_body_with_payload(
+        worker_id,
+        identity_fingerprint,
+        artifact_id,
+        artifact_name,
+        size_bytes,
+        created_at_unix,
+        r#"{"sha256":"transport"}"#,
+    )
+}
+
+fn self_hosted_worker_artifact_body_with_payload(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    artifact_id: &str,
+    artifact_name: &str,
+    size_bytes: u64,
+    created_at_unix: u64,
+    artifact_json: &str,
 ) -> String {
     format!(
         r#"{{
@@ -1738,7 +1880,7 @@ fn self_hosted_worker_artifact_body(
           "content_type": "text/plain",
           "size_bytes": {size_bytes},
           "created_at_unix": {created_at_unix},
-          "artifact_json": "{{\"sha256\":\"transport\"}}"
+          "artifact_json": {artifact_json:?}
         }}"#
     )
 }
@@ -1750,6 +1892,26 @@ fn self_hosted_worker_checkpoint_body(
     checkpoint_name: &str,
     size_bytes: u64,
     created_at_unix: u64,
+) -> String {
+    self_hosted_worker_checkpoint_body_with_payload(
+        worker_id,
+        identity_fingerprint,
+        checkpoint_id,
+        checkpoint_name,
+        size_bytes,
+        created_at_unix,
+        r#"{"sha256":"transport-checkpoint"}"#,
+    )
+}
+
+fn self_hosted_worker_checkpoint_body_with_payload(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    checkpoint_id: &str,
+    checkpoint_name: &str,
+    size_bytes: u64,
+    created_at_unix: u64,
+    checkpoint_json: &str,
 ) -> String {
     format!(
         r#"{{
@@ -1766,7 +1928,7 @@ fn self_hosted_worker_checkpoint_body(
           "checkpoint_name": "{checkpoint_name}",
           "size_bytes": {size_bytes},
           "created_at_unix": {created_at_unix},
-          "checkpoint_json": "{{\"sha256\":\"transport-checkpoint\"}}"
+          "checkpoint_json": {checkpoint_json:?}
         }}"#
     )
 }
