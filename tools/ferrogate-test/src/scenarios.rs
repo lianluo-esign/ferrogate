@@ -901,6 +901,68 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         format!("{self_hosted_worker_detail_path}/checkpoints");
     case.expect_json(
         "POST",
+        "/v1/self-hosted-workers/checkpoints",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_checkpoint_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "checkpoint-transport-too-large",
+            "transport-oversized-state",
+            16_777_217,
+            888,
+        ),
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_checkpoint"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("size_bytes")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/checkpoints",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_checkpoint_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "checkpoint-transport",
+            "transport-resume-state",
+            192,
+            889,
+        ),
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_checkpoint");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["worker"]["checkpoint_count"], 1);
+            assert_eq!(body["worker"]["latest_checkpoint_at_unix"], 889);
+            assert_eq!(body["checkpoint"]["id"], "checkpoint-transport");
+            assert_eq!(
+                body["checkpoint"]["worker_id"],
+                *self_hosted_worker_id.borrow()
+            );
+            assert_eq!(body["checkpoint"]["session_id"], "session-transport");
+            assert_eq!(body["checkpoint"]["run_id"], "run-transport");
+            assert_eq!(
+                body["checkpoint"]["checkpoint_name"],
+                "transport-resume-state"
+            );
+            assert_eq!(body["checkpoint"]["size_bytes"], 192);
+            assert_eq!(
+                body["checkpoint"]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["checkpoint"]["created_at_unix"], 889);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
         &self_hosted_worker_checkpoints_path,
         &[ADMIN_AUTH, JSON_CONTENT],
         r#"{
@@ -941,7 +1003,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         |body| {
             assert_eq!(body["object"], "self_hosted_worker_checkpoint");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
-            assert_eq!(body["worker"]["checkpoint_count"], 1);
+            assert_eq!(body["worker"]["checkpoint_count"], 2);
             assert_eq!(body["worker"]["latest_checkpoint_at_unix"], 890);
             assert_eq!(body["checkpoint"]["id"], "checkpoint-1");
             assert_eq!(
@@ -968,7 +1030,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert_eq!(body["id"], *self_hosted_worker_id.borrow());
-            assert_eq!(body["checkpoint_count"], 1);
+            assert_eq!(body["checkpoint_count"], 2);
             assert_eq!(body["latest_checkpoint_at_unix"], 890);
             Ok(())
         },
@@ -1015,7 +1077,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["data"][0]["latest_event_at_unix"], 456);
             assert_eq!(body["data"][0]["artifact_count"], 2);
             assert_eq!(body["data"][0]["latest_artifact_at_unix"], 789);
-            assert_eq!(body["data"][0]["checkpoint_count"], 1);
+            assert_eq!(body["data"][0]["checkpoint_count"], 2);
             assert_eq!(body["data"][0]["latest_checkpoint_at_unix"], 890);
             Ok(())
         },
@@ -1661,6 +1723,34 @@ fn self_hosted_worker_artifact_body(
           "size_bytes": {size_bytes},
           "created_at_unix": {created_at_unix},
           "artifact_json": "{{\"sha256\":\"transport\"}}"
+        }}"#
+    )
+}
+
+fn self_hosted_worker_checkpoint_body(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    checkpoint_id: &str,
+    checkpoint_name: &str,
+    size_bytes: u64,
+    created_at_unix: u64,
+) -> String {
+    format!(
+        r#"{{
+          "identity": {{
+            "tenant_id": "org_demo",
+            "workspace_id": "workspace-1",
+            "worker_id": "{worker_id}",
+            "token_id": "{identity_fingerprint}",
+            "token_secret": "{identity_fingerprint}"
+          }},
+          "checkpoint_id": "{checkpoint_id}",
+          "session_id": "session-transport",
+          "run_id": "run-transport",
+          "checkpoint_name": "{checkpoint_name}",
+          "size_bytes": {size_bytes},
+          "created_at_unix": {created_at_unix},
+          "checkpoint_json": "{{\"sha256\":\"transport-checkpoint\"}}"
         }}"#
     )
 }

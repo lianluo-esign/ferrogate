@@ -585,6 +585,7 @@ HTTP poll/ack endpoints to lock the worker-initiated wire shape:
 POST /v1/self-hosted-workers/heartbeat
 POST /v1/self-hosted-workers/events
 POST /v1/self-hosted-workers/artifacts
+POST /v1/self-hosted-workers/checkpoints
 POST /v1/self-hosted-workers/runs/poll
 POST /v1/self-hosted-workers/runs/ack
 ```
@@ -597,12 +598,15 @@ same identity envelope before writing normalized lifecycle/log/tool/MCP/CLI/
 skill/artifact/checkpoint/usage telemetry evidence through the storage-backed
 event record path. The artifacts endpoint validates the same identity envelope
 before writing reported artifact metadata through the storage-backed artifact
-record path. The run endpoints decode the same JSON request bodies as the
-worker-side client and return `SelfHostedRunLease` / `SelfHostedRunAck`
+record path. The checkpoints endpoint validates the same identity envelope
+before writing reported checkpoint metadata through the storage-backed
+checkpoint record path. The run endpoints decode the same JSON request bodies
+as the worker-side client and return `SelfHostedRunLease` / `SelfHostedRunAck`
 responses. This proves scope matching, adapter matching, capability matching,
 active lease ownership, idempotent dispatch identity, fail-closed identity
 errors, heartbeat ingestion, telemetry event ingestion, artifact metadata
-ingestion, and ack semantics through the real local gateway HTTP path.
+ingestion, checkpoint metadata ingestion, and ack semantics through the real
+local gateway HTTP path.
 
 This is still not the production mTLS listener. The current header is a
 contract marker for local wire-shape tests; it does not validate certificates,
