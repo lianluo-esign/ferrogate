@@ -369,13 +369,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
-    let oversized_self_hosted_transport_body =
-        format!(r#"{{"padding":"{}"}}"#, "x".repeat(1024 * 1024 + 1));
     case.expect_json(
         "POST",
         "/v1/self-hosted-workers/runs/poll",
         &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
-        &oversized_self_hosted_transport_body,
+        &oversized_self_hosted_transport_body(),
         413,
         |body| {
             assert_eq!(
@@ -407,6 +405,34 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 .as_str()
                 .context("self-hosted worker lease id should be present")?;
             self_hosted_lease_id.replace(lease_id.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/ack",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        "{",
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_transport"
+            );
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/ack",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &oversized_self_hosted_transport_body(),
+        413,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "self_hosted_worker_payload_too_large"
+            );
             Ok(())
         },
     )?;
@@ -1362,6 +1388,10 @@ fn self_hosted_worker_ack_body(worker_id: &str, token_secret: &str, lease_id: &s
           "reported_at_unix": 1001
         }}"#
     )
+}
+
+fn oversized_self_hosted_transport_body() -> String {
+    format!(r#"{{"padding":"{}"}}"#, "x".repeat(1024 * 1024 + 1))
 }
 
 pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
