@@ -54,6 +54,11 @@ use ferrogate_providers::{
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
+use ferrogate_runtime::{
+    InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunDispatch,
+    SelfHostedRunLease, SelfHostedRunPollRequest, SelfHostedWorkerError, SelfHostedWorkerIdentity,
+    SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
+};
 use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
@@ -892,6 +897,7 @@ pub(crate) struct AppState {
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     analytics_export: Arc<Mutex<ObservabilityExportRuntime>>,
     response_cache: Arc<Mutex<AiResponseCache>>,
+    self_hosted_dispatch: Arc<Mutex<SelfHostedWorkerDispatchRuntime>>,
     mcp_manager: Arc<McpManager>,
     mcp_dispatch_permits: Arc<Semaphore>,
     approvals: ApprovalRegistry,
@@ -2577,6 +2583,172 @@ fn self_hosted_worker_stale_state(
     (stale, stale_after_unix)
 }
 
+#[derive(Debug, Default)]
+struct SelfHostedWorkerDispatchRuntime {
+    registry: SelfHostedWorkerRegistry,
+    queue: InMemorySelfHostedRunQueue,
+}
+
+impl SelfHostedWorkerDispatchRuntime {
+    fn register_worker(
+        &mut self,
+        registration: &StoredSelfHostedWorkerRegistration,
+    ) -> Result<(), SelfHostedWorkerError> {
+        let capabilities =
+            self_hosted_capabilities_from_envelope(&registration.capability_envelope_json);
+        let identity = self_hosted_worker_runtime_identity(registration);
+        match self.registry.register(SelfHostedWorkerRegistration {
+            tenant_id: self_hosted_tenant_id(&registration.tenant),
+            workspace_id: registration.workspace_id.clone(),
+            worker_id: registration.id.clone(),
+            framework_adapter: self_hosted_framework_adapter(
+                &registration.capability_envelope_json,
+            ),
+            token_id: identity.token_id,
+            token_secret: identity.token_secret,
+            capabilities: capabilities.clone(),
+        }) {
+            Ok(_) | Err(SelfHostedWorkerError::DuplicateWorker(_)) => {}
+            Err(error) => return Err(error),
+        }
+        self.seed_run(registration, capabilities)
+    }
+
+    fn rebuild_registries(
+        &mut self,
+        registrations: Vec<StoredSelfHostedWorkerRegistration>,
+    ) -> Result<(), SelfHostedWorkerError> {
+        let mut next = Self::default();
+        for registration in registrations {
+            next.register_worker(&registration)?;
+        }
+        *self = next;
+        Ok(())
+    }
+
+    fn poll_run(
+        &mut self,
+        request: SelfHostedRunPollRequest,
+    ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
+        self.queue.poll_run(&self.registry, request)
+    }
+
+    fn ack_run(
+        &mut self,
+        request: SelfHostedRunAckRequest,
+    ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
+        self.queue.ack_run(&self.registry, request)
+    }
+
+    fn seed_run(
+        &mut self,
+        registration: &StoredSelfHostedWorkerRegistration,
+        capabilities: Vec<String>,
+    ) -> Result<(), SelfHostedWorkerError> {
+        if !registration.orchestration_enabled {
+            return Ok(());
+        }
+        let dispatch_id = self_hosted_seed_dispatch_id(&registration.id);
+        let required_capabilities = capabilities
+            .iter()
+            .find(|capability| capability.as_str() == "shell")
+            .cloned()
+            .or_else(|| capabilities.first().cloned())
+            .into_iter()
+            .collect::<Vec<_>>();
+        match self.queue.enqueue_run(SelfHostedRunDispatch {
+            dispatch_id,
+            tenant_id: self_hosted_tenant_id(&registration.tenant),
+            workspace_id: registration.workspace_id.clone(),
+            session_id: format!("self-hosted-session-{}", registration.id),
+            run_id: format!("self-hosted-run-{}", registration.id),
+            framework_adapter: self_hosted_framework_adapter(
+                &registration.capability_envelope_json,
+            ),
+            required_capabilities,
+            workload_ref: format!("self-hosted-workload://{}", registration.id),
+            queued_at_unix: registration.registered_at_unix.unwrap_or_default(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(SelfHostedWorkerError::InvalidTransport(message))
+                if message.contains("already exists") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn self_hosted_worker_runtime_identity(
+    registration: &StoredSelfHostedWorkerRegistration,
+) -> SelfHostedWorkerIdentity {
+    SelfHostedWorkerIdentity {
+        tenant_id: self_hosted_tenant_id(&registration.tenant),
+        workspace_id: registration.workspace_id.clone(),
+        worker_id: registration.id.clone(),
+        token_id: registration.identity_fingerprint.clone(),
+        token_secret: registration.identity_fingerprint.clone(),
+    }
+}
+
+fn self_hosted_seed_dispatch_id(worker_id: &str) -> String {
+    format!("self-hosted-dispatch-{worker_id}")
+}
+
+fn self_hosted_tenant_id(tenant: &ferrogate_core::TenantContext) -> String {
+    tenant
+        .organization_id
+        .as_deref()
+        .or(tenant.project_id.as_deref())
+        .or(tenant.team_id.as_deref())
+        .or(tenant.user_id.as_deref())
+        .or(tenant.api_key_id.as_deref())
+        .unwrap_or("tenant")
+        .to_string()
+}
+
+fn self_hosted_framework_adapter(envelope: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(envelope)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("frameworks")
+                .and_then(|frameworks| frameworks.as_array())
+                .and_then(|frameworks| frameworks.first())
+                .and_then(|framework| framework.as_str())
+                .map(str::to_string)
+        })
+        .filter(|framework| !framework.trim().is_empty())
+        .unwrap_or_else(|| "native-harness".to_string())
+}
+
+fn self_hosted_capabilities_from_envelope(envelope: &str) -> Vec<String> {
+    let mut capabilities = serde_json::from_str::<serde_json::Value>(envelope)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("capabilities")
+                .and_then(|capabilities| capabilities.as_array())
+                .map(|capabilities| {
+                    capabilities
+                        .iter()
+                        .filter_map(|capability| capability.as_str())
+                        .map(str::trim)
+                        .filter(|capability| !capability.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default();
+    if capabilities.is_empty() {
+        capabilities.push("shell".to_string());
+    }
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
 impl AppState {
     #[cfg(test)]
     pub(crate) fn new(config: Config) -> Self {
@@ -2677,6 +2849,17 @@ impl AppState {
             .flatten()
             .map(Arc::new);
         let cluster_counters = ClusterCounterBackend::from_config(&config);
+        let self_hosted_dispatch = Arc::new(Mutex::new(SelfHostedWorkerDispatchRuntime::default()));
+        {
+            let registrations = repositories.self_hosted_worker_registrations();
+            match self_hosted_dispatch.lock() {
+                Ok(mut dispatch) => dispatch.rebuild_registries(registrations),
+                Err(poisoned) => poisoned.into_inner().rebuild_registries(registrations),
+            }
+            .map_err(|error| {
+                anyhow::anyhow!("failed to initialize self-hosted worker dispatch runtime: {error}")
+            })?;
+        }
 
         Ok(Self {
             cluster_identity: Arc::new(ClusterIdentity::from_config(&config)),
@@ -2703,6 +2886,7 @@ impl AppState {
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             analytics_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
             response_cache: Arc::new(Mutex::new(AiResponseCache::default())),
+            self_hosted_dispatch,
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
             mcp_dispatch_permits: Arc::new(Semaphore::new(
                 config.reliability.mcp_dispatch_max_concurrency,
@@ -4778,8 +4962,9 @@ impl AppState {
                 .unwrap_or_else(|| "{}".into()),
         };
         self.repositories
-            .upsert_self_hosted_worker_registration(registration)
+            .upsert_self_hosted_worker_registration(registration.clone())
             .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        self.rebuild_self_hosted_worker_dispatch_runtime()?;
         self.self_hosted_worker_records()
             .into_iter()
             .find(|record| record.id == id)
@@ -4811,8 +4996,9 @@ impl AppState {
         registration.identity_fingerprint = request.identity_fingerprint.trim().to_string();
         let rotated_at_unix = now_unix_seconds();
         self.repositories
-            .upsert_self_hosted_worker_registration(registration)
+            .upsert_self_hosted_worker_registration(registration.clone())
             .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        self.rebuild_self_hosted_worker_dispatch_runtime()?;
         let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
             SelfHostedWorkerRecordError::Storage(
                 "self-hosted worker was not readable after identity rotation".into(),
@@ -4824,6 +5010,37 @@ impl AppState {
             previous_identity_fingerprint,
             rotated_at_unix,
         })
+    }
+
+    fn rebuild_self_hosted_worker_dispatch_runtime(
+        &self,
+    ) -> Result<(), SelfHostedWorkerRecordError> {
+        let registrations = self.repositories.self_hosted_worker_registrations();
+        match self.self_hosted_dispatch.lock() {
+            Ok(mut dispatch) => dispatch.rebuild_registries(registrations),
+            Err(poisoned) => poisoned.into_inner().rebuild_registries(registrations),
+        }
+        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))
+    }
+
+    pub(crate) fn poll_self_hosted_worker_run(
+        &self,
+        request: SelfHostedRunPollRequest,
+    ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
+        match self.self_hosted_dispatch.lock() {
+            Ok(mut dispatch) => dispatch.poll_run(request),
+            Err(poisoned) => poisoned.into_inner().poll_run(request),
+        }
+    }
+
+    pub(crate) fn ack_self_hosted_worker_run(
+        &self,
+        request: SelfHostedRunAckRequest,
+    ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
+        match self.self_hosted_dispatch.lock() {
+            Ok(mut dispatch) => dispatch.ack_run(request),
+            Err(poisoned) => poisoned.into_inner().ack_run(request),
+        }
     }
 
     pub(crate) fn record_self_hosted_worker_heartbeat(

@@ -7,6 +7,7 @@
 use crate::dashboard::ADMIN_DASHBOARD_HTML;
 use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
+use ferrogate_runtime::{SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedWorkerError};
 use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use std::collections::BTreeMap;
@@ -45,7 +46,8 @@ use crate::{
         AdminSelfHostedWorkerTelemetryEventRequest, AdminSelfHostedWorkerTelemetryEventResponse,
         AdminSkillPackage, AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage,
         AgentUpstreamDiscovery, HealthResponse, OpenAiModel, OpenAiModelList,
-        PromptTemplateRenderRequest, ReadinessResponse,
+        PromptTemplateRenderRequest, ReadinessResponse, SelfHostedWorkerRunAckResponse,
+        SelfHostedWorkerRunLeaseResponse,
     },
     state::{
         AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord,
@@ -65,6 +67,8 @@ const PROVIDER_CATALOG_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const SERVICE_NAME: &str = "ferrogate";
 const SKILL_PACKAGE_HEADER: &str = "x-ferrogate-skill-package";
 const SKILL_PACKAGE_VERSION_HEADER: &str = "x-ferrogate-skill-package-version";
+const SELF_HOSTED_TRANSPORT_SECURITY_HEADER: &str = "x-ferrogate-transport-security";
+const SELF_HOSTED_TRANSPORT_SECURITY_MTLS: &str = "mutual_tls";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolExecuteBackend {
@@ -3915,6 +3919,107 @@ impl FerroGateway {
                 )
                 .await
             }
+        }
+    }
+
+    pub(super) async fn handle_self_hosted_worker_runs(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> PingoraResult<()> {
+        if *method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "self-hosted worker run transport requires POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        if !self_hosted_transport_security_header_valid(headers) {
+            return write_json_error(
+                session,
+                StatusCode::UNAUTHORIZED,
+                "invalid_self_hosted_worker_transport_security",
+                "self-hosted worker transport requires x-ferrogate-transport-security: mutual_tls",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        match path {
+            "/v1/self-hosted-workers/runs/poll" => {
+                self.handle_self_hosted_worker_run_poll(session, ctx).await
+            }
+            "/v1/self-hosted-workers/runs/ack" => {
+                self.handle_self_hosted_worker_run_ack(session, ctx).await
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "self_hosted_worker_transport_path_not_found",
+                    "self-hosted worker run transport supports poll and ack",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_self_hosted_worker_run_poll(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+    ) -> PingoraResult<()> {
+        let request =
+            match read_self_hosted_transport_body::<SelfHostedRunPollRequest>(session).await? {
+                Ok(request) => request,
+                Err(error) => {
+                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
+                }
+            };
+        let state = self.state.current();
+        match state.poll_self_hosted_worker_run(request) {
+            Ok(Some(lease)) => {
+                let body = SelfHostedWorkerRunLeaseResponse {
+                    object: "self_hosted_run_lease",
+                    lease,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Ok(None) => {
+                write_empty_response(session, StatusCode::NO_CONTENT, &ctx.request_id).await
+            }
+            Err(error) => write_self_hosted_worker_transport_error(session, ctx, error).await,
+        }
+    }
+
+    async fn handle_self_hosted_worker_run_ack(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+    ) -> PingoraResult<()> {
+        let request =
+            match read_self_hosted_transport_body::<SelfHostedRunAckRequest>(session).await? {
+                Ok(request) => request,
+                Err(error) => {
+                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
+                }
+            };
+        let state = self.state.current();
+        match state.ack_self_hosted_worker_run(request) {
+            Ok(ack) => {
+                let body = SelfHostedWorkerRunAckResponse {
+                    object: "self_hosted_run_ack",
+                    ack,
+                };
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => write_self_hosted_worker_transport_error(session, ctx, error).await,
         }
     }
 
@@ -8161,6 +8266,77 @@ fn config_from_admin_payload(
     anyhow::bail!(
         "request body must include config_toml, config_yaml, config_caddyfile, or source=file"
     )
+}
+
+fn self_hosted_transport_security_header_valid(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(SELF_HOSTED_TRANSPORT_SECURITY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == SELF_HOSTED_TRANSPORT_SECURITY_MTLS)
+}
+
+async fn read_self_hosted_transport_body<T>(
+    session: &mut Session,
+) -> PingoraResult<Result<T, SelfHostedWorkerError>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let body = match read_request_body(session, 1024 * 1024).await? {
+        Ok(body) => body,
+        Err(limit) => {
+            return Ok(Err(SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker transport body exceeds maximum size of {} bytes",
+                limit.max_bytes
+            ))));
+        }
+    };
+    Ok(serde_json::from_slice::<T>(&body).map_err(|error| {
+        SelfHostedWorkerError::InvalidTransport(format!(
+            "invalid self-hosted worker transport JSON body: {error}"
+        ))
+    }))
+}
+
+async fn write_self_hosted_worker_transport_error(
+    session: &mut Session,
+    ctx: &ProxyContext,
+    error: SelfHostedWorkerError,
+) -> PingoraResult<()> {
+    let message = error.to_string();
+    let (status, code) = match &error {
+        SelfHostedWorkerError::UnknownWorker(_) | SelfHostedWorkerError::InvalidIdentity(_) => (
+            StatusCode::UNAUTHORIZED,
+            "invalid_self_hosted_worker_identity",
+        ),
+        SelfHostedWorkerError::InactiveWorker(_) => {
+            (StatusCode::FORBIDDEN, "inactive_self_hosted_worker")
+        }
+        SelfHostedWorkerError::InvalidTransport(message)
+            if message.contains("exceeds maximum size") =>
+        {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "self_hosted_worker_payload_too_large",
+            )
+        }
+        SelfHostedWorkerError::InvalidRegistration(_) => (
+            StatusCode::BAD_REQUEST,
+            "invalid_self_hosted_worker_registration",
+        ),
+        SelfHostedWorkerError::InvalidTelemetry(_) => (
+            StatusCode::BAD_REQUEST,
+            "invalid_self_hosted_worker_telemetry",
+        ),
+        SelfHostedWorkerError::DuplicateWorker(_) | SelfHostedWorkerError::InvalidTransport(_) => (
+            StatusCode::BAD_REQUEST,
+            "invalid_self_hosted_worker_transport",
+        ),
+    };
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        write_json_error_and_close(session, status, code, message, &ctx.request_id).await
+    } else {
+        write_json_error(session, status, code, message, &ctx.request_id).await
+    }
 }
 
 fn reload_from_admin_payload(

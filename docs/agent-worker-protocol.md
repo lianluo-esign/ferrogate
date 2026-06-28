@@ -568,12 +568,24 @@ The contract is:
 6. If a lease is not acknowledged before expiry, FerroGate may redeliver the
    same dispatch with a higher attempt number.
 
-The current runtime contract includes an in-memory lease queue to lock the
-poll/ack semantics before the real mTLS HTTP client/server is introduced. That
-queue proves scope matching, adapter matching, capability matching, active
-lease ownership, idempotent dispatch identity, and expiry-based redelivery. It
-is not a production network transport and it does not claim certificate
-rotation, token issuance, or mTLS enforcement.
+The current runtime contract includes an in-memory lease queue and gateway-side
+HTTP poll/ack endpoints to lock the worker-initiated wire shape:
+
+```text
+POST /v1/self-hosted-workers/runs/poll
+POST /v1/self-hosted-workers/runs/ack
+```
+
+The gateway endpoints require the `x-ferrogate-transport-security: mutual_tls`
+contract header, decode the same JSON request bodies as the worker-side client,
+and return `SelfHostedRunLease` / `SelfHostedRunAck` responses. This proves
+scope matching, adapter matching, capability matching, active lease ownership,
+idempotent dispatch identity, fail-closed identity errors, and ack semantics
+through the real local gateway HTTP path.
+
+This is still not the production mTLS listener. The current header is a
+contract marker for local wire-shape tests; it does not validate certificates,
+issue transport tokens, rotate secrets, or prove encrypted channel enforcement.
 
 ### Required Worker Capabilities
 

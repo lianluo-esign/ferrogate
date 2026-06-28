@@ -10,3 +10,4 @@ pub(crate) const OBSERVER_AUTH: &str = "Authorization: Bearer observer-secret";
 pub(crate) const AUTH_TEST_CLIENT_2: &str = "Authorization: Bearer test-secret-2";
 pub(crate) const JSON_CONTENT: &str = "Content-Type: application/json";
 pub(crate) const SUPPORT_SKILL_HEADER: &str = "x-ferrogate-skill-package: support-skill";
+pub(crate) const SELF_HOSTED_MTLS_HEADER: &str = "x-ferrogate-transport-security: mutual_tls";

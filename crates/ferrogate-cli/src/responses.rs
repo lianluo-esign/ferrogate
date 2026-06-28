@@ -397,6 +397,20 @@ pub(crate) struct AdminSelfHostedWorkerCheckpointResponse {
     pub(crate) checkpoint: AdminSelfHostedWorkerCheckpoint,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct SelfHostedWorkerRunLeaseResponse {
+    pub(crate) object: &'static str,
+    #[serde(flatten)]
+    pub(crate) lease: ferrogate_runtime::SelfHostedRunLease,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SelfHostedWorkerRunAckResponse {
+    pub(crate) object: &'static str,
+    #[serde(flatten)]
+    pub(crate) ack: ferrogate_runtime::SelfHostedRunAck,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {

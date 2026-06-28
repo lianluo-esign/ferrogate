@@ -9,7 +9,7 @@ use crate::{
     cli::{AuthArgs, LocalArgs},
     constants::{
         ADMIN_AUTH, AUTH_TEST_CLIENT_2, CLIENT_AUTH, JSON_CONTENT, OBSERVER_AUTH,
-        SUPPORT_SKILL_HEADER,
+        SELF_HOSTED_MTLS_HEADER, SUPPORT_SKILL_HEADER,
     },
     local::{AuthHarness, LocalHarness},
     mocks::spawn_mock_third_party_auth_server,
@@ -20,6 +20,7 @@ use std::{cell::RefCell, thread, time::Duration};
 pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let case = LocalHarness::start(&args.ferrogate_bin, 4)?;
     let self_hosted_worker_id = RefCell::new(String::new());
+    let self_hosted_lease_id = RefCell::new(String::new());
 
     case.expect_json("GET", "/healthz", &[], "", 200, |body| {
         assert_eq!(body["status"], "ok");
@@ -301,7 +302,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
           "worker_name": "customer-worker-a",
           "identity_fingerprint": "sha256:test-worker",
           "orchestration_enabled": true,
-          "capability_envelope_json": "{\"frameworks\":[\"codex\"]}"
+          "capability_envelope_json": "{\"frameworks\":[\"codex\"],\"capabilities\":[\"shell\",\"mcp\"]}"
         }"#,
         201,
         |body| {
@@ -326,6 +327,79 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["worker"]["telemetry_event_count"], 0);
             assert_eq!(body["worker"]["artifact_count"], 0);
             assert_eq!(body["worker"]["checkpoint_count"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT],
+        &self_hosted_worker_poll_body(&self_hosted_worker_id.borrow(), "sha256:test-worker"),
+        401,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_transport_security"
+            );
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_poll_body(&self_hosted_worker_id.borrow(), "sha256:wrong-worker"),
+        401,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_identity");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_poll_body(&self_hosted_worker_id.borrow(), "sha256:test-worker"),
+        200,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_run_lease");
+            assert_eq!(
+                body["dispatch_id"],
+                format!("self-hosted-dispatch-{}", self_hosted_worker_id.borrow())
+            );
+            assert_eq!(body["worker_id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["tenant_id"], "org_demo");
+            assert_eq!(body["workspace_id"], "workspace-1");
+            assert_eq!(body["framework_adapter"], "codex");
+            assert_eq!(body["required_capabilities"][0], "shell");
+            assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
+            let lease_id = body["lease_id"]
+                .as_str()
+                .context("self-hosted worker lease id should be present")?;
+            self_hosted_lease_id.replace(lease_id.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/ack",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_ack_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+            &self_hosted_lease_id.borrow(),
+        ),
+        200,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_run_ack");
+            assert_eq!(
+                body["dispatch_id"],
+                format!("self-hosted-dispatch-{}", self_hosted_worker_id.borrow())
+            );
+            assert_eq!(body["lease_id"], *self_hosted_lease_id.borrow());
+            assert_eq!(body["worker_id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["status"], "accepted");
+            assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
             Ok(())
         },
     )?;
@@ -1222,6 +1296,42 @@ pub(crate) fn run_auth_api(args: &AuthArgs) -> Result<()> {
 
     println!("auth-api scenario passed");
     Ok(())
+}
+
+fn self_hosted_worker_poll_body(worker_id: &str, token_secret: &str) -> String {
+    format!(
+        r#"{{
+          "identity": {{
+            "tenant_id": "org_demo",
+            "workspace_id": "workspace-1",
+            "worker_id": "{worker_id}",
+            "token_id": "sha256:test-worker",
+            "token_secret": "{token_secret}"
+          }},
+          "supported_capabilities": ["shell", "mcp"],
+          "now_unix": 1000,
+          "lease_duration_secs": 60
+        }}"#
+    )
+}
+
+fn self_hosted_worker_ack_body(worker_id: &str, token_secret: &str, lease_id: &str) -> String {
+    format!(
+        r#"{{
+          "identity": {{
+            "tenant_id": "org_demo",
+            "workspace_id": "workspace-1",
+            "worker_id": "{worker_id}",
+            "token_id": "sha256:test-worker",
+            "token_secret": "{token_secret}"
+          }},
+          "dispatch_id": "self-hosted-dispatch-{worker_id}",
+          "lease_id": "{lease_id}",
+          "run_id": "self-hosted-run-{worker_id}",
+          "status": "accepted",
+          "reported_at_unix": 1001
+        }}"#
+    )
 }
 
 pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
