@@ -15,15 +15,17 @@ use std::collections::HashMap;
 use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
     AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
-    FrameworkAdapter, FrameworkAdapterArtifact, FrameworkAdapterArtifactRequest,
-    FrameworkAdapterCapabilities, FrameworkAdapterMode, FrameworkAdapterRunRequest,
-    FrameworkAdapterSession, FrameworkAdapterSessionRequest, ManagedCliAction,
-    ManagedExternalAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedToolAction,
-    ManagedWorkerError, NativeHarnessAdapter, NormalizedFrameworkEvent, ProcessFrameworkAdapter,
+    CapabilityAuthorizationDecision, FrameworkAdapter, FrameworkAdapterArtifact,
+    FrameworkAdapterArtifactRequest, FrameworkAdapterCapabilities, FrameworkAdapterMode,
+    FrameworkAdapterRunRequest, FrameworkAdapterSession, FrameworkAdapterSessionRequest,
+    ManagedCliAction, ManagedExternalAction, ManagedMemoryAccess, ManagedMemoryAction,
+    ManagedToolAction, ManagedWorkerError, NativeHarnessAdapter, NormalizedFrameworkEvent,
+    ProcessFrameworkAdapter,
 };
 
 use crate::external_actions::{
-    authorize_handler_external_action, ExternalActionGateRequest, GatewayExternalActionAuthorizer,
+    request_handler_external_action_decision, ExternalActionGateRequest,
+    GatewayExternalActionAuthorizer,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +55,7 @@ pub(crate) fn exec_or_attach_framework_handler_with_authorizer(
         .start_session(session_request)
         .map_err(handler_runtime_error)?;
     let mut events = vec![started];
-    let decision = authorize_handler_external_action(
+    let decision = request_handler_external_action_decision(
         external_action_authorizer,
         ExternalActionGateRequest {
             session: session.clone(),
@@ -63,6 +65,19 @@ pub(crate) fn exec_or_attach_framework_handler_with_authorizer(
     )
     .map_err(handler_runtime_error)?;
     events.push(decision.event);
+    if decision.decision != CapabilityAuthorizationDecision::Allowed {
+        return Ok((
+            HandlerRunState {
+                session,
+                events: events.clone(),
+                artifacts: vec![],
+                closed: false,
+            },
+            AgentWorkerManagementResult::HandlerEvents {
+                events: events.into_iter().map(event_result).collect(),
+            },
+        ));
+    }
     events.extend(
         adapter
             .submit_run(FrameworkAdapterRunRequest {
@@ -384,6 +399,42 @@ mod tests {
             .artifacts
             .iter()
             .any(|artifact| artifact.artifact_id == "codex-artifact"));
+    }
+
+    #[test]
+    fn approval_required_framework_capability_is_returned_without_handler_execution() {
+        let mut envelope = envelope();
+        envelope.framework_adapter = Some("codex".to_string());
+        let authorizer = crate::external_actions::RuntimeGatewayExternalActionAuthorizer::new(
+            SimpleCapabilityAuthorizer::new(CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
+                ..CapabilityPolicy::default()
+            }),
+        );
+
+        let (state, result) =
+            exec_or_attach_framework_handler_with_authorizer(&envelope, Some(&authorizer)).unwrap();
+
+        let AgentWorkerManagementResult::HandlerEvents { events } = result else {
+            panic!("expected handler events");
+        };
+        assert!(!state.closed);
+        assert!(state.artifacts.is_empty());
+        assert!(events.iter().any(|event| {
+            event.kind == "capability.requested"
+                && event
+                    .metadata
+                    .get("decision")
+                    .is_some_and(|decision| decision == "approval_required")
+                && event
+                    .metadata
+                    .get("external_action")
+                    .is_some_and(|action| action == "cli")
+        }));
+        assert!(!events.iter().any(|event| event.kind == "model.requested"));
+        assert!(!events.iter().any(|event| event.kind == "artifact.created"));
+        assert!(!events.iter().any(|event| event.kind == "session.closed"));
     }
 
     #[test]

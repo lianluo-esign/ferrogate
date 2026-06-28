@@ -426,7 +426,11 @@ surface as the runtime contract: `tool`, `mcp_tool`, `cli`, `skill`,
 specs. Allowed responses prove only that the handler may continue to the next
 execution step; the command itself still does not execute the external action.
 Denied, approval-required, invalid, or self-hosted requests fail closed before
-handler execution.
+handler execution. Gateway policy decisions that are denied or
+approval-required still preserve the normalized framework event in the response,
+so management callers can store `capability.denied` or `capability.requested`
+evidence in the run timeline instead of reducing the result to a worker-local
+error string.
 
 The worker-side transport contract for the real gateway/control-plane
 authorizer uses HTTP as the primary path:

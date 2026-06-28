@@ -96,18 +96,7 @@ pub(crate) fn authorize_handler_external_action<A>(
 where
     A: GatewayExternalActionAuthorizer + ?Sized,
 {
-    validate_managed_worker_session(&request.session)?;
-    let Some(authorizer) = authorizer else {
-        return Err(FrameworkAdapterError::CapabilityDenied(
-            "managed external action denied: gateway authorization client is unavailable"
-                .to_string(),
-        ));
-    };
-    let decision = authorizer.authorize_external_action(ManagedExternalActionRequest {
-        session: request.session,
-        action: request.action,
-        high_risk: request.high_risk,
-    })?;
+    let decision = request_handler_external_action_decision(authorizer, request)?;
     if decision.allowed() {
         Ok(decision)
     } else {
@@ -120,6 +109,27 @@ where
                 .unwrap_or("gateway authorization was not allowed")
         )))
     }
+}
+
+pub(crate) fn request_handler_external_action_decision<A>(
+    authorizer: Option<&A>,
+    request: ExternalActionGateRequest,
+) -> Result<ExternalActionGateDecision, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    validate_managed_worker_session(&request.session)?;
+    let Some(authorizer) = authorizer else {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed external action denied: gateway authorization client is unavailable"
+                .to_string(),
+        ));
+    };
+    authorizer.authorize_external_action(ManagedExternalActionRequest {
+        session: request.session,
+        action: request.action,
+        high_risk: request.high_risk,
+    })
 }
 
 pub(crate) fn external_action_smoke_command() -> Result<()> {
@@ -515,7 +525,7 @@ where
         Ok(request) => request,
         Err(error) => return ExternalActionAuthorizationResponse::rejected(error),
     };
-    match authorize_handler_external_action(
+    match request_handler_external_action_decision(
         Some(authorizer),
         ExternalActionGateRequest {
             session: managed_request.session,
@@ -828,13 +838,17 @@ mod tests {
 
         assert!(!response.accepted);
         assert_eq!(
-            response.error.as_ref().map(|error| error.code.as_str()),
-            Some("capability_denied")
+            response.decision,
+            Some(ExternalActionDecision::ApprovalRequired)
         );
-        assert!(response
-            .error
-            .as_ref()
-            .is_some_and(|error| error.message.contains("requires approval")));
+        let event = response.event.unwrap();
+        assert_eq!(event["kind"], "capability.requested");
+        assert_eq!(event["metadata"]["decision"], "approval_required");
+        assert_eq!(event["metadata"]["external_action"], "cli");
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            None
+        );
     }
 
     #[test]
@@ -920,14 +934,15 @@ mod tests {
         let response = accept_external_action_json(&input, &gate).unwrap();
 
         assert!(!response.accepted);
+        assert_eq!(response.decision, Some(ExternalActionDecision::Denied));
+        let event = response.event.unwrap();
+        assert_eq!(event["kind"], "capability.denied");
+        assert_eq!(event["metadata"]["decision"], "denied");
+        assert_eq!(event["metadata"]["external_action"], "network.egress");
         assert_eq!(
             response.error.as_ref().map(|error| error.code.as_str()),
-            Some("capability_denied")
+            None
         );
-        assert!(response
-            .error
-            .as_ref()
-            .is_some_and(|error| error.message.contains("direct network egress")));
     }
 
     #[test]
@@ -1015,12 +1030,20 @@ mod tests {
         assert_eq!(served.len(), 1);
         assert!(!served[0].response.accepted);
         assert_eq!(
+            served[0].response.decision,
+            Some(ExternalActionDecision::Denied)
+        );
+        assert_eq!(
+            served[0].response.event.as_ref().unwrap()["kind"],
+            "capability.denied"
+        );
+        assert_eq!(
             served[0]
                 .response
                 .error
                 .as_ref()
                 .map(|error| error.code.as_str()),
-            Some("capability_denied")
+            None
         );
     }
 

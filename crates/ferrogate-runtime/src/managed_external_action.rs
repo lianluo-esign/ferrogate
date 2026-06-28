@@ -720,14 +720,13 @@ impl ExternalActionAuthorizationResponse {
     }
 
     pub fn into_decision(self) -> Result<ManagedExternalActionDecision, FrameworkAdapterError> {
-        if !self.accepted {
-            let message = self
-                .error
-                .map(|error| error.message)
-                .unwrap_or_else(|| "gateway external action authorization rejected".to_string());
-            return Err(FrameworkAdapterError::CapabilityDenied(message));
-        }
         let Some(event_json) = self.event else {
+            if !self.accepted {
+                let message = self.error.map(|error| error.message).unwrap_or_else(|| {
+                    "gateway external action authorization rejected".to_string()
+                });
+                return Err(FrameworkAdapterError::CapabilityDenied(message));
+            }
             return Err(FrameworkAdapterError::InvalidRequest(
                 "gateway external action authorization accepted without event".to_string(),
             ));
