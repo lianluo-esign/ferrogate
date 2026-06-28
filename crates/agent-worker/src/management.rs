@@ -1328,12 +1328,18 @@ mod tests {
     }
 
     #[test]
-    fn provision_still_fails_closed_when_firecracker_binary_is_configured() {
+    fn provision_still_fails_closed_when_firecracker_bundle_is_configured() {
         let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
         let firecracker_path = temp.path().join("firecracker");
+        let kernel_path = temp.path().join("vmlinux");
+        let rootfs_path = temp.path().join("rootfs.ext4");
         std::fs::write(&firecracker_path, b"not executed").unwrap();
+        std::fs::write(&kernel_path, b"not executed").unwrap();
+        std::fs::write(&rootfs_path, b"not executed").unwrap();
         std::env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_KERNEL", &kernel_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_ROOTFS", &rootfs_path);
         let envelope = lifecycle_envelope(
             AgentWorkerManagementAction::Provision,
             "agent-worker-configured-provision",
@@ -1344,6 +1350,8 @@ mod tests {
             accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
                 .unwrap();
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_ROOTFS");
         let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
         assert_eq!(response["accepted"], false);

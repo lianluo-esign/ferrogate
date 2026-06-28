@@ -340,7 +340,9 @@ authentication as execution support.
 returns an `isolation_backends` result with explicit Firecracker readiness, so
 the gateway can distinguish a configured worker backend from a transport or
 authentication failure. A ready Firecracker report only means the configured
-binary path exists; it must not be treated as evidence that a microVM can boot.
+worker bundle exists: `AGENT_WORKER_FIRECRACKER_BIN`,
+`AGENT_WORKER_FIRECRACKER_KERNEL`, and `AGENT_WORKER_FIRECRACKER_ROOTFS` all
+point to files. It must not be treated as evidence that a microVM can boot.
 Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 `stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
 worker-owned lifecycle or handler dispatch. The dispatch still does not boot
