@@ -7,6 +7,7 @@
 [workspace]
 members = [
     "crates/ferrogate-admin",
+    "crates/agent-worker",
     "crates/ferrogate-auth",
     "crates/ferrogate-billing",
     "crates/ferrogate-cli",
