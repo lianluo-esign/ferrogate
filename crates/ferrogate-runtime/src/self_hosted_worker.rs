@@ -385,7 +385,8 @@ struct QueuedSelfHostedRun {
     lease_id: Option<String>,
     lease_expires_at_unix: Option<u64>,
     attempt: u32,
-    acknowledged: bool,
+    acknowledged_status: Option<SelfHostedRunAckStatus>,
+    acknowledged_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -413,7 +414,8 @@ impl InMemorySelfHostedRunQueue {
                 lease_id: None,
                 lease_expires_at_unix: None,
                 attempt: 0,
-                acknowledged: false,
+                acknowledged_status: None,
+                acknowledged_at_unix: None,
             },
         );
         Ok(())
@@ -495,7 +497,13 @@ impl InMemorySelfHostedRunQueue {
                 "ack lease_id does not match active lease".to_string(),
             ));
         }
-        queued.acknowledged = true;
+        if queued.acknowledged_status.is_some() {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "dispatch lease was already acknowledged".to_string(),
+            ));
+        }
+        queued.acknowledged_status = Some(request.status);
+        queued.acknowledged_at_unix = Some(request.reported_at_unix);
         Ok(SelfHostedRunAck {
             dispatch_id: queued.dispatch.dispatch_id.clone(),
             action: queued.dispatch.action,
@@ -518,7 +526,7 @@ impl QueuedSelfHostedRun {
         supported_capabilities: &[String],
         now_unix: u64,
     ) -> bool {
-        !self.acknowledged
+        self.acknowledged_status.is_none()
             && self.dispatch.tenant_id == worker.tenant_id
             && self.dispatch.workspace_id == worker.workspace_id
             && self.dispatch.framework_adapter == worker.framework_adapter
@@ -1451,6 +1459,54 @@ mod tests {
         assert_eq!(ack.lease_id, "dispatch-1:attempt-1");
         assert_eq!(ack.worker_id, "worker-1");
         assert_eq!(ack.status, SelfHostedRunAckStatus::Accepted);
+    }
+
+    #[test]
+    fn worker_ack_rejects_duplicate_ack_for_same_lease() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        queue.enqueue_run(dispatch()).unwrap();
+        let lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("matching worker should receive a run lease");
+        let first_ack = SelfHostedRunAckRequest {
+            identity: identity.clone(),
+            dispatch_id: lease.dispatch_id.clone(),
+            action: lease.action,
+            lease_id: lease.lease_id.clone(),
+            run_id: lease.run_id.clone(),
+            status: SelfHostedRunAckStatus::Accepted,
+            reported_at_unix: 1_725_000_011,
+        };
+
+        transport
+            .ack_run(&registry, &mut queue, first_ack.clone())
+            .unwrap();
+        let duplicate = transport
+            .ack_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunAckRequest {
+                    status: SelfHostedRunAckStatus::Completed,
+                    reported_at_unix: 1_725_000_012,
+                    ..first_ack
+                },
+            )
+            .unwrap_err();
+
+        assert!(duplicate.to_string().contains("already acknowledged"));
     }
 
     #[test]
