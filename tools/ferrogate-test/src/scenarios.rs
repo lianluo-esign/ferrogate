@@ -359,6 +359,36 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/v1/self-hosted-workers/runs/poll",
         &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        "{",
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_transport"
+            );
+            Ok(())
+        },
+    )?;
+    let oversized_self_hosted_transport_body =
+        format!(r#"{{"padding":"{}"}}"#, "x".repeat(1024 * 1024 + 1));
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &oversized_self_hosted_transport_body,
+        413,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "self_hosted_worker_payload_too_large"
+            );
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
         &self_hosted_worker_poll_body(&self_hosted_worker_id.borrow(), "sha256:test-worker"),
         200,
         |body| {
