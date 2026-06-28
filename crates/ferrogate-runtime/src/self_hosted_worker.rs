@@ -497,6 +497,15 @@ impl InMemorySelfHostedRunQueue {
                 "ack lease_id does not match active lease".to_string(),
             ));
         }
+        if queued
+            .lease_expires_at_unix
+            .map(|expires_at| request.reported_at_unix > expires_at)
+            .unwrap_or(true)
+        {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "ack lease has expired".to_string(),
+            ));
+        }
         if queued.acknowledged_status.is_some() {
             return Err(SelfHostedWorkerError::InvalidTransport(
                 "dispatch lease was already acknowledged".to_string(),
@@ -1560,6 +1569,64 @@ mod tests {
         assert!(during_active_lease.is_none());
         assert_eq!(after_expiry.lease_id, "dispatch-1:attempt-2");
         assert_eq!(after_expiry.attempt, 2);
+    }
+
+    #[test]
+    fn worker_ack_rejects_expired_lease_before_redelivery() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        queue.enqueue_run(dispatch()).unwrap();
+
+        let expired_lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("matching worker should receive a run lease");
+
+        let late_ack = transport
+            .ack_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunAckRequest {
+                    identity: identity.clone(),
+                    dispatch_id: expired_lease.dispatch_id.clone(),
+                    action: expired_lease.action,
+                    lease_id: expired_lease.lease_id.clone(),
+                    run_id: expired_lease.run_id.clone(),
+                    status: SelfHostedRunAckStatus::Accepted,
+                    reported_at_unix: 1_725_000_041,
+                },
+            )
+            .unwrap_err();
+
+        assert!(late_ack.to_string().contains("lease has expired"));
+
+        let redelivered = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity,
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_041,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("expired lease should be available for redelivery");
+
+        assert_eq!(redelivered.lease_id, "dispatch-1:attempt-2");
+        assert_eq!(redelivered.attempt, 2);
     }
 
     #[test]
