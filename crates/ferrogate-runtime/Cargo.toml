@@ -16,6 +16,7 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+blake2.workspace = true
 ferrogate-core = { path = "../ferrogate-core" }
 serde_json.workspace = true
 

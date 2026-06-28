@@ -12,6 +12,11 @@
 
 use std::{error::Error, fmt};
 
+use blake2::{
+    digest::{KeyInit, Mac},
+    Blake2bMac512,
+};
+
 use crate::{
     select_isolation_backend, IsolationBackendDescriptor, IsolationCleanupOutcome, IsolationError,
     IsolationExecOutcome, IsolationExecRequest, IsolationPolicy, IsolationPrepareRequest,
@@ -173,15 +178,15 @@ pub struct AgentWorkerManagementSecurity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentWorkerSecurityAlgorithm {
-    SharedSecretHmacSha256,
-    MtlsBoundHmacSha256,
+    SharedSecretBlake2b,
+    MtlsBoundBlake2b,
 }
 
 impl AgentWorkerSecurityAlgorithm {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::SharedSecretHmacSha256 => "shared_secret_hmac_sha256",
-            Self::MtlsBoundHmacSha256 => "mtls_bound_hmac_sha256",
+            Self::SharedSecretBlake2b => "shared_secret_blake2b",
+            Self::MtlsBoundBlake2b => "mtls_bound_blake2b",
         }
     }
 }
@@ -219,7 +224,7 @@ impl AgentWorkerManagementEnvelope {
         require_non_empty("security.nonce", &self.security.nonce)?;
         require_non_empty("security.signature", &self.security.signature)?;
         if !self.security.encrypted
-            && self.security.algorithm != AgentWorkerSecurityAlgorithm::MtlsBoundHmacSha256
+            && self.security.algorithm != AgentWorkerSecurityAlgorithm::MtlsBoundBlake2b
         {
             return Err(ManagedWorkerError::InvalidRequest(
                 "agent-worker management requests must be encrypted or mTLS-bound".to_string(),
@@ -240,6 +245,67 @@ impl AgentWorkerManagementEnvelope {
         {
             return Err(ManagedWorkerError::InvalidRequest(
                 "agent-worker management request issued_at is too far in the future".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn canonical_signature_input(&self) -> String {
+        [
+            self.protocol_version.to_string(),
+            self.action.as_str().to_string(),
+            self.request_id.clone(),
+            self.idempotency_key.clone(),
+            self.issued_at_unix_millis.to_string(),
+            self.deadline_unix_millis.to_string(),
+            self.tenant_id.clone(),
+            self.workspace_id.clone(),
+            self.worker_id.clone(),
+            self.session_id.clone().unwrap_or_default(),
+            self.run_id.clone().unwrap_or_default(),
+            self.security.key_id.clone(),
+            self.security.nonce.clone(),
+            self.security.algorithm.as_str().to_string(),
+            self.security.encrypted.to_string(),
+        ]
+        .join("\n")
+    }
+
+    pub fn shared_secret_signature(
+        &self,
+        shared_secret: &str,
+    ) -> Result<String, ManagedWorkerError> {
+        require_non_empty("shared_secret", shared_secret)?;
+        let mut mac = <Blake2bMac512 as KeyInit>::new_from_slice(shared_secret.as_bytes())
+            .map_err(|_| {
+                ManagedWorkerError::InvalidRequest(
+                    "shared_secret is not a valid MAC key".to_string(),
+                )
+            })?;
+        mac.update(self.canonical_signature_input().as_bytes());
+        Ok(format!(
+            "blake2b-mac:{}",
+            encode_hex(&mac.finalize().into_bytes())
+        ))
+    }
+
+    pub fn verify_shared_secret_signature(
+        &self,
+        shared_secret: &str,
+    ) -> Result<(), ManagedWorkerError> {
+        if !matches!(
+            self.security.algorithm,
+            AgentWorkerSecurityAlgorithm::SharedSecretBlake2b
+                | AgentWorkerSecurityAlgorithm::MtlsBoundBlake2b
+        ) {
+            return Err(ManagedWorkerError::InvalidRequest(
+                "unsupported agent-worker signature algorithm".to_string(),
+            ));
+        }
+        let expected = self.shared_secret_signature(shared_secret)?;
+        if !constant_time_eq(expected.as_bytes(), self.security.signature.as_bytes()) {
+            return Err(ManagedWorkerError::InvalidRequest(
+                "agent-worker management request signature verification failed".to_string(),
             ));
         }
         Ok(())
@@ -744,6 +810,26 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), ManagedWorkerError>
     Ok(())
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedWorkerError {
     InvalidConfig(String),
@@ -1063,11 +1149,18 @@ mod tests {
         let envelope = management_envelope(AgentWorkerManagementAction::Provision);
 
         envelope.validate(1_000).unwrap();
+        envelope
+            .verify_shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
         assert_eq!(envelope.action.as_str(), "provision");
         assert_eq!(
             envelope.security.algorithm.as_str(),
-            "shared_secret_hmac_sha256"
+            "shared_secret_blake2b"
         );
+        assert!(envelope
+            .canonical_signature_input()
+            .contains("provision\nrequest-1\nidempotency-1"));
+        assert!(envelope.security.signature.starts_with("blake2b-mac:"));
 
         let mut missing_signature = envelope.clone();
         missing_signature.security.signature.clear();
@@ -1084,6 +1177,20 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("encrypted or mTLS-bound"));
+
+        let mut wrong_signature = envelope.clone();
+        wrong_signature.security.signature = "blake2b-mac:bad".to_string();
+        assert!(wrong_signature
+            .verify_shared_secret_signature("agent-worker-shared-secret")
+            .unwrap_err()
+            .to_string()
+            .contains("signature verification failed"));
+
+        assert!(envelope
+            .verify_shared_secret_signature("wrong-secret")
+            .unwrap_err()
+            .to_string()
+            .contains("signature verification failed"));
 
         let mut expired = envelope.clone();
         expired.deadline_unix_millis = 999;
@@ -1132,7 +1239,7 @@ mod tests {
     }
 
     fn management_envelope(action: AgentWorkerManagementAction) -> AgentWorkerManagementEnvelope {
-        AgentWorkerManagementEnvelope {
+        let mut envelope = AgentWorkerManagementEnvelope {
             protocol_version: AGENT_WORKER_PROTOCOL_VERSION,
             action,
             request_id: "request-1".to_string(),
@@ -1147,11 +1254,15 @@ mod tests {
             security: AgentWorkerManagementSecurity {
                 key_id: "agent-worker-key-1".to_string(),
                 nonce: "nonce-1".to_string(),
-                signature: "signature-1".to_string(),
-                algorithm: AgentWorkerSecurityAlgorithm::SharedSecretHmacSha256,
+                signature: String::new(),
+                algorithm: AgentWorkerSecurityAlgorithm::SharedSecretBlake2b,
                 encrypted: true,
             },
-        }
+        };
+        envelope.security.signature = envelope
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        envelope
     }
 
     fn backend(name: &str, kind: IsolationBackendKind) -> IsolationBackendDescriptor {
