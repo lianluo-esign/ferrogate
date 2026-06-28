@@ -35,9 +35,9 @@ use chacha20poly1305::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    select_isolation_backend, IsolationBackendDescriptor, IsolationCleanupOutcome, IsolationError,
-    IsolationExecOutcome, IsolationExecRequest, IsolationPolicy, IsolationPrepareRequest,
-    IsolationStarted, IsolationStopOutcome,
+    select_isolation_backend, FrameworkAdapterCapabilities, IsolationBackendDescriptor,
+    IsolationCleanupOutcome, IsolationError, IsolationExecOutcome, IsolationExecRequest,
+    IsolationPolicy, IsolationPrepareRequest, IsolationStarted, IsolationStopOutcome,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1354,6 +1354,7 @@ pub struct AgentWorkerFrameworkHandler {
     pub adapter_name: String,
     pub framework: String,
     pub version: String,
+    pub capabilities: Vec<String>,
     pub ready: bool,
     pub readiness_reason: Option<String>,
 }
@@ -1704,7 +1705,27 @@ impl ManagedWorkerScheduler {
                     .unwrap_or("readiness reason was not reported")
             )));
         }
+        let reported_capabilities = FrameworkAdapterCapabilities::from_capability_names(
+            handler.capabilities.iter().map(String::as_str),
+        );
+        let required_capabilities = required_framework_capabilities(&template.framework_adapter);
+        if !reported_capabilities.supports(&required_capabilities) {
+            return Err(ManagedWorkerError::NoCompatibleTemplate(format!(
+                "agent-worker handler {} does not report required capabilities for framework adapter {}",
+                handler.adapter_name, template.framework_adapter
+            )));
+        }
         Ok(())
+    }
+}
+
+fn required_framework_capabilities(adapter: &str) -> FrameworkAdapterCapabilities {
+    match adapter {
+        "codex" | "claude-code" | "claude_code" => {
+            FrameworkAdapterCapabilities::code_process_shim()
+        }
+        "hermes" => FrameworkAdapterCapabilities::hermes_process_shim(),
+        _ => FrameworkAdapterCapabilities::native_harness(),
     }
 }
 
@@ -2116,6 +2137,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_session_when_agent_worker_handler_lacks_required_capabilities() {
+        let scheduler = scheduler();
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+        agent_worker.handlers[0].capabilities = vec!["tools".to_string(), "streaming".to_string()];
+
+        let error = scheduler
+            .start_session(session_request(), &mut agent_worker)
+            .unwrap_err();
+
+        assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
+        assert_eq!(agent_worker.calls, vec!["framework_handlers"]);
+        assert!(error.to_string().contains("required capabilities"));
+    }
+
+    #[test]
     fn failed_before_start_projects_auditable_failure_lifecycle_record() {
         let scheduler = scheduler();
         let mut agent_worker = FakeAgentWorker::new(vec![backend(
@@ -2461,6 +2500,11 @@ mod tests {
                         adapter_name: "native-harness".to_string(),
                         framework: "native_harness".to_string(),
                         version: "test".to_string(),
+                        capabilities: FrameworkAdapterCapabilities::native_harness()
+                            .capability_names()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
                         ready: true,
                         readiness_reason: Some(
                             "native harness is built into the worker".to_string(),
@@ -2469,6 +2513,10 @@ mod tests {
                 });
         let result_json = serde_json::to_value(&response_with_result).unwrap();
         assert_eq!(result_json["result"]["kind"], "framework_handlers");
+        assert_eq!(
+            result_json["result"]["handlers"][0]["capabilities"][0],
+            "tools"
+        );
         assert_eq!(
             result_json["result"]["handlers"][0]["adapter_name"],
             "native-harness"
@@ -3173,6 +3221,11 @@ mod tests {
                     adapter_name: "codex".to_string(),
                     framework: "codex".to_string(),
                     version: "test-1".to_string(),
+                    capabilities: FrameworkAdapterCapabilities::code_process_shim()
+                        .capability_names()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
                     ready: true,
                     readiness_reason: None,
                 }],

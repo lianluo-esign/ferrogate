@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use ferrogate_runtime::AgentWorkerFrameworkHandler;
+use ferrogate_runtime::{AgentWorkerFrameworkHandler, FrameworkAdapterCapabilities};
 use serde_json::json;
 
 pub(crate) fn probe_handlers_command() -> Result<()> {
@@ -48,6 +48,7 @@ pub(crate) fn framework_handlers() -> Vec<AgentWorkerFrameworkHandler> {
             adapter_name: "native-harness".to_string(),
             framework: "native_harness".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            capabilities: capability_names(FrameworkAdapterCapabilities::native_harness()),
             ready: true,
             readiness_reason: Some(
                 "native harness is built into the agent-worker process".to_string(),
@@ -86,6 +87,7 @@ fn probed_binary_handler(
                 adapter_name: adapter_name.to_string(),
                 framework: framework.to_string(),
                 version: "external".to_string(),
+                capabilities: capabilities_for_adapter(adapter_name),
                 ready: true,
                 readiness_reason: Some(format!("{env_var} points to executable candidate {path}")),
             }
@@ -94,6 +96,7 @@ fn probed_binary_handler(
             adapter_name: adapter_name.to_string(),
             framework: framework.to_string(),
             version: "unknown".to_string(),
+            capabilities: capabilities_for_adapter(adapter_name),
             ready: false,
             readiness_reason: Some(format!("{env_var} does not point to a file: {path}")),
         },
@@ -101,10 +104,29 @@ fn probed_binary_handler(
             adapter_name: adapter_name.to_string(),
             framework: framework.to_string(),
             version: "unknown".to_string(),
+            capabilities: capabilities_for_adapter(adapter_name),
             ready: false,
             readiness_reason: Some(missing_message.to_string()),
         },
     }
+}
+
+fn capabilities_for_adapter(adapter_name: &str) -> Vec<String> {
+    match adapter_name {
+        "codex" | "claude-code" | "claude_code" => {
+            capability_names(FrameworkAdapterCapabilities::code_process_shim())
+        }
+        "hermes" => capability_names(FrameworkAdapterCapabilities::hermes_process_shim()),
+        _ => capability_names(FrameworkAdapterCapabilities::native_harness()),
+    }
+}
+
+fn capability_names(capabilities: FrameworkAdapterCapabilities) -> Vec<String> {
+    capabilities
+        .capability_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +256,7 @@ fn handlers_json(handlers: &[AgentWorkerFrameworkHandler]) -> String {
                 "adapter_name": handler.adapter_name,
                 "framework": handler.framework,
                 "version": handler.version,
+                "capabilities": handler.capabilities,
                 "ready": handler.ready,
                 "readiness_reason": handler.readiness_reason,
             })
@@ -271,6 +294,18 @@ mod tests {
             .unwrap();
         assert!(native.ready);
         assert_eq!(native.framework, "native_harness");
+        assert!(native
+            .capabilities
+            .iter()
+            .any(|capability| capability == "tools"));
+        assert!(native
+            .capabilities
+            .iter()
+            .any(|capability| capability == "checkpoint"));
+        assert!(native
+            .capabilities
+            .iter()
+            .any(|capability| capability == "streaming"));
 
         let codex = handlers
             .iter()
@@ -278,13 +313,35 @@ mod tests {
             .unwrap();
         assert!(!codex.ready);
         assert!(codex
+            .capabilities
+            .iter()
+            .any(|capability| capability == "filesystem"));
+        assert!(codex
+            .capabilities
+            .iter()
+            .any(|capability| capability == "shell"));
+        assert!(codex
             .readiness_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("was not configured")));
 
+        let hermes = handlers
+            .iter()
+            .find(|handler| handler.adapter_name == "hermes")
+            .unwrap();
+        assert!(hermes
+            .capabilities
+            .iter()
+            .any(|capability| capability == "memory.read"));
+        assert!(hermes
+            .capabilities
+            .iter()
+            .any(|capability| capability == "subagents"));
+
         let json = handlers_json(&handlers);
         assert!(json.contains(r#""handler_owner":"agent-worker""#));
         assert!(json.contains(r#""gateway_handler_probe":false"#));
+        assert!(json.contains(r#""capabilities":["#));
     }
 
     #[test]

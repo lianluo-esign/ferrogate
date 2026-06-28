@@ -71,6 +71,73 @@ pub struct FrameworkAdapterCapabilities {
 }
 
 impl FrameworkAdapterCapabilities {
+    pub fn capability_names(&self) -> Vec<&'static str> {
+        let mut capabilities = Vec::new();
+        if self.tools {
+            capabilities.push("tools");
+        }
+        if self.mcp {
+            capabilities.push("mcp");
+        }
+        if self.memory_read {
+            capabilities.push("memory.read");
+        }
+        if self.memory_write {
+            capabilities.push("memory.write");
+        }
+        if self.checkpoint {
+            capabilities.push("checkpoint");
+        }
+        if self.artifacts {
+            capabilities.push("artifacts");
+        }
+        if self.subagents {
+            capabilities.push("subagents");
+        }
+        if self.filesystem {
+            capabilities.push("filesystem");
+        }
+        if self.shell {
+            capabilities.push("shell");
+        }
+        if self.browser {
+            capabilities.push("browser");
+        }
+        if self.rest_egress {
+            capabilities.push("rest.egress");
+        }
+        if self.secrets_read {
+            capabilities.push("secrets.read");
+        }
+        if self.streaming {
+            capabilities.push("streaming");
+        }
+        capabilities
+    }
+
+    pub fn from_capability_names<'a>(capabilities: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut normalized = Self::default();
+        for capability in capabilities {
+            match capability {
+                "tools" => normalized.tools = true,
+                "mcp" => normalized.mcp = true,
+                "memory.read" => normalized.memory_read = true,
+                "memory.write" => normalized.memory_write = true,
+                "checkpoint" => normalized.checkpoint = true,
+                "artifacts" => normalized.artifacts = true,
+                "subagents" => normalized.subagents = true,
+                "filesystem" => normalized.filesystem = true,
+                "shell" => normalized.shell = true,
+                "browser" => normalized.browser = true,
+                "rest.egress" => normalized.rest_egress = true,
+                "secrets.read" => normalized.secrets_read = true,
+                "streaming" => normalized.streaming = true,
+                _ => {}
+            }
+        }
+        normalized
+    }
+
     pub fn supports(&self, required: &Self) -> bool {
         (!required.tools || self.tools)
             && (!required.mcp || self.mcp)
