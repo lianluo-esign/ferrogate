@@ -25,14 +25,13 @@ use std::{
 use anyhow::Result;
 use ferrogate_runtime::{
     authorize_managed_external_action, CapabilityAction, CapabilityAuthorizationDecision,
-    CapabilityAuthorizer, CapabilityPolicy, FrameworkAdapterError, FrameworkAdapterEventKind,
-    FrameworkAdapterMode, FrameworkAdapterSession, ManagedBrowserAction, ManagedBrowserOperation,
-    ManagedCliAction, ManagedExternalAction, ManagedExternalActionRequest, ManagedFilesystemAccess,
-    ManagedFilesystemAction, ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction,
-    ManagedNetworkEgressAction, ManagedRestAction, ManagedSecretAction, ManagedSkillAction,
-    ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
+    CapabilityAuthorizer, CapabilityPolicy, ExternalActionAuthorizationRequest,
+    ExternalActionAuthorizationResponse, FrameworkAdapterError, FrameworkAdapterMode,
+    FrameworkAdapterSession, GatewayExternalActionTransportRequest,
+    GatewayExternalActionTransportResponse, ManagedExternalAction, ManagedExternalActionDecision,
+    ManagedExternalActionRequest, ManagedToolAction, NormalizedFrameworkEvent,
+    SimpleCapabilityAuthorizer, SupportedFramework,
 };
-use serde::{Deserialize, Serialize};
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -47,167 +46,6 @@ pub(crate) struct ExternalActionGateRequest {
 pub(crate) struct ExternalActionGateDecision {
     pub(crate) decision: CapabilityAuthorizationDecision,
     pub(crate) event: NormalizedFrameworkEvent,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExternalActionAuthorizationRequest {
-    pub(crate) session: ExternalActionSession,
-    pub(crate) action: ExternalActionSpec,
-    #[serde(default)]
-    pub(crate) high_risk: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExternalActionSession {
-    pub(crate) session_id: String,
-    pub(crate) run_id: String,
-    pub(crate) tenant_id: String,
-    pub(crate) workspace_id: String,
-    pub(crate) worker_id: String,
-    pub(crate) isolation_backend: String,
-    pub(crate) adapter_name: String,
-    pub(crate) adapter_version: String,
-    pub(crate) framework: ExternalActionFramework,
-    #[serde(default = "default_external_action_mode")]
-    pub(crate) mode: ExternalActionMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalActionFramework {
-    ClaudeCode,
-    Codex,
-    Hermes,
-    NativeHarness,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalActionMode {
-    Managed,
-    SelfHosted,
-}
-
-fn default_external_action_mode() -> ExternalActionMode {
-    ExternalActionMode::Managed
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum ExternalActionSpec {
-    Tool {
-        tool_name: String,
-        arguments_policy: String,
-    },
-    McpTool {
-        server_name: String,
-        tool_name: String,
-        arguments_policy: String,
-    },
-    Cli {
-        command: String,
-        args: Vec<String>,
-        working_dir: String,
-        env_policy: String,
-        timeout_millis: u64,
-        stdout_limit_bytes: u64,
-        stderr_limit_bytes: u64,
-        artifact_capture: bool,
-    },
-    Skill {
-        skill_id: String,
-        declared_capabilities: Vec<String>,
-    },
-    Filesystem {
-        path: String,
-        access: ExternalActionFilesystemAccess,
-        workspace_relative: bool,
-    },
-    Browser {
-        operation: ExternalActionBrowserOperation,
-        url: String,
-        timeout_millis: u64,
-    },
-    Rest {
-        method: String,
-        url: String,
-        headers_policy: String,
-        body_policy: String,
-        timeout_millis: u64,
-        retry_limit: u32,
-    },
-    Secret {
-        secret_id: String,
-        purpose: String,
-    },
-    Memory {
-        access: ExternalActionMemoryAccess,
-        namespace: String,
-        key: String,
-    },
-    NetworkEgress {
-        host: String,
-        port: u16,
-        protocol: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalActionFilesystemAccess {
-    Read,
-    Write,
-    Delete,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalActionBrowserOperation {
-    Navigate,
-    Screenshot,
-    Click,
-    Script,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalActionMemoryAccess {
-    Read,
-    Write,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExternalActionAuthorizationResponse {
-    pub(crate) accepted: bool,
-    pub(crate) decision: Option<ExternalActionDecision>,
-    pub(crate) event: Option<serde_json::Value>,
-    pub(crate) error: Option<ExternalActionAuthorizationError>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct GatewayExternalActionTransportRequest {
-    pub(crate) request_id: String,
-    pub(crate) authorization: ExternalActionAuthorizationRequest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct GatewayExternalActionTransportResponse {
-    pub(crate) request_id: String,
-    pub(crate) response: ExternalActionAuthorizationResponse,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalActionDecision {
-    Allowed,
-    Denied,
-    ApprovalRequired,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExternalActionAuthorizationError {
-    pub(crate) code: String,
-    pub(crate) message: String,
 }
 
 impl ExternalActionGateDecision {
@@ -428,7 +266,7 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
     ) -> Result<ExternalActionGateDecision, FrameworkAdapterError> {
         let authorization = ExternalActionAuthorizationRequest::from_managed_request(request);
         let transport_request = GatewayExternalActionTransportRequest {
-            request_id: gateway_authorization_request_id(&authorization),
+            request_id: authorization.stable_request_id(),
             authorization,
         };
         let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
@@ -476,7 +314,13 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
                 "gateway external action authorization response request_id mismatch".to_string(),
             ));
         }
-        response.response.into_gate_decision()
+        response
+            .response
+            .into_decision()
+            .map(|decision| ExternalActionGateDecision {
+                decision: decision.decision,
+                event: decision.event,
+            })
     }
 }
 
@@ -514,12 +358,24 @@ fn accept_external_action_authorization<A>(
 where
     A: GatewayExternalActionAuthorizer,
 {
-    let gate_request = match request.try_into_gate_request() {
+    let managed_request = match request.into_managed_request() {
         Ok(request) => request,
         Err(error) => return ExternalActionAuthorizationResponse::rejected(error),
     };
-    match authorize_handler_external_action(Some(authorizer), gate_request) {
-        Ok(decision) => ExternalActionAuthorizationResponse::from_decision(decision),
+    match authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: managed_request.session,
+            action: managed_request.action,
+            high_risk: managed_request.high_risk,
+        },
+    ) {
+        Ok(decision) => {
+            ExternalActionAuthorizationResponse::from_decision(ManagedExternalActionDecision {
+                decision: decision.decision,
+                event: decision.event,
+            })
+        }
         Err(error) => ExternalActionAuthorizationResponse::rejected(error),
     }
 }
@@ -569,498 +425,6 @@ fn read_external_action_stream<R: Read>(reader: &mut R, output: &mut String) -> 
     Ok(())
 }
 
-impl ExternalActionAuthorizationRequest {
-    fn from_managed_request(request: ManagedExternalActionRequest) -> Self {
-        Self {
-            session: ExternalActionSession::from_framework_session(request.session),
-            action: ExternalActionSpec::from_managed_action(request.action),
-            high_risk: request.high_risk,
-        }
-    }
-
-    fn try_into_gate_request(self) -> Result<ExternalActionGateRequest, FrameworkAdapterError> {
-        Ok(ExternalActionGateRequest {
-            session: self.session.try_into_framework_session()?,
-            action: self.action.into_managed_action(),
-            high_risk: self.high_risk,
-        })
-    }
-}
-
-impl ExternalActionSession {
-    fn from_framework_session(session: FrameworkAdapterSession) -> Self {
-        Self {
-            session_id: session.session_id,
-            run_id: session.run_id,
-            tenant_id: session.tenant_id,
-            workspace_id: session.workspace_id,
-            worker_id: session.worker_id,
-            isolation_backend: session.isolation_backend,
-            adapter_name: session.adapter_name,
-            adapter_version: session.adapter_version,
-            framework: ExternalActionFramework::from_supported_framework(session.framework),
-            mode: ExternalActionMode::from_framework_mode(session.mode),
-        }
-    }
-
-    fn try_into_framework_session(self) -> Result<FrameworkAdapterSession, FrameworkAdapterError> {
-        Ok(FrameworkAdapterSession {
-            session_id: self.session_id,
-            run_id: self.run_id,
-            tenant_id: self.tenant_id,
-            workspace_id: self.workspace_id,
-            worker_id: self.worker_id,
-            isolation_backend: self.isolation_backend,
-            adapter_name: self.adapter_name,
-            adapter_version: self.adapter_version,
-            framework: self.framework.into_supported_framework(),
-            mode: self.mode.into_framework_mode(),
-        })
-    }
-}
-
-impl ExternalActionFramework {
-    fn from_supported_framework(framework: SupportedFramework) -> Self {
-        match framework {
-            SupportedFramework::ClaudeCode => Self::ClaudeCode,
-            SupportedFramework::Codex => Self::Codex,
-            SupportedFramework::Hermes => Self::Hermes,
-            SupportedFramework::NativeHarness => Self::NativeHarness,
-        }
-    }
-
-    fn into_supported_framework(self) -> SupportedFramework {
-        match self {
-            Self::ClaudeCode => SupportedFramework::ClaudeCode,
-            Self::Codex => SupportedFramework::Codex,
-            Self::Hermes => SupportedFramework::Hermes,
-            Self::NativeHarness => SupportedFramework::NativeHarness,
-        }
-    }
-}
-
-impl ExternalActionMode {
-    fn from_framework_mode(mode: FrameworkAdapterMode) -> Self {
-        match mode {
-            FrameworkAdapterMode::Managed => Self::Managed,
-            FrameworkAdapterMode::SelfHosted => Self::SelfHosted,
-        }
-    }
-
-    fn into_framework_mode(self) -> FrameworkAdapterMode {
-        match self {
-            Self::Managed => FrameworkAdapterMode::Managed,
-            Self::SelfHosted => FrameworkAdapterMode::SelfHosted,
-        }
-    }
-}
-
-impl ExternalActionSpec {
-    fn kind_label(&self) -> &'static str {
-        match self {
-            Self::Tool { .. } => "tool",
-            Self::McpTool { .. } => "mcp_tool",
-            Self::Cli { .. } => "cli",
-            Self::Skill { .. } => "skill",
-            Self::Filesystem { .. } => "filesystem",
-            Self::Browser { .. } => "browser",
-            Self::Rest { .. } => "rest",
-            Self::Secret { .. } => "secret",
-            Self::Memory { .. } => "memory",
-            Self::NetworkEgress { .. } => "network_egress",
-        }
-    }
-
-    fn from_managed_action(action: ManagedExternalAction) -> Self {
-        match action {
-            ManagedExternalAction::Tool(action) => Self::Tool {
-                tool_name: action.tool_name,
-                arguments_policy: action.arguments_policy,
-            },
-            ManagedExternalAction::McpTool(action) => Self::McpTool {
-                server_name: action.server_name,
-                tool_name: action.tool_name,
-                arguments_policy: action.arguments_policy,
-            },
-            ManagedExternalAction::Cli(action) => Self::Cli {
-                command: action.command,
-                args: action.args,
-                working_dir: action.working_dir,
-                env_policy: action.env_policy,
-                timeout_millis: action.timeout_millis,
-                stdout_limit_bytes: action.stdout_limit_bytes,
-                stderr_limit_bytes: action.stderr_limit_bytes,
-                artifact_capture: action.artifact_capture,
-            },
-            ManagedExternalAction::Skill(action) => Self::Skill {
-                skill_id: action.skill_id,
-                declared_capabilities: action.declared_capabilities,
-            },
-            ManagedExternalAction::Filesystem(action) => Self::Filesystem {
-                path: action.path,
-                access: ExternalActionFilesystemAccess::from_managed_access(action.access),
-                workspace_relative: action.workspace_relative,
-            },
-            ManagedExternalAction::Browser(action) => Self::Browser {
-                operation: ExternalActionBrowserOperation::from_managed_operation(action.operation),
-                url: action.url,
-                timeout_millis: action.timeout_millis,
-            },
-            ManagedExternalAction::Rest(action) => Self::Rest {
-                method: action.method,
-                url: action.url,
-                headers_policy: action.headers_policy,
-                body_policy: action.body_policy,
-                timeout_millis: action.timeout_millis,
-                retry_limit: action.retry_limit,
-            },
-            ManagedExternalAction::Secret(action) => Self::Secret {
-                secret_id: action.secret_id,
-                purpose: action.purpose,
-            },
-            ManagedExternalAction::Memory(action) => Self::Memory {
-                access: ExternalActionMemoryAccess::from_managed_access(action.access),
-                namespace: action.namespace,
-                key: action.key,
-            },
-            ManagedExternalAction::NetworkEgress(action) => Self::NetworkEgress {
-                host: action.host,
-                port: action.port,
-                protocol: action.protocol,
-            },
-        }
-    }
-
-    fn into_managed_action(self) -> ManagedExternalAction {
-        match self {
-            Self::Tool {
-                tool_name,
-                arguments_policy,
-            } => ManagedExternalAction::Tool(ManagedToolAction {
-                tool_name,
-                arguments_policy,
-            }),
-            Self::McpTool {
-                server_name,
-                tool_name,
-                arguments_policy,
-            } => ManagedExternalAction::McpTool(ManagedMcpToolAction {
-                server_name,
-                tool_name,
-                arguments_policy,
-            }),
-            Self::Cli {
-                command,
-                args,
-                working_dir,
-                env_policy,
-                timeout_millis,
-                stdout_limit_bytes,
-                stderr_limit_bytes,
-                artifact_capture,
-            } => ManagedExternalAction::Cli(ManagedCliAction {
-                command,
-                args,
-                working_dir,
-                env_policy,
-                timeout_millis,
-                stdout_limit_bytes,
-                stderr_limit_bytes,
-                artifact_capture,
-            }),
-            Self::Skill {
-                skill_id,
-                declared_capabilities,
-            } => ManagedExternalAction::Skill(ManagedSkillAction {
-                skill_id,
-                declared_capabilities,
-            }),
-            Self::Filesystem {
-                path,
-                access,
-                workspace_relative,
-            } => ManagedExternalAction::Filesystem(ManagedFilesystemAction {
-                path,
-                access: access.into_managed_access(),
-                workspace_relative,
-            }),
-            Self::Browser {
-                operation,
-                url,
-                timeout_millis,
-            } => ManagedExternalAction::Browser(ManagedBrowserAction {
-                operation: operation.into_managed_operation(),
-                url,
-                timeout_millis,
-            }),
-            Self::Rest {
-                method,
-                url,
-                headers_policy,
-                body_policy,
-                timeout_millis,
-                retry_limit,
-            } => ManagedExternalAction::Rest(ManagedRestAction {
-                method,
-                url,
-                headers_policy,
-                body_policy,
-                timeout_millis,
-                retry_limit,
-            }),
-            Self::Secret { secret_id, purpose } => {
-                ManagedExternalAction::Secret(ManagedSecretAction { secret_id, purpose })
-            }
-            Self::Memory {
-                access,
-                namespace,
-                key,
-            } => ManagedExternalAction::Memory(ManagedMemoryAction {
-                access: access.into_managed_access(),
-                namespace,
-                key,
-            }),
-            Self::NetworkEgress {
-                host,
-                port,
-                protocol,
-            } => ManagedExternalAction::NetworkEgress(ManagedNetworkEgressAction {
-                host,
-                port,
-                protocol,
-            }),
-        }
-    }
-}
-
-impl ExternalActionFilesystemAccess {
-    fn from_managed_access(access: ManagedFilesystemAccess) -> Self {
-        match access {
-            ManagedFilesystemAccess::Read => Self::Read,
-            ManagedFilesystemAccess::Write => Self::Write,
-            ManagedFilesystemAccess::Delete => Self::Delete,
-        }
-    }
-
-    fn into_managed_access(self) -> ManagedFilesystemAccess {
-        match self {
-            Self::Read => ManagedFilesystemAccess::Read,
-            Self::Write => ManagedFilesystemAccess::Write,
-            Self::Delete => ManagedFilesystemAccess::Delete,
-        }
-    }
-}
-
-impl ExternalActionBrowserOperation {
-    fn from_managed_operation(operation: ManagedBrowserOperation) -> Self {
-        match operation {
-            ManagedBrowserOperation::Navigate => Self::Navigate,
-            ManagedBrowserOperation::Screenshot => Self::Screenshot,
-            ManagedBrowserOperation::Click => Self::Click,
-            ManagedBrowserOperation::Script => Self::Script,
-        }
-    }
-
-    fn into_managed_operation(self) -> ManagedBrowserOperation {
-        match self {
-            Self::Navigate => ManagedBrowserOperation::Navigate,
-            Self::Screenshot => ManagedBrowserOperation::Screenshot,
-            Self::Click => ManagedBrowserOperation::Click,
-            Self::Script => ManagedBrowserOperation::Script,
-        }
-    }
-}
-
-impl ExternalActionMemoryAccess {
-    fn from_managed_access(access: ManagedMemoryAccess) -> Self {
-        match access {
-            ManagedMemoryAccess::Read => Self::Read,
-            ManagedMemoryAccess::Write => Self::Write,
-        }
-    }
-
-    fn into_managed_access(self) -> ManagedMemoryAccess {
-        match self {
-            Self::Read => ManagedMemoryAccess::Read,
-            Self::Write => ManagedMemoryAccess::Write,
-        }
-    }
-}
-
-impl ExternalActionAuthorizationResponse {
-    fn from_decision(decision: ExternalActionGateDecision) -> Self {
-        let decision_label = match decision.decision {
-            CapabilityAuthorizationDecision::Allowed => ExternalActionDecision::Allowed,
-            CapabilityAuthorizationDecision::Denied => ExternalActionDecision::Denied,
-            CapabilityAuthorizationDecision::ApprovalRequired => {
-                ExternalActionDecision::ApprovalRequired
-            }
-        };
-        Self {
-            accepted: decision.allowed(),
-            decision: Some(decision_label),
-            event: Some(decision.event.canonical_json()),
-            error: None,
-        }
-    }
-
-    fn rejected(error: FrameworkAdapterError) -> Self {
-        Self {
-            accepted: false,
-            decision: None,
-            event: None,
-            error: Some(ExternalActionAuthorizationError {
-                code: external_action_error_code(&error).to_string(),
-                message: error.to_string(),
-            }),
-        }
-    }
-
-    fn into_gate_decision(self) -> Result<ExternalActionGateDecision, FrameworkAdapterError> {
-        if !self.accepted {
-            let message = self
-                .error
-                .map(|error| error.message)
-                .unwrap_or_else(|| "gateway external action authorization rejected".to_string());
-            return Err(FrameworkAdapterError::CapabilityDenied(message));
-        }
-        let Some(event_json) = self.event else {
-            return Err(FrameworkAdapterError::InvalidRequest(
-                "gateway external action authorization accepted without event".to_string(),
-            ));
-        };
-        let event = normalized_event_from_canonical_json(event_json)?;
-        let decision = match self.decision {
-            Some(ExternalActionDecision::Allowed) => CapabilityAuthorizationDecision::Allowed,
-            Some(ExternalActionDecision::Denied) => CapabilityAuthorizationDecision::Denied,
-            Some(ExternalActionDecision::ApprovalRequired) => {
-                CapabilityAuthorizationDecision::ApprovalRequired
-            }
-            None => {
-                return Err(FrameworkAdapterError::InvalidRequest(
-                    "gateway external action authorization accepted without decision".to_string(),
-                ));
-            }
-        };
-        Ok(ExternalActionGateDecision { decision, event })
-    }
-}
-
-fn external_action_error_code(error: &FrameworkAdapterError) -> &'static str {
-    match error {
-        FrameworkAdapterError::InvalidDescriptor(_) => "invalid_descriptor",
-        FrameworkAdapterError::InvalidRequest(_) => "invalid_request",
-        FrameworkAdapterError::CapabilityDenied(_) => "capability_denied",
-    }
-}
-
-fn normalized_event_from_canonical_json(
-    value: serde_json::Value,
-) -> Result<NormalizedFrameworkEvent, FrameworkAdapterError> {
-    let metadata = value
-        .get("metadata")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| {
-            FrameworkAdapterError::InvalidRequest(
-                "gateway external action event missing metadata".to_string(),
-            )
-        })?
-        .iter()
-        .map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
-        .collect::<Option<std::collections::BTreeMap<_, _>>>()
-        .ok_or_else(|| {
-            FrameworkAdapterError::InvalidRequest(
-                "gateway external action event metadata values must be strings".to_string(),
-            )
-        })?;
-    Ok(NormalizedFrameworkEvent {
-        session_id: json_string_field(&value, "session_id")?,
-        run_id: json_string_field(&value, "run_id")?,
-        adapter_name: json_string_field(&value, "adapter_name")?,
-        adapter_version: json_string_field(&value, "adapter_version")?,
-        framework: parse_supported_framework(&json_string_field(&value, "framework")?)?,
-        mode: parse_framework_mode(&json_string_field(&value, "mode")?)?,
-        kind: parse_capability_event_kind(&json_string_field(&value, "kind")?)?,
-        message: value
-            .get("message")
-            .and_then(|message| {
-                if message.is_null() {
-                    Some(None)
-                } else {
-                    message.as_str().map(|message| Some(message.to_string()))
-                }
-            })
-            .ok_or_else(|| {
-                FrameworkAdapterError::InvalidRequest(
-                    "gateway external action event message must be string or null".to_string(),
-                )
-            })?,
-        metadata,
-    })
-}
-
-fn json_string_field(
-    value: &serde_json::Value,
-    field: &str,
-) -> Result<String, FrameworkAdapterError> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            FrameworkAdapterError::InvalidRequest(format!(
-                "gateway external action event {field} must be a non-empty string"
-            ))
-        })
-}
-
-fn parse_supported_framework(value: &str) -> Result<SupportedFramework, FrameworkAdapterError> {
-    match value {
-        "claude_code" => Ok(SupportedFramework::ClaudeCode),
-        "codex" => Ok(SupportedFramework::Codex),
-        "hermes" => Ok(SupportedFramework::Hermes),
-        "native_harness" => Ok(SupportedFramework::NativeHarness),
-        _ => Err(FrameworkAdapterError::InvalidRequest(format!(
-            "unsupported gateway external action framework {value}"
-        ))),
-    }
-}
-
-fn parse_framework_mode(value: &str) -> Result<FrameworkAdapterMode, FrameworkAdapterError> {
-    match value {
-        "managed" => Ok(FrameworkAdapterMode::Managed),
-        "self_hosted" => Ok(FrameworkAdapterMode::SelfHosted),
-        _ => Err(FrameworkAdapterError::InvalidRequest(format!(
-            "unsupported gateway external action mode {value}"
-        ))),
-    }
-}
-
-fn parse_capability_event_kind(
-    value: &str,
-) -> Result<FrameworkAdapterEventKind, FrameworkAdapterError> {
-    match value {
-        "capability.allowed" => Ok(FrameworkAdapterEventKind::CapabilityAllowed),
-        "capability.denied" => Ok(FrameworkAdapterEventKind::CapabilityDenied),
-        "capability.requested" => Ok(FrameworkAdapterEventKind::CapabilityRequested),
-        _ => Err(FrameworkAdapterError::InvalidRequest(format!(
-            "unsupported gateway external action event kind {value}"
-        ))),
-    }
-}
-
-fn gateway_authorization_request_id(authorization: &ExternalActionAuthorizationRequest) -> String {
-    format!(
-        "{}:{}:{}:{}:{}",
-        authorization.session.run_id,
-        authorization.session.session_id,
-        authorization.session.worker_id,
-        authorization.session.adapter_name,
-        authorization.action.kind_label()
-    )
-}
-
 fn validate_managed_worker_session(
     session: &FrameworkAdapterSession,
 ) -> Result<(), FrameworkAdapterError> {
@@ -1091,7 +455,12 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), FrameworkAdapterErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrogate_runtime::{ManagedCliAction, ManagedMcpToolAction, ManagedRestAction};
+    use ferrogate_runtime::{
+        ExternalActionBrowserOperation, ExternalActionDecision, ExternalActionFilesystemAccess,
+        ExternalActionFramework, ExternalActionMemoryAccess, ExternalActionMode,
+        ExternalActionSession, ExternalActionSpec, ManagedCliAction, ManagedMcpToolAction,
+        ManagedRestAction,
+    };
 
     #[test]
     fn managed_tool_action_must_pass_gateway_authorization_before_execution() {

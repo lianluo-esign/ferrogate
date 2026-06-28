@@ -47,11 +47,17 @@ pub use isolation::{
     IsolationStarted, IsolationStopOutcome,
 };
 pub use managed_external_action::{
-    authorize_managed_external_action, self_hosted_external_action_report, ManagedBrowserAction,
-    ManagedBrowserOperation, ManagedCliAction, ManagedExternalAction, ManagedExternalActionRequest,
-    ManagedFilesystemAccess, ManagedFilesystemAction, ManagedMcpToolAction, ManagedMemoryAccess,
-    ManagedMemoryAction, ManagedNetworkEgressAction, ManagedRestAction, ManagedSecretAction,
-    ManagedSkillAction, ManagedToolAction,
+    authorize_managed_external_action, normalized_event_from_canonical_json,
+    self_hosted_external_action_report, ExternalActionAuthorizationError,
+    ExternalActionAuthorizationRequest, ExternalActionAuthorizationResponse,
+    ExternalActionBrowserOperation, ExternalActionDecision, ExternalActionFilesystemAccess,
+    ExternalActionFramework, ExternalActionMemoryAccess, ExternalActionMode, ExternalActionSession,
+    ExternalActionSpec, GatewayExternalActionTransportRequest,
+    GatewayExternalActionTransportResponse, ManagedBrowserAction, ManagedBrowserOperation,
+    ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
+    ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
+    ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedNetworkEgressAction,
+    ManagedRestAction, ManagedSecretAction, ManagedSkillAction, ManagedToolAction,
 };
 #[cfg(unix)]
 pub use managed_worker::AgentWorkerUnixManagementClient;
