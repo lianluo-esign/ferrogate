@@ -44,6 +44,7 @@ use crate::{
 pub struct WorkerTemplate {
     pub id: String,
     pub framework_adapter: String,
+    pub expected_handler_version: Option<String>,
     pub isolation_policy: IsolationPolicy,
     pub enabled: bool,
 }
@@ -1705,6 +1706,14 @@ impl ManagedWorkerScheduler {
                     .unwrap_or("readiness reason was not reported")
             )));
         }
+        if let Some(expected_version) = template.expected_handler_version.as_deref() {
+            if handler.version != expected_version {
+                return Err(ManagedWorkerError::NoCompatibleTemplate(format!(
+                    "agent-worker handler {} version {} does not match pinned version {}",
+                    handler.adapter_name, handler.version, expected_version
+                )));
+            }
+        }
         let reported_capabilities = FrameworkAdapterCapabilities::from_capability_names(
             handler.capabilities.iter().map(String::as_str),
         );
@@ -2152,6 +2161,30 @@ mod tests {
         assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
         assert_eq!(agent_worker.calls, vec!["framework_handlers"]);
         assert!(error.to_string().contains("required capabilities"));
+    }
+
+    #[test]
+    fn rejects_session_when_agent_worker_handler_version_does_not_match_pin() {
+        let scheduler = ManagedWorkerScheduler::new(
+            ManagedWorkerSchedulerConfig::default(),
+            vec![WorkerTemplate {
+                expected_handler_version: Some("codex-2026.06".to_string()),
+                ..template()
+            }],
+        )
+        .unwrap();
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+
+        let error = scheduler
+            .start_session(session_request(), &mut agent_worker)
+            .unwrap_err();
+
+        assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
+        assert_eq!(agent_worker.calls, vec!["framework_handlers"]);
+        assert!(error.to_string().contains("pinned version codex-2026.06"));
     }
 
     #[test]
@@ -3060,6 +3093,7 @@ mod tests {
         WorkerTemplate {
             id: "template-codex".to_string(),
             framework_adapter: "codex".to_string(),
+            expected_handler_version: None,
             isolation_policy: IsolationPolicy {
                 allowed_kinds: vec![IsolationBackendKind::FirecrackerMicroVm],
                 ..IsolationPolicy::default()
