@@ -35,7 +35,8 @@ pub use framework_adapter::{
     FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterResumeRequest,
     FrameworkAdapterRunRequest, FrameworkAdapterSession, FrameworkAdapterSessionRequest,
     FrameworkAdapterStreamRequest, FrameworkCapabilityRequest, FrameworkEventTimelineRecord,
-    NativeHarnessAdapter, NormalizedFrameworkEvent, SupportedFramework,
+    NativeHarnessAdapter, NormalizedFrameworkEvent, ProcessFrameworkAdapter,
+    ProcessFrameworkLaunch, SupportedFramework,
 };
 pub use isolation::{
     select_isolation_backend, CollectedIsolationArtifacts, CollectedIsolationLogs,

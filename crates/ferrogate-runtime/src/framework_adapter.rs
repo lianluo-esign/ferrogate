@@ -97,6 +97,33 @@ impl FrameworkAdapterCapabilities {
             ..Self::default()
         }
     }
+
+    pub fn code_process_shim() -> Self {
+        Self {
+            tools: true,
+            mcp: true,
+            checkpoint: true,
+            artifacts: true,
+            filesystem: true,
+            shell: true,
+            streaming: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn hermes_process_shim() -> Self {
+        Self {
+            tools: true,
+            mcp: true,
+            memory_read: true,
+            memory_write: true,
+            checkpoint: true,
+            artifacts: true,
+            subagents: true,
+            streaming: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,6 +420,300 @@ pub trait FrameworkAdapter {
         &mut self,
         session: &FrameworkAdapterSession,
     ) -> Result<NormalizedFrameworkEvent, FrameworkAdapterError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessFrameworkLaunch {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub working_dir: Option<String>,
+}
+
+impl ProcessFrameworkLaunch {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            working_dir: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessFrameworkAdapter {
+    descriptor: FrameworkAdapterDescriptor,
+    launch: ProcessFrameworkLaunch,
+}
+
+impl ProcessFrameworkAdapter {
+    pub fn claude_code() -> Self {
+        Self::new(
+            FrameworkAdapterDescriptor {
+                name: "claude-code".to_string(),
+                version: "1".to_string(),
+                framework: SupportedFramework::ClaudeCode,
+                capabilities: FrameworkAdapterCapabilities::code_process_shim(),
+                enabled: true,
+            },
+            ProcessFrameworkLaunch::new("claude"),
+        )
+    }
+
+    pub fn codex() -> Self {
+        Self::new(
+            FrameworkAdapterDescriptor {
+                name: "codex".to_string(),
+                version: "1".to_string(),
+                framework: SupportedFramework::Codex,
+                capabilities: FrameworkAdapterCapabilities::code_process_shim(),
+                enabled: true,
+            },
+            ProcessFrameworkLaunch::new("codex"),
+        )
+    }
+
+    pub fn hermes() -> Self {
+        Self::new(
+            FrameworkAdapterDescriptor {
+                name: "hermes".to_string(),
+                version: "1".to_string(),
+                framework: SupportedFramework::Hermes,
+                capabilities: FrameworkAdapterCapabilities::hermes_process_shim(),
+                enabled: true,
+            },
+            ProcessFrameworkLaunch::new("hermes"),
+        )
+    }
+
+    pub fn new(descriptor: FrameworkAdapterDescriptor, launch: ProcessFrameworkLaunch) -> Self {
+        Self { descriptor, launch }
+    }
+
+    pub fn launch(&self) -> &ProcessFrameworkLaunch {
+        &self.launch
+    }
+}
+
+impl FrameworkAdapter for ProcessFrameworkAdapter {
+    fn descriptor(&self) -> &FrameworkAdapterDescriptor {
+        &self.descriptor
+    }
+
+    fn start_session(
+        &mut self,
+        request: FrameworkAdapterSessionRequest,
+    ) -> Result<(FrameworkAdapterSession, NormalizedFrameworkEvent), FrameworkAdapterError> {
+        validate_session_request(&request)?;
+        validate_descriptor(&self.descriptor)?;
+        validate_process_launch(&self.launch)?;
+        if !self
+            .descriptor
+            .capabilities
+            .supports(&request.required_capabilities)
+        {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "adapter does not satisfy required capabilities".to_string(),
+            ));
+        }
+        let session = FrameworkAdapterSession {
+            session_id: request.session_id,
+            run_id: request.run_id,
+            tenant_id: request.tenant_id,
+            workspace_id: request.workspace_id,
+            worker_id: request.worker_id.clone(),
+            isolation_backend: request.isolation_backend,
+            adapter_name: self.descriptor.name.clone(),
+            adapter_version: self.descriptor.version.clone(),
+            framework: self.descriptor.framework,
+            mode: request.mode,
+        };
+        let event = normalized_event_owned(
+            &session,
+            FrameworkAdapterEventKind::SessionStarted,
+            Some(format!(
+                "{} process shim session prepared",
+                self.descriptor.name
+            )),
+            self.process_metadata([
+                ("worker_id".to_string(), request.worker_id),
+                (
+                    "handshake".to_string(),
+                    "process_launch_prepared".to_string(),
+                ),
+            ]),
+        );
+        Ok((session, event))
+    }
+
+    fn submit_run(
+        &mut self,
+        request: FrameworkAdapterRunRequest,
+    ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError> {
+        require_request_field("input_ref", &request.input_ref)?;
+        validate_process_launch(&self.launch)?;
+        let session = request.session;
+        Ok(vec![
+            normalized_event_owned(
+                &session,
+                FrameworkAdapterEventKind::RunStarted,
+                Some(format!(
+                    "{} process shim run dispatch prepared",
+                    self.descriptor.name
+                )),
+                self.process_metadata([("input_ref".to_string(), request.input_ref)]),
+            ),
+            normalized_event_owned(
+                &session,
+                FrameworkAdapterEventKind::ModelRequested,
+                Some(format!(
+                    "{} process shim model boundary prepared",
+                    self.descriptor.name
+                )),
+                self.process_metadata([(
+                    "target".to_string(),
+                    format!("framework:{}", self.descriptor.framework.as_str()),
+                )]),
+            ),
+        ])
+    }
+
+    fn resume_run(
+        &mut self,
+        request: FrameworkAdapterResumeRequest,
+    ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError> {
+        require_request_field("checkpoint_id", &request.checkpoint_id)?;
+        validate_process_launch(&self.launch)?;
+        let session = request.session;
+        Ok(vec![normalized_event_owned(
+            &session,
+            FrameworkAdapterEventKind::RunStarted,
+            Some(format!(
+                "{} process shim resume prepared",
+                self.descriptor.name
+            )),
+            self.process_metadata([("checkpoint_id".to_string(), request.checkpoint_id)]),
+        )])
+    }
+
+    fn stream_events(
+        &mut self,
+        request: FrameworkAdapterStreamRequest,
+    ) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError> {
+        if request.max_events == 0 {
+            return Err(FrameworkAdapterError::InvalidRequest(
+                "max_events must be greater than zero".to_string(),
+            ));
+        }
+        validate_process_launch(&self.launch)?;
+        let session = request.session;
+        Ok(vec![normalized_event_owned(
+            &session,
+            FrameworkAdapterEventKind::RunStarted,
+            Some(format!(
+                "{} process shim stream replay prepared",
+                self.descriptor.name
+            )),
+            self.process_metadata([
+                (
+                    "after_event_id".to_string(),
+                    request.after_event_id.unwrap_or_default(),
+                ),
+                ("max_events".to_string(), request.max_events.to_string()),
+            ]),
+        )])
+    }
+
+    fn collect_artifacts(
+        &mut self,
+        request: FrameworkAdapterArtifactRequest,
+    ) -> Result<FrameworkAdapterArtifacts, FrameworkAdapterError> {
+        validate_process_launch(&self.launch)?;
+        let artifact_id = request
+            .artifact_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| format!("{}-artifact-manifest", self.descriptor.name));
+        let event = normalized_event_owned(
+            &request.session,
+            FrameworkAdapterEventKind::ArtifactCreated,
+            Some(format!(
+                "{} process shim artifact manifest prepared",
+                self.descriptor.name
+            )),
+            self.process_metadata([("artifact_id".to_string(), artifact_id.clone())]),
+        );
+        Ok(FrameworkAdapterArtifacts {
+            artifacts: vec![FrameworkAdapterArtifact {
+                artifact_id,
+                name: format!("{}-artifact-manifest.json", self.descriptor.name),
+                media_type: "application/json".to_string(),
+                byte_len: 0,
+            }],
+            event,
+        })
+    }
+
+    fn cancel_run(
+        &mut self,
+        session: &FrameworkAdapterSession,
+    ) -> Result<NormalizedFrameworkEvent, FrameworkAdapterError> {
+        validate_process_launch(&self.launch)?;
+        Ok(normalized_event_owned(
+            session,
+            FrameworkAdapterEventKind::RunCancelled,
+            Some(format!(
+                "{} process shim cancel prepared",
+                self.descriptor.name
+            )),
+            self.process_metadata([]),
+        ))
+    }
+
+    fn close_session(
+        &mut self,
+        session: &FrameworkAdapterSession,
+    ) -> Result<NormalizedFrameworkEvent, FrameworkAdapterError> {
+        validate_process_launch(&self.launch)?;
+        Ok(normalized_event_owned(
+            session,
+            FrameworkAdapterEventKind::SessionClosed,
+            Some(format!(
+                "{} process shim session closed",
+                self.descriptor.name
+            )),
+            self.process_metadata([]),
+        ))
+    }
+}
+
+impl ProcessFrameworkAdapter {
+    fn process_metadata(
+        &self,
+        extra: impl IntoIterator<Item = (String, String)>,
+    ) -> BTreeMap<String, String> {
+        let mut metadata = BTreeMap::from([
+            ("process_shim".to_string(), "true".to_string()),
+            ("sdk_bound".to_string(), "false".to_string()),
+            ("launch_command".to_string(), self.launch.command.clone()),
+            ("launch_args".to_string(), self.launch.args.join(" ")),
+            (
+                "launch_env_keys".to_string(),
+                self.launch
+                    .env
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            (
+                "working_dir".to_string(),
+                self.launch.working_dir.clone().unwrap_or_default(),
+            ),
+        ]);
+        metadata.extend(extra);
+        metadata
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -697,6 +1018,25 @@ fn validate_descriptor(
     Ok(())
 }
 
+fn validate_process_launch(launch: &ProcessFrameworkLaunch) -> Result<(), FrameworkAdapterError> {
+    if launch.command.trim().is_empty() {
+        return Err(FrameworkAdapterError::InvalidDescriptor(
+            "process launch command must not be empty".to_string(),
+        ));
+    }
+    if launch.args.iter().any(|arg| arg.trim().is_empty()) {
+        return Err(FrameworkAdapterError::InvalidDescriptor(
+            "process launch args must not contain empty values".to_string(),
+        ));
+    }
+    if launch.env.keys().any(|key| key.trim().is_empty()) {
+        return Err(FrameworkAdapterError::InvalidDescriptor(
+            "process launch env keys must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_session_request(
     request: &FrameworkAdapterSessionRequest,
 ) -> Result<(), FrameworkAdapterError> {
@@ -746,6 +1086,25 @@ fn normalized_event<'a>(
             .into_iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect(),
+    }
+}
+
+fn normalized_event_owned(
+    session: &FrameworkAdapterSession,
+    kind: FrameworkAdapterEventKind,
+    message: Option<String>,
+    metadata: BTreeMap<String, String>,
+) -> NormalizedFrameworkEvent {
+    NormalizedFrameworkEvent {
+        session_id: session.session_id.clone(),
+        run_id: session.run_id.clone(),
+        adapter_name: session.adapter_name.clone(),
+        adapter_version: session.adapter_version.clone(),
+        framework: session.framework,
+        mode: session.mode,
+        kind,
+        message,
+        metadata,
     }
 }
 
@@ -932,6 +1291,85 @@ mod tests {
         .unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn process_framework_adapters_prepare_launch_handshake_events() {
+        let mut adapters = vec![
+            (
+                ProcessFrameworkAdapter::claude_code(),
+                SupportedFramework::ClaudeCode,
+                "claude",
+            ),
+            (
+                ProcessFrameworkAdapter::codex(),
+                SupportedFramework::Codex,
+                "codex",
+            ),
+            (
+                ProcessFrameworkAdapter::hermes(),
+                SupportedFramework::Hermes,
+                "hermes",
+            ),
+        ];
+
+        for (adapter, framework, command) in &mut adapters {
+            assert_eq!(adapter.descriptor().framework, *framework);
+            assert_eq!(adapter.launch().command, *command);
+            let (session, started) = adapter.start_session(session_request()).unwrap();
+            let events = adapter
+                .submit_run(FrameworkAdapterRunRequest {
+                    session,
+                    input_ref: "input://run-1".to_string(),
+                })
+                .unwrap();
+
+            assert_eq!(started.kind, FrameworkAdapterEventKind::SessionStarted);
+            assert_eq!(started.framework, *framework);
+            assert_eq!(
+                started.metadata.get("process_shim").map(String::as_str),
+                Some("true")
+            );
+            assert_eq!(
+                started.metadata.get("sdk_bound").map(String::as_str),
+                Some("false")
+            );
+            assert_eq!(
+                started.metadata.get("launch_command").map(String::as_str),
+                Some(*command)
+            );
+            assert_eq!(
+                started.metadata.get("handshake").map(String::as_str),
+                Some("process_launch_prepared")
+            );
+            assert_eq!(
+                events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+                vec![
+                    FrameworkAdapterEventKind::RunStarted,
+                    FrameworkAdapterEventKind::ModelRequested,
+                ]
+            );
+            assert!(events.iter().all(|event| event.framework == *framework
+                && event.metadata.get("process_shim").map(String::as_str) == Some("true")));
+        }
+    }
+
+    #[test]
+    fn process_framework_adapter_validates_launch_contract() {
+        let mut adapter = ProcessFrameworkAdapter::new(
+            FrameworkAdapterDescriptor {
+                name: "codex".to_string(),
+                version: "1".to_string(),
+                framework: SupportedFramework::Codex,
+                capabilities: FrameworkAdapterCapabilities::code_process_shim(),
+                enabled: true,
+            },
+            ProcessFrameworkLaunch::new(""),
+        );
+
+        let error = adapter.start_session(session_request()).unwrap_err();
+
+        assert!(matches!(error, FrameworkAdapterError::InvalidDescriptor(_)));
     }
 
     #[test]

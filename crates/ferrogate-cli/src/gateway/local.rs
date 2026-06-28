@@ -3849,7 +3849,7 @@ impl FerroGateway {
                         "claude-code",
                         "claude_code",
                         "claude-code",
-                        "shim_pending",
+                        "process_shim_contract_ready",
                         &[
                             "tools",
                             "mcp",
@@ -3864,7 +3864,7 @@ impl FerroGateway {
                         "codex",
                         "codex",
                         "codex",
-                        "shim_pending",
+                        "process_shim_contract_ready",
                         &[
                             "tools",
                             "mcp",
@@ -3879,7 +3879,7 @@ impl FerroGateway {
                         "hermes",
                         "hermes",
                         "hermes",
-                        "shim_pending",
+                        "process_shim_contract_ready",
                         &[
                             "tools",
                             "mcp",

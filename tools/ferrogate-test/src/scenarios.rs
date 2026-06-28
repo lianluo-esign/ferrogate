@@ -162,7 +162,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(native["public_api_exposes_framework_details"], false);
             let codex =
                 admin_list_item(&body, "id", "codex").context("codex adapter should be listed")?;
-            assert_eq!(codex["integration_status"], "shim_pending");
+            assert_eq!(codex["integration_status"], "process_shim_contract_ready");
             assert_eq!(codex["enabled"], false);
             Ok(())
         },

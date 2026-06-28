@@ -9457,6 +9457,7 @@
             "type": "string",
             "enum": [
               "contract_ready",
+              "process_shim_contract_ready",
               "shim_pending"
             ]
           },
