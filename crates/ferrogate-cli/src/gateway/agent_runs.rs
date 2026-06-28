@@ -768,10 +768,11 @@ impl GatewayAgentToolDispatcher {
             ),
             TimelineEventRecord {
                 id: format!(
-                    "agent-capability:{}:{}:{}:{}",
+                    "agent-capability:{}:{}:{}:{}:{}",
                     request.run_id,
                     request.turn,
                     CapabilityAction::Tool.as_str().replace('.', "_"),
+                    outcome,
                     sanitize_timeline_id_part(&request.tool_call.id)
                 ),
                 run_id: request.run_id.to_string(),
@@ -815,6 +816,19 @@ impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
                 .or_else(|| Some(format!("agent_run:{}", request.run_id))),
         };
         let tool_name = tool_request.name.clone();
+        if self
+            .state
+            .tool_by_name(&tool_name)
+            .is_some_and(|tool| tool.approval_policy == ferrogate_core::ApprovalPolicy::Always)
+        {
+            self.record_capability_event(
+                &request,
+                "requested",
+                format!(
+                    "tool capability requires approval before gateway-mediated dispatch: {tool_name}"
+                ),
+            );
+        }
         let response =
             match block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
                 &self.ctx,

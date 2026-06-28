@@ -346,6 +346,80 @@ fn agent_run_endpoint_records_denied_tool_capability_in_timeline() {
 }
 
 #[test]
+fn agent_run_endpoint_records_approval_required_tool_capability_in_timeline() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        external_echo_agent_run_approval_config(&gateway_addr),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let failed = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-agent-run-id: agent-run-approval-required",
+        ],
+        r#"{"input":"attempt an approval-gated tool","max_turns":3,"timeout_millis":3000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"needs approval"},"session_id":"agent-approval-tool-session"}]}"#,
+    ));
+    assert_eq!(failed["object"], "agent_run");
+    assert_eq!(failed["id"], "agent-run-approval-required");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["tool_results"].as_array().unwrap().len(), 0);
+
+    let timeline = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-runs/agent-run-approval-required",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert_eq!(timeline["object"], "agent_run_timeline");
+    assert_eq!(timeline["run"]["id"], "agent-run-approval-required");
+    assert_eq!(timeline["run"]["status"], "failed");
+    let agent_events = timeline["agent_events"].as_array().unwrap();
+    assert!(agent_events.iter().any(|event| {
+        event["kind"] == "capability.requested"
+            && event["run_id"] == "agent-run-approval-required"
+            && event["target"] == "tool.echo"
+            && event["outcome"] == "requested"
+            && event["tool_call_id"] == "mock-tool-call"
+            && event["message"]
+                .as_str()
+                .unwrap()
+                .contains("requires approval before gateway-mediated dispatch")
+    }));
+    assert!(agent_events.iter().any(|event| {
+        event["kind"] == "capability.denied"
+            && event["run_id"] == "agent-run-approval-required"
+            && event["target"] == "tool.echo"
+            && event["outcome"] == "denied"
+            && event["tool_call_id"] == "mock-tool-call"
+            && event["message"].as_str().unwrap().contains("tool_denied")
+    }));
+    assert!(timeline["audit_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event["action"] == "tool.approval_requested"
+                && event["agent_run_id"] == "agent-run-approval-required"
+                && event["outcome"] == "pending"
+        }));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn default_agent_runtime_requires_agent_worker_transport() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
@@ -1337,6 +1411,25 @@ fn external_echo_agent_run_config_without_tool_scope(gateway_addr: &str) -> Stri
     external_echo_agent_run_config(gateway_addr).replace(
         r#"scopes = ["agent.runs.create", "tools.execute"]"#,
         r#"scopes = ["agent.runs.create"]"#,
+    )
+}
+
+fn external_echo_agent_run_approval_config(gateway_addr: &str) -> String {
+    let config = external_echo_agent_run_config(gateway_addr).replace(
+        r#"[agent_runtime.external]"#,
+        r#"[reliability]
+tool_approval_timeout_secs = 1
+
+[agent_runtime.external]"#,
+    );
+    config.replace(
+        r#"order = 10
+
+[extensions.permissions]"#,
+        r#"order = 10
+approval_policy = "always"
+
+[extensions.permissions]"#,
     )
 }
 
