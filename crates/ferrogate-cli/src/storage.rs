@@ -196,4 +196,24 @@ fn print_migration_report(mode: &str, counts: &StorageMigrationCounts) {
         "managed_worker_lifecycle_events={}",
         counts.managed_worker_lifecycle_events
     );
+    println!(
+        "self_hosted_worker_registrations={}",
+        counts.self_hosted_worker_registrations
+    );
+    println!(
+        "self_hosted_worker_heartbeats={}",
+        counts.self_hosted_worker_heartbeats
+    );
+    println!(
+        "self_hosted_worker_telemetry_events={}",
+        counts.self_hosted_worker_telemetry_events
+    );
+    println!(
+        "self_hosted_worker_artifacts={}",
+        counts.self_hosted_worker_artifacts
+    );
+    println!(
+        "self_hosted_worker_checkpoints={}",
+        counts.self_hosted_worker_checkpoints
+    );
 }

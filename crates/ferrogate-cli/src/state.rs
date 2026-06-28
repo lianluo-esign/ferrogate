@@ -2949,7 +2949,11 @@ impl AppState {
             schema.engine == "postgres"
                 && schema.validated
                 && schema.version >= 4
-                && schema.name == "004_supabase_managed_worker_lifecycle"
+                && matches!(
+                    schema.name.as_str(),
+                    "004_supabase_managed_worker_lifecycle"
+                        | "005_supabase_self_hosted_worker_lifecycle"
+                )
         })
     }
 

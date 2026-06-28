@@ -163,6 +163,110 @@ CREATE INDEX IF NOT EXISTS idx_managed_worker_lifecycle_session_time
 CREATE INDEX IF NOT EXISTS idx_managed_worker_lifecycle_tenant_time
     ON managed_worker_lifecycle_events(tenant, occurred_at_unix DESC);
 
+CREATE TABLE IF NOT EXISTS self_hosted_worker_registrations (
+    id TEXT PRIMARY KEY,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    worker_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    identity_fingerprint TEXT NOT NULL,
+    orchestration_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    registered_at_unix BIGINT NOT NULL,
+    last_seen_at_unix BIGINT,
+    trust_level TEXT NOT NULL,
+    capability_envelope_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_tenant_status
+    ON self_hosted_worker_registrations(tenant, status, last_seen_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_workspace_status
+    ON self_hosted_worker_registrations(workspace_id, status, last_seen_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_identity
+    ON self_hosted_worker_registrations(identity_fingerprint);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_heartbeats (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES self_hosted_worker_registrations(id) ON DELETE CASCADE,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reported_at_unix BIGINT NOT NULL,
+    observed_at_unix BIGINT NOT NULL,
+    heartbeat_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_heartbeats_worker_time
+    ON self_hosted_worker_heartbeats(worker_id, reported_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_heartbeats_tenant_time
+    ON self_hosted_worker_heartbeats(tenant, reported_at_unix DESC);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_telemetry_events (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES self_hosted_worker_registrations(id) ON DELETE CASCADE,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT,
+    run_id TEXT,
+    kind TEXT NOT NULL,
+    trust_level TEXT NOT NULL,
+    occurred_at_unix BIGINT NOT NULL,
+    ingested_at_unix BIGINT NOT NULL,
+    event_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_telemetry_worker_time
+    ON self_hosted_worker_telemetry_events(worker_id, occurred_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_telemetry_run_time
+    ON self_hosted_worker_telemetry_events(run_id, occurred_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_telemetry_tenant_kind_time
+    ON self_hosted_worker_telemetry_events(tenant, kind, occurred_at_unix DESC);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_artifacts (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES self_hosted_worker_registrations(id) ON DELETE CASCADE,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    artifact_name TEXT NOT NULL,
+    content_type TEXT,
+    size_bytes BIGINT NOT NULL,
+    trust_level TEXT NOT NULL,
+    created_at_unix BIGINT NOT NULL,
+    artifact_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_artifacts_run
+    ON self_hosted_worker_artifacts(run_id, created_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_artifacts_worker_time
+    ON self_hosted_worker_artifacts(worker_id, created_at_unix DESC);
+
+CREATE TABLE IF NOT EXISTS self_hosted_worker_checkpoints (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL REFERENCES self_hosted_worker_registrations(id) ON DELETE CASCADE,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    checkpoint_name TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    trust_level TEXT NOT NULL,
+    created_at_unix BIGINT NOT NULL,
+    checkpoint_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_checkpoints_run
+    ON self_hosted_worker_checkpoints(run_id, created_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_checkpoints_worker_time
+    ON self_hosted_worker_checkpoints(worker_id, created_at_unix DESC);
+
 CREATE TABLE IF NOT EXISTS request_logs (
     request_id TEXT PRIMARY KEY,
     trace_id TEXT,
@@ -388,5 +492,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (4, '004_supabase_managed_worker_lifecycle')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (5, '005_supabase_self_hosted_worker_lifecycle')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

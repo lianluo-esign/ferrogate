@@ -161,6 +161,11 @@ pub struct StorageMigrationSnapshot {
     pub agent_worker_instances: Vec<StoredAgentWorkerInstance>,
     pub managed_worker_sessions: Vec<StoredManagedWorkerSession>,
     pub managed_worker_lifecycle_events: Vec<StoredManagedWorkerLifecycleEvent>,
+    pub self_hosted_worker_registrations: Vec<StoredSelfHostedWorkerRegistration>,
+    pub self_hosted_worker_heartbeats: Vec<StoredSelfHostedWorkerHeartbeat>,
+    pub self_hosted_worker_telemetry_events: Vec<StoredSelfHostedWorkerTelemetryEvent>,
+    pub self_hosted_worker_artifacts: Vec<StoredSelfHostedWorkerArtifact>,
+    pub self_hosted_worker_checkpoints: Vec<StoredSelfHostedWorkerCheckpoint>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +191,11 @@ pub struct StorageMigrationCounts {
     pub agent_worker_instances: usize,
     pub managed_worker_sessions: usize,
     pub managed_worker_lifecycle_events: usize,
+    pub self_hosted_worker_registrations: usize,
+    pub self_hosted_worker_heartbeats: usize,
+    pub self_hosted_worker_telemetry_events: usize,
+    pub self_hosted_worker_artifacts: usize,
+    pub self_hosted_worker_checkpoints: usize,
 }
 
 impl StorageMigrationSnapshot {
@@ -212,6 +222,11 @@ impl StorageMigrationSnapshot {
             agent_worker_instances: self.agent_worker_instances.len(),
             managed_worker_sessions: self.managed_worker_sessions.len(),
             managed_worker_lifecycle_events: self.managed_worker_lifecycle_events.len(),
+            self_hosted_worker_registrations: self.self_hosted_worker_registrations.len(),
+            self_hosted_worker_heartbeats: self.self_hosted_worker_heartbeats.len(),
+            self_hosted_worker_telemetry_events: self.self_hosted_worker_telemetry_events.len(),
+            self_hosted_worker_artifacts: self.self_hosted_worker_artifacts.len(),
+            self_hosted_worker_checkpoints: self.self_hosted_worker_checkpoints.len(),
         }
     }
 }
@@ -283,8 +298,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 4;
-const POSTGRES_SCHEMA_NAME: &str = "004_supabase_managed_worker_lifecycle";
+const POSTGRES_SCHEMA_VERSION: u64 = 5;
+const POSTGRES_SCHEMA_NAME: &str = "005_supabase_self_hosted_worker_lifecycle";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -422,6 +437,28 @@ pub trait ManagedWorkerLifecycleEventRepository:
 {
 }
 
+pub trait SelfHostedWorkerRegistrationRepository:
+    Repository<StoredSelfHostedWorkerRegistration>
+{
+}
+
+pub trait SelfHostedWorkerHeartbeatRepository:
+    AppendRepository<StoredSelfHostedWorkerHeartbeat>
+{
+}
+
+pub trait SelfHostedWorkerTelemetryEventRepository:
+    AppendRepository<StoredSelfHostedWorkerTelemetryEvent>
+{
+}
+
+pub trait SelfHostedWorkerArtifactRepository: Repository<StoredSelfHostedWorkerArtifact> {}
+
+pub trait SelfHostedWorkerCheckpointRepository:
+    Repository<StoredSelfHostedWorkerCheckpoint>
+{
+}
+
 pub trait AppendRepository<T> {
     fn append(&mut self, record: T);
     fn list(&self) -> Vec<T>;
@@ -535,6 +572,79 @@ pub struct StoredManagedWorkerLifecycleEvent {
     pub outcome: String,
     pub occurred_at_unix: Option<u64>,
     pub evidence_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSelfHostedWorkerRegistration {
+    pub id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub worker_name: String,
+    pub status: String,
+    pub identity_fingerprint: String,
+    pub orchestration_enabled: bool,
+    pub registered_at_unix: Option<u64>,
+    pub last_seen_at_unix: Option<u64>,
+    pub trust_level: String,
+    pub capability_envelope_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSelfHostedWorkerHeartbeat {
+    pub id: String,
+    pub worker_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub status: String,
+    pub reported_at_unix: Option<u64>,
+    pub observed_at_unix: Option<u64>,
+    pub heartbeat_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSelfHostedWorkerTelemetryEvent {
+    pub id: String,
+    pub worker_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub kind: String,
+    pub trust_level: String,
+    pub occurred_at_unix: Option<u64>,
+    pub ingested_at_unix: Option<u64>,
+    pub event_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSelfHostedWorkerArtifact {
+    pub id: String,
+    pub worker_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub artifact_name: String,
+    pub content_type: Option<String>,
+    pub size_bytes: u64,
+    pub trust_level: String,
+    pub created_at_unix: Option<u64>,
+    pub artifact_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSelfHostedWorkerCheckpoint {
+    pub id: String,
+    pub worker_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub checkpoint_name: String,
+    pub size_bytes: u64,
+    pub trust_level: String,
+    pub created_at_unix: Option<u64>,
+    pub checkpoint_json: String,
 }
 
 #[derive(Debug)]
@@ -1442,6 +1552,306 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    fn upsert_self_hosted_worker_registration(
+        &self,
+        registration: &StoredSelfHostedWorkerRegistration,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&registration.tenant);
+        let registered_at_unix = saturating_i64(
+            registration
+                .registered_at_unix
+                .unwrap_or_else(now_unix_seconds),
+        );
+        let last_seen_at_unix = registration.last_seen_at_unix.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO self_hosted_worker_registrations \
+                 (id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
+                  orchestration_enabled, registered_at_unix, last_seen_at_unix, trust_level, \
+                  capability_envelope_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 tenant = EXCLUDED.tenant, \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 worker_name = EXCLUDED.worker_name, \
+                 status = EXCLUDED.status, \
+                 identity_fingerprint = EXCLUDED.identity_fingerprint, \
+                 orchestration_enabled = EXCLUDED.orchestration_enabled, \
+                 last_seen_at_unix = EXCLUDED.last_seen_at_unix, \
+                 trust_level = EXCLUDED.trust_level, \
+                 capability_envelope_json = EXCLUDED.capability_envelope_json",
+                &[
+                    &registration.id,
+                    &tenant_context_id,
+                    &registration.workspace_id,
+                    &registration.worker_name,
+                    &registration.status,
+                    &registration.identity_fingerprint,
+                    &registration.orchestration_enabled,
+                    &registered_at_unix,
+                    &last_seen_at_unix,
+                    &registration.trust_level,
+                    &registration.capability_envelope_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn self_hosted_worker_registrations(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerRegistration>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
+                        orchestration_enabled, registered_at_unix, last_seen_at_unix, trust_level, \
+                        capability_envelope_json::text \
+                     FROM self_hosted_worker_registrations \
+                     ORDER BY registered_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(self_hosted_worker_registration_from_row)
+                .collect())
+        })
+    }
+
+    fn append_self_hosted_worker_heartbeat(
+        &self,
+        heartbeat: &StoredSelfHostedWorkerHeartbeat,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&heartbeat.tenant);
+        let reported_at_unix =
+            saturating_i64(heartbeat.reported_at_unix.unwrap_or_else(now_unix_seconds));
+        let observed_at_unix =
+            saturating_i64(heartbeat.observed_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO self_hosted_worker_heartbeats \
+                 (id, worker_id, tenant, workspace_id, status, reported_at_unix, \
+                  observed_at_unix, heartbeat_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &heartbeat.id,
+                    &heartbeat.worker_id,
+                    &tenant_context_id,
+                    &heartbeat.workspace_id,
+                    &heartbeat.status,
+                    &reported_at_unix,
+                    &observed_at_unix,
+                    &heartbeat.heartbeat_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn self_hosted_worker_heartbeats(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerHeartbeat>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, worker_id, tenant, workspace_id, status, reported_at_unix, \
+                        observed_at_unix, heartbeat_json::text \
+                     FROM self_hosted_worker_heartbeats \
+                     ORDER BY reported_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(self_hosted_worker_heartbeat_from_row)
+                .collect())
+        })
+    }
+
+    fn append_self_hosted_worker_telemetry_event(
+        &self,
+        event: &StoredSelfHostedWorkerTelemetryEvent,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&event.tenant);
+        let occurred_at_unix =
+            saturating_i64(event.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        let ingested_at_unix =
+            saturating_i64(event.ingested_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO self_hosted_worker_telemetry_events \
+                 (id, worker_id, tenant, workspace_id, session_id, run_id, kind, trust_level, \
+                  occurred_at_unix, ingested_at_unix, event_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &event.id,
+                    &event.worker_id,
+                    &tenant_context_id,
+                    &event.workspace_id,
+                    &event.session_id,
+                    &event.run_id,
+                    &event.kind,
+                    &event.trust_level,
+                    &occurred_at_unix,
+                    &ingested_at_unix,
+                    &event.event_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn self_hosted_worker_telemetry_events(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerTelemetryEvent>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, kind, \
+                        trust_level, occurred_at_unix, ingested_at_unix, event_json::text \
+                     FROM self_hosted_worker_telemetry_events \
+                     ORDER BY occurred_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(self_hosted_worker_telemetry_event_from_row)
+                .collect())
+        })
+    }
+
+    fn upsert_self_hosted_worker_artifact(
+        &self,
+        artifact: &StoredSelfHostedWorkerArtifact,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&artifact.tenant);
+        let size_bytes = saturating_i64(artifact.size_bytes);
+        let created_at_unix =
+            saturating_i64(artifact.created_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO self_hosted_worker_artifacts \
+                 (id, worker_id, tenant, workspace_id, session_id, run_id, artifact_name, \
+                  content_type, size_bytes, trust_level, created_at_unix, artifact_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::text::jsonb) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 worker_id = EXCLUDED.worker_id, \
+                 tenant = EXCLUDED.tenant, \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 session_id = EXCLUDED.session_id, \
+                 run_id = EXCLUDED.run_id, \
+                 artifact_name = EXCLUDED.artifact_name, \
+                 content_type = EXCLUDED.content_type, \
+                 size_bytes = EXCLUDED.size_bytes, \
+                 trust_level = EXCLUDED.trust_level, \
+                 artifact_json = EXCLUDED.artifact_json",
+                &[
+                    &artifact.id,
+                    &artifact.worker_id,
+                    &tenant_context_id,
+                    &artifact.workspace_id,
+                    &artifact.session_id,
+                    &artifact.run_id,
+                    &artifact.artifact_name,
+                    &artifact.content_type,
+                    &size_bytes,
+                    &artifact.trust_level,
+                    &created_at_unix,
+                    &artifact.artifact_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn self_hosted_worker_artifacts(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerArtifact>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
+                        artifact_name, content_type, size_bytes, trust_level, created_at_unix, \
+                        artifact_json::text \
+                     FROM self_hosted_worker_artifacts \
+                     ORDER BY created_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(self_hosted_worker_artifact_from_row)
+                .collect())
+        })
+    }
+
+    fn upsert_self_hosted_worker_checkpoint(
+        &self,
+        checkpoint: &StoredSelfHostedWorkerCheckpoint,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&checkpoint.tenant);
+        let size_bytes = saturating_i64(checkpoint.size_bytes);
+        let created_at_unix =
+            saturating_i64(checkpoint.created_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO self_hosted_worker_checkpoints \
+                 (id, worker_id, tenant, workspace_id, session_id, run_id, checkpoint_name, \
+                  size_bytes, trust_level, created_at_unix, checkpoint_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 worker_id = EXCLUDED.worker_id, \
+                 tenant = EXCLUDED.tenant, \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 session_id = EXCLUDED.session_id, \
+                 run_id = EXCLUDED.run_id, \
+                 checkpoint_name = EXCLUDED.checkpoint_name, \
+                 size_bytes = EXCLUDED.size_bytes, \
+                 trust_level = EXCLUDED.trust_level, \
+                 checkpoint_json = EXCLUDED.checkpoint_json",
+                &[
+                    &checkpoint.id,
+                    &checkpoint.worker_id,
+                    &tenant_context_id,
+                    &checkpoint.workspace_id,
+                    &checkpoint.session_id,
+                    &checkpoint.run_id,
+                    &checkpoint.checkpoint_name,
+                    &size_bytes,
+                    &checkpoint.trust_level,
+                    &created_at_unix,
+                    &checkpoint.checkpoint_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn self_hosted_worker_checkpoints(
+        &self,
+    ) -> Result<Vec<StoredSelfHostedWorkerCheckpoint>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, worker_id, tenant, workspace_id, session_id, run_id, \
+                        checkpoint_name, size_bytes, trust_level, created_at_unix, \
+                        checkpoint_json::text \
+                     FROM self_hosted_worker_checkpoints \
+                     ORDER BY created_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(self_hosted_worker_checkpoint_from_row)
+                .collect())
+        })
+    }
+
     fn billing_events_page(
         &self,
         offset: usize,
@@ -2011,6 +2421,11 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "agent_worker_instances",
         "managed_worker_sessions",
         "managed_worker_lifecycle_events",
+        "self_hosted_worker_registrations",
+        "self_hosted_worker_heartbeats",
+        "self_hosted_worker_telemetry_events",
+        "self_hosted_worker_artifacts",
+        "self_hosted_worker_checkpoints",
         "request_logs",
         "audit_events",
         "billing_metering_events",
@@ -2042,6 +2457,14 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         ("managed_worker_sessions", "capability_envelope_json"),
         ("managed_worker_sessions", "resource_limits_json"),
         ("managed_worker_lifecycle_events", "evidence_json"),
+        (
+            "self_hosted_worker_registrations",
+            "capability_envelope_json",
+        ),
+        ("self_hosted_worker_heartbeats", "heartbeat_json"),
+        ("self_hosted_worker_telemetry_events", "event_json"),
+        ("self_hosted_worker_artifacts", "artifact_json"),
+        ("self_hosted_worker_checkpoints", "checkpoint_json"),
         ("request_logs", "request_json"),
         ("audit_events", "audit_json"),
     ];
@@ -2071,6 +2494,11 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_agent_worker_instances_status_seen",
         "idx_managed_worker_sessions_tenant_status",
         "idx_managed_worker_lifecycle_session_time",
+        "idx_self_hosted_worker_registrations_tenant_status",
+        "idx_self_hosted_worker_heartbeats_worker_time",
+        "idx_self_hosted_worker_telemetry_worker_time",
+        "idx_self_hosted_worker_artifacts_run",
+        "idx_self_hosted_worker_checkpoints_run",
         "idx_request_logs_model_provider_started",
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
@@ -2406,6 +2834,88 @@ fn managed_worker_lifecycle_event_from_row(row: PostgresRow) -> StoredManagedWor
         outcome: row.get(8),
         occurred_at_unix: Some(nonnegative_u64(row.get(9))),
         evidence_json: row.get(10),
+    }
+}
+
+fn self_hosted_worker_registration_from_row(
+    row: PostgresRow,
+) -> StoredSelfHostedWorkerRegistration {
+    StoredSelfHostedWorkerRegistration {
+        id: row.get(0),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(1).as_deref()),
+        workspace_id: row.get(2),
+        worker_name: row.get(3),
+        status: row.get(4),
+        identity_fingerprint: row.get(5),
+        orchestration_enabled: row.get(6),
+        registered_at_unix: Some(nonnegative_u64(row.get(7))),
+        last_seen_at_unix: row.get::<_, Option<i64>>(8).map(nonnegative_u64),
+        trust_level: row.get(9),
+        capability_envelope_json: row.get(10),
+    }
+}
+
+fn self_hosted_worker_heartbeat_from_row(row: PostgresRow) -> StoredSelfHostedWorkerHeartbeat {
+    StoredSelfHostedWorkerHeartbeat {
+        id: row.get(0),
+        worker_id: row.get(1),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(2).as_deref()),
+        workspace_id: row.get(3),
+        status: row.get(4),
+        reported_at_unix: Some(nonnegative_u64(row.get(5))),
+        observed_at_unix: Some(nonnegative_u64(row.get(6))),
+        heartbeat_json: row.get(7),
+    }
+}
+
+fn self_hosted_worker_telemetry_event_from_row(
+    row: PostgresRow,
+) -> StoredSelfHostedWorkerTelemetryEvent {
+    StoredSelfHostedWorkerTelemetryEvent {
+        id: row.get(0),
+        worker_id: row.get(1),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(2).as_deref()),
+        workspace_id: row.get(3),
+        session_id: row.get(4),
+        run_id: row.get(5),
+        kind: row.get(6),
+        trust_level: row.get(7),
+        occurred_at_unix: Some(nonnegative_u64(row.get(8))),
+        ingested_at_unix: Some(nonnegative_u64(row.get(9))),
+        event_json: row.get(10),
+    }
+}
+
+fn self_hosted_worker_artifact_from_row(row: PostgresRow) -> StoredSelfHostedWorkerArtifact {
+    StoredSelfHostedWorkerArtifact {
+        id: row.get(0),
+        worker_id: row.get(1),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(2).as_deref()),
+        workspace_id: row.get(3),
+        session_id: row.get(4),
+        run_id: row.get(5),
+        artifact_name: row.get(6),
+        content_type: row.get(7),
+        size_bytes: nonnegative_u64(row.get(8)),
+        trust_level: row.get(9),
+        created_at_unix: Some(nonnegative_u64(row.get(10))),
+        artifact_json: row.get(11),
+    }
+}
+
+fn self_hosted_worker_checkpoint_from_row(row: PostgresRow) -> StoredSelfHostedWorkerCheckpoint {
+    StoredSelfHostedWorkerCheckpoint {
+        id: row.get(0),
+        worker_id: row.get(1),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(2).as_deref()),
+        workspace_id: row.get(3),
+        session_id: row.get(4),
+        run_id: row.get(5),
+        checkpoint_name: row.get(6),
+        size_bytes: nonnegative_u64(row.get(7)),
+        trust_level: row.get(8),
+        created_at_unix: Some(nonnegative_u64(row.get(9))),
+        checkpoint_json: row.get(10),
     }
 }
 
@@ -3021,6 +3531,25 @@ impl ManagedWorkerLifecycleEventRepository
 {
 }
 
+impl SelfHostedWorkerRegistrationRepository
+    for InMemoryRepository<StoredSelfHostedWorkerRegistration>
+{
+}
+
+impl SelfHostedWorkerHeartbeatRepository
+    for InMemoryAppendRepository<StoredSelfHostedWorkerHeartbeat>
+{
+}
+
+impl SelfHostedWorkerTelemetryEventRepository
+    for InMemoryAppendRepository<StoredSelfHostedWorkerTelemetryEvent>
+{
+}
+
+impl SelfHostedWorkerArtifactRepository for InMemoryRepository<StoredSelfHostedWorkerArtifact> {}
+
+impl SelfHostedWorkerCheckpointRepository for InMemoryRepository<StoredSelfHostedWorkerCheckpoint> {}
+
 #[derive(Debug)]
 pub struct RuntimeStorageRepositories {
     backend: RuntimeStorageBackend,
@@ -3035,18 +3564,36 @@ pub struct RuntimeStorageRepositories {
     managed_worker_sessions: Mutex<InMemoryRepository<StoredManagedWorkerSession>>,
     managed_worker_lifecycle_events:
         Mutex<InMemoryAppendRepository<StoredManagedWorkerLifecycleEvent>>,
+    self_hosted_worker_registrations: Mutex<InMemoryRepository<StoredSelfHostedWorkerRegistration>>,
+    self_hosted_worker_heartbeats: Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerHeartbeat>>,
+    self_hosted_worker_telemetry_events:
+        Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerTelemetryEvent>>,
+    self_hosted_worker_artifacts: Mutex<InMemoryRepository<StoredSelfHostedWorkerArtifact>>,
+    self_hosted_worker_checkpoints: Mutex<InMemoryRepository<StoredSelfHostedWorkerCheckpoint>>,
 }
 
-impl RuntimeStorageRepositories {
-    pub fn new(
-        backend: RuntimeStorageBackend,
-        control_plane: RuntimeControlPlaneState,
-        request_log_retention_records: usize,
-        audit_event_retention_records: usize,
-    ) -> Self {
+struct RuntimeStorageRepositorySets {
+    request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
+    audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
+    usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
+    agent_runs: Mutex<InMemoryRepository<StoredAgentRun>>,
+    agent_run_events: Mutex<InMemoryAppendRepository<StoredAgentRunEvent>>,
+    managed_worker_templates: Mutex<InMemoryRepository<StoredManagedWorkerTemplate>>,
+    agent_worker_instances: Mutex<InMemoryRepository<StoredAgentWorkerInstance>>,
+    managed_worker_sessions: Mutex<InMemoryRepository<StoredManagedWorkerSession>>,
+    managed_worker_lifecycle_events:
+        Mutex<InMemoryAppendRepository<StoredManagedWorkerLifecycleEvent>>,
+    self_hosted_worker_registrations: Mutex<InMemoryRepository<StoredSelfHostedWorkerRegistration>>,
+    self_hosted_worker_heartbeats: Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerHeartbeat>>,
+    self_hosted_worker_telemetry_events:
+        Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerTelemetryEvent>>,
+    self_hosted_worker_artifacts: Mutex<InMemoryRepository<StoredSelfHostedWorkerArtifact>>,
+    self_hosted_worker_checkpoints: Mutex<InMemoryRepository<StoredSelfHostedWorkerCheckpoint>>,
+}
+
+impl RuntimeStorageRepositorySets {
+    fn new(request_log_retention_records: usize, audit_event_retention_records: usize) -> Self {
         Self {
-            backend,
-            control_plane: RuntimeControlPlaneBackend::Memory(Box::new(Mutex::new(control_plane))),
             request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
                 request_log_retention_records,
             )),
@@ -3060,6 +3607,43 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: Mutex::new(InMemoryRepository::new()),
             managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
             managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
+            self_hosted_worker_registrations: Mutex::new(InMemoryRepository::new()),
+            self_hosted_worker_heartbeats: Mutex::new(InMemoryAppendRepository::new()),
+            self_hosted_worker_telemetry_events: Mutex::new(InMemoryAppendRepository::new()),
+            self_hosted_worker_artifacts: Mutex::new(InMemoryRepository::new()),
+            self_hosted_worker_checkpoints: Mutex::new(InMemoryRepository::new()),
+        }
+    }
+}
+
+impl RuntimeStorageRepositories {
+    pub fn new(
+        backend: RuntimeStorageBackend,
+        control_plane: RuntimeControlPlaneState,
+        request_log_retention_records: usize,
+        audit_event_retention_records: usize,
+    ) -> Self {
+        let repositories = RuntimeStorageRepositorySets::new(
+            request_log_retention_records,
+            audit_event_retention_records,
+        );
+        Self {
+            backend,
+            control_plane: RuntimeControlPlaneBackend::Memory(Box::new(Mutex::new(control_plane))),
+            request_logs: repositories.request_logs,
+            audit_events: repositories.audit_events,
+            usage_aggregates: repositories.usage_aggregates,
+            agent_runs: repositories.agent_runs,
+            agent_run_events: repositories.agent_run_events,
+            managed_worker_templates: repositories.managed_worker_templates,
+            agent_worker_instances: repositories.agent_worker_instances,
+            managed_worker_sessions: repositories.managed_worker_sessions,
+            managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
+            self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
+            self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
+            self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
+            self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
         }
     }
 
@@ -3115,22 +3699,27 @@ impl RuntimeStorageRepositories {
                     StorageError::Postgres("postgres storage connect thread panicked".into())
                 })?
         })?;
+        let repositories = RuntimeStorageRepositorySets::new(
+            request_log_retention_records,
+            audit_event_retention_records,
+        );
         Ok(Self {
             backend,
             control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
-            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                request_log_retention_records,
-            )),
-            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                audit_event_retention_records,
-            )),
-            usage_aggregates: Mutex::new(InMemoryRepository::new()),
-            agent_runs: Mutex::new(InMemoryRepository::new()),
-            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
-            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
-            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
-            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
-            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
+            request_logs: repositories.request_logs,
+            audit_events: repositories.audit_events,
+            usage_aggregates: repositories.usage_aggregates,
+            agent_runs: repositories.agent_runs,
+            agent_run_events: repositories.agent_run_events,
+            managed_worker_templates: repositories.managed_worker_templates,
+            agent_worker_instances: repositories.agent_worker_instances,
+            managed_worker_sessions: repositories.managed_worker_sessions,
+            managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
+            self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
+            self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
+            self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
+            self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
         })
     }
 
@@ -3179,18 +3768,24 @@ impl RuntimeStorageRepositories {
             ControlPlaneDocuments::default(),
             initialize_schema,
         )?;
+        let repositories = RuntimeStorageRepositorySets::new(0, 0);
         Ok(Self {
             backend,
             control_plane: RuntimeControlPlaneBackend::Mysql(Arc::new(control_plane)),
-            request_logs: Mutex::new(InMemoryAppendRepository::new()),
-            audit_events: Mutex::new(InMemoryAppendRepository::new()),
-            usage_aggregates: Mutex::new(InMemoryRepository::new()),
-            agent_runs: Mutex::new(InMemoryRepository::new()),
-            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
-            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
-            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
-            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
-            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
+            request_logs: repositories.request_logs,
+            audit_events: repositories.audit_events,
+            usage_aggregates: repositories.usage_aggregates,
+            agent_runs: repositories.agent_runs,
+            agent_run_events: repositories.agent_run_events,
+            managed_worker_templates: repositories.managed_worker_templates,
+            agent_worker_instances: repositories.agent_worker_instances,
+            managed_worker_sessions: repositories.managed_worker_sessions,
+            managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
+            self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
+            self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
+            self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
+            self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
         })
     }
 
@@ -3215,18 +3810,24 @@ impl RuntimeStorageRepositories {
             initialize_schema,
             validate_schema,
         )?;
+        let repositories = RuntimeStorageRepositorySets::new(0, 0);
         Ok(Self {
             backend,
             control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
-            request_logs: Mutex::new(InMemoryAppendRepository::new()),
-            audit_events: Mutex::new(InMemoryAppendRepository::new()),
-            usage_aggregates: Mutex::new(InMemoryRepository::new()),
-            agent_runs: Mutex::new(InMemoryRepository::new()),
-            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
-            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
-            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
-            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
-            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
+            request_logs: repositories.request_logs,
+            audit_events: repositories.audit_events,
+            usage_aggregates: repositories.usage_aggregates,
+            agent_runs: repositories.agent_runs,
+            agent_run_events: repositories.agent_run_events,
+            managed_worker_templates: repositories.managed_worker_templates,
+            agent_worker_instances: repositories.agent_worker_instances,
+            managed_worker_sessions: repositories.managed_worker_sessions,
+            managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
+            self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
+            self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
+            self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
+            self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
         })
     }
 
@@ -3252,22 +3853,27 @@ impl RuntimeStorageRepositories {
                 .join()
                 .map_err(|_| StorageError::Mysql("mysql storage connect thread panicked".into()))?
         })?;
+        let repositories = RuntimeStorageRepositorySets::new(
+            request_log_retention_records,
+            audit_event_retention_records,
+        );
         Ok(Self {
             backend,
             control_plane: RuntimeControlPlaneBackend::Mysql(Arc::new(control_plane)),
-            request_logs: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                request_log_retention_records,
-            )),
-            audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
-                audit_event_retention_records,
-            )),
-            usage_aggregates: Mutex::new(InMemoryRepository::new()),
-            agent_runs: Mutex::new(InMemoryRepository::new()),
-            agent_run_events: Mutex::new(InMemoryAppendRepository::new()),
-            managed_worker_templates: Mutex::new(InMemoryRepository::new()),
-            agent_worker_instances: Mutex::new(InMemoryRepository::new()),
-            managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
-            managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
+            request_logs: repositories.request_logs,
+            audit_events: repositories.audit_events,
+            usage_aggregates: repositories.usage_aggregates,
+            agent_runs: repositories.agent_runs,
+            agent_run_events: repositories.agent_run_events,
+            managed_worker_templates: repositories.managed_worker_templates,
+            agent_worker_instances: repositories.agent_worker_instances,
+            managed_worker_sessions: repositories.managed_worker_sessions,
+            managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
+            self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
+            self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
+            self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
+            self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
         })
     }
 
@@ -3365,6 +3971,11 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: self.agent_worker_instances(),
             managed_worker_sessions: self.managed_worker_sessions(),
             managed_worker_lifecycle_events: self.managed_worker_lifecycle_events(),
+            self_hosted_worker_registrations: self.self_hosted_worker_registrations(),
+            self_hosted_worker_heartbeats: self.self_hosted_worker_heartbeats(),
+            self_hosted_worker_telemetry_events: self.self_hosted_worker_telemetry_events(),
+            self_hosted_worker_artifacts: self.self_hosted_worker_artifacts(),
+            self_hosted_worker_checkpoints: self.self_hosted_worker_checkpoints(),
         })
     }
 
@@ -3405,6 +4016,21 @@ impl RuntimeStorageRepositories {
         }
         for event in snapshot.managed_worker_lifecycle_events {
             self.append_managed_worker_lifecycle_event(event)?;
+        }
+        for registration in snapshot.self_hosted_worker_registrations {
+            self.upsert_self_hosted_worker_registration(registration)?;
+        }
+        for heartbeat in snapshot.self_hosted_worker_heartbeats {
+            self.append_self_hosted_worker_heartbeat(heartbeat)?;
+        }
+        for event in snapshot.self_hosted_worker_telemetry_events {
+            self.append_self_hosted_worker_telemetry_event(event)?;
+        }
+        for artifact in snapshot.self_hosted_worker_artifacts {
+            self.upsert_self_hosted_worker_artifact(artifact)?;
+        }
+        for checkpoint in snapshot.self_hosted_worker_checkpoints {
+            self.upsert_self_hosted_worker_checkpoint(checkpoint)?;
         }
         Ok(())
     }
@@ -4252,6 +4878,201 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
         }
     }
+
+    pub fn upsert_self_hosted_worker_registration(
+        &self,
+        registration: StoredSelfHostedWorkerRegistration,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut registrations) = self.self_hosted_worker_registrations.lock() {
+                    registrations.insert(registration.id.clone(), registration);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_self_hosted_worker_registration(&registration)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "self_hosted_worker_registration",
+                registration.id.clone(),
+                serialize_storage_record(&registration)?,
+            ),
+        }
+    }
+
+    pub fn self_hosted_worker_registrations(&self) -> Vec<StoredSelfHostedWorkerRegistration> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_registrations
+                .lock()
+                .map(|registrations| registrations.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_registrations()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("self_hosted_worker_registration")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn append_self_hosted_worker_heartbeat(
+        &self,
+        heartbeat: StoredSelfHostedWorkerHeartbeat,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut heartbeats) = self.self_hosted_worker_heartbeats.lock() {
+                    heartbeats.append(heartbeat);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.append_self_hosted_worker_heartbeat(&heartbeat)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "self_hosted_worker_heartbeat",
+                heartbeat.id.clone(),
+                serialize_storage_record(&heartbeat)?,
+            ),
+        }
+    }
+
+    pub fn self_hosted_worker_heartbeats(&self) -> Vec<StoredSelfHostedWorkerHeartbeat> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_heartbeats
+                .lock()
+                .map(|heartbeats| heartbeats.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_heartbeats()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("self_hosted_worker_heartbeat")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn append_self_hosted_worker_telemetry_event(
+        &self,
+        event: StoredSelfHostedWorkerTelemetryEvent,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut events) = self.self_hosted_worker_telemetry_events.lock() {
+                    events.append(event);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.append_self_hosted_worker_telemetry_event(&event)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "self_hosted_worker_telemetry_event",
+                event.id.clone(),
+                serialize_storage_record(&event)?,
+            ),
+        }
+    }
+
+    pub fn self_hosted_worker_telemetry_events(&self) -> Vec<StoredSelfHostedWorkerTelemetryEvent> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_telemetry_events
+                .lock()
+                .map(|events| events.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_telemetry_events()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("self_hosted_worker_telemetry_event")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn upsert_self_hosted_worker_artifact(
+        &self,
+        artifact: StoredSelfHostedWorkerArtifact,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut artifacts) = self.self_hosted_worker_artifacts.lock() {
+                    artifacts.insert(artifact.id.clone(), artifact);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_self_hosted_worker_artifact(&artifact)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "self_hosted_worker_artifact",
+                artifact.id.clone(),
+                serialize_storage_record(&artifact)?,
+            ),
+        }
+    }
+
+    pub fn self_hosted_worker_artifacts(&self) -> Vec<StoredSelfHostedWorkerArtifact> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_artifacts
+                .lock()
+                .map(|artifacts| artifacts.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_artifacts()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("self_hosted_worker_artifact")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn upsert_self_hosted_worker_checkpoint(
+        &self,
+        checkpoint: StoredSelfHostedWorkerCheckpoint,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut checkpoints) = self.self_hosted_worker_checkpoints.lock() {
+                    checkpoints.insert(checkpoint.id.clone(), checkpoint);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_self_hosted_worker_checkpoint(&checkpoint)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "self_hosted_worker_checkpoint",
+                checkpoint.id.clone(),
+                serialize_storage_record(&checkpoint)?,
+            ),
+        }
+    }
+
+    pub fn self_hosted_worker_checkpoints(&self) -> Vec<StoredSelfHostedWorkerCheckpoint> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_worker_checkpoints
+                .lock()
+                .map(|checkpoints| checkpoints.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_worker_checkpoints()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("self_hosted_worker_checkpoint")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
 }
 
 fn serialize_storage_record<T: Serialize>(record: &T) -> Result<String, StorageError> {
@@ -4849,6 +5670,149 @@ mod tests {
         assert_eq!(target.agent_worker_instances().len(), 1);
         assert_eq!(target.managed_worker_sessions().len(), 1);
         assert_eq!(target.managed_worker_lifecycle_events().len(), 1);
+    }
+
+    fn self_hosted_tenant() -> TenantContext {
+        TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        }
+    }
+
+    fn insert_self_hosted_worker_records(repositories: &RuntimeStorageRepositories) {
+        let tenant = self_hosted_tenant();
+        repositories
+            .upsert_self_hosted_worker_registration(StoredSelfHostedWorkerRegistration {
+                id: "self-hosted-worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                worker_name: "customer-worker-a".into(),
+                status: "online".into(),
+                identity_fingerprint: "sha256:worker-identity".into(),
+                orchestration_enabled: true,
+                registered_at_unix: Some(20),
+                last_seen_at_unix: Some(21),
+                trust_level: "reported_by_self_hosted_worker".into(),
+                capability_envelope_json: r#"{"frameworks":["codex"]}"#.into(),
+            })
+            .unwrap();
+        repositories
+            .append_self_hosted_worker_heartbeat(StoredSelfHostedWorkerHeartbeat {
+                id: "heartbeat-1".into(),
+                worker_id: "self-hosted-worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                status: "online".into(),
+                reported_at_unix: Some(22),
+                observed_at_unix: Some(23),
+                heartbeat_json: r#"{"load":0.42}"#.into(),
+            })
+            .unwrap();
+        repositories
+            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                id: "telemetry-1".into(),
+                worker_id: "self-hosted-worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                session_id: Some("session-1".into()),
+                run_id: Some("run-1".into()),
+                kind: "tool_call".into(),
+                trust_level: "reported_by_self_hosted_worker".into(),
+                occurred_at_unix: Some(24),
+                ingested_at_unix: Some(25),
+                event_json: r#"{"tool":"bash"}"#.into(),
+            })
+            .unwrap();
+        repositories
+            .upsert_self_hosted_worker_artifact(StoredSelfHostedWorkerArtifact {
+                id: "artifact-1".into(),
+                worker_id: "self-hosted-worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                artifact_name: "stdout.log".into(),
+                content_type: Some("text/plain".into()),
+                size_bytes: 128,
+                trust_level: "reported_by_self_hosted_worker".into(),
+                created_at_unix: Some(26),
+                artifact_json: r#"{"path":"stdout.log"}"#.into(),
+            })
+            .unwrap();
+        repositories
+            .upsert_self_hosted_worker_checkpoint(StoredSelfHostedWorkerCheckpoint {
+                id: "checkpoint-1".into(),
+                worker_id: "self-hosted-worker-1".into(),
+                tenant,
+                workspace_id: "workspace-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                checkpoint_name: "resume-state".into(),
+                size_bytes: 256,
+                trust_level: "reported_by_self_hosted_worker".into(),
+                created_at_unix: Some(27),
+                checkpoint_json: r#"{"version":1}"#.into(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn runtime_repositories_keep_self_hosted_worker_records() {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        insert_self_hosted_worker_records(&repositories);
+
+        let registrations = repositories.self_hosted_worker_registrations();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(
+            registrations[0].trust_level,
+            "reported_by_self_hosted_worker"
+        );
+        assert!(registrations[0].orchestration_enabled);
+        assert_eq!(
+            repositories.self_hosted_worker_heartbeats()[0].status,
+            "online"
+        );
+        assert_eq!(
+            repositories.self_hosted_worker_telemetry_events()[0].kind,
+            "tool_call"
+        );
+        assert_eq!(
+            repositories.self_hosted_worker_artifacts()[0].artifact_name,
+            "stdout.log"
+        );
+        assert_eq!(
+            repositories.self_hosted_worker_checkpoints()[0].checkpoint_name,
+            "resume-state"
+        );
+    }
+
+    #[test]
+    fn migration_snapshot_includes_self_hosted_worker_records() {
+        let source =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        insert_self_hosted_worker_records(&source);
+
+        let snapshot = source.export_migration_snapshot().unwrap();
+        let counts = snapshot.counts();
+        assert_eq!(counts.self_hosted_worker_registrations, 1);
+        assert_eq!(counts.self_hosted_worker_heartbeats, 1);
+        assert_eq!(counts.self_hosted_worker_telemetry_events, 1);
+        assert_eq!(counts.self_hosted_worker_artifacts, 1);
+        assert_eq!(counts.self_hosted_worker_checkpoints, 1);
+
+        let target =
+            RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
+        target.import_migration_snapshot(snapshot).unwrap();
+
+        assert_eq!(target.self_hosted_worker_registrations().len(), 1);
+        assert_eq!(target.self_hosted_worker_heartbeats().len(), 1);
+        assert_eq!(target.self_hosted_worker_telemetry_events().len(), 1);
+        assert_eq!(target.self_hosted_worker_artifacts().len(), 1);
+        assert_eq!(target.self_hosted_worker_checkpoints().len(), 1);
     }
 
     #[test]
