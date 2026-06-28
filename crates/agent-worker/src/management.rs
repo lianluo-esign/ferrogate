@@ -23,7 +23,10 @@ use ferrogate_runtime::{
     AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES, AGENT_WORKER_PROTOCOL_VERSION,
 };
 
-use crate::{backends::isolation_backends, handlers::framework_handlers};
+use crate::{
+    backends::isolation_backends, handlers::framework_handlers,
+    lifecycle::dispatch_lifecycle_action,
+};
 
 const SMOKE_SHARED_SECRET: &str = "agent-worker-smoke-secret";
 
@@ -280,15 +283,7 @@ fn dispatch_management_action(
         | AgentWorkerManagementAction::Stop
         | AgentWorkerManagementAction::Cleanup
         | AgentWorkerManagementAction::StreamStatus
-        | AgentWorkerManagementAction::CollectArtifacts => {
-            Err(ManagedWorkerError::management_protocol_error(
-                AgentWorkerManagementErrorCode::UnsupportedAction,
-                format!(
-                    "agent-worker management action {} is not implemented by this worker process",
-                    envelope.action.as_str()
-                ),
-            ))
-        }
+        | AgentWorkerManagementAction::CollectArtifacts => dispatch_lifecycle_action(&envelope),
     }
 }
 
@@ -442,17 +437,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_signed_lifecycle_action_until_worker_implements_handler() {
-        let mut envelope = smoke_envelope().unwrap();
-        envelope.action = AgentWorkerManagementAction::Provision;
-        envelope.request_id = "agent-worker-provision-request".to_string();
-        envelope.idempotency_key = "agent-worker-provision-idempotency".to_string();
-        envelope.session_id = Some("agent-worker-provision-session".to_string());
-        envelope.run_id = Some("agent-worker-provision-run".to_string());
-        envelope.security.nonce = "agent-worker-provision-nonce".to_string();
-        envelope.security.signature = envelope
-            .shared_secret_signature(SMOKE_SHARED_SECRET)
-            .unwrap();
+    fn routes_signed_provision_to_firecracker_lifecycle_branch_fail_closed() {
+        let envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::Provision,
+            "agent-worker-provision",
+        );
         let input = serde_json::to_string(&envelope).unwrap();
 
         let response_json =
@@ -463,8 +452,66 @@ mod tests {
         assert_eq!(response["accepted"], false);
         assert_eq!(response["request_id"], "agent-worker-provision-request");
         assert_eq!(response["action"], "provision");
-        assert_eq!(response["error"]["code"], "unsupported_action");
+        assert_eq!(response["error"]["code"], "incompatible_backend");
         assert_eq!(response["error"]["retryable"], false);
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Firecracker")));
+    }
+
+    #[test]
+    fn cleanup_lifecycle_action_returns_typed_noop_evidence_before_firecracker_start() {
+        let envelope =
+            lifecycle_envelope(AgentWorkerManagementAction::Cleanup, "agent-worker-cleanup");
+        let input = serde_json::to_string(&envelope).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], true);
+        assert_eq!(response["action"], "cleanup");
+        assert_eq!(response["result"]["kind"], "lifecycle");
+        assert_eq!(
+            response["result"]["lifecycle"]["session_id"],
+            "agent-worker-cleanup-session"
+        );
+        assert_eq!(
+            response["result"]["lifecycle"]["run_id"],
+            "agent-worker-cleanup-run"
+        );
+        assert_eq!(response["result"]["lifecycle"]["status"], "cleaned_up");
+        assert_eq!(
+            response["result"]["lifecycle"]["backend_name"],
+            "firecracker"
+        );
+        assert_eq!(response["result"]["lifecycle"]["outcome"], "not_started");
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn stream_status_lifecycle_action_reports_not_started_without_gateway_execution() {
+        let envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::StreamStatus,
+            "agent-worker-status",
+        );
+        let input = serde_json::to_string(&envelope).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], true);
+        assert_eq!(response["action"], "stream_status");
+        assert_eq!(response["result"]["kind"], "lifecycle");
+        assert_eq!(response["result"]["lifecycle"]["status"], "failed");
+        assert_eq!(response["result"]["lifecycle"]["outcome"], "not_started");
+        assert_eq!(
+            response["result"]["lifecycle"]["isolation_instance_id"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
@@ -671,5 +718,22 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("unix socket was not created at {}", socket_path.display());
+    }
+
+    fn lifecycle_envelope(
+        action: AgentWorkerManagementAction,
+        prefix: &str,
+    ) -> AgentWorkerManagementEnvelope {
+        let mut envelope = smoke_envelope().unwrap();
+        envelope.action = action;
+        envelope.request_id = format!("{prefix}-request");
+        envelope.idempotency_key = format!("{prefix}-idempotency");
+        envelope.session_id = Some(format!("{prefix}-session"));
+        envelope.run_id = Some(format!("{prefix}-run"));
+        envelope.security.nonce = format!("{prefix}-nonce");
+        envelope.security.signature = envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        envelope
     }
 }

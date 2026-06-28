@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 
 mod backends;
 mod handlers;
+mod lifecycle;
 mod management;
 
 #[derive(Debug, Parser)]

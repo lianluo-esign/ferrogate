@@ -151,6 +151,14 @@ the response envelope. The current executable `probe_handlers` action returns
 initial registry reports the Firecracker backend as ready only when
 `AGENT_WORKER_FIRECRACKER_BIN` points to a configured local file; the worker
 does not scan `PATH` or execute the binary during readiness reporting.
+Lifecycle dispatch now reaches worker-owned action branches for `provision`,
+`exec_or_attach`, `stop`, `cleanup`, `stream_status`, and `collect_artifacts`.
+`provision` fails closed with `incompatible_backend` when Firecracker is not
+configured and with `provision_failed` when the binary is configured but the
+real microVM provision/start implementation is still absent. `cleanup` and
+`stream_status` can return `result.kind=lifecycle` with explicit `not_started`
+evidence before any Firecracker instance exists; this is lifecycle evidence, not
+microVM boot proof.
 Stable error codes include `invalid_request`, `unsupported_protocol_version`,
 `unsupported_action`, `transport_security_required`, `policy_denied`,
 `quota_exceeded`, `incompatible_backend`, `handler_unavailable`, `worker_busy`,
@@ -170,8 +178,8 @@ The management API fails closed:
 - replayed nonces are rejected;
 - reused idempotency keys are accepted only when they bind to the same
   lifecycle fingerprint.
-- authenticated but unimplemented lifecycle actions are rejected with
-  `unsupported_action`; authentication success never implies execution support.
+- authenticated lifecycle actions are still dispatched by action; authentication
+  success never implies Firecracker execution support.
 
 The supported MAC algorithms are `shared_secret_blake2b` and
 `mtls_bound_blake2b`. The MAC proves request authenticity and integrity. It
@@ -256,19 +264,21 @@ explicit same-host process boundary and can shut down cleanly without leaving a
 stale socket. It is not the final unbounded concurrent lifecycle server, does
 not provide cross-host encryption, and does not boot Firecracker.
 
-Until lifecycle handlers land, this server dispatches every authenticated
-request by action instead of treating authentication as execution support.
+The server dispatches every authenticated request by action instead of treating
+authentication as execution support.
 `probe_handlers` returns a `framework_handlers` result payload. `list_backends`
 returns an `isolation_backends` result with explicit Firecracker readiness, so
 the gateway can distinguish a configured worker backend from a transport or
 authentication failure. A ready Firecracker report only means the configured
 binary path exists; it must not be treated as evidence that a microVM can boot.
-Lifecycle, status, and artifact actions such as
-`provision`, `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and
-`collect_artifacts` are rejected with
-`unsupported_action` instead of returning a false positive `accepted=true`.
-Adding a lifecycle action requires both the handler implementation and contract
-coverage for the reported response.
+Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
+`stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
+worker-owned lifecycle dispatch. The dispatch still does not boot Firecracker:
+`provision` fails closed until real microVM lifecycle code exists, while
+`cleanup` and `stream_status` can report typed lifecycle `not_started` evidence
+for sessions that never provisioned. Adding real lifecycle success requires both
+the Firecracker handler implementation and contract coverage for the reported
+response.
 
 The gateway/control-plane side uses the same local wire contract through
 `AgentWorkerUnixManagementClient`. The client serializes an

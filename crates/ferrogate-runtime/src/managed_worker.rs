@@ -95,7 +95,8 @@ pub struct ManagedWorkerSession {
     pub status: ManagedWorkerSessionStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ManagedWorkerSessionStatus {
     Running,
     Completed,
@@ -905,6 +906,9 @@ pub enum AgentWorkerManagementResult {
         registry_implemented: bool,
         backends: Vec<AgentWorkerIsolationBackendReport>,
     },
+    Lifecycle {
+        lifecycle: AgentWorkerLifecycleResult,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -914,6 +918,20 @@ pub struct AgentWorkerIsolationBackendReport {
     pub kind: String,
     pub ready: bool,
     pub readiness_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWorkerLifecycleResult {
+    pub session_id: String,
+    pub run_id: String,
+    pub worker_id: String,
+    pub action: AgentWorkerManagementAction,
+    pub status: ManagedWorkerSessionStatus,
+    pub backend_name: String,
+    pub backend_kind: String,
+    pub isolation_instance_id: Option<String>,
+    pub outcome: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2266,6 +2284,37 @@ mod tests {
         assert_eq!(
             backend_result_json["result"]["backends"][0]["kind"],
             "firecracker_micro_vm"
+        );
+
+        let lifecycle_result_json = serde_json::to_value(response.clone().with_result(
+            AgentWorkerManagementResult::Lifecycle {
+                lifecycle: AgentWorkerLifecycleResult {
+                    session_id: "session-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    worker_id: "agent-worker-fake-1".to_string(),
+                    action: AgentWorkerManagementAction::Cleanup,
+                    status: ManagedWorkerSessionStatus::CleanedUp,
+                    backend_name: "firecracker".to_string(),
+                    backend_kind: "firecracker_micro_vm".to_string(),
+                    isolation_instance_id: None,
+                    outcome: "not_started".to_string(),
+                    message: "cleanup accepted as no-op".to_string(),
+                },
+            },
+        ))
+        .unwrap();
+        assert_eq!(lifecycle_result_json["result"]["kind"], "lifecycle");
+        assert_eq!(
+            lifecycle_result_json["result"]["lifecycle"]["status"],
+            "cleaned_up"
+        );
+        assert_eq!(
+            lifecycle_result_json["result"]["lifecycle"]["backend_kind"],
+            "firecracker_micro_vm"
+        );
+        assert_eq!(
+            lifecycle_result_json["result"]["lifecycle"]["isolation_instance_id"],
+            serde_json::Value::Null
         );
 
         let duplicate_idempotency = management_envelope_with(
