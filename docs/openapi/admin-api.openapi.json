@@ -9997,6 +9997,10 @@
                 "register_worker",
                 "probe_worker",
                 "heartbeat",
+                "start_run",
+                "cancel_run",
+                "resume_run",
+                "close_session",
                 "poll_run",
                 "ack_run",
                 "stream_events",
@@ -10039,6 +10043,8 @@
         "required": [
           "implemented",
           "transport_shape",
+          "current_protocol_version",
+          "minimum_supported_protocol_version",
           "lease_ack_implemented",
           "inbound_customer_host_required",
           "production_mtls_transport_implemented",
@@ -10055,6 +10061,16 @@
               "worker_initiated_outbound_polling"
             ],
             "description": "Remote workers initiate the transport session and poll for leased work instead of requiring inbound customer-host reachability."
+          },
+          "current_protocol_version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Current self-hosted worker poll/ack wire protocol version accepted by the gateway."
+          },
+          "minimum_supported_protocol_version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Minimum self-hosted worker poll/ack wire protocol version accepted by the gateway."
           },
           "lease_ack_implemented": {
             "type": "boolean",
@@ -10073,6 +10089,10 @@
             "items": {
               "type": "string",
               "enum": [
+                "start_run",
+                "cancel_run",
+                "resume_run",
+                "close_session",
                 "poll_run",
                 "ack_run"
               ]

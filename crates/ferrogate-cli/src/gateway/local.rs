@@ -4370,6 +4370,10 @@ impl FerroGateway {
                             dispatch_contract: AdminSelfHostedWorkerDispatchContract {
                                 implemented: true,
                                 transport_shape: "worker_initiated_outbound_polling",
+                                current_protocol_version:
+                                    ferrogate_runtime::SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                                minimum_supported_protocol_version:
+                                    ferrogate_runtime::SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                                 lease_ack_implemented: true,
                                 inbound_customer_host_required: false,
                                 production_mtls_transport_implemented: false,

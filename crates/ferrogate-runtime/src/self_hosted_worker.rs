@@ -21,6 +21,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 const SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const SELF_HOSTED_WORKER_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedWorkerRegistration {
@@ -199,6 +200,7 @@ pub enum SelfHostedRunAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunPollRequest {
+    pub protocol_version: u32,
     pub identity: SelfHostedWorkerIdentity,
     pub supported_capabilities: Vec<String>,
     pub now_unix: u64,
@@ -225,6 +227,7 @@ pub struct SelfHostedRunLease {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunAckRequest {
+    pub protocol_version: u32,
     pub identity: SelfHostedWorkerIdentity,
     pub dispatch_id: String,
     pub action: SelfHostedRunAction,
@@ -1035,6 +1038,7 @@ fn validate_run_dispatch(dispatch: &SelfHostedRunDispatch) -> Result<(), SelfHos
 fn validate_run_poll_request(
     request: &SelfHostedRunPollRequest,
 ) -> Result<(), SelfHostedWorkerError> {
+    validate_worker_protocol_version(request.protocol_version)?;
     if request.now_unix == 0 {
         return Err(SelfHostedWorkerError::InvalidTransport(
             "now_unix must be greater than zero".to_string(),
@@ -1060,6 +1064,7 @@ fn validate_run_poll_request(
 fn validate_run_ack_request(
     request: &SelfHostedRunAckRequest,
 ) -> Result<(), SelfHostedWorkerError> {
+    validate_worker_protocol_version(request.protocol_version)?;
     require_transport_non_empty("dispatch_id", &request.dispatch_id)?;
     require_transport_non_empty("lease_id", &request.lease_id)?;
     require_transport_non_empty("run_id", &request.run_id)?;
@@ -1069,6 +1074,15 @@ fn validate_run_ack_request(
         ));
     }
     Ok(())
+}
+
+fn validate_worker_protocol_version(protocol_version: u32) -> Result<(), SelfHostedWorkerError> {
+    if protocol_version == SELF_HOSTED_WORKER_PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(SelfHostedWorkerError::InvalidTransport(format!(
+        "unsupported self-hosted worker protocol_version {protocol_version}; expected {SELF_HOSTED_WORKER_PROTOCOL_VERSION}"
+    )))
 }
 
 fn validate_checkpoint_fetch(
@@ -1429,6 +1443,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: identity.clone(),
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_010,
@@ -1453,6 +1468,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunAckRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity,
                     dispatch_id: lease.dispatch_id.clone(),
                     action: lease.action,
@@ -1482,6 +1498,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: identity.clone(),
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_010,
@@ -1491,6 +1508,7 @@ mod tests {
             .unwrap()
             .expect("matching worker should receive a run lease");
         let first_ack = SelfHostedRunAckRequest {
+            protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
             identity: identity.clone(),
             dispatch_id: lease.dispatch_id.clone(),
             action: lease.action,
@@ -1508,6 +1526,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunAckRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     status: SelfHostedRunAckStatus::Completed,
                     reported_at_unix: 1_725_000_012,
                     ..first_ack
@@ -1531,6 +1550,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: identity.clone(),
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_010,
@@ -1544,6 +1564,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: identity.clone(),
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_039,
@@ -1556,6 +1577,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity,
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_040,
@@ -1572,6 +1594,65 @@ mod tests {
     }
 
     #[test]
+    fn worker_poll_and_ack_reject_unsupported_protocol_version() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        queue.enqueue_run(dispatch()).unwrap();
+
+        let poll_error = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    protocol_version: 0,
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap_err();
+
+        assert!(poll_error.to_string().contains("protocol_version"));
+
+        let lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("supported protocol version should receive a run lease");
+
+        let ack_error = transport
+            .ack_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunAckRequest {
+                    protocol_version: 0,
+                    identity,
+                    dispatch_id: lease.dispatch_id.clone(),
+                    action: lease.action,
+                    lease_id: lease.lease_id.clone(),
+                    run_id: lease.run_id.clone(),
+                    status: SelfHostedRunAckStatus::Accepted,
+                    reported_at_unix: 1_725_000_011,
+                },
+            )
+            .unwrap_err();
+
+        assert!(ack_error.to_string().contains("protocol_version"));
+    }
+
+    #[test]
     fn worker_ack_rejects_expired_lease_before_redelivery() {
         let registry = registered_registry();
         let identity = registry.list()[0].identity();
@@ -1584,6 +1665,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: identity.clone(),
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_010,
@@ -1598,6 +1680,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunAckRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: identity.clone(),
                     dispatch_id: expired_lease.dispatch_id.clone(),
                     action: expired_lease.action,
@@ -1616,6 +1699,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity,
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_041,
@@ -1650,6 +1734,7 @@ mod tests {
                     &registry,
                     &mut queue,
                     SelfHostedRunPollRequest {
+                        protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                         identity: identity.clone(),
                         supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                         now_unix: 1_725_000_010,
@@ -1666,6 +1751,7 @@ mod tests {
                     &registry,
                     &mut queue,
                     SelfHostedRunAckRequest {
+                        protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                         identity: identity.clone(),
                         dispatch_id: lease.dispatch_id.clone(),
                         action,
@@ -1737,6 +1823,7 @@ mod tests {
                     &registry,
                     &mut queue,
                     SelfHostedRunPollRequest {
+                        protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                         identity,
                         supported_capabilities: capabilities,
                         now_unix: 1_725_000_010,
@@ -1772,6 +1859,7 @@ mod tests {
                 &registry,
                 &mut queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity,
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_010,
@@ -1807,6 +1895,7 @@ mod tests {
                 &registry,
                 &mut wrong_worker_queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: worker_1.clone(),
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_010,
@@ -1821,6 +1910,7 @@ mod tests {
                 &registry,
                 &mut wrong_worker_queue,
                 SelfHostedRunAckRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: worker_2.clone(),
                     dispatch_id: lease.dispatch_id.clone(),
                     action: lease.action,
@@ -1838,6 +1928,7 @@ mod tests {
                 &registry,
                 &mut wrong_lease_queue,
                 SelfHostedRunPollRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: worker_1.clone(),
                     supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
                     now_unix: 1_725_000_010,
@@ -1851,6 +1942,7 @@ mod tests {
                 &registry,
                 &mut wrong_lease_queue,
                 SelfHostedRunAckRequest {
+                    protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                     identity: worker_1,
                     dispatch_id: lease.dispatch_id,
                     action: lease.action,
@@ -1913,6 +2005,7 @@ mod tests {
 
         let received_lease = client
             .poll_run(&SelfHostedRunPollRequest {
+                protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                 identity: identity.clone(),
                 supported_capabilities: vec!["logs".to_string()],
                 now_unix: 1_725_000_010,
@@ -1922,6 +2015,7 @@ mod tests {
             .unwrap();
         let received_ack = client
             .ack_run(&SelfHostedRunAckRequest {
+                protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                 identity,
                 dispatch_id: received_lease.dispatch_id.clone(),
                 action: received_lease.action,
@@ -1941,11 +2035,19 @@ mod tests {
         assert!(requests[0].contains("\r\ncontent-type: application/json\r\n"));
         let poll_body: SelfHostedRunPollRequest =
             serde_json::from_str(http_request_body(&requests[0])).unwrap();
+        assert_eq!(
+            poll_body.protocol_version,
+            SELF_HOSTED_WORKER_PROTOCOL_VERSION
+        );
         assert_eq!(poll_body.identity.worker_id, "worker-1");
         assert_eq!(poll_body.supported_capabilities, vec!["logs"]);
         assert!(requests[1].starts_with("POST /v1/self-hosted-workers/runs/ack HTTP/1.1\r\n"));
         let ack_body: SelfHostedRunAckRequest =
             serde_json::from_str(http_request_body(&requests[1])).unwrap();
+        assert_eq!(
+            ack_body.protocol_version,
+            SELF_HOSTED_WORKER_PROTOCOL_VERSION
+        );
         assert_eq!(ack_body.lease_id, "dispatch-1:attempt-1");
         assert_eq!(ack_body.status, SelfHostedRunAckStatus::Accepted);
     }
@@ -1961,6 +2063,7 @@ mod tests {
 
         let lease = client
             .poll_run(&SelfHostedRunPollRequest {
+                protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                 identity: registration_identity(),
                 supported_capabilities: vec!["logs".to_string()],
                 now_unix: 1_725_000_010,
@@ -1983,6 +2086,7 @@ mod tests {
 
         let error = client
             .poll_run(&SelfHostedRunPollRequest {
+                protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
                 identity: registration_identity(),
                 supported_capabilities: vec!["logs".to_string()],
                 now_unix: 1_725_000_010,

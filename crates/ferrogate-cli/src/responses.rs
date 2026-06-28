@@ -189,6 +189,8 @@ pub(crate) struct AdminSelfHostedWorkerRuntime {
 pub(crate) struct AdminSelfHostedWorkerDispatchContract {
     pub(crate) implemented: bool,
     pub(crate) transport_shape: &'static str,
+    pub(crate) current_protocol_version: u32,
+    pub(crate) minimum_supported_protocol_version: u32,
     pub(crate) lease_ack_implemented: bool,
     pub(crate) inbound_customer_host_required: bool,
     pub(crate) production_mtls_transport_implemented: bool,

@@ -203,6 +203,14 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 "worker_initiated_outbound_polling"
             );
             assert_eq!(
+                body["data"][0]["dispatch_contract"]["current_protocol_version"],
+                1
+            );
+            assert_eq!(
+                body["data"][0]["dispatch_contract"]["minimum_supported_protocol_version"],
+                1
+            );
+            assert_eq!(
                 body["data"][0]["dispatch_contract"]["lease_ack_implemented"],
                 true
             );
@@ -424,6 +432,24 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(
                 body["error"]["code"],
                 "self_hosted_worker_payload_too_large"
+            );
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_poll_body_with_protocol(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+            0,
+        ),
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_transport"
             );
             Ok(())
         },
@@ -1713,7 +1739,21 @@ pub(crate) fn run_auth_api(args: &AuthArgs) -> Result<()> {
 }
 
 fn self_hosted_worker_poll_body(worker_id: &str, token_secret: &str) -> String {
-    self_hosted_worker_poll_body_for_scope("org_demo", "workspace-1", worker_id, token_secret)
+    self_hosted_worker_poll_body_with_protocol(worker_id, token_secret, 1)
+}
+
+fn self_hosted_worker_poll_body_with_protocol(
+    worker_id: &str,
+    token_secret: &str,
+    protocol_version: u32,
+) -> String {
+    self_hosted_worker_poll_body_for_scope_with_protocol(
+        "org_demo",
+        "workspace-1",
+        worker_id,
+        token_secret,
+        protocol_version,
+    )
 }
 
 fn self_hosted_worker_poll_body_for_scope(
@@ -1722,8 +1762,25 @@ fn self_hosted_worker_poll_body_for_scope(
     worker_id: &str,
     token_secret: &str,
 ) -> String {
+    self_hosted_worker_poll_body_for_scope_with_protocol(
+        tenant_id,
+        workspace_id,
+        worker_id,
+        token_secret,
+        1,
+    )
+}
+
+fn self_hosted_worker_poll_body_for_scope_with_protocol(
+    tenant_id: &str,
+    workspace_id: &str,
+    worker_id: &str,
+    token_secret: &str,
+    protocol_version: u32,
+) -> String {
     format!(
         r#"{{
+          "protocol_version": {protocol_version},
           "identity": {{
             "tenant_id": "{tenant_id}",
             "workspace_id": "{workspace_id}",
@@ -1757,6 +1814,7 @@ fn self_hosted_worker_ack_body_for_scope(
 ) -> String {
     format!(
         r#"{{
+          "protocol_version": 1,
           "identity": {{
             "tenant_id": "{tenant_id}",
             "workspace_id": "{workspace_id}",
