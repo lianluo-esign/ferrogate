@@ -1,0 +1,344 @@
+[
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "session.started",
+    "message": "claude-code process shim session prepared",
+    "metadata": {
+      "handshake": "process_launch_prepared",
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "worker_id": "worker-1",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "run.started",
+    "message": "claude-code process shim resume prepared",
+    "metadata": {
+      "checkpoint_id": "checkpoint-1",
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "run.started",
+    "message": "claude-code process shim stream replay prepared",
+    "metadata": {
+      "after_event_id": "event-1",
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "max_events": "2",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "artifact.created",
+    "message": "claude-code process shim artifact manifest prepared",
+    "metadata": {
+      "artifact_id": "artifact-1",
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "run.cancelled",
+    "message": "claude-code process shim cancel prepared",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "session.closed",
+    "message": "claude-code process shim session closed",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "session.started",
+    "message": "codex process shim session prepared",
+    "metadata": {
+      "handshake": "process_launch_prepared",
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "worker_id": "worker-1",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "run.started",
+    "message": "codex process shim resume prepared",
+    "metadata": {
+      "checkpoint_id": "checkpoint-1",
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "run.started",
+    "message": "codex process shim stream replay prepared",
+    "metadata": {
+      "after_event_id": "event-1",
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "max_events": "2",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "artifact.created",
+    "message": "codex process shim artifact manifest prepared",
+    "metadata": {
+      "artifact_id": "artifact-1",
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "run.cancelled",
+    "message": "codex process shim cancel prepared",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "session.closed",
+    "message": "codex process shim session closed",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "session.started",
+    "message": "hermes process shim session prepared",
+    "metadata": {
+      "handshake": "process_launch_prepared",
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "worker_id": "worker-1",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "run.started",
+    "message": "hermes process shim resume prepared",
+    "metadata": {
+      "checkpoint_id": "checkpoint-1",
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "run.started",
+    "message": "hermes process shim stream replay prepared",
+    "metadata": {
+      "after_event_id": "event-1",
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "max_events": "2",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "artifact.created",
+    "message": "hermes process shim artifact manifest prepared",
+    "metadata": {
+      "artifact_id": "artifact-1",
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "run.cancelled",
+    "message": "hermes process shim cancel prepared",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "session.closed",
+    "message": "hermes process shim session closed",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  }
+]
