@@ -2356,25 +2356,27 @@ fn latest_self_hosted_heartbeat(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SelfHostedWorkerRegistrationError {
+pub(crate) enum SelfHostedWorkerRecordError {
     InvalidRequest(String),
+    NotFound(String),
     Storage(String),
 }
 
-impl std::fmt::Display for SelfHostedWorkerRegistrationError {
+impl std::fmt::Display for SelfHostedWorkerRecordError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SelfHostedWorkerRegistrationError::InvalidRequest(message) => {
+            SelfHostedWorkerRecordError::InvalidRequest(message) => {
                 write!(formatter, "{message}")
             }
-            SelfHostedWorkerRegistrationError::Storage(message) => write!(formatter, "{message}"),
+            SelfHostedWorkerRecordError::NotFound(message) => write!(formatter, "{message}"),
+            SelfHostedWorkerRecordError::Storage(message) => write!(formatter, "{message}"),
         }
     }
 }
 
 fn validate_self_hosted_registration_request(
     request: &crate::responses::AdminSelfHostedWorkerRegistrationRequest,
-) -> Result<(), SelfHostedWorkerRegistrationError> {
+) -> Result<(), SelfHostedWorkerRecordError> {
     require_self_hosted_field("workspace_id", &request.workspace_id)?;
     require_self_hosted_field("worker_name", &request.worker_name)?;
     require_self_hosted_field("identity_fingerprint", &request.identity_fingerprint)?;
@@ -2389,19 +2391,38 @@ fn validate_self_hosted_registration_request(
         )
         .is_err()
     {
-        return Err(SelfHostedWorkerRegistrationError::InvalidRequest(
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(
             "capability_envelope_json must be valid JSON when provided".into(),
         ));
     }
     Ok(())
 }
 
-fn require_self_hosted_field(
-    field: &str,
-    value: &str,
-) -> Result<(), SelfHostedWorkerRegistrationError> {
+fn validate_self_hosted_heartbeat_request(
+    request: &crate::responses::AdminSelfHostedWorkerHeartbeatRequest,
+) -> Result<(), SelfHostedWorkerRecordError> {
+    require_self_hosted_field("status", &request.status)?;
+    if !request
+        .heartbeat_json
+        .as_deref()
+        .unwrap_or("{}")
+        .trim()
+        .is_empty()
+        && serde_json::from_str::<serde_json::Value>(
+            request.heartbeat_json.as_deref().unwrap_or("{}"),
+        )
+        .is_err()
+    {
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(
+            "heartbeat_json must be valid JSON when provided".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_self_hosted_field(field: &str, value: &str) -> Result<(), SelfHostedWorkerRecordError> {
     if value.trim().is_empty() {
-        return Err(SelfHostedWorkerRegistrationError::InvalidRequest(format!(
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
             "{field} must not be empty"
         )));
     }
@@ -2414,6 +2435,14 @@ fn next_self_hosted_worker_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("self-hosted-worker-{nanos}-{}", std::process::id())
+}
+
+fn next_self_hosted_heartbeat_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("self-hosted-heartbeat-{nanos}-{}", std::process::id())
 }
 
 impl AppState {
@@ -4596,8 +4625,7 @@ impl AppState {
     pub(crate) fn register_self_hosted_worker(
         &self,
         request: crate::responses::AdminSelfHostedWorkerRegistrationRequest,
-    ) -> Result<crate::responses::AdminSelfHostedWorkerRecord, SelfHostedWorkerRegistrationError>
-    {
+    ) -> Result<crate::responses::AdminSelfHostedWorkerRecord, SelfHostedWorkerRecordError> {
         validate_self_hosted_registration_request(&request)?;
         let id = next_self_hosted_worker_id();
         let now = now_unix_seconds();
@@ -4619,15 +4647,72 @@ impl AppState {
         };
         self.repositories
             .upsert_self_hosted_worker_registration(registration)
-            .map_err(|error| SelfHostedWorkerRegistrationError::Storage(error.to_string()))?;
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
         self.self_hosted_worker_records()
             .into_iter()
             .find(|record| record.id == id)
             .ok_or_else(|| {
-                SelfHostedWorkerRegistrationError::Storage(
+                SelfHostedWorkerRecordError::Storage(
                     "self-hosted worker registration was not readable after write".into(),
                 )
             })
+    }
+
+    pub(crate) fn record_self_hosted_worker_heartbeat(
+        &self,
+        worker_id: &str,
+        request: crate::responses::AdminSelfHostedWorkerHeartbeatRequest,
+    ) -> Result<
+        (
+            crate::responses::AdminSelfHostedWorkerRecord,
+            crate::responses::AdminSelfHostedWorkerHeartbeat,
+        ),
+        SelfHostedWorkerRecordError,
+    > {
+        validate_self_hosted_heartbeat_request(&request)?;
+        let mut registration = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .find(|registration| registration.id == worker_id)
+            .ok_or_else(|| {
+                SelfHostedWorkerRecordError::NotFound(format!(
+                    "self-hosted worker {worker_id} was not found"
+                ))
+            })?;
+        let observed_at_unix = now_unix_seconds();
+        let heartbeat = StoredSelfHostedWorkerHeartbeat {
+            id: next_self_hosted_heartbeat_id(),
+            worker_id: registration.id.clone(),
+            tenant: registration.tenant.clone(),
+            workspace_id: registration.workspace_id.clone(),
+            status: request.status.trim().to_string(),
+            reported_at_unix: request.reported_at_unix.or(observed_at_unix),
+            observed_at_unix,
+            heartbeat_json: request
+                .heartbeat_json
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "{}".into()),
+        };
+        self.repositories
+            .append_self_hosted_worker_heartbeat(heartbeat.clone())
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        registration.status = heartbeat.status.clone();
+        registration.last_seen_at_unix = heartbeat.observed_at_unix;
+        self.repositories
+            .upsert_self_hosted_worker_registration(registration)
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
+            SelfHostedWorkerRecordError::Storage(
+                "self-hosted worker was not readable after heartbeat write".into(),
+            )
+        })?;
+        let heartbeat = worker.latest_heartbeat.clone().ok_or_else(|| {
+            SelfHostedWorkerRecordError::Storage(
+                "self-hosted heartbeat was not readable after write".into(),
+            )
+        })?;
+        Ok((worker, heartbeat))
     }
 
     pub(crate) fn self_hosted_worker_record(
@@ -7521,7 +7606,7 @@ mod tests {
         );
         assert!(matches!(
             blank_workspace,
-            Err(SelfHostedWorkerRegistrationError::InvalidRequest(message))
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
                 if message == "workspace_id must not be empty"
         ));
 
@@ -7537,13 +7622,143 @@ mod tests {
         );
         assert!(matches!(
             invalid_json,
-            Err(SelfHostedWorkerRegistrationError::InvalidRequest(message))
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
                 if message == "capability_envelope_json must be valid JSON when provided"
         ));
 
         assert!(state
             .repositories
             .self_hosted_worker_registrations()
+            .is_empty());
+    }
+
+    #[test]
+    fn record_self_hosted_worker_heartbeat_updates_status_and_latest_seen() {
+        let state = AppState::new(Config::default());
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext {
+                        organization_id: Some("org".into()),
+                        team_id: None,
+                        project_id: Some("project".into()),
+                        user_id: None,
+                        api_key_id: Some("key".into()),
+                    },
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: true,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+
+        let (updated_worker, heartbeat) = state
+            .record_self_hosted_worker_heartbeat(
+                &worker.id,
+                crate::responses::AdminSelfHostedWorkerHeartbeatRequest {
+                    status: "online".into(),
+                    reported_at_unix: Some(123),
+                    heartbeat_json: Some(r#"{"load":0.42}"#.into()),
+                },
+            )
+            .expect("heartbeat should be accepted");
+
+        assert!(heartbeat.id.starts_with("self-hosted-heartbeat-"));
+        assert_eq!(heartbeat.status, "online");
+        assert_eq!(heartbeat.reported_at_unix, Some(123));
+        assert!(heartbeat.observed_at_unix.is_some());
+        assert_eq!(updated_worker.id, worker.id);
+        assert_eq!(updated_worker.status, "online");
+        assert_eq!(updated_worker.last_seen_at_unix, heartbeat.observed_at_unix);
+        assert_eq!(
+            updated_worker
+                .latest_heartbeat
+                .as_ref()
+                .map(|heartbeat| heartbeat.id.as_str()),
+            Some(heartbeat.id.as_str())
+        );
+
+        let stored_registration = state
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .find(|registration| registration.id == worker.id)
+            .expect("registration should remain stored");
+        assert_eq!(stored_registration.status, "online");
+        assert_eq!(
+            stored_registration.last_seen_at_unix,
+            heartbeat.observed_at_unix
+        );
+
+        let stored_heartbeats = state.repositories.self_hosted_worker_heartbeats();
+        assert_eq!(stored_heartbeats.len(), 1);
+        assert_eq!(stored_heartbeats[0].worker_id, worker.id);
+        assert_eq!(stored_heartbeats[0].heartbeat_json, r#"{"load":0.42}"#);
+    }
+
+    #[test]
+    fn record_self_hosted_worker_heartbeat_rejects_missing_or_invalid_payloads() {
+        let state = AppState::new(Config::default());
+
+        let missing = state.record_self_hosted_worker_heartbeat(
+            "missing-worker",
+            crate::responses::AdminSelfHostedWorkerHeartbeatRequest {
+                status: "online".into(),
+                reported_at_unix: None,
+                heartbeat_json: None,
+            },
+        );
+        assert!(matches!(
+            missing,
+            Err(SelfHostedWorkerRecordError::NotFound(message))
+                if message == "self-hosted worker missing-worker was not found"
+        ));
+
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext::default(),
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: false,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+        let blank_status = state.record_self_hosted_worker_heartbeat(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerHeartbeatRequest {
+                status: " ".into(),
+                reported_at_unix: None,
+                heartbeat_json: None,
+            },
+        );
+        assert!(matches!(
+            blank_status,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "status must not be empty"
+        ));
+
+        let invalid_json = state.record_self_hosted_worker_heartbeat(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerHeartbeatRequest {
+                status: "online".into(),
+                reported_at_unix: None,
+                heartbeat_json: Some("{not-json".into()),
+            },
+        );
+        assert!(matches!(
+            invalid_json,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "heartbeat_json must be valid JSON when provided"
+        ));
+
+        assert!(state
+            .repositories
+            .self_hosted_worker_heartbeats()
             .is_empty());
     }
 

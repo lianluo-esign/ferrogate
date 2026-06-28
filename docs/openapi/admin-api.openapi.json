@@ -453,6 +453,63 @@
         }
       }
     },
+    "/admin/v1/self-hosted-workers/{id}/heartbeat": {
+      "post": {
+        "operationId": "recordAdminSelfHostedWorkerHeartbeat",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Record a self-hosted worker heartbeat in durable control-plane storage.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSelfHostedWorkerHeartbeatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded self-hosted worker heartbeat and updated worker projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerHeartbeatResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
     "/admin/v1/managed-workers": {
       "get": {
         "operationId": "listAdminManagedWorkers",
@@ -9837,6 +9894,54 @@
           },
           "worker": {
             "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerHeartbeatRequest": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reported_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "heartbeat_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional customer-reported heartbeat document encoded as JSON."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerHeartbeatResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "worker",
+          "heartbeat"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_worker_heartbeat"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+          },
+          "heartbeat": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerHeartbeat"
           }
         },
         "additionalProperties": false

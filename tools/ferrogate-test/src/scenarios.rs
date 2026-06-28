@@ -268,6 +268,46 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    let self_hosted_worker_heartbeat_path = format!("{self_hosted_worker_detail_path}/heartbeat");
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_heartbeat_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "status": "online",
+          "reported_at_unix": 123,
+          "heartbeat_json": "{\"load\":0.42}"
+        }"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_heartbeat");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["worker"]["status"], "online");
+            assert_eq!(
+                body["worker"]["latest_heartbeat"]["id"],
+                body["heartbeat"]["id"]
+            );
+            assert_eq!(body["heartbeat"]["status"], "online");
+            assert_eq!(body["heartbeat"]["reported_at_unix"], 123);
+            assert!(body["heartbeat"]["observed_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        &self_hosted_worker_detail_path,
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["status"], "online");
+            assert_eq!(body["latest_heartbeat"]["status"], "online");
+            assert_eq!(body["latest_heartbeat"]["reported_at_unix"], 123);
+            assert!(body["last_seen_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "GET",
         "/admin/v1/self-hosted-workers/missing-worker",
@@ -292,7 +332,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["offset"], 0);
             assert_eq!(body["data"][0]["workspace_id"], "workspace-1");
             assert_eq!(body["data"][0]["worker_name"], "customer-worker-a");
-            assert_eq!(body["data"][0]["status"], "registered");
+            assert_eq!(body["data"][0]["status"], "online");
             assert_eq!(
                 body["data"][0]["identity_fingerprint"],
                 "sha256:test-worker"
@@ -302,6 +342,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["data"][0]["trust_level"],
                 "reported_by_self_hosted_worker"
             );
+            assert_eq!(body["data"][0]["latest_heartbeat"]["status"], "online");
             Ok(())
         },
     )?;

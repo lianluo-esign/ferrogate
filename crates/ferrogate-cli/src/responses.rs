@@ -216,7 +216,7 @@ pub(crate) struct AdminSelfHostedWorkerRecord {
     pub(crate) latest_checkpoint_at_unix: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct AdminSelfHostedWorkerHeartbeat {
     pub(crate) id: String,
     pub(crate) status: String,
@@ -241,6 +241,23 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationRequest {
 pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
     pub(crate) object: &'static str,
     pub(crate) worker: AdminSelfHostedWorkerRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminSelfHostedWorkerHeartbeatRequest {
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) reported_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) heartbeat_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerHeartbeatResponse {
+    pub(crate) object: &'static str,
+    pub(crate) worker: AdminSelfHostedWorkerRecord,
+    pub(crate) heartbeat: AdminSelfHostedWorkerHeartbeat,
 }
 
 impl<T> AdminList<T> {
