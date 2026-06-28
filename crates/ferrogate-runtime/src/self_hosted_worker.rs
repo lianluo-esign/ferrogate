@@ -177,6 +177,7 @@ pub struct SelfHostedWorkerHeartbeat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedRunDispatch {
     pub dispatch_id: String,
+    pub action: SelfHostedRunAction,
     pub tenant_id: String,
     pub workspace_id: String,
     pub session_id: String,
@@ -185,6 +186,15 @@ pub struct SelfHostedRunDispatch {
     pub required_capabilities: Vec<String>,
     pub workload_ref: String,
     pub queued_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfHostedRunAction {
+    StartRun,
+    CancelRun,
+    ResumeRun,
+    CloseSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +208,7 @@ pub struct SelfHostedRunPollRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunLease {
     pub dispatch_id: String,
+    pub action: SelfHostedRunAction,
     pub lease_id: String,
     pub tenant_id: String,
     pub workspace_id: String,
@@ -216,6 +227,7 @@ pub struct SelfHostedRunLease {
 pub struct SelfHostedRunAckRequest {
     pub identity: SelfHostedWorkerIdentity,
     pub dispatch_id: String,
+    pub action: SelfHostedRunAction,
     pub lease_id: String,
     pub run_id: String,
     pub status: SelfHostedRunAckStatus,
@@ -234,6 +246,7 @@ pub enum SelfHostedRunAckStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunAck {
     pub dispatch_id: String,
+    pub action: SelfHostedRunAction,
     pub lease_id: String,
     pub tenant_id: String,
     pub workspace_id: String,
@@ -429,6 +442,7 @@ impl InMemorySelfHostedRunQueue {
 
         Ok(Some(SelfHostedRunLease {
             dispatch_id: queued.dispatch.dispatch_id.clone(),
+            action: queued.dispatch.action,
             lease_id,
             tenant_id: queued.dispatch.tenant_id.clone(),
             workspace_id: queued.dispatch.workspace_id.clone(),
@@ -466,6 +480,11 @@ impl InMemorySelfHostedRunQueue {
                 "ack run_id does not match dispatch".to_string(),
             ));
         }
+        if queued.dispatch.action != request.action {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "ack action does not match dispatch".to_string(),
+            ));
+        }
         if queued.assigned_worker_id.as_deref() != Some(worker.worker_id.as_str()) {
             return Err(SelfHostedWorkerError::InvalidTransport(
                 "ack worker does not own the active lease".to_string(),
@@ -479,6 +498,7 @@ impl InMemorySelfHostedRunQueue {
         queued.acknowledged = true;
         Ok(SelfHostedRunAck {
             dispatch_id: queued.dispatch.dispatch_id.clone(),
+            action: queued.dispatch.action,
             lease_id: request.lease_id,
             tenant_id: worker.tenant_id.clone(),
             workspace_id: worker.workspace_id.clone(),
@@ -1418,6 +1438,7 @@ mod tests {
                 SelfHostedRunAckRequest {
                     identity,
                     dispatch_id: lease.dispatch_id.clone(),
+                    action: lease.action,
                     lease_id: lease.lease_id.clone(),
                     run_id: lease.run_id.clone(),
                     status: SelfHostedRunAckStatus::Accepted,
@@ -1483,6 +1504,69 @@ mod tests {
         assert!(during_active_lease.is_none());
         assert_eq!(after_expiry.lease_id, "dispatch-1:attempt-2");
         assert_eq!(after_expiry.attempt, 2);
+    }
+
+    #[test]
+    fn worker_dispatch_actions_cover_cancel_resume_and_close_contracts() {
+        for action in [
+            SelfHostedRunAction::CancelRun,
+            SelfHostedRunAction::ResumeRun,
+            SelfHostedRunAction::CloseSession,
+        ] {
+            let registry = registered_registry();
+            let identity = registry.list()[0].identity();
+            let mut queue = InMemorySelfHostedRunQueue::default();
+            let transport = InMemorySelfHostedWorkerTransport::default();
+            let mut dispatch = dispatch();
+            dispatch.action = action;
+            dispatch.dispatch_id = format!("{}-dispatch", action.as_str_for_test());
+            queue.enqueue_run(dispatch).unwrap();
+
+            let lease = transport
+                .poll_run(
+                    &registry,
+                    &mut queue,
+                    SelfHostedRunPollRequest {
+                        identity: identity.clone(),
+                        supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                        now_unix: 1_725_000_010,
+                        lease_duration_secs: 30,
+                    },
+                )
+                .unwrap()
+                .expect("matching worker should receive control action lease");
+
+            assert_eq!(lease.action, action);
+
+            let ack = transport
+                .ack_run(
+                    &registry,
+                    &mut queue,
+                    SelfHostedRunAckRequest {
+                        identity: identity.clone(),
+                        dispatch_id: lease.dispatch_id.clone(),
+                        action,
+                        lease_id: lease.lease_id.clone(),
+                        run_id: lease.run_id.clone(),
+                        status: SelfHostedRunAckStatus::Accepted,
+                        reported_at_unix: 1_725_000_011,
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(ack.action, action);
+        }
+    }
+
+    impl SelfHostedRunAction {
+        fn as_str_for_test(self) -> &'static str {
+            match self {
+                Self::StartRun => "start-run",
+                Self::CancelRun => "cancel-run",
+                Self::ResumeRun => "resume-run",
+                Self::CloseSession => "close-session",
+            }
+        }
     }
 
     #[test]
@@ -1616,6 +1700,7 @@ mod tests {
                 SelfHostedRunAckRequest {
                     identity: worker_2.clone(),
                     dispatch_id: lease.dispatch_id.clone(),
+                    action: lease.action,
                     lease_id: lease.lease_id.clone(),
                     run_id: lease.run_id.clone(),
                     status: SelfHostedRunAckStatus::Accepted,
@@ -1645,6 +1730,7 @@ mod tests {
                 SelfHostedRunAckRequest {
                     identity: worker_1,
                     dispatch_id: lease.dispatch_id,
+                    action: lease.action,
                     lease_id: "dispatch-1:attempt-999".to_string(),
                     run_id: lease.run_id,
                     status: SelfHostedRunAckStatus::Accepted,
@@ -1662,6 +1748,7 @@ mod tests {
         let identity = registration_identity();
         let lease = SelfHostedRunLease {
             dispatch_id: "dispatch-1".to_string(),
+            action: SelfHostedRunAction::StartRun,
             lease_id: "dispatch-1:attempt-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             workspace_id: "workspace-1".to_string(),
@@ -1677,6 +1764,7 @@ mod tests {
         };
         let ack = SelfHostedRunAck {
             dispatch_id: lease.dispatch_id.clone(),
+            action: lease.action,
             lease_id: lease.lease_id.clone(),
             tenant_id: lease.tenant_id.clone(),
             workspace_id: lease.workspace_id.clone(),
@@ -1713,6 +1801,7 @@ mod tests {
             .ack_run(&SelfHostedRunAckRequest {
                 identity,
                 dispatch_id: received_lease.dispatch_id.clone(),
+                action: received_lease.action,
                 lease_id: received_lease.lease_id.clone(),
                 run_id: received_lease.run_id.clone(),
                 status: SelfHostedRunAckStatus::Accepted,
@@ -1819,6 +1908,7 @@ mod tests {
     fn dispatch() -> SelfHostedRunDispatch {
         SelfHostedRunDispatch {
             dispatch_id: "dispatch-1".to_string(),
+            action: SelfHostedRunAction::StartRun,
             tenant_id: "tenant-1".to_string(),
             workspace_id: "workspace-1".to_string(),
             session_id: "session-1".to_string(),

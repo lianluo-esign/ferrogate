@@ -189,6 +189,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert!(body["data"][0]["transport_actions"]
                 .as_array()
                 .is_some_and(|actions| actions.iter().any(|action| action == "poll_run")
+                    && actions.iter().any(|action| action == "cancel_run")
+                    && actions.iter().any(|action| action == "resume_run")
+                    && actions.iter().any(|action| action == "close_session")
                     && actions.iter().any(|action| action == "ack_run")));
             assert_eq!(body["data"][0]["dispatch_contract"]["implemented"], true);
             assert_eq!(
@@ -207,6 +210,12 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["data"][0]["dispatch_contract"]["production_mtls_transport_implemented"],
                 false
             );
+            assert!(body["data"][0]["dispatch_contract"]["actions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| action == "start_run")
+                    && actions.iter().any(|action| action == "cancel_run")
+                    && actions.iter().any(|action| action == "resume_run")
+                    && actions.iter().any(|action| action == "close_session")));
             assert_eq!(body["data"][0]["registration_api"]["implemented"], true);
             assert_eq!(body["data"][0]["persistence"]["implemented"], false);
             assert_eq!(
@@ -430,6 +439,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["worker_id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["tenant_id"], "org_demo");
             assert_eq!(body["workspace_id"], "workspace-1");
+            assert_eq!(body["action"], "start_run");
             assert_eq!(body["framework_adapter"], "codex");
             assert_eq!(body["required_capabilities"][0], "shell");
             assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
@@ -503,6 +513,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             );
             assert_eq!(body["lease_id"], *self_hosted_lease_id.borrow());
             assert_eq!(body["worker_id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["action"], "start_run");
             assert_eq!(body["status"], "accepted");
             assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
             Ok(())
@@ -1750,6 +1761,7 @@ fn self_hosted_worker_ack_body_for_scope(
             "token_secret": "{token_secret}"
           }},
           "dispatch_id": "self-hosted-dispatch-{worker_id}",
+          "action": "start_run",
           "lease_id": "{lease_id}",
           "run_id": "self-hosted-run-{worker_id}",
           "status": "accepted",

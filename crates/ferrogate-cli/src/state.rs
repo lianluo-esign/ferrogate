@@ -55,9 +55,9 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_runtime::{
-    InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunDispatch,
-    SelfHostedRunLease, SelfHostedRunPollRequest, SelfHostedWorkerError, SelfHostedWorkerIdentity,
-    SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
+    InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunAction,
+    SelfHostedRunDispatch, SelfHostedRunLease, SelfHostedRunPollRequest, SelfHostedWorkerError,
+    SelfHostedWorkerIdentity, SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
@@ -2665,6 +2665,7 @@ impl SelfHostedWorkerDispatchRuntime {
             .collect::<Vec<_>>();
         match self.queue.enqueue_run(SelfHostedRunDispatch {
             dispatch_id,
+            action: SelfHostedRunAction::StartRun,
             tenant_id: self_hosted_tenant_id(&registration.tenant),
             workspace_id: registration.workspace_id.clone(),
             session_id: format!("self-hosted-session-{}", registration.id),
