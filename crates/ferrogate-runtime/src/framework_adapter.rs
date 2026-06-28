@@ -1355,6 +1355,42 @@ mod tests {
     }
 
     #[test]
+    fn process_framework_adapter_event_stream_matches_golden_fixture() {
+        let mut events = Vec::new();
+        for mut adapter in [
+            ProcessFrameworkAdapter::claude_code(),
+            ProcessFrameworkAdapter::codex(),
+            ProcessFrameworkAdapter::hermes(),
+        ] {
+            let (session, started) = adapter.start_session(session_request()).unwrap();
+            events.push(started);
+            events.extend(
+                adapter
+                    .submit_run(FrameworkAdapterRunRequest {
+                        session: session.clone(),
+                        input_ref: "input://run-1".to_string(),
+                    })
+                    .unwrap(),
+            );
+            events.push(adapter.close_session(&session).unwrap());
+        }
+
+        let actual = serde_json::to_value(
+            events
+                .iter()
+                .map(NormalizedFrameworkEvent::canonical_json)
+                .collect::<Vec<serde_json::Value>>(),
+        )
+        .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/process_framework_adapter_events.golden.json"
+        ))
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn process_framework_adapter_validates_launch_contract() {
         let mut adapter = ProcessFrameworkAdapter::new(
             FrameworkAdapterDescriptor {

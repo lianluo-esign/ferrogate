@@ -1,0 +1,230 @@
+[
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "session.started",
+    "message": "claude-code process shim session prepared",
+    "metadata": {
+      "handshake": "process_launch_prepared",
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "worker_id": "worker-1",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "run.started",
+    "message": "claude-code process shim run dispatch prepared",
+    "metadata": {
+      "input_ref": "input://run-1",
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "model.requested",
+    "message": "claude-code process shim model boundary prepared",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "target": "framework:claude_code",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "claude-code",
+    "adapter_version": "1",
+    "framework": "claude_code",
+    "kind": "session.closed",
+    "message": "claude-code process shim session closed",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "claude",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "session.started",
+    "message": "codex process shim session prepared",
+    "metadata": {
+      "handshake": "process_launch_prepared",
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "worker_id": "worker-1",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "run.started",
+    "message": "codex process shim run dispatch prepared",
+    "metadata": {
+      "input_ref": "input://run-1",
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "model.requested",
+    "message": "codex process shim model boundary prepared",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "target": "framework:codex",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "codex",
+    "adapter_version": "1",
+    "framework": "codex",
+    "kind": "session.closed",
+    "message": "codex process shim session closed",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "codex",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "session.started",
+    "message": "hermes process shim session prepared",
+    "metadata": {
+      "handshake": "process_launch_prepared",
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "worker_id": "worker-1",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "run.started",
+    "message": "hermes process shim run dispatch prepared",
+    "metadata": {
+      "input_ref": "input://run-1",
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "model.requested",
+    "message": "hermes process shim model boundary prepared",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "target": "framework:hermes",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  },
+  {
+    "adapter_name": "hermes",
+    "adapter_version": "1",
+    "framework": "hermes",
+    "kind": "session.closed",
+    "message": "hermes process shim session closed",
+    "metadata": {
+      "launch_args": "",
+      "launch_command": "hermes",
+      "launch_env_keys": "",
+      "process_shim": "true",
+      "sdk_bound": "false",
+      "working_dir": ""
+    },
+    "mode": "managed",
+    "run_id": "run-1",
+    "session_id": "session-1"
+  }
+]
