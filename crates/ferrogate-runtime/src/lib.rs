@@ -48,10 +48,10 @@ pub use isolation::{
 #[cfg(unix)]
 pub use managed_worker::AgentWorkerUnixManagementClient;
 pub use managed_worker::{
-    AgentWorkerControlClient, AgentWorkerFrameworkHandler, AgentWorkerManagementAction,
-    AgentWorkerManagementEnvelope, AgentWorkerManagementError, AgentWorkerManagementErrorCode,
-    AgentWorkerManagementKey, AgentWorkerManagementResponse, AgentWorkerManagementResult,
-    AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
+    AgentWorkerControlClient, AgentWorkerFrameworkHandler, AgentWorkerIsolationBackendReport,
+    AgentWorkerManagementAction, AgentWorkerManagementEnvelope, AgentWorkerManagementError,
+    AgentWorkerManagementErrorCode, AgentWorkerManagementKey, AgentWorkerManagementResponse,
+    AgentWorkerManagementResult, AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
     AgentWorkerManagementVerification, AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
     AgentWorkerTransportSecurity, InMemoryAgentWorkerManagementTransport,
     ManagedWorkerCancellation, ManagedWorkerError, ManagedWorkerExecution,

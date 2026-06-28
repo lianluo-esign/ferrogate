@@ -17,11 +17,12 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ferrogate_runtime::{
-    AgentWorkerFrameworkHandler, AgentWorkerManagementAction, AgentWorkerManagementEnvelope,
-    AgentWorkerManagementErrorCode, AgentWorkerManagementKey, AgentWorkerManagementResponse,
-    AgentWorkerManagementResult, AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
-    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
-    InMemoryAgentWorkerManagementTransport, ManagedWorkerError, AGENT_WORKER_PROTOCOL_VERSION,
+    AgentWorkerFrameworkHandler, AgentWorkerIsolationBackendReport, AgentWorkerManagementAction,
+    AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementKey,
+    AgentWorkerManagementResponse, AgentWorkerManagementResult, AgentWorkerManagementSecurity,
+    AgentWorkerManagementTransport, AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
+    AgentWorkerTransportSecurity, InMemoryAgentWorkerManagementTransport, ManagedWorkerError,
+    AGENT_WORKER_PROTOCOL_VERSION,
 };
 use serde_json::json;
 
@@ -323,10 +324,10 @@ fn dispatch_management_action(
             }
         }
         AgentWorkerManagementAction::ListBackends => {
-            Err(ManagedWorkerError::management_protocol_error(
-                AgentWorkerManagementErrorCode::IncompatibleBackend,
-                "agent-worker isolation backend registry is not implemented by this worker process",
-            ))
+            Ok(Some(AgentWorkerManagementResult::IsolationBackends {
+                registry_implemented: false,
+                backends: isolation_backends(),
+            }))
         }
         AgentWorkerManagementAction::Provision
         | AgentWorkerManagementAction::ExecOrAttach
@@ -343,6 +344,10 @@ fn dispatch_management_action(
             ))
         }
     }
+}
+
+fn isolation_backends() -> Vec<AgentWorkerIsolationBackendReport> {
+    Vec::new()
 }
 
 fn current_unix_millis() -> u64 {
@@ -602,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_signed_backend_listing_to_backend_dispatch_stub() {
+    fn routes_signed_backend_listing_to_typed_empty_registry_result() {
         let mut envelope = smoke_envelope().unwrap();
         envelope.action = AgentWorkerManagementAction::ListBackends;
         envelope.request_id = "agent-worker-list-backends-request".to_string();
@@ -618,11 +623,16 @@ mod tests {
                 .unwrap();
         let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
-        assert_eq!(response["accepted"], false);
+        assert_eq!(response["accepted"], true);
         assert_eq!(response["request_id"], "agent-worker-list-backends-request");
         assert_eq!(response["action"], "list_backends");
-        assert_eq!(response["error"]["code"], "incompatible_backend");
-        assert_eq!(response["error"]["retryable"], false);
+        assert_eq!(response["result"]["kind"], "isolation_backends");
+        assert_eq!(response["result"]["registry_implemented"], false);
+        assert_eq!(
+            response["result"]["backends"],
+            serde_json::Value::Array(Vec::new())
+        );
+        assert_eq!(response["error"], serde_json::Value::Null);
     }
 
     #[test]

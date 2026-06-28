@@ -548,6 +548,19 @@ pub enum AgentWorkerManagementResult {
     FrameworkHandlers {
         handlers: Vec<AgentWorkerFrameworkHandler>,
     },
+    IsolationBackends {
+        registry_implemented: bool,
+        backends: Vec<AgentWorkerIsolationBackendReport>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWorkerIsolationBackendReport {
+    pub backend_name: String,
+    pub backend_version: String,
+    pub kind: String,
+    pub ready: bool,
+    pub readiness_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1832,6 +1845,28 @@ mod tests {
         assert_eq!(
             result_json["result"]["handlers"][0]["adapter_name"],
             "native-harness"
+        );
+
+        let backend_result_json = serde_json::to_value(response.clone().with_result(
+            AgentWorkerManagementResult::IsolationBackends {
+                registry_implemented: false,
+                backends: vec![AgentWorkerIsolationBackendReport {
+                    backend_name: "firecracker".to_string(),
+                    backend_version: "not-wired".to_string(),
+                    kind: "firecracker_micro_vm".to_string(),
+                    ready: false,
+                    readiness_reason: Some(
+                        "Firecracker backend registry is not implemented".to_string(),
+                    ),
+                }],
+            },
+        ))
+        .unwrap();
+        assert_eq!(backend_result_json["result"]["kind"], "isolation_backends");
+        assert_eq!(backend_result_json["result"]["registry_implemented"], false);
+        assert_eq!(
+            backend_result_json["result"]["backends"][0]["kind"],
+            "firecracker_micro_vm"
         );
 
         let duplicate_idempotency = management_envelope_with(
