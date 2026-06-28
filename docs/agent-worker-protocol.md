@@ -348,14 +348,18 @@ Firecracker: `provision` fails closed until real microVM lifecycle code exists,
 while `exec_or_attach`, `stream_status`, and `collect_artifacts` can exercise
 the selected framework handler inside `agent-worker` only after the worker
 receives a `capability.allowed` decision from the configured gateway HTTP
-authorizer. The native harness can complete deterministically; Codex, Claude
-Code, and Hermes currently use process-shim contract adapters that emit
-prepared run/model/artifact events without launching real binaries. The
-recorded handler events therefore prove the managed action gate was crossed and
-the selected adapter contract was used; they still do not prove real tool
-execution or microVM boot. Adding real lifecycle success requires the
-Firecracker handler implementation, HTTP/mTLS production transport, and
-contract coverage for Codex/Claude/Hermes binary or SDK launch.
+authorizer. The requested capability is framework-specific: the native harness
+uses a managed tool dispatch capability, Codex and Claude Code use a managed
+CLI capability with gateway-controlled environment policy and output limits, and
+Hermes uses managed memory-read capability for run context. The native harness
+can complete deterministically; Codex, Claude Code, and Hermes currently use
+process-shim contract adapters that emit prepared run/model/artifact events
+without launching real binaries. The recorded handler events therefore prove
+the managed action gate was crossed and the selected adapter contract was used;
+they still do not prove real tool execution or microVM boot. Adding real
+lifecycle success requires the Firecracker handler implementation, HTTP/mTLS
+production transport, and contract coverage for Codex/Claude/Hermes binary or
+SDK launch.
 
 The gateway/control-plane side uses `AgentWorkerHttpManagementClient` for the
 primary worker management path. The client sends `POST

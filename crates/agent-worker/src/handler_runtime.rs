@@ -17,9 +17,9 @@ use ferrogate_runtime::{
     AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
     FrameworkAdapter, FrameworkAdapterArtifact, FrameworkAdapterArtifactRequest,
     FrameworkAdapterCapabilities, FrameworkAdapterMode, FrameworkAdapterRunRequest,
-    FrameworkAdapterSession, FrameworkAdapterSessionRequest, ManagedExternalAction,
-    ManagedToolAction, ManagedWorkerError, NativeHarnessAdapter, NormalizedFrameworkEvent,
-    ProcessFrameworkAdapter,
+    FrameworkAdapterSession, FrameworkAdapterSessionRequest, ManagedCliAction,
+    ManagedExternalAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedToolAction,
+    ManagedWorkerError, NativeHarnessAdapter, NormalizedFrameworkEvent, ProcessFrameworkAdapter,
 };
 
 use crate::external_actions::{
@@ -232,10 +232,30 @@ fn required_capabilities(adapter: Option<&str>) -> FrameworkAdapterCapabilities 
 }
 
 fn managed_action_for_session(session: &FrameworkAdapterSession) -> ManagedExternalAction {
-    ManagedExternalAction::Tool(ManagedToolAction {
-        tool_name: format!("{}.dispatch", session.adapter_name),
-        arguments_policy: "redacted_json".to_string(),
-    })
+    match session.adapter_name.as_str() {
+        "codex" | "claude-code" => ManagedExternalAction::Cli(ManagedCliAction {
+            command: session.adapter_name.clone(),
+            args: vec!["run".to_string(), "--json".to_string()],
+            working_dir: format!("/workspaces/{}", session.workspace_id),
+            env_policy: "gateway_injected_only".to_string(),
+            timeout_millis: 30_000,
+            stdout_limit_bytes: 1024 * 1024,
+            stderr_limit_bytes: 256 * 1024,
+            artifact_capture: true,
+        }),
+        "hermes" => ManagedExternalAction::Memory(ManagedMemoryAction {
+            access: ManagedMemoryAccess::Read,
+            namespace: format!(
+                "tenant:{}/workspace:{}",
+                session.tenant_id, session.workspace_id
+            ),
+            key: format!("run-context:{}", session.run_id),
+        }),
+        _ => ManagedExternalAction::Tool(ManagedToolAction {
+            tool_name: format!("{}.dispatch", session.adapter_name),
+            arguments_policy: "redacted_json".to_string(),
+        }),
+    }
 }
 
 fn handler_runtime_error(error: ferrogate_runtime::FrameworkAdapterError) -> ManagedWorkerError {
@@ -348,7 +368,15 @@ mod tests {
                 && event
                     .metadata
                     .get("external_target")
-                    .is_some_and(|target| target == "tool:codex.dispatch")
+                    .is_some_and(|target| target == "codex")
+                && event
+                    .metadata
+                    .get("external_action")
+                    .is_some_and(|action| action == "cli")
+                && event
+                    .metadata
+                    .get("env_policy")
+                    .is_some_and(|policy| policy == "gateway_injected_only")
         }));
         assert!(events.iter().any(|event| event.kind == "model.requested"));
         assert!(!events.iter().any(|event| event.kind == "tool.completed"));
@@ -358,12 +386,45 @@ mod tests {
             .any(|artifact| artifact.artifact_id == "codex-artifact"));
     }
 
+    #[test]
+    fn hermes_process_shim_requests_memory_capability_before_execution() {
+        let mut envelope = envelope();
+        envelope.framework_adapter = Some("hermes".to_string());
+        let authorizer = authorizer();
+
+        let (_, result) =
+            exec_or_attach_framework_handler_with_authorizer(&envelope, Some(&authorizer)).unwrap();
+
+        let AgentWorkerManagementResult::HandlerEvents { events } = result else {
+            panic!("expected handler events");
+        };
+        assert!(events.iter().any(|event| {
+            event.kind == "capability.allowed"
+                && event
+                    .metadata
+                    .get("external_action")
+                    .is_some_and(|action| action == "memory.read")
+                && event
+                    .metadata
+                    .get("memory_access")
+                    .is_some_and(|access| access == "read")
+                && event
+                    .metadata
+                    .get("namespace")
+                    .is_some_and(|namespace| namespace == "tenant:tenant-1/workspace:workspace-1")
+        }));
+    }
+
     fn authorizer(
     ) -> crate::external_actions::RuntimeGatewayExternalActionAuthorizer<SimpleCapabilityAuthorizer>
     {
         crate::external_actions::RuntimeGatewayExternalActionAuthorizer::new(
             SimpleCapabilityAuthorizer::new(CapabilityPolicy {
-                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                allowed_actions: BTreeSet::from([
+                    CapabilityAction::Tool,
+                    CapabilityAction::Cli,
+                    CapabilityAction::MemoryRead,
+                ]),
                 ..CapabilityPolicy::default()
             }),
         )

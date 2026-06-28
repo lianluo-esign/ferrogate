@@ -1120,6 +1120,22 @@ mod tests {
             .position(|event| event.kind == "model.requested")
             .expect("missing model.requested event");
         assert!(capability_position < model_position);
+        let capability = &events[capability_position];
+        assert_eq!(
+            capability
+                .metadata
+                .get("external_action")
+                .map(String::as_str),
+            Some("cli")
+        );
+        assert_eq!(
+            capability.metadata.get("command").map(String::as_str),
+            Some("codex")
+        );
+        assert_eq!(
+            capability.metadata.get("env_policy").map(String::as_str),
+            Some("gateway_injected_only")
+        );
         assert!(events
             .iter()
             .any(|event| event.adapter_name == "codex" && event.framework == "codex"));
@@ -1138,7 +1154,12 @@ mod tests {
         let server_responses = server.join().unwrap();
         assert_eq!(server_responses.len(), 3);
         assert!(server_responses.iter().all(|response| response.accepted));
-        assert_eq!(authorizer.join().len(), 1);
+        let authorizer_requests = authorizer.join();
+        assert_eq!(authorizer_requests.len(), 1);
+        assert!(matches!(
+            authorizer_requests[0].response.decision,
+            Some(ferrogate_runtime::ExternalActionDecision::Allowed)
+        ));
     }
 
     #[test]
@@ -1472,7 +1493,10 @@ mod tests {
         let handle = thread::spawn(move || {
             let authorizer = RuntimeGatewayExternalActionAuthorizer::new(
                 SimpleCapabilityAuthorizer::new(CapabilityPolicy {
-                    allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                    allowed_actions: BTreeSet::from([
+                        CapabilityAction::Tool,
+                        CapabilityAction::Cli,
+                    ]),
                     ..CapabilityPolicy::default()
                 }),
             );
