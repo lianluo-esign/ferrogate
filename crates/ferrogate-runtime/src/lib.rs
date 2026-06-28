@@ -10,6 +10,7 @@ mod agent;
 mod capability_boundary;
 mod framework_adapter;
 mod isolation;
+mod managed_external_action;
 mod managed_worker;
 mod reload;
 mod self_hosted_worker;
@@ -44,6 +45,13 @@ pub use isolation::{
     IsolationLifecycleEvidence, IsolationNetworkPolicy, IsolationPolicy, IsolationPrepareRequest,
     IsolationPrepared, IsolationResourceLimits, IsolationResult, IsolationSnapshotOutcome,
     IsolationStarted, IsolationStopOutcome,
+};
+pub use managed_external_action::{
+    authorize_managed_external_action, self_hosted_external_action_report, ManagedBrowserAction,
+    ManagedBrowserOperation, ManagedCliAction, ManagedExternalAction, ManagedExternalActionRequest,
+    ManagedFilesystemAccess, ManagedFilesystemAction, ManagedMcpToolAction, ManagedMemoryAccess,
+    ManagedMemoryAction, ManagedNetworkEgressAction, ManagedRestAction, ManagedSecretAction,
+    ManagedSkillAction, ManagedToolAction,
 };
 #[cfg(unix)]
 pub use managed_worker::AgentWorkerUnixManagementClient;

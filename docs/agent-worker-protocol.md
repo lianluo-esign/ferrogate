@@ -278,6 +278,45 @@ stream, reads one `AgentWorkerManagementResponse`, and maps IPC failures to
 `AgentWorker` control errors. It does not verify signatures or execute lifecycle
 actions; those remain worker-side responsibilities behind the management API.
 
+### Gateway-Mediated External Actions
+
+Managed worker handlers must not execute framework-requested external actions
+directly. The standard adapter-facing request is `ManagedExternalActionRequest`.
+It binds the current `FrameworkAdapterSession` to one typed action spec and
+routes that action through `authorize_managed_external_action` before any
+handler touches tools, MCP, shell, filesystem, browser automation, REST, secrets,
+memory, or network egress.
+
+The current typed action specs are:
+
+- `ManagedToolAction`: governed built-in or plugin tool call with argument
+  policy.
+- `ManagedMcpToolAction`: governed MCP server/tool call with argument policy.
+- `ManagedCliAction`: command, args, working directory, env policy, timeout,
+  stdout/stderr limits, and artifact capture policy.
+- `ManagedSkillAction`: skill id and declared capability list.
+- `ManagedFilesystemAction`: path, access mode, and workspace-relative flag.
+- `ManagedBrowserAction`: browser operation, URL, and timeout.
+- `ManagedRestAction`: method, URL, headers policy, body policy, timeout, and
+  retry limit.
+- `ManagedSecretAction`: secret id and use purpose.
+- `ManagedMemoryAction`: read/write access, namespace, and key.
+- `ManagedNetworkEgressAction`: host, port, and protocol.
+
+Each action maps to the stable `CapabilityAction` policy surface and produces a
+normalized framework event with `capability.allowed`, `capability.denied`, or
+`capability.requested`. The event metadata preserves both the generic
+authorization fields (`action`, `target`, `decision`, tenant/workspace/worker,
+and isolation backend) and the action-specific policy shape such as CLI limits
+or REST body/header policy. Invalid action specs fail before authorization so
+operators do not see malformed worker requests as policy decisions.
+
+Self-hosted workers use `self_hosted_external_action_report` for the same action
+shape, but the event remains reported telemetry with
+`trust_level=reported_by_self_hosted_worker`. It is not FerroGate-enforced
+evidence unless the customer explicitly routes the action through a governed
+callback path.
+
 ### Core Objects
 
 - `tenant`

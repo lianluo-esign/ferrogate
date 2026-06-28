@@ -2215,11 +2215,11 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["id"], "agent-run-harness");
             assert_eq!(body["summary"]["request_count"], 0);
             assert_eq!(body["summary"]["audit_event_count"], 7);
-            assert_eq!(body["summary"]["agent_event_count"], 6);
+            assert_eq!(body["summary"]["agent_event_count"], 7);
             assert_eq!(body["run"]["id"], "agent-run-harness");
             assert_eq!(body["run"]["status"], "completed");
             assert_eq!(body["run"]["provider"], "ferrogate.external");
-            assert_eq!(body["agent_events"].as_array().unwrap().len(), 6);
+            assert_eq!(body["agent_events"].as_array().unwrap().len(), 7);
             assert!(body["agent_events"]
                 .as_array()
                 .unwrap()
@@ -2228,6 +2228,17 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
                     event["kind"] == "tool_call_completed"
                         && event["run_id"] == "agent-run-harness"
                         && event["outcome"] == "success"
+                }));
+            assert!(body["agent_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["kind"] == "capability.allowed"
+                        && event["run_id"] == "agent-run-harness"
+                        && event["target"] == "tool.echo"
+                        && event["tool_call_id"] == "mock-tool-call"
+                        && event["outcome"] == "allowed"
                 }));
             assert!(body["audit_events"]
                 .as_array()
