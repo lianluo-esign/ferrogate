@@ -62,7 +62,8 @@ pub use managed_external_action::{
 #[cfg(unix)]
 pub use managed_worker::AgentWorkerUnixManagementClient;
 pub use managed_worker::{
-    AgentWorkerControlClient, AgentWorkerEncryptedPayload, AgentWorkerFrameworkHandler,
+    AgentWorkerControlClient, AgentWorkerEncryptedPayload, AgentWorkerFrameworkArtifactResult,
+    AgentWorkerFrameworkEventResult, AgentWorkerFrameworkHandler,
     AgentWorkerIsolationBackendReport, AgentWorkerLifecycleResult, AgentWorkerManagementAction,
     AgentWorkerManagementEnvelope, AgentWorkerManagementError, AgentWorkerManagementErrorCode,
     AgentWorkerManagementFrame, AgentWorkerManagementFrameEncoding, AgentWorkerManagementKey,

@@ -909,6 +909,34 @@ pub enum AgentWorkerManagementResult {
     Lifecycle {
         lifecycle: AgentWorkerLifecycleResult,
     },
+    HandlerEvents {
+        events: Vec<AgentWorkerFrameworkEventResult>,
+    },
+    HandlerArtifacts {
+        artifacts: Vec<AgentWorkerFrameworkArtifactResult>,
+        events: Vec<AgentWorkerFrameworkEventResult>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWorkerFrameworkEventResult {
+    pub session_id: String,
+    pub run_id: String,
+    pub adapter_name: String,
+    pub adapter_version: String,
+    pub framework: String,
+    pub mode: String,
+    pub kind: String,
+    pub message: Option<String>,
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWorkerFrameworkArtifactResult {
+    pub artifact_id: String,
+    pub name: String,
+    pub media_type: String,
+    pub byte_len: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

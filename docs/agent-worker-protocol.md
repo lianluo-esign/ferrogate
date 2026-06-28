@@ -101,12 +101,23 @@ idempotent, and encoded with stable wire values. Any new transport or lifecycle
 action must preserve this contract instead of adding side-channel arguments or
 transport-specific behavior.
 
-Every gateway-to-`agent-worker` management request is either a local plaintext
-JSON envelope or a standard `AgentWorkerManagementFrame`. The plaintext form is
-allowed only for same-host Unix socket contract smokes. Network-capable
-transports should send a frame with `encoding=encrypted_json`; the frame carries
+The primary gateway-to-`agent-worker` management path is an HTTP API over an
+encrypted channel:
+
+```text
+POST /v1/agent-worker/management
+content-type: application/json
+x-ferrogate-transport-security: mutual_tls | symmetric_aead
+```
+
+Production deployments should use mTLS or an equivalent encrypted transport.
+When symmetric application encryption is used, the HTTP body is an
+`AgentWorkerManagementFrame` with `encoding=encrypted_json`; the frame carries
 the routing identity in clear associated data and the signed envelope as an
-AEAD-authenticated encrypted payload.
+AEAD-authenticated encrypted payload. Same-host development and contract smokes
+may send a signed plaintext JSON envelope only when the transport is explicitly
+marked as a local-only path. Do not treat local Unix sockets as the product
+protocol; they are an optimization/test transport over the same envelope.
 
 The signed envelope uses stable snake_case enum values and carries:
 
@@ -155,16 +166,21 @@ Lifecycle dispatch now reaches worker-owned action branches for `provision`,
 `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and `collect_artifacts`.
 `provision` fails closed with `incompatible_backend` when Firecracker is not
 configured and with `provision_failed` when the binary is configured but the
-real microVM provision/start implementation is still absent. `cleanup` and
-`stream_status` can return `result.kind=lifecycle` with explicit `not_started`
-evidence before any Firecracker instance exists; this is lifecycle evidence, not
-microVM boot proof. The worker also keeps a process-local management state store
-for bounded contract smokes: accepted idempotency retries replay the first stored
-action outcome instead of re-dispatching lifecycle logic, and lifecycle result
-events are recorded behind the worker-owned store boundary. This is intentionally
-not a production durability claim; Postgres/Supabase-backed nonce, idempotency,
-session, run, and evidence persistence is still required before long-running
-deployment.
+real microVM provision/start implementation is still absent. `exec_or_attach`
+now has a worker-owned native harness execution smoke that returns
+`result.kind=handler_events` with normalized framework events such as
+`session.started`, `run.started`, `artifact.created`, `run.completed`, and
+`session.closed`. `stream_status` can replay stored native-harness events as
+`handler_events`, and `collect_artifacts` can return
+`result.kind=handler_artifacts` with an artifact manifest plus the related
+events. This is handler execution proof inside `agent-worker`, not Firecracker
+boot proof and not Codex/Claude/Hermes process execution proof. The worker also
+keeps a process-local management state store for bounded contract smokes:
+accepted idempotency retries replay the first stored action outcome instead of
+re-dispatching lifecycle logic, and lifecycle/handler outcomes are recorded
+behind the worker-owned store boundary. This is intentionally not a production
+durability claim; Postgres/Supabase-backed nonce, idempotency, session, run, and
+evidence persistence is still required before long-running deployment.
 Stable error codes include `invalid_request`, `unsupported_protocol_version`,
 `unsupported_action`, `transport_security_required`, `policy_denied`,
 `quota_exceeded`, `incompatible_backend`, `handler_unavailable`, `worker_busy`,
@@ -241,7 +257,26 @@ and writes one `AgentWorkerManagementResponse` JSON object to stdout. It
 verifies the same contract future HTTP, gRPC, or Unix-socket transports must
 use; it does not execute Firecracker lifecycle actions by itself.
 
-The first concrete process transport is a Unix-domain socket contract smoke:
+The primary local process transport smoke is HTTP:
+
+```bash
+agent-worker serve-management-http \
+  --listen 127.0.0.1:7777 \
+  --key-id "$AGENT_WORKER_MANAGEMENT_KEY_ID" \
+  --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET" \
+  --max-requests 1 \
+  --idle-timeout-millis 1000
+```
+
+This command accepts `POST /v1/agent-worker/management`, requires
+`content-type: application/json`, requires
+`x-ferrogate-transport-security=mutual_tls` or `symmetric_aead`, verifies the
+signed envelope or encrypted frame, dispatches the requested management action,
+writes one JSON `AgentWorkerManagementResponse`, and exits after
+`--max-requests` requests. It is a std-library bounded smoke server for the HTTP
+contract, not the final async production HTTP/mTLS server.
+
+There is also a Unix-domain socket local-only contract smoke:
 
 ```bash
 agent-worker serve-management-unix \
@@ -266,12 +301,16 @@ idempotency key and lifecycle fingerprint returns the stored action result with
 Accepted connections are handled independently, so one slow client cannot block
 the listener from accepting a later management request during the same bounded
 server run. The envelope should use
-`security.transport_security=local_unix_socket` for this transport.
+`security.transport_security=local_unix_socket` for this transport. This path
+must not be documented or implemented as the product gateway-to-worker protocol;
+it exists for same-host development, deterministic contract tests, and local
+optimization only.
 
-This proves the `agent-worker` process can receive management requests over an
-explicit same-host process boundary and can shut down cleanly without leaving a
-stale socket. It is not the final unbounded concurrent lifecycle server, does
-not provide cross-host encryption, and does not boot Firecracker.
+The HTTP smoke proves the `agent-worker` process can receive management
+requests over the intended API shape. The Unix smoke proves the same envelope can
+also cross an explicit same-host process boundary and can shut down cleanly
+without leaving a stale socket. Neither smoke is the final unbounded concurrent
+production server, and neither boots Firecracker.
 
 The server dispatches every authenticated request by action instead of treating
 authentication as execution support.
@@ -282,12 +321,13 @@ authentication failure. A ready Firecracker report only means the configured
 binary path exists; it must not be treated as evidence that a microVM can boot.
 Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 `stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
-worker-owned lifecycle dispatch. The dispatch still does not boot Firecracker:
-`provision` fails closed until real microVM lifecycle code exists, while
-`cleanup` and `stream_status` can report typed lifecycle `not_started` evidence
-for sessions that never provisioned. Adding real lifecycle success requires both
-the Firecracker handler implementation and contract coverage for the reported
-response.
+worker-owned lifecycle or handler dispatch. The dispatch still does not boot
+Firecracker: `provision` fails closed until real microVM lifecycle code exists,
+while `exec_or_attach`, `stream_status`, and `collect_artifacts` can exercise
+the built-in native harness inside `agent-worker` and return normalized handler
+events/artifact metadata. Adding real lifecycle success requires the Firecracker
+handler implementation, HTTP/mTLS production transport, and contract coverage
+for Codex/Claude/Hermes handler launch.
 
 The gateway/control-plane side uses the same local wire contract through
 `AgentWorkerUnixManagementClient`. The client serializes an

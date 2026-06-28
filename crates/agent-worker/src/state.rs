@@ -19,6 +19,8 @@ use ferrogate_runtime::{
     AgentWorkerManagementResponse, AgentWorkerManagementResult, ManagedWorkerError,
 };
 
+use crate::handler_runtime::HandlerRunState;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredLifecycleEvent {
     pub(crate) tenant_id: String,
@@ -78,6 +80,10 @@ pub(crate) trait AgentWorkerStateStore {
         response: AgentWorkerManagementResponse,
     ) -> Result<RecordedManagementOutcome, ManagedWorkerError>;
 
+    fn get_handler_run_state(&self, session_id: &str, run_id: &str) -> Option<HandlerRunState>;
+
+    fn put_handler_run_state(&mut self, state: HandlerRunState);
+
     #[cfg(test)]
     fn lifecycle_events(&self) -> Vec<StoredLifecycleEvent>;
 }
@@ -86,6 +92,7 @@ pub(crate) trait AgentWorkerStateStore {
 pub(crate) struct InMemoryAgentWorkerStateStore {
     idempotent_responses: HashMap<String, AgentWorkerManagementResponse>,
     lifecycle_events: Vec<StoredLifecycleEvent>,
+    handler_runs: HashMap<String, HandlerRunState>,
 }
 
 impl InMemoryAgentWorkerStateStore {
@@ -130,6 +137,10 @@ impl InMemoryAgentWorkerStateStore {
                 .push(StoredLifecycleEvent::from_lifecycle(envelope, lifecycle));
         }
     }
+
+    fn handler_run_key(session_id: &str, run_id: &str) -> String {
+        [session_id, run_id].join("\n")
+    }
 }
 
 impl AgentWorkerStateStore for InMemoryAgentWorkerStateStore {
@@ -159,6 +170,19 @@ impl AgentWorkerStateStore for InMemoryAgentWorkerStateStore {
         self.record_lifecycle_event_if_present(envelope, &response);
         self.idempotent_responses.insert(key, response.clone());
         Ok(RecordedManagementOutcome::Fresh(response))
+    }
+
+    fn get_handler_run_state(&self, session_id: &str, run_id: &str) -> Option<HandlerRunState> {
+        self.handler_runs
+            .get(&Self::handler_run_key(session_id, run_id))
+            .cloned()
+    }
+
+    fn put_handler_run_state(&mut self, state: HandlerRunState) {
+        self.handler_runs.insert(
+            Self::handler_run_key(&state.session.session_id, &state.session.run_id),
+            state,
+        );
     }
 
     #[cfg(test)]

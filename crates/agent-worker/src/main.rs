@@ -4,13 +4,14 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod backends;
 mod external_actions;
+mod handler_runtime;
 mod handlers;
 mod lifecycle;
 mod management;
@@ -83,6 +84,27 @@ enum Command {
         #[arg(long)]
         idle_timeout_millis: Option<u64>,
     },
+    /// Serve signed management JSON over the HTTP management API.
+    ServeManagementHttp {
+        /// HTTP listen address for the management API.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_HTTP_ADDR")]
+        listen: SocketAddr,
+        /// Management key id expected in the signed envelope.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_KEY_ID")]
+        key_id: String,
+        /// Shared secret used to verify the envelope MAC.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_SHARED_SECRET")]
+        shared_secret: String,
+        /// Verification time override for deterministic contract tests.
+        #[arg(long)]
+        now_unix_millis: Option<u64>,
+        /// Number of HTTP management requests to accept before exiting.
+        #[arg(long, default_value_t = 1)]
+        max_requests: usize,
+        /// Exit after this many idle milliseconds without a new HTTP connection.
+        #[arg(long)]
+        idle_timeout_millis: Option<u64>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -111,6 +133,21 @@ fn main() -> Result<()> {
             idle_timeout_millis,
         } => management::serve_management_unix_command(
             &socket_path,
+            &key_id,
+            &shared_secret,
+            now_unix_millis,
+            max_requests,
+            idle_timeout_millis,
+        ),
+        Command::ServeManagementHttp {
+            listen,
+            key_id,
+            shared_secret,
+            now_unix_millis,
+            max_requests,
+            idle_timeout_millis,
+        } => management::serve_management_http_command(
+            listen,
             &key_id,
             &shared_secret,
             now_unix_millis,

@@ -16,30 +16,26 @@ use ferrogate_runtime::{
     ManagedWorkerSessionStatus,
 };
 
-use crate::backends::isolation_backends;
+use crate::{
+    backends::isolation_backends,
+    handler_runtime::{
+        cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
+        exec_or_attach_native_harness, stream_native_harness_status,
+    },
+    state::AgentWorkerStateStore,
+};
 
 pub(crate) fn dispatch_lifecycle_action(
+    state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     match envelope.action {
         AgentWorkerManagementAction::Provision => provision(envelope),
-        AgentWorkerManagementAction::ExecOrAttach => lifecycle_not_started(
-            envelope,
-            AgentWorkerManagementErrorCode::RunFailed,
-            "agent-worker cannot exec_or_attach before Firecracker provision succeeds",
-        ),
-        AgentWorkerManagementAction::Stop => lifecycle_not_started(
-            envelope,
-            AgentWorkerManagementErrorCode::Cancelled,
-            "agent-worker cannot stop a session before Firecracker provision succeeds",
-        ),
-        AgentWorkerManagementAction::Cleanup => cleanup(envelope),
-        AgentWorkerManagementAction::StreamStatus => lifecycle_status(envelope),
-        AgentWorkerManagementAction::CollectArtifacts => lifecycle_not_started(
-            envelope,
-            AgentWorkerManagementErrorCode::CleanupFailed,
-            "agent-worker cannot collect artifacts before Firecracker provision succeeds",
-        ),
+        AgentWorkerManagementAction::ExecOrAttach => exec_or_attach(state, envelope),
+        AgentWorkerManagementAction::Stop => stop(state, envelope),
+        AgentWorkerManagementAction::Cleanup => cleanup(state, envelope),
+        AgentWorkerManagementAction::StreamStatus => stream_status(state, envelope),
+        AgentWorkerManagementAction::CollectArtifacts => collect_artifacts(state, envelope),
         AgentWorkerManagementAction::ProbeHandlers | AgentWorkerManagementAction::ListBackends => {
             Ok(None)
         }
@@ -74,9 +70,77 @@ fn provision(
     ))
 }
 
-fn cleanup(
+fn exec_or_attach(
+    state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    if let Some(existing) = state.get_handler_run_state(&session_id, &run_id) {
+        return Ok(Some(stream_native_harness_status(&existing)));
+    }
+    let (handler_state, result) = exec_or_attach_native_harness(envelope)?;
+    state.put_handler_run_state(handler_state);
+    Ok(Some(result))
+}
+
+fn stream_status(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    if let Some(existing) = state.get_handler_run_state(&session_id, &run_id) {
+        return Ok(Some(stream_native_harness_status(&existing)));
+    }
+    lifecycle_status(envelope)
+}
+
+fn collect_artifacts(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    let Some(existing) = state.get_handler_run_state(&session_id, &run_id) else {
+        return lifecycle_not_started(
+            envelope,
+            AgentWorkerManagementErrorCode::CleanupFailed,
+            "agent-worker cannot collect artifacts before handler execution starts",
+        );
+    };
+    Ok(Some(collect_native_harness_artifacts(&existing)))
+}
+
+fn stop(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    let Some(mut existing) = state.get_handler_run_state(&session_id, &run_id) else {
+        return lifecycle_not_started(
+            envelope,
+            AgentWorkerManagementErrorCode::Cancelled,
+            "agent-worker cannot stop a session before handler execution starts",
+        );
+    };
+    let result = cancel_native_harness(&mut existing)?;
+    state.put_handler_run_state(existing);
+    Ok(Some(result))
+}
+
+fn cleanup(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    if let Some(mut existing) = state.get_handler_run_state(&session_id, &run_id) {
+        let result = cleanup_native_harness(&mut existing)?;
+        state.put_handler_run_state(existing);
+        return Ok(Some(result));
+    }
     let lifecycle = lifecycle_result(
         envelope,
         ManagedWorkerSessionStatus::CleanedUp,

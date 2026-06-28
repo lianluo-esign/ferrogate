@@ -5,7 +5,9 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use std::{
+    collections::HashMap,
     io::{self, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
     os::unix::net::UnixListener,
     path::Path,
     sync::{Arc, Mutex},
@@ -101,6 +103,289 @@ pub(crate) fn serve_management_unix_command(
         println!("agent-worker unix management served requests=0 idle_timeout=true");
     }
     Ok(())
+}
+
+pub(crate) fn serve_management_http_command(
+    listen: SocketAddr,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: Option<u64>,
+    max_requests: usize,
+    idle_timeout_millis: Option<u64>,
+) -> Result<()> {
+    let responses = serve_management_http(
+        listen,
+        key_id,
+        shared_secret,
+        now_unix_millis,
+        max_requests,
+        idle_timeout_millis,
+    )?;
+    if let Some(response) = responses.last() {
+        println!(
+            "agent-worker http management served requests={} last_request_id={} last_accepted={}",
+            responses.len(),
+            response.request_id,
+            response.accepted
+        );
+    } else {
+        println!("agent-worker http management served requests=0 idle_timeout=true");
+    }
+    Ok(())
+}
+
+fn serve_management_http(
+    listen: SocketAddr,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: Option<u64>,
+    max_requests: usize,
+    idle_timeout_millis: Option<u64>,
+) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
+    if max_requests == 0 {
+        anyhow::bail!("max_requests must be greater than zero");
+    }
+    let listener = TcpListener::bind(listen)?;
+    let transport = Arc::new(Mutex::new(InMemoryAgentWorkerManagementTransport::new(
+        AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+            key_id: key_id.to_string(),
+            shared_secret: shared_secret.to_string(),
+        }])?,
+    )));
+    let state = Arc::new(Mutex::new(InMemoryAgentWorkerStateStore::new()));
+    let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
+    let mut handles = Vec::with_capacity(max_requests);
+    let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
+    if let Some(timeout) = idle_timeout {
+        if timeout.is_zero() {
+            anyhow::bail!("idle_timeout_millis must be greater than zero");
+        }
+        listener.set_nonblocking(true)?;
+    }
+    let mut idle_started = Instant::now();
+    while handles.len() < max_requests {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let transport = Arc::clone(&transport);
+                let state = Arc::clone(&state);
+                let shared_secret = shared_secret.to_string();
+                handles.push(thread::spawn(move || {
+                    handle_management_http_stream(
+                        stream,
+                        transport,
+                        state,
+                        &shared_secret,
+                        now_unix_millis,
+                    )
+                }));
+                idle_started = Instant::now();
+            }
+            Err(error) if idle_timeout.is_some() && is_idle_accept_error(&error) => {
+                let timeout = idle_timeout.expect("guarded by idle_timeout.is_some()");
+                if idle_started.elapsed() >= timeout {
+                    break;
+                }
+                std::thread::sleep(
+                    timeout
+                        .saturating_sub(idle_started.elapsed())
+                        .min(Duration::from_millis(10)),
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut responses = Vec::with_capacity(handles.len());
+    for handle in handles {
+        responses.push(
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("agent-worker HTTP management thread panicked"))??,
+        );
+    }
+    Ok(responses)
+}
+
+fn handle_management_http_stream(
+    mut stream: TcpStream,
+    transport: Arc<Mutex<InMemoryAgentWorkerManagementTransport>>,
+    state: Arc<Mutex<InMemoryAgentWorkerStateStore>>,
+    shared_secret: &str,
+    now_unix_millis: u64,
+) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
+    stream.set_nonblocking(false)?;
+    let request = read_http_management_request(&mut stream)?;
+    let response = match request {
+        Ok(body) => {
+            let envelope = decode_management_input(&body, shared_secret)?;
+            let response = {
+                let mut transport = transport.lock().map_err(|_| {
+                    anyhow::anyhow!("agent-worker HTTP management transport lock poisoned")
+                })?;
+                transport.accept_management_request(envelope.clone(), now_unix_millis)
+            };
+            let mut state = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("agent-worker HTTP management state lock poisoned"))?;
+            accept_verified_management_response(&mut *state, envelope, response)
+        }
+        Err(response) => response,
+    };
+    write_http_json_response(&mut stream, &response)?;
+    Ok(response)
+}
+
+fn read_http_management_request(
+    stream: &mut TcpStream,
+) -> Result<Result<String, AgentWorkerManagementResponse>> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let header_end;
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(Err(http_invalid_request_response(
+                "agent-worker HTTP management request closed before headers",
+            )));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+            return Ok(Err(http_invalid_request_response(
+                "agent-worker HTTP management request exceeds maximum message size",
+            )));
+        }
+        if let Some(position) = find_http_header_end(&buffer) {
+            header_end = position;
+            break;
+        }
+    }
+
+    let headers = String::from_utf8(buffer[..header_end].to_vec()).map_err(|_| {
+        anyhow::anyhow!("agent-worker HTTP management request headers are not valid UTF-8")
+    })?;
+    let mut lines = headers.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    if request_line != "POST /v1/agent-worker/management HTTP/1.1" {
+        return Ok(Err(http_invalid_request_response(
+            "agent-worker HTTP management endpoint requires POST /v1/agent-worker/management",
+        )));
+    }
+    let headers = parse_http_headers(lines);
+    let content_type = headers
+        .get("content-type")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if !content_type.starts_with("application/json") {
+        return Ok(Err(http_invalid_request_response(
+            "agent-worker HTTP management endpoint requires application/json",
+        )));
+    }
+    let transport_security = headers
+        .get("x-ferrogate-transport-security")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if !matches!(transport_security, "mutual_tls" | "symmetric_aead") {
+        return Ok(Err(http_invalid_request_response(
+            "agent-worker HTTP management requires x-ferrogate-transport-security=mutual_tls or symmetric_aead",
+        )));
+    }
+    let Some(content_length) = headers.get("content-length") else {
+        return Ok(Err(http_invalid_request_response(
+            "agent-worker HTTP management request missing content-length",
+        )));
+    };
+    let content_length = match content_length.parse::<usize>() {
+        Ok(value) if value <= AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES => value,
+        _ => {
+            return Ok(Err(http_invalid_request_response(
+                "agent-worker HTTP management content-length is invalid or too large",
+            )));
+        }
+    };
+    let body_start = header_end + 4;
+    let mut body = buffer[body_start..].to_vec();
+    while body.len() < content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(Err(http_invalid_request_response(
+                "agent-worker HTTP management request closed before body",
+            )));
+        }
+        body.extend_from_slice(&chunk[..read]);
+        if body.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+            return Ok(Err(http_invalid_request_response(
+                "agent-worker HTTP management body exceeds maximum message size",
+            )));
+        }
+    }
+    body.truncate(content_length);
+    let body = String::from_utf8(body)
+        .map_err(|_| anyhow::anyhow!("agent-worker HTTP management body is not valid UTF-8"))?;
+    Ok(Ok(body))
+}
+
+fn find_http_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn parse_http_headers<'a>(lines: impl Iterator<Item = &'a str>) -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+    headers
+}
+
+fn write_http_json_response(
+    stream: &mut TcpStream,
+    response: &AgentWorkerManagementResponse,
+) -> Result<()> {
+    let status = if response.accepted {
+        "200 OK"
+    } else {
+        "400 Bad Request"
+    };
+    let body = serde_json::to_string(response)?;
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )?;
+    Ok(())
+}
+
+fn http_invalid_request_response(message: impl Into<String>) -> AgentWorkerManagementResponse {
+    let envelope = AgentWorkerManagementEnvelope {
+        protocol_version: AGENT_WORKER_PROTOCOL_VERSION,
+        action: AgentWorkerManagementAction::ProbeHandlers,
+        request_id: "invalid-http-management-request".to_string(),
+        idempotency_key: "invalid-http-management-request".to_string(),
+        issued_at_unix_millis: 0,
+        deadline_unix_millis: 1,
+        tenant_id: "unknown".to_string(),
+        workspace_id: "unknown".to_string(),
+        worker_id: "unknown".to_string(),
+        session_id: None,
+        run_id: None,
+        security: AgentWorkerManagementSecurity {
+            key_id: "unknown".to_string(),
+            nonce: "unknown".to_string(),
+            signature: "unknown".to_string(),
+            algorithm: AgentWorkerSecurityAlgorithm::SharedSecretBlake2b,
+            transport_security: AgentWorkerTransportSecurity::MutualTls,
+            encrypted: true,
+        },
+    };
+    AgentWorkerManagementResponse::rejected(
+        &envelope,
+        &ManagedWorkerError::management_protocol_error(
+            AgentWorkerManagementErrorCode::InvalidRequest,
+            message,
+        ),
+    )
 }
 
 fn serve_management_unix(
@@ -278,7 +563,7 @@ fn accept_verified_management_response(
             return replayed;
         }
     }
-    match dispatch_management_action(envelope.clone()) {
+    match dispatch_management_action(state, envelope.clone()) {
         Ok(Some(result)) => state
             .record_management_response(&envelope, response.with_result(result))
             .map(|outcome| outcome.into_response())
@@ -298,6 +583,7 @@ fn accept_verified_management_response(
 }
 
 fn dispatch_management_action(
+    state: &mut impl AgentWorkerStateStore,
     envelope: AgentWorkerManagementEnvelope,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     match envelope.action {
@@ -325,7 +611,9 @@ fn dispatch_management_action(
         | AgentWorkerManagementAction::Stop
         | AgentWorkerManagementAction::Cleanup
         | AgentWorkerManagementAction::StreamStatus
-        | AgentWorkerManagementAction::CollectArtifacts => dispatch_lifecycle_action(&envelope),
+        | AgentWorkerManagementAction::CollectArtifacts => {
+            dispatch_lifecycle_action(state, &envelope)
+        }
     }
 }
 
@@ -369,8 +657,8 @@ mod tests {
     use super::*;
     use crate::{state::AgentWorkerStateStore, test_support::lock_firecracker_env};
     use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
-    use std::os::unix::net::UnixStream;
     use std::thread;
+    use std::{net::TcpStream, os::unix::net::UnixStream};
 
     #[test]
     fn smoke_envelope_uses_signed_management_contract() {
@@ -477,6 +765,52 @@ mod tests {
         assert_eq!(response["workspace_id"], "smoke-workspace");
         assert_eq!(response["worker_id"], "agent-worker-smoke");
         assert_eq!(response["result"]["kind"], "isolation_backends");
+    }
+
+    #[test]
+    fn accepts_encrypted_management_frame_over_http_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let server = thread::spawn(move || {
+            serve_management_http(
+                addr,
+                "agent-worker-smoke-key",
+                SMOKE_SHARED_SECRET,
+                Some(1_000),
+                1,
+                None,
+            )
+            .unwrap()
+        });
+
+        let mut envelope = smoke_envelope().unwrap();
+        envelope.action = AgentWorkerManagementAction::ListBackends;
+        envelope.request_id = "agent-worker-http-frame-request".to_string();
+        envelope.idempotency_key = "agent-worker-http-frame-idempotency".to_string();
+        envelope.security.nonce = "agent-worker-http-frame-nonce".to_string();
+        envelope.security.transport_security = AgentWorkerTransportSecurity::SymmetricAead;
+        envelope.security.encrypted = true;
+        envelope.security.signature = envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let frame =
+            AgentWorkerManagementFrame::encrypt_envelope(&envelope, SMOKE_SHARED_SECRET, [9; 24])
+                .unwrap();
+        let body = serde_json::to_string(&frame).unwrap();
+
+        let response = send_http_management_request(addr, &body, "symmetric_aead");
+
+        assert!(response.accepted);
+        assert_eq!(response.request_id, "agent-worker-http-frame-request");
+        assert_eq!(response.action, AgentWorkerManagementAction::ListBackends);
+        assert!(matches!(
+            response.result,
+            Some(AgentWorkerManagementResult::IsolationBackends { .. })
+        ));
+        let server_responses = server.join().unwrap();
+        assert_eq!(server_responses.len(), 1);
+        assert!(server_responses[0].accepted);
     }
 
     #[test]
@@ -594,6 +928,167 @@ mod tests {
             response["result"]["lifecycle"]["isolation_instance_id"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn exec_or_attach_runs_native_harness_inside_agent_worker() {
+        let envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::ExecOrAttach,
+            "agent-worker-native-run",
+        );
+        let input = serde_json::to_string(&envelope).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], true);
+        assert_eq!(response["action"], "exec_or_attach");
+        assert_eq!(response["result"]["kind"], "handler_events");
+        let events = response["result"]["events"].as_array().unwrap();
+        assert!(events.iter().any(|event| {
+            event["kind"] == "session.started"
+                && event["framework"] == "native_harness"
+                && event["mode"] == "managed"
+        }));
+        assert!(events.iter().any(|event| event["kind"] == "run.completed"));
+        assert!(events.iter().any(|event| event["kind"] == "session.closed"));
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn native_harness_status_and_artifacts_reuse_worker_process_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("agent-worker-management.sock");
+        let socket_for_server = socket_path.clone();
+        let server = thread::spawn(move || {
+            serve_management_unix(
+                &socket_for_server,
+                "agent-worker-smoke-key",
+                SMOKE_SHARED_SECRET,
+                Some(1_000),
+                3,
+                None,
+            )
+            .unwrap()
+        });
+
+        wait_for_socket(&socket_path);
+        let client = AgentWorkerUnixManagementClient::new(&socket_path);
+        let exec = client
+            .send_management_request(&shared_lifecycle_envelope(
+                AgentWorkerManagementAction::ExecOrAttach,
+                "agent-worker-native-socket",
+                "exec",
+            ))
+            .unwrap();
+        let status = client
+            .send_management_request(&shared_lifecycle_envelope(
+                AgentWorkerManagementAction::StreamStatus,
+                "agent-worker-native-socket",
+                "status",
+            ))
+            .unwrap();
+        let artifacts = client
+            .send_management_request(&shared_lifecycle_envelope(
+                AgentWorkerManagementAction::CollectArtifacts,
+                "agent-worker-native-socket",
+                "artifacts",
+            ))
+            .unwrap();
+
+        assert!(exec.accepted);
+        assert!(status.accepted);
+        assert!(artifacts.accepted);
+        let Some(AgentWorkerManagementResult::HandlerEvents { events }) = status.result else {
+            panic!("status did not return handler events");
+        };
+        assert!(events.iter().any(|event| event.kind == "run.completed"));
+        let Some(AgentWorkerManagementResult::HandlerArtifacts {
+            artifacts: collected,
+            events,
+        }) = artifacts.result
+        else {
+            panic!("artifact collection did not return handler artifacts");
+        };
+        assert_eq!(collected[0].artifact_id, "native-artifact");
+        assert!(events.iter().any(|event| event.kind == "artifact.created"));
+
+        let server_responses = server.join().unwrap();
+        assert_eq!(server_responses.len(), 3);
+        assert!(server_responses.iter().all(|response| response.accepted));
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn native_harness_status_and_artifacts_reuse_http_worker_process_state() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let server = thread::spawn(move || {
+            serve_management_http(
+                addr,
+                "agent-worker-smoke-key",
+                SMOKE_SHARED_SECRET,
+                Some(1_000),
+                3,
+                None,
+            )
+            .unwrap()
+        });
+
+        let exec = send_http_management_request(
+            addr,
+            &serde_json::to_string(&shared_lifecycle_envelope(
+                AgentWorkerManagementAction::ExecOrAttach,
+                "agent-worker-native-http",
+                "exec",
+            ))
+            .unwrap(),
+            "mutual_tls",
+        );
+        let status = send_http_management_request(
+            addr,
+            &serde_json::to_string(&shared_lifecycle_envelope(
+                AgentWorkerManagementAction::StreamStatus,
+                "agent-worker-native-http",
+                "status",
+            ))
+            .unwrap(),
+            "mutual_tls",
+        );
+        let artifacts = send_http_management_request(
+            addr,
+            &serde_json::to_string(&shared_lifecycle_envelope(
+                AgentWorkerManagementAction::CollectArtifacts,
+                "agent-worker-native-http",
+                "artifacts",
+            ))
+            .unwrap(),
+            "mutual_tls",
+        );
+
+        assert!(exec.accepted);
+        assert!(status.accepted);
+        assert!(artifacts.accepted);
+        assert!(matches!(
+            status.result,
+            Some(AgentWorkerManagementResult::HandlerEvents { .. })
+        ));
+        let Some(AgentWorkerManagementResult::HandlerArtifacts {
+            artifacts: collected,
+            events,
+        }) = artifacts.result
+        else {
+            panic!("artifact collection did not return handler artifacts");
+        };
+        assert_eq!(collected[0].artifact_id, "native-artifact");
+        assert!(events.iter().any(|event| event.kind == "artifact.created"));
+
+        let server_responses = server.join().unwrap();
+        assert_eq!(server_responses.len(), 3);
+        assert!(server_responses.iter().all(|response| response.accepted));
     }
 
     #[test]
@@ -880,17 +1375,60 @@ mod tests {
         panic!("unix socket was not created at {}", socket_path.display());
     }
 
+    fn send_http_management_request(
+        addr: SocketAddr,
+        body: &str,
+        transport_security: &str,
+    ) -> AgentWorkerManagementResponse {
+        let mut stream = None;
+        for _ in 0..100 {
+            match TcpStream::connect(addr) {
+                Ok(connected) => {
+                    stream = Some(connected);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        let mut stream = stream.unwrap_or_else(|| panic!("tcp listener was not created at {addr}"));
+        write!(
+            stream,
+            "POST /v1/agent-worker/management HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\nx-ferrogate-transport-security: {transport_security}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(body.trim()).unwrap()
+    }
+
     fn lifecycle_envelope(
         action: AgentWorkerManagementAction,
         prefix: &str,
     ) -> AgentWorkerManagementEnvelope {
+        shared_lifecycle_envelope(action, prefix, "")
+    }
+
+    fn shared_lifecycle_envelope(
+        action: AgentWorkerManagementAction,
+        prefix: &str,
+        request_suffix: &str,
+    ) -> AgentWorkerManagementEnvelope {
         let mut envelope = smoke_envelope().unwrap();
         envelope.action = action;
-        envelope.request_id = format!("{prefix}-request");
-        envelope.idempotency_key = format!("{prefix}-idempotency");
+        let request_name = if request_suffix.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix}-{request_suffix}")
+        };
+        envelope.request_id = format!("{request_name}-request");
+        envelope.idempotency_key = format!("{request_name}-idempotency");
         envelope.session_id = Some(format!("{prefix}-session"));
         envelope.run_id = Some(format!("{prefix}-run"));
-        envelope.security.nonce = format!("{prefix}-nonce");
+        envelope.security.nonce = format!("{request_name}-nonce");
         envelope.security.signature = envelope
             .shared_secret_signature(SMOKE_SHARED_SECRET)
             .unwrap();
