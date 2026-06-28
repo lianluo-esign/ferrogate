@@ -63,7 +63,7 @@ pub use managed_external_action::{
 pub use managed_worker::AgentWorkerUnixManagementClient;
 pub use managed_worker::{
     AgentWorkerControlClient, AgentWorkerEncryptedPayload, AgentWorkerFrameworkArtifactResult,
-    AgentWorkerFrameworkEventResult, AgentWorkerFrameworkHandler,
+    AgentWorkerFrameworkEventResult, AgentWorkerFrameworkHandler, AgentWorkerHttpManagementClient,
     AgentWorkerIsolationBackendReport, AgentWorkerLifecycleResult, AgentWorkerManagementAction,
     AgentWorkerManagementEnvelope, AgentWorkerManagementError, AgentWorkerManagementErrorCode,
     AgentWorkerManagementFrame, AgentWorkerManagementFrameEncoding, AgentWorkerManagementKey,

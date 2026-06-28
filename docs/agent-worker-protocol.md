@@ -329,13 +329,26 @@ events/artifact metadata. Adding real lifecycle success requires the Firecracker
 handler implementation, HTTP/mTLS production transport, and contract coverage
 for Codex/Claude/Hermes handler launch.
 
-The gateway/control-plane side uses the same local wire contract through
-`AgentWorkerUnixManagementClient`. The client serializes an
-`AgentWorkerManagementEnvelope`, enforces the management message size limit,
-sends it to the configured Unix socket, shuts down the request side of the
-stream, reads one `AgentWorkerManagementResponse`, and maps IPC failures to
-`AgentWorker` control errors. It does not verify signatures or execute lifecycle
-actions; those remain worker-side responsibilities behind the management API.
+The gateway/control-plane side uses `AgentWorkerHttpManagementClient` for the
+primary worker management path. The client sends `POST
+/v1/agent-worker/management`, sets `content-type: application/json`, sets
+`x-ferrogate-transport-security` to `mutual_tls` or `symmetric_aead`, enforces
+the management message size limit, reads one `AgentWorkerManagementResponse`,
+and maps HTTP/framing failures to `AgentWorker` control errors. The mTLS-bound
+path sends a signed plaintext envelope only when the caller has already
+established the encrypted mutual-TLS channel. The symmetric path sends an
+`AgentWorkerManagementFrame` with `encoding=encrypted_json`; nonce generation
+and key rotation remain caller/control-plane responsibilities.
+
+For same-host development and deterministic smokes, the gateway/control-plane
+may still use `AgentWorkerUnixManagementClient`. That client serializes an
+`AgentWorkerManagementEnvelope`, sends it to the configured Unix socket, shuts
+down the request side of the stream, reads one response, and maps IPC failures
+to `AgentWorker` control errors. Unix socket transport is local-only and must
+not replace the HTTP encrypted-channel product protocol.
+
+Neither client verifies signatures or executes lifecycle actions; those remain
+worker-side responsibilities behind the management API.
 
 ### Gateway-Mediated External Actions
 

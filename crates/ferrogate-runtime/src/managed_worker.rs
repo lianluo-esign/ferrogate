@@ -14,11 +14,11 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
+    io::{Read, Write},
+    net::{Shutdown, SocketAddr, TcpStream},
 };
 #[cfg(unix)]
 use std::{
-    io::{Read, Write},
-    net::Shutdown,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
@@ -1108,6 +1108,161 @@ impl AgentWorkerManagementTransport for InMemoryAgentWorkerManagementTransport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerHttpManagementClient {
+    endpoint: SocketAddr,
+}
+
+impl AgentWorkerHttpManagementClient {
+    pub fn new(endpoint: SocketAddr) -> Self {
+        Self { endpoint }
+    }
+
+    pub fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
+    pub fn send_management_request_over_mtls(
+        &self,
+        envelope: &AgentWorkerManagementEnvelope,
+    ) -> Result<AgentWorkerManagementResponse, ManagedWorkerError> {
+        if envelope.security.transport_security != AgentWorkerTransportSecurity::MutualTls
+            || envelope.security.encrypted
+        {
+            return Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::TransportSecurityRequired,
+                "agent-worker HTTP mTLS management requests require mutual_tls transport_security and encrypted=false",
+            ));
+        }
+        let request = serde_json::to_string(envelope).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker HTTP management request serialization failed: {error}"
+            ))
+        })?;
+        self.send_json_request(&request, AgentWorkerTransportSecurity::MutualTls)
+    }
+
+    pub fn send_encrypted_management_request(
+        &self,
+        envelope: &AgentWorkerManagementEnvelope,
+        shared_secret: &str,
+        nonce: [u8; 24],
+    ) -> Result<AgentWorkerManagementResponse, ManagedWorkerError> {
+        let frame = AgentWorkerManagementFrame::encrypt_envelope(envelope, shared_secret, nonce)?;
+        let request = serde_json::to_string(&frame).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker HTTP encrypted management frame serialization failed: {error}"
+            ))
+        })?;
+        self.send_json_request(&request, AgentWorkerTransportSecurity::SymmetricAead)
+    }
+
+    fn send_json_request(
+        &self,
+        body: &str,
+        transport_security: AgentWorkerTransportSecurity,
+    ) -> Result<AgentWorkerManagementResponse, ManagedWorkerError> {
+        if body.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+            return Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::MessageTooLarge,
+                "agent-worker HTTP management request exceeds maximum message size",
+            ));
+        }
+        let mut stream = TcpStream::connect(self.endpoint).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker HTTP management connect failed at {}: {error}",
+                self.endpoint
+            ))
+        })?;
+        let request = format!(
+            "POST /v1/agent-worker/management HTTP/1.1\r\n\
+             host: {}\r\n\
+             content-type: application/json\r\n\
+             x-ferrogate-transport-security: {}\r\n\
+             content-length: {}\r\n\
+             connection: close\r\n\
+             \r\n\
+             {}",
+            self.endpoint,
+            transport_security.as_str(),
+            body.len(),
+            body
+        );
+        stream.write_all(request.as_bytes()).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker HTTP management request write failed: {error}"
+            ))
+        })?;
+        stream.shutdown(Shutdown::Write).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker HTTP management request shutdown failed: {error}"
+            ))
+        })?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker HTTP management response read failed: {error}"
+            ))
+        })?;
+        if response.len() > AGENT_WORKER_MANAGEMENT_MAX_MESSAGE_BYTES {
+            return Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::MessageTooLarge,
+                "agent-worker HTTP management response exceeds maximum message size",
+            ));
+        }
+        decode_http_management_response(&response)
+    }
+}
+
+fn decode_http_management_response(
+    response: &[u8],
+) -> Result<AgentWorkerManagementResponse, ManagedWorkerError> {
+    let response = std::str::from_utf8(response).map_err(|_| {
+        ManagedWorkerError::AgentWorker(
+            "agent-worker HTTP management response is not valid UTF-8".to_string(),
+        )
+    })?;
+    let Some(header_end) = response.find("\r\n\r\n") else {
+        return Err(ManagedWorkerError::AgentWorker(
+            "agent-worker HTTP management response missing header terminator".to_string(),
+        ));
+    };
+    let (headers, body) = response.split_at(header_end);
+    let body = &body[4..];
+    let mut header_lines = headers.lines();
+    let status_line = header_lines.next().unwrap_or_default();
+    let status_code = parse_http_status_code(status_line)?;
+    if status_code != 200 {
+        return Err(ManagedWorkerError::AgentWorker(format!(
+            "agent-worker HTTP management response returned status {status_code}"
+        )));
+    }
+    serde_json::from_str(body.trim()).map_err(|error| {
+        ManagedWorkerError::AgentWorker(format!(
+            "agent-worker HTTP management response decode failed: {error}"
+        ))
+    })
+}
+
+fn parse_http_status_code(status_line: &str) -> Result<u16, ManagedWorkerError> {
+    let mut parts = status_line.split_whitespace();
+    let version = parts.next().unwrap_or_default();
+    if !version.starts_with("HTTP/") {
+        return Err(ManagedWorkerError::AgentWorker(format!(
+            "agent-worker HTTP management response has invalid status line: {status_line}"
+        )));
+    }
+    parts
+        .next()
+        .unwrap_or_default()
+        .parse::<u16>()
+        .map_err(|_| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker HTTP management response has invalid status code: {status_line}"
+            ))
+        })
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentWorkerUnixManagementClient {
@@ -1835,6 +1990,7 @@ mod tests {
         IsolationBackendCapabilities, IsolationBackendKind, IsolationFilesystemPolicy,
         IsolationLifecycleEvidence, IsolationNetworkPolicy, IsolationResourceLimits,
     };
+    use std::{net::TcpListener, thread};
 
     #[test]
     fn schedules_managed_session_through_agent_worker_control_client() {
@@ -2485,6 +2641,129 @@ mod tests {
     }
 
     #[test]
+    fn http_management_client_sends_signed_envelope_over_mtls_contract() {
+        let mut envelope = management_envelope(AgentWorkerManagementAction::ProbeHandlers);
+        envelope.security.transport_security = AgentWorkerTransportSecurity::MutualTls;
+        envelope.security.encrypted = false;
+        envelope.security.signature = envelope
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        let expected_response =
+            AgentWorkerManagementResponse::accepted(AgentWorkerManagementVerification {
+                request_id: envelope.request_id.clone(),
+                idempotency_key: envelope.idempotency_key.clone(),
+                key_id: envelope.security.key_id.clone(),
+                nonce: envelope.security.nonce.clone(),
+                action: envelope.action,
+                tenant_id: envelope.tenant_id.clone(),
+                workspace_id: envelope.workspace_id.clone(),
+                worker_id: envelope.worker_id.clone(),
+                session_id: envelope.session_id.clone(),
+                run_id: envelope.run_id.clone(),
+                duplicate_idempotency_key: false,
+            });
+        let expected_envelope = envelope.clone();
+        let server = spawn_http_management_contract_server(
+            move |request| {
+                assert!(request.starts_with("POST /v1/agent-worker/management HTTP/1.1\r\n"));
+                assert!(request.contains("\r\ncontent-type: application/json\r\n"));
+                assert!(request.contains("\r\nx-ferrogate-transport-security: mutual_tls\r\n"));
+                let body = http_request_body(&request);
+                let received: AgentWorkerManagementEnvelope = serde_json::from_str(body).unwrap();
+                assert_eq!(received, expected_envelope);
+            },
+            expected_response.clone(),
+            200,
+        );
+        let client = AgentWorkerHttpManagementClient::new(server.endpoint);
+
+        let response = client.send_management_request_over_mtls(&envelope).unwrap();
+        server.join();
+
+        assert_eq!(response, expected_response);
+    }
+
+    #[test]
+    fn http_management_client_sends_encrypted_frame_over_symmetric_aead_contract() {
+        let mut envelope = management_envelope(AgentWorkerManagementAction::ProbeHandlers);
+        envelope.security.transport_security = AgentWorkerTransportSecurity::SymmetricAead;
+        envelope.security.encrypted = true;
+        envelope.security.signature = envelope
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        let expected_response =
+            AgentWorkerManagementResponse::accepted(AgentWorkerManagementVerification {
+                request_id: envelope.request_id.clone(),
+                idempotency_key: envelope.idempotency_key.clone(),
+                key_id: envelope.security.key_id.clone(),
+                nonce: envelope.security.nonce.clone(),
+                action: envelope.action,
+                tenant_id: envelope.tenant_id.clone(),
+                workspace_id: envelope.workspace_id.clone(),
+                worker_id: envelope.worker_id.clone(),
+                session_id: envelope.session_id.clone(),
+                run_id: envelope.run_id.clone(),
+                duplicate_idempotency_key: false,
+            });
+        let expected_envelope = envelope.clone();
+        let server = spawn_http_management_contract_server(
+            move |request| {
+                assert!(request.starts_with("POST /v1/agent-worker/management HTTP/1.1\r\n"));
+                assert!(request.contains("\r\ncontent-type: application/json\r\n"));
+                assert!(request.contains("\r\nx-ferrogate-transport-security: symmetric_aead\r\n"));
+                let body = http_request_body(&request);
+                let frame: AgentWorkerManagementFrame = serde_json::from_str(body).unwrap();
+                assert_eq!(
+                    frame.encoding,
+                    AgentWorkerManagementFrameEncoding::EncryptedJson
+                );
+                assert!(frame.plaintext_json.is_none());
+                let decoded = frame.decode_envelope("agent-worker-shared-secret").unwrap();
+                assert_eq!(decoded, expected_envelope);
+            },
+            expected_response.clone(),
+            200,
+        );
+        let client = AgentWorkerHttpManagementClient::new(server.endpoint);
+
+        let response = client
+            .send_encrypted_management_request(&envelope, "agent-worker-shared-secret", [11_u8; 24])
+            .unwrap();
+        server.join();
+
+        assert_eq!(response, expected_response);
+    }
+
+    #[test]
+    fn http_management_client_rejects_non_success_status() {
+        let mut envelope = management_envelope(AgentWorkerManagementAction::ProbeHandlers);
+        envelope.security.transport_security = AgentWorkerTransportSecurity::MutualTls;
+        envelope.security.encrypted = false;
+        envelope.security.signature = envelope
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        let rejected = AgentWorkerManagementResponse::rejected(
+            &envelope,
+            &ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::InvalidRequest,
+                "bad request",
+            ),
+        );
+        let server = spawn_http_management_contract_server(|_| {}, rejected, 400);
+        let client = AgentWorkerHttpManagementClient::new(server.endpoint);
+
+        let error = client
+            .send_management_request_over_mtls(&envelope)
+            .unwrap_err();
+        server.join();
+
+        assert!(matches!(error, ManagedWorkerError::AgentWorker(_)));
+        assert!(error
+            .to_string()
+            .contains("agent-worker HTTP management response returned status 400"));
+    }
+
+    #[test]
     fn management_wire_json_round_trips_signed_envelope_and_response_codes() {
         let envelope = management_envelope(AgentWorkerManagementAction::ProbeHandlers);
         let encoded = serde_json::to_string(&envelope).unwrap();
@@ -2785,6 +3064,68 @@ mod tests {
             kind,
             capabilities: IsolationBackendCapabilities::full(),
         }
+    }
+
+    struct HttpManagementContractServer {
+        endpoint: SocketAddr,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl HttpManagementContractServer {
+        fn join(self) {
+            self.handle.join().unwrap();
+        }
+    }
+
+    fn spawn_http_management_contract_server<F>(
+        inspect_request: F,
+        response: AgentWorkerManagementResponse,
+        status_code: u16,
+    ) -> HttpManagementContractServer
+    where
+        F: FnOnce(String) + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            inspect_request(request);
+            let body = serde_json::to_string(&response).unwrap();
+            let reason = match status_code {
+                200 => "OK",
+                400 => "Bad Request",
+                _ => "Error",
+            };
+            let response = format!(
+                "HTTP/1.1 {status_code} {reason}\r\n\
+                 content-type: application/json\r\n\
+                 content-length: {}\r\n\
+                 connection: close\r\n\
+                 \r\n\
+                 {}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        HttpManagementContractServer { endpoint, handle }
+    }
+
+    fn http_request_body(request: &str) -> &str {
+        request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default()
     }
 
     struct FakeAgentWorker {
