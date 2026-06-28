@@ -653,6 +653,54 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/events",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_event_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "unknown",
+            449,
+        ),
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_event");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("kind must be one of")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/events",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_event_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "lifecycle",
+            450,
+        ),
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_event");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["worker"]["telemetry_event_count"], 1);
+            assert_eq!(body["worker"]["latest_event_at_unix"], 450);
+            assert_eq!(body["event"]["worker_id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["event"]["session_id"], "session-transport");
+            assert_eq!(body["event"]["run_id"], "run-transport");
+            assert_eq!(body["event"]["kind"], "lifecycle");
+            assert_eq!(
+                body["event"]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["event"]["occurred_at_unix"], 450);
+            assert!(body["event"]["ingested_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
     let self_hosted_worker_events_path = format!("{self_hosted_worker_detail_path}/events");
     case.expect_json(
         "POST",
@@ -689,7 +737,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         |body| {
             assert_eq!(body["object"], "self_hosted_worker_event");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
-            assert_eq!(body["worker"]["telemetry_event_count"], 1);
+            assert_eq!(body["worker"]["telemetry_event_count"], 2);
             assert_eq!(body["worker"]["latest_event_at_unix"], 456);
             assert_eq!(body["event"]["worker_id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["event"]["session_id"], "session-1");
@@ -712,7 +760,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert_eq!(body["id"], *self_hosted_worker_id.borrow());
-            assert_eq!(body["telemetry_event_count"], 1);
+            assert_eq!(body["telemetry_event_count"], 2);
             assert_eq!(body["latest_event_at_unix"], 456);
             Ok(())
         },
@@ -906,7 +954,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert!(body["data"][0]["stale_after_unix"].as_u64().is_some());
             assert_eq!(body["data"][0]["stale_threshold_secs"], 300);
             assert_eq!(body["data"][0]["latest_heartbeat"]["status"], "online");
-            assert_eq!(body["data"][0]["telemetry_event_count"], 1);
+            assert_eq!(body["data"][0]["telemetry_event_count"], 2);
             assert_eq!(body["data"][0]["latest_event_at_unix"], 456);
             assert_eq!(body["data"][0]["artifact_count"], 1);
             assert_eq!(body["data"][0]["latest_artifact_at_unix"], 789);
@@ -1503,6 +1551,30 @@ fn self_hosted_worker_heartbeat_body(
           "status": "{status}",
           "reported_at_unix": {reported_at_unix},
           "heartbeat_json": "{{\"load\":0.24}}"
+        }}"#
+    )
+}
+
+fn self_hosted_worker_event_body(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    kind: &str,
+    occurred_at_unix: u64,
+) -> String {
+    format!(
+        r#"{{
+          "identity": {{
+            "tenant_id": "org_demo",
+            "workspace_id": "workspace-1",
+            "worker_id": "{worker_id}",
+            "token_id": "{identity_fingerprint}",
+            "token_secret": "{identity_fingerprint}"
+          }},
+          "session_id": "session-transport",
+          "run_id": "run-transport",
+          "kind": "{kind}",
+          "occurred_at_unix": {occurred_at_unix},
+          "event_json": "{{\"message\":\"worker transport event\"}}"
         }}"#
     )
 }

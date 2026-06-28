@@ -310,6 +310,19 @@ pub(crate) struct SelfHostedWorkerHeartbeatTransportRequest {
     pub(crate) heartbeat_json: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelfHostedWorkerTelemetryEventTransportRequest {
+    pub(crate) identity: SelfHostedWorkerIdentity,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) occurred_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) event_json: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminSelfHostedWorkerTelemetryEvent {
     pub(crate) id: String,

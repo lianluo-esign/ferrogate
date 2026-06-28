@@ -48,6 +48,7 @@ use crate::{
         AgentUpstreamDiscovery, HealthResponse, OpenAiModel, OpenAiModelList,
         PromptTemplateRenderRequest, ReadinessResponse, SelfHostedWorkerHeartbeatTransportRequest,
         SelfHostedWorkerRunAckResponse, SelfHostedWorkerRunLeaseResponse,
+        SelfHostedWorkerTelemetryEventTransportRequest,
     },
     state::{
         AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord,
@@ -3954,6 +3955,9 @@ impl FerroGateway {
             "/v1/self-hosted-workers/heartbeat" => {
                 self.handle_self_hosted_worker_heartbeat(session, ctx).await
             }
+            "/v1/self-hosted-workers/events" => {
+                self.handle_self_hosted_worker_event(session, ctx).await
+            }
             "/v1/self-hosted-workers/runs/poll" => {
                 self.handle_self_hosted_worker_run_poll(session, ctx).await
             }
@@ -3965,7 +3969,7 @@ impl FerroGateway {
                     session,
                     StatusCode::NOT_FOUND,
                     "self_hosted_worker_transport_path_not_found",
-                    "self-hosted worker transport supports heartbeat, poll, and ack",
+                    "self-hosted worker transport supports heartbeat, events, poll, and ack",
                     &ctx.request_id,
                 )
                 .await
@@ -4032,6 +4036,75 @@ impl FerroGateway {
                     session,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "self_hosted_worker_heartbeat_failed",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_self_hosted_worker_event(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+    ) -> PingoraResult<()> {
+        let request = match read_self_hosted_transport_body::<
+            SelfHostedWorkerTelemetryEventTransportRequest,
+        >(session)
+        .await?
+        {
+            Ok(request) => request,
+            Err(error) => {
+                return write_self_hosted_worker_transport_error(session, ctx, error).await;
+            }
+        };
+        let state = self.state.current();
+        if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
+            return write_self_hosted_worker_transport_error(session, ctx, error).await;
+        }
+        let worker_id = request.identity.worker_id.clone();
+        let event = AdminSelfHostedWorkerTelemetryEventRequest {
+            session_id: request.session_id,
+            run_id: request.run_id,
+            kind: request.kind,
+            occurred_at_unix: request.occurred_at_unix,
+            event_json: request.event_json,
+        };
+        match state.record_self_hosted_worker_telemetry_event(&worker_id, event) {
+            Ok((worker, event)) => {
+                let body = AdminSelfHostedWorkerTelemetryEventResponse {
+                    object: "self_hosted_worker_event",
+                    worker,
+                    event,
+                };
+                write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+            }
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_self_hosted_worker_event",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::NotFound(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_self_hosted_worker_identity",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::Storage(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "self_hosted_worker_event_failed",
                     message,
                     &ctx.request_id,
                 )
