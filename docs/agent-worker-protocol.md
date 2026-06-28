@@ -132,6 +132,7 @@ The signed envelope uses stable snake_case enum values and carries:
 - `worker_id`
 - optional `session_id`
 - optional `run_id`
+- optional `framework_adapter`
 - `security.key_id`
 - `security.nonce`
 - `security.signature`
@@ -143,7 +144,12 @@ Lifecycle actions (`provision`, `exec_or_attach`, `stop`, `cleanup`,
 `stream_status`, and `collect_artifacts`) must include both `session_id` and
 `run_id`. Discovery actions (`probe_handlers` and `list_backends`) may omit
 them. This prevents a lifecycle command from being detached from the durable run
-record the gateway will audit and bill.
+record the gateway will audit and bill. `framework_adapter` is optional for
+backward-compatible discovery and native-harness smokes, but lifecycle requests
+from the scheduler should set it to the selected adapter, such as
+`native-harness`, `codex`, `claude-code`, or `hermes`. The field is part of the
+signed envelope and encrypted-frame associated data so a request cannot be
+retargeted to a different handler after authorization.
 
 The initial standard actions are `probe_handlers`, `list_backends`,
 `provision`, `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and
@@ -151,8 +157,8 @@ The initial standard actions are `probe_handlers`, `list_backends`,
 
 Every response uses the same envelope identity fields (`request_id`,
 `idempotency_key`, `action`, `tenant_id`, `workspace_id`, `worker_id`,
-`session_id`, and `run_id`) plus `accepted`, `duplicate_idempotency_key`, an
-optional action-specific `result`, and an
+`session_id`, `run_id`, and optional `framework_adapter`) plus `accepted`,
+`duplicate_idempotency_key`, an optional action-specific `result`, and an
 optional standardized error object. Successful action payloads are tagged with a
 stable `result.kind` value so future actions can add typed data without changing
 the response envelope. The current executable `probe_handlers` action returns
@@ -173,12 +179,18 @@ continue. Without that gateway authorization client, `exec_or_attach` fails
 closed with `run_failed` before `run.completed` is emitted. With an allowed
 gateway decision, the result returns `result.kind=handler_events` with
 normalized framework events such as `session.started`, `capability.allowed`,
-`run.started`, `artifact.created`, `run.completed`, and `session.closed`.
+`run.started`, `model.requested`, `artifact.created`, `run.completed`, and
+`session.closed`.
 `stream_status` can replay stored native-harness events as `handler_events`,
 and `collect_artifacts` can return
 `result.kind=handler_artifacts` with an artifact manifest plus the related
-events. This is handler execution proof inside `agent-worker`, not Firecracker
-boot proof and not Codex/Claude/Hermes process execution proof. The worker also
+events. When `framework_adapter` selects `codex`, `claude-code`, or `hermes`,
+the current worker path runs the process-shim contract and emits normalized
+prepared events such as `session.started`, `capability.allowed`,
+`run.started`, `model.requested`, `artifact.created`, and `session.closed`
+without executing a real vendor binary or SDK. This is handler selection and
+event-contract proof inside `agent-worker`, not Firecracker boot proof and not
+Codex/Claude/Hermes process execution proof. The worker also
 keeps a process-local management state store for bounded contract smokes:
 accepted idempotency retries replay the first stored action outcome instead of
 re-dispatching lifecycle logic, and lifecycle/handler outcomes are recorded
@@ -334,13 +346,16 @@ Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 worker-owned lifecycle or handler dispatch. The dispatch still does not boot
 Firecracker: `provision` fails closed until real microVM lifecycle code exists,
 while `exec_or_attach`, `stream_status`, and `collect_artifacts` can exercise
-the built-in native harness inside `agent-worker` only after the worker receives
-a `capability.allowed` decision from the configured gateway HTTP authorizer.
-The recorded handler events therefore prove the managed action gate was crossed
-before native harness completion; they still do not prove real tool execution or
-microVM boot. Adding real lifecycle success requires the Firecracker handler
-implementation, HTTP/mTLS production transport, and contract coverage for
-Codex/Claude/Hermes handler launch.
+the selected framework handler inside `agent-worker` only after the worker
+receives a `capability.allowed` decision from the configured gateway HTTP
+authorizer. The native harness can complete deterministically; Codex, Claude
+Code, and Hermes currently use process-shim contract adapters that emit
+prepared run/model/artifact events without launching real binaries. The
+recorded handler events therefore prove the managed action gate was crossed and
+the selected adapter contract was used; they still do not prove real tool
+execution or microVM boot. Adding real lifecycle success requires the
+Firecracker handler implementation, HTTP/mTLS production transport, and
+contract coverage for Codex/Claude/Hermes binary or SDK launch.
 
 The gateway/control-plane side uses `AgentWorkerHttpManagementClient` for the
 primary worker management path. The client sends `POST

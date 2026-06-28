@@ -19,6 +19,7 @@ use ferrogate_runtime::{
     FrameworkAdapterCapabilities, FrameworkAdapterMode, FrameworkAdapterRunRequest,
     FrameworkAdapterSession, FrameworkAdapterSessionRequest, ManagedExternalAction,
     ManagedToolAction, ManagedWorkerError, NativeHarnessAdapter, NormalizedFrameworkEvent,
+    ProcessFrameworkAdapter,
 };
 
 use crate::external_actions::{
@@ -33,11 +34,11 @@ pub(crate) struct HandlerRunState {
     pub(crate) closed: bool,
 }
 
-pub(crate) fn exec_or_attach_native_harness_with_authorizer(
+pub(crate) fn exec_or_attach_framework_handler_with_authorizer(
     envelope: &AgentWorkerManagementEnvelope,
     external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
 ) -> Result<(HandlerRunState, AgentWorkerManagementResult), ManagedWorkerError> {
-    let mut adapter = NativeHarnessAdapter::default();
+    let mut adapter = selected_adapter(envelope)?;
     let session_request = FrameworkAdapterSessionRequest {
         session_id: lifecycle_session_id(envelope)?,
         run_id: lifecycle_run_id(envelope)?,
@@ -46,13 +47,7 @@ pub(crate) fn exec_or_attach_native_harness_with_authorizer(
         worker_id: envelope.worker_id.clone(),
         isolation_backend: "firecracker".to_string(),
         mode: FrameworkAdapterMode::Managed,
-        required_capabilities: FrameworkAdapterCapabilities {
-            tools: true,
-            checkpoint: true,
-            artifacts: true,
-            streaming: true,
-            ..FrameworkAdapterCapabilities::default()
-        },
+        required_capabilities: required_capabilities(envelope.framework_adapter.as_deref()),
     };
     let (session, started) = adapter
         .start_session(session_request)
@@ -62,10 +57,7 @@ pub(crate) fn exec_or_attach_native_harness_with_authorizer(
         external_action_authorizer,
         ExternalActionGateRequest {
             session: session.clone(),
-            action: ManagedExternalAction::Tool(ManagedToolAction {
-                tool_name: "native.echo".to_string(),
-                arguments_policy: "redacted_json".to_string(),
-            }),
+            action: managed_action_for_session(&session),
             high_risk: false,
         },
     )
@@ -82,7 +74,7 @@ pub(crate) fn exec_or_attach_native_harness_with_authorizer(
     let artifacts = adapter
         .collect_artifacts(FrameworkAdapterArtifactRequest {
             session: session.clone(),
-            artifact_id: Some("native-artifact".to_string()),
+            artifact_id: Some(format!("{}-artifact", session.adapter_name)),
         })
         .map_err(handler_runtime_error)?;
     events.push(artifacts.event.clone());
@@ -127,7 +119,7 @@ pub(crate) fn collect_native_harness_artifacts(
 pub(crate) fn cancel_native_harness(
     state: &mut HandlerRunState,
 ) -> Result<AgentWorkerManagementResult, ManagedWorkerError> {
-    let mut adapter = NativeHarnessAdapter::default();
+    let mut adapter = adapter_for_name(&state.session.adapter_name)?;
     let cancelled = adapter
         .cancel_run(&state.session)
         .map_err(handler_runtime_error)?;
@@ -143,7 +135,7 @@ pub(crate) fn cleanup_native_harness(
     if state.closed {
         return Ok(AgentWorkerManagementResult::HandlerEvents { events: vec![] });
     }
-    let mut adapter = NativeHarnessAdapter::default();
+    let mut adapter = adapter_for_name(&state.session.adapter_name)?;
     let closed = adapter
         .close_session(&state.session)
         .map_err(handler_runtime_error)?;
@@ -177,10 +169,79 @@ fn artifact_result(artifact: FrameworkAdapterArtifact) -> AgentWorkerFrameworkAr
     }
 }
 
+fn selected_adapter(
+    envelope: &AgentWorkerManagementEnvelope,
+) -> Result<Box<dyn FrameworkAdapter>, ManagedWorkerError> {
+    let adapter = envelope
+        .framework_adapter
+        .as_deref()
+        .unwrap_or("native-harness");
+    match adapter {
+        "native-harness" | "native_harness" => adapter_for_name("native-harness"),
+        "codex" => adapter_for_name("codex"),
+        "claude-code" | "claude_code" => adapter_for_name("claude-code"),
+        "hermes" => adapter_for_name("hermes"),
+        other => Err(ManagedWorkerError::management_protocol_error(
+            AgentWorkerManagementErrorCode::HandlerUnavailable,
+            format!("agent-worker has no framework handler for adapter {other}"),
+        )),
+    }
+}
+
+fn adapter_for_name(adapter_name: &str) -> Result<Box<dyn FrameworkAdapter>, ManagedWorkerError> {
+    match adapter_name {
+        "native-harness" | "native_harness" => Ok(Box::new(NativeHarnessAdapter::default())),
+        "codex" => Ok(Box::new(ProcessFrameworkAdapter::codex())),
+        "claude-code" | "claude_code" => Ok(Box::new(ProcessFrameworkAdapter::claude_code())),
+        "hermes" => Ok(Box::new(ProcessFrameworkAdapter::hermes())),
+        other => Err(ManagedWorkerError::management_protocol_error(
+            AgentWorkerManagementErrorCode::HandlerUnavailable,
+            format!("agent-worker has no framework handler for adapter {other}"),
+        )),
+    }
+}
+
+fn required_capabilities(adapter: Option<&str>) -> FrameworkAdapterCapabilities {
+    match adapter.unwrap_or("native-harness") {
+        "hermes" => FrameworkAdapterCapabilities {
+            memory_read: true,
+            memory_write: true,
+            checkpoint: true,
+            artifacts: true,
+            subagents: true,
+            streaming: true,
+            ..FrameworkAdapterCapabilities::default()
+        },
+        "codex" | "claude-code" | "claude_code" => FrameworkAdapterCapabilities {
+            tools: true,
+            checkpoint: true,
+            artifacts: true,
+            filesystem: true,
+            shell: true,
+            streaming: true,
+            ..FrameworkAdapterCapabilities::default()
+        },
+        _ => FrameworkAdapterCapabilities {
+            tools: true,
+            checkpoint: true,
+            artifacts: true,
+            streaming: true,
+            ..FrameworkAdapterCapabilities::default()
+        },
+    }
+}
+
+fn managed_action_for_session(session: &FrameworkAdapterSession) -> ManagedExternalAction {
+    ManagedExternalAction::Tool(ManagedToolAction {
+        tool_name: format!("{}.dispatch", session.adapter_name),
+        arguments_policy: "redacted_json".to_string(),
+    })
+}
+
 fn handler_runtime_error(error: ferrogate_runtime::FrameworkAdapterError) -> ManagedWorkerError {
     ManagedWorkerError::management_protocol_error(
         AgentWorkerManagementErrorCode::RunFailed,
-        format!("agent-worker native harness handler failed: {error}"),
+        format!("agent-worker framework handler failed: {error}"),
     )
 }
 
@@ -222,7 +283,7 @@ mod tests {
         let authorizer = authorizer();
 
         let (state, result) =
-            exec_or_attach_native_harness_with_authorizer(&envelope, Some(&authorizer)).unwrap();
+            exec_or_attach_framework_handler_with_authorizer(&envelope, Some(&authorizer)).unwrap();
 
         let AgentWorkerManagementResult::HandlerEvents { events } = result else {
             panic!("expected handler events");
@@ -237,31 +298,64 @@ mod tests {
             .any(|event| event.kind == "capability.allowed"));
         assert!(events.iter().any(|event| event.kind == "run.completed"));
         assert!(events.iter().any(|event| event.kind == "session.closed"));
-        assert_eq!(state.artifacts[0].artifact_id, "native-artifact");
+        assert_eq!(state.artifacts[0].artifact_id, "native-harness-artifact");
     }
 
     #[test]
     fn native_harness_artifacts_reuse_recorded_worker_state() {
         let authorizer = authorizer();
         let (state, _) =
-            exec_or_attach_native_harness_with_authorizer(&envelope(), Some(&authorizer)).unwrap();
+            exec_or_attach_framework_handler_with_authorizer(&envelope(), Some(&authorizer))
+                .unwrap();
 
         let result = collect_native_harness_artifacts(&state);
 
         let AgentWorkerManagementResult::HandlerArtifacts { artifacts, events } = result else {
             panic!("expected handler artifacts");
         };
-        assert_eq!(artifacts[0].artifact_id, "native-artifact");
+        assert_eq!(artifacts[0].artifact_id, "native-harness-artifact");
         assert!(events.iter().any(|event| event.kind == "artifact.created"));
     }
 
     #[test]
     fn native_harness_execution_fails_closed_without_gateway_authorizer() {
-        let error = exec_or_attach_native_harness_with_authorizer(&envelope(), None).unwrap_err();
+        let error =
+            exec_or_attach_framework_handler_with_authorizer(&envelope(), None).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("run_failed"));
         assert!(message.contains("gateway authorization client is unavailable"));
+    }
+
+    #[test]
+    fn codex_process_shim_uses_same_worker_event_contract_after_authorization() {
+        let mut envelope = envelope();
+        envelope.framework_adapter = Some("codex".to_string());
+        let authorizer = authorizer();
+
+        let (state, result) =
+            exec_or_attach_framework_handler_with_authorizer(&envelope, Some(&authorizer)).unwrap();
+
+        let AgentWorkerManagementResult::HandlerEvents { events } = result else {
+            panic!("expected handler events");
+        };
+        assert_eq!(state.session.adapter_name, "codex");
+        assert!(events.iter().any(|event| {
+            event.kind == "session.started" && event.framework == "codex" && event.mode == "managed"
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "capability.allowed"
+                && event
+                    .metadata
+                    .get("external_target")
+                    .is_some_and(|target| target == "tool:codex.dispatch")
+        }));
+        assert!(events.iter().any(|event| event.kind == "model.requested"));
+        assert!(!events.iter().any(|event| event.kind == "tool.completed"));
+        assert!(state
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id == "codex-artifact"));
     }
 
     fn authorizer(
@@ -288,6 +382,7 @@ mod tests {
             worker_id: "worker-1".to_string(),
             session_id: Some("session-1".to_string()),
             run_id: Some("run-1".to_string()),
+            framework_adapter: Some("native-harness".to_string()),
             security: AgentWorkerManagementSecurity {
                 key_id: "key-1".to_string(),
                 nonce: "nonce-1".to_string(),

@@ -21,7 +21,7 @@ use crate::{
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
-        exec_or_attach_native_harness_with_authorizer, stream_native_harness_status,
+        exec_or_attach_framework_handler_with_authorizer, stream_native_harness_status,
     },
     state::AgentWorkerStateStore,
 };
@@ -85,7 +85,7 @@ fn exec_or_attach(
         return Ok(Some(stream_native_harness_status(&existing)));
     }
     let (handler_state, result) =
-        exec_or_attach_native_harness_with_authorizer(envelope, external_action_authorizer)?;
+        exec_or_attach_framework_handler_with_authorizer(envelope, external_action_authorizer)?;
     state.put_handler_run_state(handler_state);
     Ok(Some(result))
 }

@@ -299,6 +299,8 @@ pub struct AgentWorkerManagementFrame {
     pub worker_id: String,
     pub session_id: Option<String>,
     pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_adapter: Option<String>,
     pub encoding: AgentWorkerManagementFrameEncoding,
     pub plaintext_json: Option<String>,
     pub encrypted_payload: Option<AgentWorkerEncryptedPayload>,
@@ -318,6 +320,7 @@ impl AgentWorkerManagementFrame {
             worker_id: envelope.worker_id.clone(),
             session_id: envelope.session_id.clone(),
             run_id: envelope.run_id.clone(),
+            framework_adapter: envelope.framework_adapter.clone(),
             encoding: AgentWorkerManagementFrameEncoding::PlaintextJson,
             plaintext_json: Some(serde_json::to_string(envelope).map_err(|error| {
                 ManagedWorkerError::management_protocol(
@@ -374,6 +377,7 @@ impl AgentWorkerManagementFrame {
             worker_id: envelope.worker_id.clone(),
             session_id: envelope.session_id.clone(),
             run_id: envelope.run_id.clone(),
+            framework_adapter: envelope.framework_adapter.clone(),
             encoding: AgentWorkerManagementFrameEncoding::EncryptedJson,
             plaintext_json: None,
             encrypted_payload: Some(AgentWorkerEncryptedPayload {
@@ -516,6 +520,7 @@ impl AgentWorkerManagementFrame {
             self.worker_id.clone(),
             self.session_id.clone().unwrap_or_default(),
             self.run_id.clone().unwrap_or_default(),
+            self.framework_adapter.clone().unwrap_or_default(),
         ]
         .join("\n")
     }
@@ -532,6 +537,7 @@ impl AgentWorkerManagementFrame {
             || self.worker_id != envelope.worker_id
             || self.session_id != envelope.session_id
             || self.run_id != envelope.run_id
+            || self.framework_adapter != envelope.framework_adapter
         {
             return Err(ManagedWorkerError::management_protocol(
                 AgentWorkerManagementErrorCode::InvalidFrame,
@@ -614,6 +620,8 @@ pub struct AgentWorkerManagementEnvelope {
     pub worker_id: String,
     pub session_id: Option<String>,
     pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_adapter: Option<String>,
     pub security: AgentWorkerManagementSecurity,
 }
 
@@ -715,6 +723,7 @@ impl AgentWorkerManagementEnvelope {
             self.worker_id.clone(),
             self.session_id.clone().unwrap_or_default(),
             self.run_id.clone().unwrap_or_default(),
+            self.framework_adapter.clone().unwrap_or_default(),
             self.security.key_id.clone(),
             self.security.nonce.clone(),
             self.security.algorithm.as_str().to_string(),
@@ -734,6 +743,7 @@ impl AgentWorkerManagementEnvelope {
             worker_id: self.worker_id.clone(),
             session_id: self.session_id.clone(),
             run_id: self.run_id.clone(),
+            framework_adapter: self.framework_adapter.clone(),
             encoding: AgentWorkerManagementFrameEncoding::EncryptedJson,
             plaintext_json: None,
             encrypted_payload: None,
@@ -793,6 +803,7 @@ impl AgentWorkerManagementEnvelope {
             self.worker_id.clone(),
             self.session_id.clone().unwrap_or_default(),
             self.run_id.clone().unwrap_or_default(),
+            self.framework_adapter.clone().unwrap_or_default(),
         ]
         .join("\n")
     }
@@ -816,6 +827,7 @@ pub struct AgentWorkerManagementVerification {
     pub worker_id: String,
     pub session_id: Option<String>,
     pub run_id: Option<String>,
+    pub framework_adapter: Option<String>,
     pub duplicate_idempotency_key: bool,
 }
 
@@ -847,6 +859,8 @@ pub struct AgentWorkerManagementResponse {
     pub worker_id: String,
     pub session_id: Option<String>,
     pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_adapter: Option<String>,
     pub accepted: bool,
     pub duplicate_idempotency_key: bool,
     pub result: Option<AgentWorkerManagementResult>,
@@ -865,6 +879,7 @@ impl AgentWorkerManagementResponse {
             worker_id: verification.worker_id,
             session_id: verification.session_id,
             run_id: verification.run_id,
+            framework_adapter: verification.framework_adapter,
             accepted: true,
             duplicate_idempotency_key: verification.duplicate_idempotency_key,
             result: None,
@@ -888,6 +903,7 @@ impl AgentWorkerManagementResponse {
             worker_id: envelope.worker_id.clone(),
             session_id: envelope.session_id.clone(),
             run_id: envelope.run_id.clone(),
+            framework_adapter: envelope.framework_adapter.clone(),
             accepted: false,
             duplicate_idempotency_key: false,
             result: None,
@@ -1052,6 +1068,7 @@ impl AgentWorkerManagementVerifier {
             worker_id: envelope.worker_id.clone(),
             session_id: envelope.session_id.clone(),
             run_id: envelope.run_id.clone(),
+            framework_adapter: envelope.framework_adapter.clone(),
             duplicate_idempotency_key,
         })
     }
@@ -2273,10 +2290,19 @@ mod tests {
         assert!(envelope
             .canonical_signature_input()
             .contains("provision\nrequest-1\nidempotency-1"));
+        assert!(envelope.canonical_signature_input().contains("\ncodex\n"));
         assert!(envelope
             .canonical_signature_input()
             .contains("shared_secret_blake2b\nlocal_unix_socket\ntrue"));
         assert!(envelope.security.signature.starts_with("blake2b-mac:"));
+
+        let mut tampered_adapter = envelope.clone();
+        tampered_adapter.framework_adapter = Some("claude-code".to_string());
+        assert!(tampered_adapter
+            .verify_shared_secret_signature("agent-worker-shared-secret")
+            .unwrap_err()
+            .to_string()
+            .contains("signature verification failed"));
 
         let mut missing_signature = envelope.clone();
         missing_signature.security.signature.clear();
@@ -2660,6 +2686,7 @@ mod tests {
                 worker_id: envelope.worker_id.clone(),
                 session_id: envelope.session_id.clone(),
                 run_id: envelope.run_id.clone(),
+                framework_adapter: envelope.framework_adapter.clone(),
                 duplicate_idempotency_key: false,
             });
         let expected_envelope = envelope.clone();
@@ -2703,6 +2730,7 @@ mod tests {
                 worker_id: envelope.worker_id.clone(),
                 session_id: envelope.session_id.clone(),
                 run_id: envelope.run_id.clone(),
+                framework_adapter: envelope.framework_adapter.clone(),
                 duplicate_idempotency_key: false,
             });
         let expected_envelope = envelope.clone();
@@ -3042,6 +3070,7 @@ mod tests {
             worker_id: "agent-worker-fake-1".to_string(),
             session_id: Some("session-1".to_string()),
             run_id: Some("run-1".to_string()),
+            framework_adapter: Some("codex".to_string()),
             security: AgentWorkerManagementSecurity {
                 key_id: "agent-worker-key-1".to_string(),
                 nonce: nonce.to_string(),

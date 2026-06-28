@@ -404,6 +404,7 @@ fn http_invalid_request_response(message: impl Into<String>) -> AgentWorkerManag
         worker_id: "unknown".to_string(),
         session_id: None,
         run_id: None,
+        framework_adapter: None,
         security: AgentWorkerManagementSecurity {
             key_id: "unknown".to_string(),
             nonce: "unknown".to_string(),
@@ -683,6 +684,7 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
         worker_id: "agent-worker-smoke".to_string(),
         session_id: None,
         run_id: None,
+        framework_adapter: None,
         security: AgentWorkerManagementSecurity {
             key_id: "agent-worker-smoke-key".to_string(),
             nonce: "agent-worker-smoke-nonce".to_string(),
@@ -1052,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn http_management_exec_or_attach_calls_gateway_authorizer_before_native_harness_run() {
+    fn http_management_exec_or_attach_calls_gateway_authorizer_before_selected_process_shim() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -1073,10 +1075,11 @@ mod tests {
 
         let exec = send_http_management_request(
             addr,
-            &serde_json::to_string(&shared_lifecycle_envelope(
+            &serde_json::to_string(&shared_lifecycle_envelope_with_adapter(
                 AgentWorkerManagementAction::ExecOrAttach,
                 "agent-worker-native-http",
                 "exec",
+                "codex",
             ))
             .unwrap(),
             "mutual_tls",
@@ -1112,11 +1115,16 @@ mod tests {
             .iter()
             .position(|event| event.kind == "capability.allowed")
             .expect("missing capability.allowed event");
-        let run_position = events
+        let model_position = events
             .iter()
-            .position(|event| event.kind == "run.completed")
-            .expect("missing run.completed event");
-        assert!(capability_position < run_position);
+            .position(|event| event.kind == "model.requested")
+            .expect("missing model.requested event");
+        assert!(capability_position < model_position);
+        assert!(events
+            .iter()
+            .any(|event| event.adapter_name == "codex" && event.framework == "codex"));
+        assert!(events.iter().any(|event| event.kind == "model.requested"));
+        assert!(!events.iter().any(|event| event.kind == "tool.completed"));
         let Some(AgentWorkerManagementResult::HandlerArtifacts {
             artifacts: collected,
             events,
@@ -1124,7 +1132,7 @@ mod tests {
         else {
             panic!("artifact collection did not return handler artifacts");
         };
-        assert_eq!(collected[0].artifact_id, "native-artifact");
+        assert_eq!(collected[0].artifact_id, "codex-artifact");
         assert!(events.iter().any(|event| event.kind == "artifact.created"));
 
         let server_responses = server.join().unwrap();
@@ -1503,6 +1511,29 @@ mod tests {
         prefix: &str,
         request_suffix: &str,
     ) -> AgentWorkerManagementEnvelope {
+        shared_lifecycle_envelope_with_optional_adapter(action, prefix, request_suffix, None)
+    }
+
+    fn shared_lifecycle_envelope_with_adapter(
+        action: AgentWorkerManagementAction,
+        prefix: &str,
+        request_suffix: &str,
+        framework_adapter: &str,
+    ) -> AgentWorkerManagementEnvelope {
+        shared_lifecycle_envelope_with_optional_adapter(
+            action,
+            prefix,
+            request_suffix,
+            Some(framework_adapter),
+        )
+    }
+
+    fn shared_lifecycle_envelope_with_optional_adapter(
+        action: AgentWorkerManagementAction,
+        prefix: &str,
+        request_suffix: &str,
+        framework_adapter: Option<&str>,
+    ) -> AgentWorkerManagementEnvelope {
         let mut envelope = smoke_envelope().unwrap();
         envelope.action = action;
         let request_name = if request_suffix.is_empty() {
@@ -1514,6 +1545,7 @@ mod tests {
         envelope.idempotency_key = format!("{request_name}-idempotency");
         envelope.session_id = Some(format!("{prefix}-session"));
         envelope.run_id = Some(format!("{prefix}-run"));
+        envelope.framework_adapter = framework_adapter.map(ToOwned::to_owned);
         envelope.security.nonce = format!("{request_name}-nonce");
         envelope.security.signature = envelope
             .shared_secret_signature(SMOKE_SHARED_SECRET)
