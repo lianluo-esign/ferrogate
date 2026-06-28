@@ -359,6 +359,22 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         "POST",
         "/v1/self-hosted-workers/runs/poll",
         &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_poll_body_for_scope(
+            "org_other",
+            "workspace-1",
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+        ),
+        401,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_identity");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
         "{",
         400,
         |body| {
@@ -433,6 +449,23 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["error"]["code"],
                 "self_hosted_worker_payload_too_large"
             );
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/ack",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_ack_body_for_scope(
+            "org_demo",
+            "workspace-other",
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+            &self_hosted_lease_id.borrow(),
+        ),
+        401,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_identity");
             Ok(())
         },
     )?;
@@ -1355,11 +1388,20 @@ pub(crate) fn run_auth_api(args: &AuthArgs) -> Result<()> {
 }
 
 fn self_hosted_worker_poll_body(worker_id: &str, token_secret: &str) -> String {
+    self_hosted_worker_poll_body_for_scope("org_demo", "workspace-1", worker_id, token_secret)
+}
+
+fn self_hosted_worker_poll_body_for_scope(
+    tenant_id: &str,
+    workspace_id: &str,
+    worker_id: &str,
+    token_secret: &str,
+) -> String {
     format!(
         r#"{{
           "identity": {{
-            "tenant_id": "org_demo",
-            "workspace_id": "workspace-1",
+            "tenant_id": "{tenant_id}",
+            "workspace_id": "{workspace_id}",
             "worker_id": "{worker_id}",
             "token_id": "sha256:test-worker",
             "token_secret": "{token_secret}"
@@ -1372,11 +1414,27 @@ fn self_hosted_worker_poll_body(worker_id: &str, token_secret: &str) -> String {
 }
 
 fn self_hosted_worker_ack_body(worker_id: &str, token_secret: &str, lease_id: &str) -> String {
+    self_hosted_worker_ack_body_for_scope(
+        "org_demo",
+        "workspace-1",
+        worker_id,
+        token_secret,
+        lease_id,
+    )
+}
+
+fn self_hosted_worker_ack_body_for_scope(
+    tenant_id: &str,
+    workspace_id: &str,
+    worker_id: &str,
+    token_secret: &str,
+    lease_id: &str,
+) -> String {
     format!(
         r#"{{
           "identity": {{
-            "tenant_id": "org_demo",
-            "workspace_id": "workspace-1",
+            "tenant_id": "{tenant_id}",
+            "workspace_id": "{workspace_id}",
             "worker_id": "{worker_id}",
             "token_id": "sha256:test-worker",
             "token_secret": "{token_secret}"
