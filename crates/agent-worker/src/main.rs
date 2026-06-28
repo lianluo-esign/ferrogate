@@ -22,12 +22,20 @@ mod test_support {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     static FIRECRACKER_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static HANDLER_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     pub(crate) fn lock_firecracker_env() -> MutexGuard<'static, ()> {
         FIRECRACKER_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("firecracker env test lock poisoned")
+    }
+
+    pub(crate) fn lock_handler_env() -> MutexGuard<'static, ()> {
+        HANDLER_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("handler env test lock poisoned")
     }
 }
 
@@ -45,6 +53,15 @@ enum Command {
     ProtocolSmoke,
     /// Probe framework handler readiness inside the agent-worker process.
     ProbeHandlers,
+    /// Execute the configured framework handler binary smoke inside agent-worker ownership.
+    SmokeHandlerBinary {
+        /// Adapter to smoke: codex, claude-code, or hermes.
+        #[arg(long)]
+        adapter: String,
+        /// Maximum time to wait for the binary probe command.
+        #[arg(long, default_value_t = 2_000)]
+        timeout_millis: u64,
+    },
     /// Run a managed external-action authorization smoke without executing the action.
     ExternalActionSmoke,
     /// Accept one managed external-action authorization request as JSON on stdin.
@@ -121,6 +138,10 @@ fn main() -> Result<()> {
     match cli.command {
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
+        Command::SmokeHandlerBinary {
+            adapter,
+            timeout_millis,
+        } => handlers::smoke_handler_binary_command(&adapter, timeout_millis),
         Command::ExternalActionSmoke => external_actions::external_action_smoke_command(),
         Command::AcceptExternalActionJson => {
             external_actions::accept_external_action_json_command()

@@ -363,6 +363,19 @@ lifecycle success requires the Firecracker handler implementation, HTTP/mTLS
 production transport, and contract coverage for Codex/Claude/Hermes binary or
 SDK launch.
 
+When an adapter dependency is available on the worker host, `agent-worker` can
+run a bounded binary smoke with `agent-worker smoke-handler-binary --adapter
+codex|claude-code|hermes`. The smoke is owned by the worker process and reads
+only the worker-owned binary configuration variables:
+`AGENT_WORKER_CODEX_BIN`, `AGENT_WORKER_CLAUDE_CODE_BIN`, and
+`AGENT_WORKER_HERMES_BIN`. It does not scan `PATH`, and the gateway must not run
+the same probe itself. The current smoke executes a short version-style probe
+with a timeout and returns JSON evidence for the adapter, configured binary
+path, probe arguments, exit status, and output excerpts. A passing binary smoke
+proves only that the configured handler binary can be started by `agent-worker`;
+it is not Firecracker boot proof, SDK integration proof, or proof that a real
+agent task completed.
+
 The gateway/control-plane side uses `AgentWorkerHttpManagementClient` for the
 primary worker management path. The client sends `POST
 /v1/agent-worker/management`, sets `content-type: application/json`, sets
