@@ -80,12 +80,14 @@ pub use managed_worker::{
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 pub use self_hosted_worker::{
-    InMemorySelfHostedWorkerTransport, RegisteredSelfHostedWorker, SelfHostedArtifactUpload,
-    SelfHostedArtifactUploadRequest, SelfHostedCheckpointFetchRequest,
-    SelfHostedCheckpointReference, SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor,
-    SelfHostedTelemetryKind, SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel,
-    SelfHostedWorkerError, SelfHostedWorkerHeartbeat, SelfHostedWorkerIdentity,
-    SelfHostedWorkerRegistration, SelfHostedWorkerRegistry, SelfHostedWorkerTransport,
+    InMemorySelfHostedRunQueue, InMemorySelfHostedWorkerTransport, RegisteredSelfHostedWorker,
+    SelfHostedArtifactUpload, SelfHostedArtifactUploadRequest, SelfHostedCheckpointFetchRequest,
+    SelfHostedCheckpointReference, SelfHostedRunAck, SelfHostedRunAckRequest,
+    SelfHostedRunAckStatus, SelfHostedRunDispatch, SelfHostedRunLease, SelfHostedRunPollRequest,
+    SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor, SelfHostedTelemetryKind,
+    SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel, SelfHostedWorkerError,
+    SelfHostedWorkerHeartbeat, SelfHostedWorkerIdentity, SelfHostedWorkerRegistration,
+    SelfHostedWorkerRegistry, SelfHostedWorkerTransport,
 };
 
 /// Runtime lifecycle commands exposed by the CLI and future control plane.

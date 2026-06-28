@@ -165,6 +165,227 @@ pub struct SelfHostedWorkerHeartbeat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedRunDispatch {
+    pub dispatch_id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub framework_adapter: String,
+    pub required_capabilities: Vec<String>,
+    pub workload_ref: String,
+    pub queued_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedRunPollRequest {
+    pub identity: SelfHostedWorkerIdentity,
+    pub supported_capabilities: Vec<String>,
+    pub now_unix: u64,
+    pub lease_duration_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedRunLease {
+    pub dispatch_id: String,
+    pub lease_id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub framework_adapter: String,
+    pub required_capabilities: Vec<String>,
+    pub workload_ref: String,
+    pub attempt: u32,
+    pub lease_expires_at_unix: u64,
+    pub trust_level: SelfHostedTelemetryTrustLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedRunAckRequest {
+    pub identity: SelfHostedWorkerIdentity,
+    pub dispatch_id: String,
+    pub lease_id: String,
+    pub run_id: String,
+    pub status: SelfHostedRunAckStatus,
+    pub reported_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfHostedRunAckStatus {
+    Accepted,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedRunAck {
+    pub dispatch_id: String,
+    pub lease_id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub run_id: String,
+    pub status: SelfHostedRunAckStatus,
+    pub accepted_at_unix: u64,
+    pub trust_level: SelfHostedTelemetryTrustLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedSelfHostedRun {
+    dispatch: SelfHostedRunDispatch,
+    assigned_worker_id: Option<String>,
+    lease_id: Option<String>,
+    lease_expires_at_unix: Option<u64>,
+    attempt: u32,
+    acknowledged: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct InMemorySelfHostedRunQueue {
+    runs: BTreeMap<String, QueuedSelfHostedRun>,
+}
+
+impl InMemorySelfHostedRunQueue {
+    pub fn enqueue_run(
+        &mut self,
+        dispatch: SelfHostedRunDispatch,
+    ) -> Result<(), SelfHostedWorkerError> {
+        validate_run_dispatch(&dispatch)?;
+        if self.runs.contains_key(&dispatch.dispatch_id) {
+            return Err(SelfHostedWorkerError::InvalidTransport(format!(
+                "dispatch {} already exists",
+                dispatch.dispatch_id
+            )));
+        }
+        self.runs.insert(
+            dispatch.dispatch_id.clone(),
+            QueuedSelfHostedRun {
+                dispatch,
+                assigned_worker_id: None,
+                lease_id: None,
+                lease_expires_at_unix: None,
+                attempt: 0,
+                acknowledged: false,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn poll_run(
+        &mut self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedRunPollRequest,
+    ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
+        let worker = registry.validate_identity(&request.identity)?;
+        validate_run_poll_request(&request)?;
+        let supported_capabilities = normalized_capabilities(request.supported_capabilities);
+        let Some((_, queued)) = self.runs.iter_mut().find(|(_, queued)| {
+            queued.can_lease_to(worker, &supported_capabilities, request.now_unix)
+        }) else {
+            return Ok(None);
+        };
+
+        queued.attempt = queued.attempt.saturating_add(1);
+        let lease_id = format!("{}:attempt-{}", queued.dispatch.dispatch_id, queued.attempt);
+        let lease_expires_at_unix = request.now_unix.saturating_add(request.lease_duration_secs);
+        queued.assigned_worker_id = Some(worker.worker_id.clone());
+        queued.lease_id = Some(lease_id.clone());
+        queued.lease_expires_at_unix = Some(lease_expires_at_unix);
+
+        Ok(Some(SelfHostedRunLease {
+            dispatch_id: queued.dispatch.dispatch_id.clone(),
+            lease_id,
+            tenant_id: queued.dispatch.tenant_id.clone(),
+            workspace_id: queued.dispatch.workspace_id.clone(),
+            worker_id: worker.worker_id.clone(),
+            session_id: queued.dispatch.session_id.clone(),
+            run_id: queued.dispatch.run_id.clone(),
+            framework_adapter: queued.dispatch.framework_adapter.clone(),
+            required_capabilities: queued.dispatch.required_capabilities.clone(),
+            workload_ref: queued.dispatch.workload_ref.clone(),
+            attempt: queued.attempt,
+            lease_expires_at_unix,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        }))
+    }
+
+    pub fn ack_run(
+        &mut self,
+        registry: &SelfHostedWorkerRegistry,
+        request: SelfHostedRunAckRequest,
+    ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
+        let worker = registry.validate_identity(&request.identity)?;
+        validate_run_ack_request(&request)?;
+        let queued = self.runs.get_mut(&request.dispatch_id).ok_or_else(|| {
+            SelfHostedWorkerError::InvalidTransport("unknown dispatch".to_string())
+        })?;
+        if queued.dispatch.tenant_id != worker.tenant_id
+            || queued.dispatch.workspace_id != worker.workspace_id
+        {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "worker identity is outside dispatch tenant/workspace scope".to_string(),
+            ));
+        }
+        if queued.dispatch.run_id != request.run_id {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "ack run_id does not match dispatch".to_string(),
+            ));
+        }
+        if queued.assigned_worker_id.as_deref() != Some(worker.worker_id.as_str()) {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "ack worker does not own the active lease".to_string(),
+            ));
+        }
+        if queued.lease_id.as_deref() != Some(request.lease_id.as_str()) {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "ack lease_id does not match active lease".to_string(),
+            ));
+        }
+        queued.acknowledged = true;
+        Ok(SelfHostedRunAck {
+            dispatch_id: queued.dispatch.dispatch_id.clone(),
+            lease_id: request.lease_id,
+            tenant_id: worker.tenant_id.clone(),
+            workspace_id: worker.workspace_id.clone(),
+            worker_id: worker.worker_id.clone(),
+            run_id: request.run_id,
+            status: request.status,
+            accepted_at_unix: request.reported_at_unix,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        })
+    }
+}
+
+impl QueuedSelfHostedRun {
+    fn can_lease_to(
+        &self,
+        worker: &RegisteredSelfHostedWorker,
+        supported_capabilities: &[String],
+        now_unix: u64,
+    ) -> bool {
+        !self.acknowledged
+            && self.dispatch.tenant_id == worker.tenant_id
+            && self.dispatch.workspace_id == worker.workspace_id
+            && self.dispatch.framework_adapter == worker.framework_adapter
+            && required_capabilities_supported(
+                &self.dispatch.required_capabilities,
+                supported_capabilities,
+            )
+            && required_capabilities_supported(
+                &self.dispatch.required_capabilities,
+                &worker.capabilities,
+            )
+            && self
+                .lease_expires_at_unix
+                .map(|expires_at| expires_at <= now_unix)
+                .unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedArtifactUploadRequest {
     pub identity: SelfHostedWorkerIdentity,
     pub session_id: String,
@@ -360,6 +581,18 @@ pub trait SelfHostedWorkerTransport {
         registry: &SelfHostedWorkerRegistry,
         request: SelfHostedCheckpointFetchRequest,
     ) -> Result<SelfHostedCheckpointReference, SelfHostedWorkerError>;
+    fn poll_run(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        queue: &mut InMemorySelfHostedRunQueue,
+        request: SelfHostedRunPollRequest,
+    ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError>;
+    fn ack_run(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        queue: &mut InMemorySelfHostedRunQueue,
+        request: SelfHostedRunAckRequest,
+    ) -> Result<SelfHostedRunAck, SelfHostedWorkerError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,6 +694,24 @@ impl SelfHostedWorkerTransport for InMemorySelfHostedWorkerTransport {
             trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
         })
     }
+
+    fn poll_run(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        queue: &mut InMemorySelfHostedRunQueue,
+        request: SelfHostedRunPollRequest,
+    ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
+        queue.poll_run(registry, request)
+    }
+
+    fn ack_run(
+        &self,
+        registry: &SelfHostedWorkerRegistry,
+        queue: &mut InMemorySelfHostedRunQueue,
+        request: SelfHostedRunAckRequest,
+    ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
+        queue.ack_run(registry, request)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +722,7 @@ pub enum SelfHostedWorkerError {
     InactiveWorker(String),
     InvalidIdentity(String),
     InvalidTelemetry(String),
+    InvalidTransport(String),
 }
 
 impl fmt::Display for SelfHostedWorkerError {
@@ -496,6 +748,9 @@ impl fmt::Display for SelfHostedWorkerError {
             }
             Self::InvalidTelemetry(message) => {
                 write!(formatter, "invalid self-hosted worker telemetry: {message}")
+            }
+            Self::InvalidTransport(message) => {
+                write!(formatter, "invalid self-hosted worker transport: {message}")
             }
         }
     }
@@ -582,6 +837,70 @@ fn validate_artifact_upload(
     Ok(())
 }
 
+fn validate_run_dispatch(dispatch: &SelfHostedRunDispatch) -> Result<(), SelfHostedWorkerError> {
+    require_transport_non_empty("dispatch_id", &dispatch.dispatch_id)?;
+    require_transport_non_empty("tenant_id", &dispatch.tenant_id)?;
+    require_transport_non_empty("workspace_id", &dispatch.workspace_id)?;
+    require_transport_non_empty("session_id", &dispatch.session_id)?;
+    require_transport_non_empty("run_id", &dispatch.run_id)?;
+    require_transport_non_empty("framework_adapter", &dispatch.framework_adapter)?;
+    require_transport_non_empty("workload_ref", &dispatch.workload_ref)?;
+    if dispatch.queued_at_unix == 0 {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "queued_at_unix must be greater than zero".to_string(),
+        ));
+    }
+    if dispatch
+        .required_capabilities
+        .iter()
+        .any(|item| item.trim().is_empty())
+    {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "required_capabilities must not contain empty values".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_run_poll_request(
+    request: &SelfHostedRunPollRequest,
+) -> Result<(), SelfHostedWorkerError> {
+    if request.now_unix == 0 {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "now_unix must be greater than zero".to_string(),
+        ));
+    }
+    if request.lease_duration_secs == 0 {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "lease_duration_secs must be greater than zero".to_string(),
+        ));
+    }
+    if request
+        .supported_capabilities
+        .iter()
+        .any(|item| item.trim().is_empty())
+    {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "supported_capabilities must not contain empty values".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_run_ack_request(
+    request: &SelfHostedRunAckRequest,
+) -> Result<(), SelfHostedWorkerError> {
+    require_transport_non_empty("dispatch_id", &request.dispatch_id)?;
+    require_transport_non_empty("lease_id", &request.lease_id)?;
+    require_transport_non_empty("run_id", &request.run_id)?;
+    if request.reported_at_unix == 0 {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "reported_at_unix must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_checkpoint_fetch(
     request: &SelfHostedCheckpointFetchRequest,
 ) -> Result<(), SelfHostedWorkerError> {
@@ -598,6 +917,12 @@ fn normalized_capabilities(mut capabilities: Vec<String>) -> Vec<String> {
     capabilities.sort();
     capabilities.dedup();
     capabilities
+}
+
+fn required_capabilities_supported(required: &[String], supported: &[String]) -> bool {
+    required
+        .iter()
+        .all(|capability| supported.iter().any(|item| item == capability))
 }
 
 fn worker_key(tenant_id: &str, workspace_id: &str, worker_id: &str) -> String {
@@ -625,6 +950,15 @@ fn require_identity_non_empty(field: &str, value: &str) -> Result<(), SelfHosted
 fn require_telemetry_non_empty(field: &str, value: &str) -> Result<(), SelfHostedWorkerError> {
     if value.trim().is_empty() {
         return Err(SelfHostedWorkerError::InvalidTelemetry(format!(
+            "{field} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn require_transport_non_empty(field: &str, value: &str) -> Result<(), SelfHostedWorkerError> {
+    if value.trim().is_empty() {
+        return Err(SelfHostedWorkerError::InvalidTransport(format!(
             "{field} must not be empty"
         )));
     }
@@ -862,6 +1196,284 @@ mod tests {
         assert!(error.to_string().contains("artifact exceeds maximum size"));
     }
 
+    #[test]
+    fn worker_poll_leases_matching_dispatch_and_acknowledges_it() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        queue.enqueue_run(dispatch()).unwrap();
+
+        let lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .expect("matching worker should receive a run lease");
+
+        assert_eq!(lease.dispatch_id, "dispatch-1");
+        assert_eq!(lease.lease_id, "dispatch-1:attempt-1");
+        assert_eq!(lease.worker_id, "worker-1");
+        assert_eq!(lease.attempt, 1);
+        assert_eq!(lease.lease_expires_at_unix, 1_725_000_040);
+        assert_eq!(
+            lease.trust_level,
+            SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker
+        );
+
+        let ack = transport
+            .ack_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunAckRequest {
+                    identity,
+                    dispatch_id: lease.dispatch_id.clone(),
+                    lease_id: lease.lease_id.clone(),
+                    run_id: lease.run_id.clone(),
+                    status: SelfHostedRunAckStatus::Accepted,
+                    reported_at_unix: 1_725_000_011,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(ack.dispatch_id, "dispatch-1");
+        assert_eq!(ack.lease_id, "dispatch-1:attempt-1");
+        assert_eq!(ack.worker_id, "worker-1");
+        assert_eq!(ack.status, SelfHostedRunAckStatus::Accepted);
+    }
+
+    #[test]
+    fn worker_poll_holds_unacked_lease_until_expiry_then_redelivers() {
+        let registry = registered_registry();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        queue.enqueue_run(dispatch()).unwrap();
+
+        let first = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let during_active_lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity: identity.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_039,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap();
+        let after_expiry = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity,
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_040,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.lease_id, "dispatch-1:attempt-1");
+        assert!(during_active_lease.is_none());
+        assert_eq!(after_expiry.lease_id, "dispatch-1:attempt-2");
+        assert_eq!(after_expiry.attempt, 2);
+    }
+
+    #[test]
+    fn worker_poll_rejects_mismatched_scope_adapter_and_capabilities() {
+        let mut registry = SelfHostedWorkerRegistry::default();
+        registry.register(registration()).unwrap();
+        registry
+            .register(SelfHostedWorkerRegistration {
+                tenant_id: "tenant-2".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "worker-2".to_string(),
+                framework_adapter: "codex".to_string(),
+                token_id: "token-2".to_string(),
+                token_secret: "secret-2".to_string(),
+                capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+            })
+            .unwrap();
+        registry
+            .register(SelfHostedWorkerRegistration {
+                tenant_id: "tenant-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "worker-3".to_string(),
+                framework_adapter: "hermes".to_string(),
+                token_id: "token-3".to_string(),
+                token_secret: "secret-3".to_string(),
+                capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+            })
+            .unwrap();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        queue.enqueue_run(dispatch()).unwrap();
+
+        for identity in [
+            registry.list()[1].identity(),
+            registry.list()[2].identity(),
+            registry.list()[0].identity(),
+        ] {
+            let capabilities = if identity.worker_id == "worker-1" {
+                vec!["logs".to_string()]
+            } else {
+                vec!["logs".to_string(), "artifacts".to_string()]
+            };
+            let lease = transport
+                .poll_run(
+                    &registry,
+                    &mut queue,
+                    SelfHostedRunPollRequest {
+                        identity,
+                        supported_capabilities: capabilities,
+                        now_unix: 1_725_000_010,
+                        lease_duration_secs: 30,
+                    },
+                )
+                .unwrap();
+            assert!(lease.is_none());
+        }
+    }
+
+    #[test]
+    fn worker_poll_requires_capabilities_registered_on_worker_identity() {
+        let mut registry = SelfHostedWorkerRegistry::default();
+        registry
+            .register(SelfHostedWorkerRegistration {
+                tenant_id: "tenant-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "worker-1".to_string(),
+                framework_adapter: "codex".to_string(),
+                token_id: "token-1".to_string(),
+                token_secret: "secret-1".to_string(),
+                capabilities: vec!["logs".to_string()],
+            })
+            .unwrap();
+        let identity = registry.list()[0].identity();
+        let mut queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        queue.enqueue_run(dispatch()).unwrap();
+
+        let lease = transport
+            .poll_run(
+                &registry,
+                &mut queue,
+                SelfHostedRunPollRequest {
+                    identity,
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap();
+
+        assert!(lease.is_none());
+    }
+
+    #[test]
+    fn worker_ack_rejects_wrong_worker_and_wrong_lease() {
+        let mut registry = registered_registry();
+        registry
+            .register(SelfHostedWorkerRegistration {
+                tenant_id: "tenant-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "worker-2".to_string(),
+                framework_adapter: "codex".to_string(),
+                token_id: "token-2".to_string(),
+                token_secret: "secret-2".to_string(),
+                capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+            })
+            .unwrap();
+        let worker_1 = registry.list()[0].identity();
+        let worker_2 = registry.list()[1].identity();
+        let mut wrong_worker_queue = InMemorySelfHostedRunQueue::default();
+        let transport = InMemorySelfHostedWorkerTransport::default();
+        wrong_worker_queue.enqueue_run(dispatch()).unwrap();
+        let lease = transport
+            .poll_run(
+                &registry,
+                &mut wrong_worker_queue,
+                SelfHostedRunPollRequest {
+                    identity: worker_1.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        let wrong_worker = transport
+            .ack_run(
+                &registry,
+                &mut wrong_worker_queue,
+                SelfHostedRunAckRequest {
+                    identity: worker_2.clone(),
+                    dispatch_id: lease.dispatch_id.clone(),
+                    lease_id: lease.lease_id.clone(),
+                    run_id: lease.run_id.clone(),
+                    status: SelfHostedRunAckStatus::Accepted,
+                    reported_at_unix: 1_725_000_011,
+                },
+            )
+            .unwrap_err();
+        let mut wrong_lease_queue = InMemorySelfHostedRunQueue::default();
+        wrong_lease_queue.enqueue_run(dispatch()).unwrap();
+        let lease = transport
+            .poll_run(
+                &registry,
+                &mut wrong_lease_queue,
+                SelfHostedRunPollRequest {
+                    identity: worker_1.clone(),
+                    supported_capabilities: vec!["logs".to_string(), "artifacts".to_string()],
+                    now_unix: 1_725_000_010,
+                    lease_duration_secs: 30,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let wrong_lease = transport
+            .ack_run(
+                &registry,
+                &mut wrong_lease_queue,
+                SelfHostedRunAckRequest {
+                    identity: worker_1,
+                    dispatch_id: lease.dispatch_id,
+                    lease_id: "dispatch-1:attempt-999".to_string(),
+                    run_id: lease.run_id,
+                    status: SelfHostedRunAckStatus::Accepted,
+                    reported_at_unix: 1_725_000_011,
+                },
+            )
+            .unwrap_err();
+
+        assert!(wrong_worker.to_string().contains("active lease"));
+        assert!(wrong_lease.to_string().contains("lease_id"));
+    }
+
     fn registered_registry() -> SelfHostedWorkerRegistry {
         let mut registry = SelfHostedWorkerRegistry::default();
         registry.register(registration()).unwrap();
@@ -882,6 +1494,20 @@ mod tests {
                 "logs".to_string(),
                 " artifacts ".to_string(),
             ],
+        }
+    }
+
+    fn dispatch() -> SelfHostedRunDispatch {
+        SelfHostedRunDispatch {
+            dispatch_id: "dispatch-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-1".to_string(),
+            framework_adapter: "codex".to_string(),
+            required_capabilities: vec!["artifacts".to_string(), "logs".to_string()],
+            workload_ref: "queue://runs/run-1".to_string(),
+            queued_at_unix: 1_725_000_000,
         }
     }
 }

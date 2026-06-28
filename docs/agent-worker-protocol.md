@@ -538,10 +538,42 @@ callback path.
 - `cancel_run`
 - `resume_run`
 - `heartbeat`
+- `poll_run`
+- `ack_run`
 - `stream_events`
 - `upload_artifact`
 - `fetch_checkpoint`
 - `close_session`
+
+### Self-Hosted Dispatch Transport
+
+Self-hosted worker dispatch follows the mature GitHub Actions runner shape:
+the worker initiates the transport session, polls for work, receives a leased
+run, and acknowledges the lease. FerroGate does not require an inbound network
+path to the customer host for the primary remote-worker flow.
+
+The product transport is HTTP over a mutually authenticated encrypted channel.
+The contract is:
+
+1. The worker registers and obtains a tenant/workspace-scoped identity.
+2. The worker sends `poll_run` with its identity, framework adapter, supported
+   capabilities, current time, and requested lease duration.
+3. FerroGate validates the identity, tenant/workspace scope, adapter, and
+   capability match.
+4. FerroGate returns either no work or a `SelfHostedRunLease` containing
+   `dispatch_id`, `lease_id`, `session_id`, `run_id`, `workload_ref`, attempt,
+   and `lease_expires_at_unix`.
+5. The worker sends `ack_run` with the same identity, `dispatch_id`, `lease_id`,
+   `run_id`, status, and report time.
+6. If a lease is not acknowledged before expiry, FerroGate may redeliver the
+   same dispatch with a higher attempt number.
+
+The current runtime contract includes an in-memory lease queue to lock the
+poll/ack semantics before the real mTLS HTTP client/server is introduced. That
+queue proves scope matching, adapter matching, capability matching, active
+lease ownership, idempotent dispatch identity, and expiry-based redelivery. It
+is not a production network transport and it does not claim certificate
+rotation, token issuance, or mTLS enforcement.
 
 ### Required Worker Capabilities
 
