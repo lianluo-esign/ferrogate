@@ -510,6 +510,63 @@
         }
       }
     },
+    "/admin/v1/self-hosted-workers/{id}/events": {
+      "post": {
+        "operationId": "recordAdminSelfHostedWorkerTelemetryEvent",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Record a self-hosted worker telemetry event in durable control-plane storage.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSelfHostedWorkerTelemetryEventRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded self-hosted worker telemetry event and updated worker projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerTelemetryEventResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
     "/admin/v1/managed-workers": {
       "get": {
         "operationId": "listAdminManagedWorkers",
@@ -9942,6 +9999,125 @@
           },
           "heartbeat": {
             "$ref": "#/components/schemas/AdminSelfHostedWorkerHeartbeat"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerTelemetryEventRequest": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "run_id",
+          "kind"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "lifecycle",
+              "log",
+              "tool_call",
+              "mcp_call",
+              "cli_command",
+              "skill_invocation",
+              "artifact",
+              "checkpoint",
+              "usage"
+            ]
+          },
+          "occurred_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "event_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional customer-reported telemetry event document encoded as JSON."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerTelemetryEventResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "worker",
+          "event"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_worker_event"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+          },
+          "event": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerTelemetryEvent"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerTelemetryEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "worker_id",
+          "kind",
+          "trust_level"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "occurred_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "ingested_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         },
         "additionalProperties": false

@@ -260,6 +260,37 @@ pub(crate) struct AdminSelfHostedWorkerHeartbeatResponse {
     pub(crate) heartbeat: AdminSelfHostedWorkerHeartbeat,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerTelemetryEvent {
+    pub(crate) id: String,
+    pub(crate) worker_id: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) kind: String,
+    pub(crate) trust_level: String,
+    pub(crate) occurred_at_unix: Option<u64>,
+    pub(crate) ingested_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminSelfHostedWorkerTelemetryEventRequest {
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) occurred_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) event_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerTelemetryEventResponse {
+    pub(crate) object: &'static str,
+    pub(crate) worker: AdminSelfHostedWorkerRecord,
+    pub(crate) event: AdminSelfHostedWorkerTelemetryEvent,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {

@@ -60,13 +60,10 @@ use ferrogate_storage::{
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
     StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
     StoredRequestLog, StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
-    StoredUsageAggregate,
+    StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
 };
 #[cfg(test)]
-use ferrogate_storage::{
-    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
-    StoredSelfHostedWorkerTelemetryEvent,
-};
+use ferrogate_storage::{StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
 use redis::Commands;
@@ -2420,6 +2417,45 @@ fn validate_self_hosted_heartbeat_request(
     Ok(())
 }
 
+fn validate_self_hosted_telemetry_event_request(
+    request: &crate::responses::AdminSelfHostedWorkerTelemetryEventRequest,
+) -> Result<(), SelfHostedWorkerRecordError> {
+    require_self_hosted_field("session_id", &request.session_id)?;
+    require_self_hosted_field("run_id", &request.run_id)?;
+    require_self_hosted_field("kind", &request.kind)?;
+    let kind = request.kind.trim();
+    if !matches!(
+        kind,
+        "lifecycle"
+            | "log"
+            | "tool_call"
+            | "mcp_call"
+            | "cli_command"
+            | "skill_invocation"
+            | "artifact"
+            | "checkpoint"
+            | "usage"
+    ) {
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
+            "kind must be one of lifecycle, log, tool_call, mcp_call, cli_command, skill_invocation, artifact, checkpoint, usage; got {kind}"
+        )));
+    }
+    if !request
+        .event_json
+        .as_deref()
+        .unwrap_or("{}")
+        .trim()
+        .is_empty()
+        && serde_json::from_str::<serde_json::Value>(request.event_json.as_deref().unwrap_or("{}"))
+            .is_err()
+    {
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(
+            "event_json must be valid JSON when provided".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn require_self_hosted_field(field: &str, value: &str) -> Result<(), SelfHostedWorkerRecordError> {
     if value.trim().is_empty() {
         return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
@@ -2443,6 +2479,14 @@ fn next_self_hosted_heartbeat_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("self-hosted-heartbeat-{nanos}-{}", std::process::id())
+}
+
+fn next_self_hosted_telemetry_event_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("self-hosted-event-{nanos}-{}", std::process::id())
 }
 
 impl AppState {
@@ -4713,6 +4757,66 @@ impl AppState {
             )
         })?;
         Ok((worker, heartbeat))
+    }
+
+    pub(crate) fn record_self_hosted_worker_telemetry_event(
+        &self,
+        worker_id: &str,
+        request: crate::responses::AdminSelfHostedWorkerTelemetryEventRequest,
+    ) -> Result<
+        (
+            crate::responses::AdminSelfHostedWorkerRecord,
+            crate::responses::AdminSelfHostedWorkerTelemetryEvent,
+        ),
+        SelfHostedWorkerRecordError,
+    > {
+        validate_self_hosted_telemetry_event_request(&request)?;
+        let registration = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .find(|registration| registration.id == worker_id)
+            .ok_or_else(|| {
+                SelfHostedWorkerRecordError::NotFound(format!(
+                    "self-hosted worker {worker_id} was not found"
+                ))
+            })?;
+        let ingested_at_unix = now_unix_seconds();
+        let stored_event = StoredSelfHostedWorkerTelemetryEvent {
+            id: next_self_hosted_telemetry_event_id(),
+            worker_id: registration.id.clone(),
+            tenant: registration.tenant,
+            workspace_id: registration.workspace_id,
+            session_id: Some(request.session_id.trim().to_string()),
+            run_id: Some(request.run_id.trim().to_string()),
+            kind: request.kind.trim().to_string(),
+            trust_level: "reported_by_self_hosted_worker".into(),
+            occurred_at_unix: request.occurred_at_unix.or(ingested_at_unix),
+            ingested_at_unix,
+            event_json: request
+                .event_json
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "{}".into()),
+        };
+        self.repositories
+            .append_self_hosted_worker_telemetry_event(stored_event.clone())
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
+            SelfHostedWorkerRecordError::Storage(
+                "self-hosted worker was not readable after telemetry event write".into(),
+            )
+        })?;
+        let event = crate::responses::AdminSelfHostedWorkerTelemetryEvent {
+            id: stored_event.id,
+            worker_id: stored_event.worker_id,
+            session_id: stored_event.session_id,
+            run_id: stored_event.run_id,
+            kind: stored_event.kind,
+            trust_level: stored_event.trust_level,
+            occurred_at_unix: stored_event.occurred_at_unix,
+            ingested_at_unix: stored_event.ingested_at_unix,
+        };
+        Ok((worker, event))
     }
 
     pub(crate) fn self_hosted_worker_record(
@@ -7759,6 +7863,129 @@ mod tests {
         assert!(state
             .repositories
             .self_hosted_worker_heartbeats()
+            .is_empty());
+    }
+
+    #[test]
+    fn record_self_hosted_worker_telemetry_event_updates_event_projection() {
+        let state = AppState::new(Config::default());
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext {
+                        organization_id: Some("org".into()),
+                        team_id: None,
+                        project_id: Some("project".into()),
+                        user_id: None,
+                        api_key_id: Some("key".into()),
+                    },
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: true,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+
+        let (updated_worker, event) = state
+            .record_self_hosted_worker_telemetry_event(
+                &worker.id,
+                crate::responses::AdminSelfHostedWorkerTelemetryEventRequest {
+                    session_id: "session-1".into(),
+                    run_id: "run-1".into(),
+                    kind: "tool_call".into(),
+                    occurred_at_unix: Some(456),
+                    event_json: Some(r#"{"tool":"shell"}"#.into()),
+                },
+            )
+            .expect("telemetry event should be accepted");
+
+        assert!(event.id.starts_with("self-hosted-event-"));
+        assert_eq!(event.worker_id, worker.id);
+        assert_eq!(event.session_id.as_deref(), Some("session-1"));
+        assert_eq!(event.run_id.as_deref(), Some("run-1"));
+        assert_eq!(event.kind, "tool_call");
+        assert_eq!(event.trust_level, "reported_by_self_hosted_worker");
+        assert_eq!(event.occurred_at_unix, Some(456));
+        assert!(event.ingested_at_unix.is_some());
+        assert_eq!(updated_worker.id, worker.id);
+        assert_eq!(updated_worker.telemetry_event_count, 1);
+        assert_eq!(updated_worker.latest_event_at_unix, Some(456));
+
+        let stored_events = state.repositories.self_hosted_worker_telemetry_events();
+        assert_eq!(stored_events.len(), 1);
+        assert_eq!(stored_events[0].worker_id, worker.id);
+        assert_eq!(stored_events[0].event_json, r#"{"tool":"shell"}"#);
+    }
+
+    #[test]
+    fn record_self_hosted_worker_telemetry_event_rejects_missing_or_invalid_payloads() {
+        let state = AppState::new(Config::default());
+
+        let missing = state.record_self_hosted_worker_telemetry_event(
+            "missing-worker",
+            crate::responses::AdminSelfHostedWorkerTelemetryEventRequest {
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                kind: "log".into(),
+                occurred_at_unix: None,
+                event_json: None,
+            },
+        );
+        assert!(matches!(
+            missing,
+            Err(SelfHostedWorkerRecordError::NotFound(message))
+                if message == "self-hosted worker missing-worker was not found"
+        ));
+
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext::default(),
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: false,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+        let invalid_kind = state.record_self_hosted_worker_telemetry_event(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerTelemetryEventRequest {
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                kind: "unknown".into(),
+                occurred_at_unix: None,
+                event_json: None,
+            },
+        );
+        assert!(matches!(
+            invalid_kind,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message.contains("kind must be one of")
+        ));
+
+        let invalid_json = state.record_self_hosted_worker_telemetry_event(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerTelemetryEventRequest {
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                kind: "log".into(),
+                occurred_at_unix: None,
+                event_json: Some("{not-json".into()),
+            },
+        );
+        assert!(matches!(
+            invalid_json,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "event_json must be valid JSON when provided"
+        ));
+
+        assert!(state
+            .repositories
+            .self_hosted_worker_telemetry_events()
             .is_empty());
     }
 

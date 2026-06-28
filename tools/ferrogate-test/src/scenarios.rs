@@ -308,6 +308,50 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    let self_hosted_worker_events_path = format!("{self_hosted_worker_detail_path}/events");
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_events_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "session_id": "session-1",
+          "run_id": "run-1",
+          "kind": "tool_call",
+          "occurred_at_unix": 456,
+          "event_json": "{\"tool\":\"shell\"}"
+        }"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_event");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["worker"]["telemetry_event_count"], 1);
+            assert_eq!(body["worker"]["latest_event_at_unix"], 456);
+            assert_eq!(body["event"]["worker_id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["event"]["session_id"], "session-1");
+            assert_eq!(body["event"]["run_id"], "run-1");
+            assert_eq!(body["event"]["kind"], "tool_call");
+            assert_eq!(
+                body["event"]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["event"]["occurred_at_unix"], 456);
+            assert!(body["event"]["ingested_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        &self_hosted_worker_detail_path,
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["telemetry_event_count"], 1);
+            assert_eq!(body["latest_event_at_unix"], 456);
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "GET",
         "/admin/v1/self-hosted-workers/missing-worker",
@@ -343,6 +387,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 "reported_by_self_hosted_worker"
             );
             assert_eq!(body["data"][0]["latest_heartbeat"]["status"], "online");
+            assert_eq!(body["data"][0]["telemetry_event_count"], 1);
+            assert_eq!(body["data"][0]["latest_event_at_unix"], 456);
             Ok(())
         },
     )?;
