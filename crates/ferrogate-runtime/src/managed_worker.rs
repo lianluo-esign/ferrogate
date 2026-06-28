@@ -132,7 +132,131 @@ pub enum ManagedWorkerLifecycleAction {
     Failure,
 }
 
+pub const AGENT_WORKER_PROTOCOL_VERSION: u32 = 1;
+pub const AGENT_WORKER_CLOCK_SKEW_MILLIS: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWorkerManagementAction {
+    ProbeHandlers,
+    ListBackends,
+    Provision,
+    ExecOrAttach,
+    Stop,
+    Cleanup,
+    StreamStatus,
+    CollectArtifacts,
+}
+
+impl AgentWorkerManagementAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProbeHandlers => "probe_handlers",
+            Self::ListBackends => "list_backends",
+            Self::Provision => "provision",
+            Self::ExecOrAttach => "exec_or_attach",
+            Self::Stop => "stop",
+            Self::Cleanup => "cleanup",
+            Self::StreamStatus => "stream_status",
+            Self::CollectArtifacts => "collect_artifacts",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerManagementSecurity {
+    pub key_id: String,
+    pub nonce: String,
+    pub signature: String,
+    pub algorithm: AgentWorkerSecurityAlgorithm,
+    pub encrypted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWorkerSecurityAlgorithm {
+    SharedSecretHmacSha256,
+    MtlsBoundHmacSha256,
+}
+
+impl AgentWorkerSecurityAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SharedSecretHmacSha256 => "shared_secret_hmac_sha256",
+            Self::MtlsBoundHmacSha256 => "mtls_bound_hmac_sha256",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerManagementEnvelope {
+    pub protocol_version: u32,
+    pub action: AgentWorkerManagementAction,
+    pub request_id: String,
+    pub idempotency_key: String,
+    pub issued_at_unix_millis: u64,
+    pub deadline_unix_millis: u64,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub security: AgentWorkerManagementSecurity,
+}
+
+impl AgentWorkerManagementEnvelope {
+    pub fn validate(&self, now_unix_millis: u64) -> Result<(), ManagedWorkerError> {
+        if self.protocol_version != AGENT_WORKER_PROTOCOL_VERSION {
+            return Err(ManagedWorkerError::InvalidRequest(format!(
+                "unsupported agent-worker protocol version {}",
+                self.protocol_version
+            )));
+        }
+        require_non_empty("request_id", &self.request_id)?;
+        require_non_empty("idempotency_key", &self.idempotency_key)?;
+        require_non_empty("tenant_id", &self.tenant_id)?;
+        require_non_empty("workspace_id", &self.workspace_id)?;
+        require_non_empty("worker_id", &self.worker_id)?;
+        require_non_empty("security.key_id", &self.security.key_id)?;
+        require_non_empty("security.nonce", &self.security.nonce)?;
+        require_non_empty("security.signature", &self.security.signature)?;
+        if !self.security.encrypted
+            && self.security.algorithm != AgentWorkerSecurityAlgorithm::MtlsBoundHmacSha256
+        {
+            return Err(ManagedWorkerError::InvalidRequest(
+                "agent-worker management requests must be encrypted or mTLS-bound".to_string(),
+            ));
+        }
+        if self.deadline_unix_millis <= self.issued_at_unix_millis {
+            return Err(ManagedWorkerError::InvalidRequest(
+                "deadline_unix_millis must be after issued_at_unix_millis".to_string(),
+            ));
+        }
+        if now_unix_millis > self.deadline_unix_millis {
+            return Err(ManagedWorkerError::InvalidRequest(
+                "agent-worker management request deadline expired".to_string(),
+            ));
+        }
+        if self.issued_at_unix_millis
+            > now_unix_millis.saturating_add(AGENT_WORKER_CLOCK_SKEW_MILLIS)
+        {
+            return Err(ManagedWorkerError::InvalidRequest(
+                "agent-worker management request issued_at is too far in the future".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerFrameworkHandler {
+    pub adapter_name: String,
+    pub framework: String,
+    pub version: String,
+    pub ready: bool,
+    pub readiness_reason: Option<String>,
+}
+
 pub trait AgentWorkerControlClient {
+    fn framework_handlers(&mut self) -> &[AgentWorkerFrameworkHandler];
     fn backends(&mut self) -> &[IsolationBackendDescriptor];
     fn provision_managed_worker(
         &mut self,
@@ -193,6 +317,7 @@ impl ManagedWorkerScheduler {
         self.validate_request(&request)?;
         self.check_concurrency(&request)?;
         let template = self.select_template(&request)?;
+        self.check_framework_handler(template, agent_worker)?;
         let selected_backend =
             select_isolation_backend(&template.isolation_policy, agent_worker.backends())
                 .map_err(ManagedWorkerError::Isolation)?
@@ -447,6 +572,37 @@ impl ManagedWorkerScheduler {
                 ))
             })
     }
+
+    fn check_framework_handler<C>(
+        &self,
+        template: &WorkerTemplate,
+        agent_worker: &mut C,
+    ) -> Result<(), ManagedWorkerError>
+    where
+        C: AgentWorkerControlClient,
+    {
+        let handlers = agent_worker.framework_handlers();
+        let Some(handler) = handlers
+            .iter()
+            .find(|handler| handler.adapter_name == template.framework_adapter)
+        else {
+            return Err(ManagedWorkerError::NoCompatibleTemplate(format!(
+                "agent-worker reported no handler for framework adapter {}",
+                template.framework_adapter
+            )));
+        };
+        if !handler.ready {
+            return Err(ManagedWorkerError::NoCompatibleTemplate(format!(
+                "agent-worker handler {} is not ready: {}",
+                handler.adapter_name,
+                handler
+                    .readiness_reason
+                    .as_deref()
+                    .unwrap_or("readiness reason was not reported")
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl ManagedWorkerSession {
@@ -579,6 +735,15 @@ impl IsolationCleanupOutcome {
     }
 }
 
+fn require_non_empty(field: &str, value: &str) -> Result<(), ManagedWorkerError> {
+    if value.trim().is_empty() {
+        return Err(ManagedWorkerError::InvalidRequest(format!(
+            "{field} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedWorkerError {
     InvalidConfig(String),
@@ -647,6 +812,7 @@ mod tests {
         assert_eq!(
             agent_worker.calls,
             vec![
+                "framework_handlers",
                 "backends",
                 "provision_managed_worker",
                 "exec_or_attach",
@@ -719,6 +885,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_session_when_agent_worker_handler_is_not_ready() {
+        let scheduler = scheduler();
+        let mut agent_worker = FakeAgentWorker::new(vec![backend(
+            "firecracker",
+            IsolationBackendKind::FirecrackerMicroVm,
+        )]);
+        agent_worker.handlers[0].ready = false;
+        agent_worker.handlers[0].readiness_reason = Some("codex binary missing".to_string());
+
+        let error = scheduler
+            .start_session(session_request(), &mut agent_worker)
+            .unwrap_err();
+
+        assert!(matches!(error, ManagedWorkerError::NoCompatibleTemplate(_)));
+        assert_eq!(agent_worker.calls, vec!["framework_handlers"]);
+        assert!(error.to_string().contains("codex binary missing"));
+    }
+
+    #[test]
     fn failed_before_start_projects_auditable_failure_lifecycle_record() {
         let scheduler = scheduler();
         let mut agent_worker = FakeAgentWorker::new(vec![backend(
@@ -781,7 +966,7 @@ mod tests {
             error,
             ManagedWorkerError::Isolation(IsolationError::NoCompatibleBackend(_))
         ));
-        assert_eq!(agent_worker.calls, vec!["backends"]);
+        assert_eq!(agent_worker.calls, vec!["framework_handlers", "backends"]);
     }
 
     #[test]
@@ -800,6 +985,7 @@ mod tests {
         assert_eq!(
             agent_worker.calls,
             vec![
+                "framework_handlers",
                 "backends",
                 "provision_managed_worker",
                 "exec_or_attach",
@@ -872,6 +1058,42 @@ mod tests {
         assert!(matches!(error, ManagedWorkerError::InvalidConfig(_)));
     }
 
+    #[test]
+    fn agent_worker_management_envelope_requires_stable_secure_fields() {
+        let envelope = management_envelope(AgentWorkerManagementAction::Provision);
+
+        envelope.validate(1_000).unwrap();
+        assert_eq!(envelope.action.as_str(), "provision");
+        assert_eq!(
+            envelope.security.algorithm.as_str(),
+            "shared_secret_hmac_sha256"
+        );
+
+        let mut missing_signature = envelope.clone();
+        missing_signature.security.signature.clear();
+        assert!(missing_signature
+            .validate(1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("security.signature"));
+
+        let mut unencrypted = envelope.clone();
+        unencrypted.security.encrypted = false;
+        assert!(unencrypted
+            .validate(1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("encrypted or mTLS-bound"));
+
+        let mut expired = envelope.clone();
+        expired.deadline_unix_millis = 999;
+        assert!(expired
+            .validate(1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("deadline expired"));
+    }
+
     fn scheduler() -> ManagedWorkerScheduler {
         ManagedWorkerScheduler::new(ManagedWorkerSchedulerConfig::default(), vec![template()])
             .unwrap()
@@ -909,6 +1131,29 @@ mod tests {
         }
     }
 
+    fn management_envelope(action: AgentWorkerManagementAction) -> AgentWorkerManagementEnvelope {
+        AgentWorkerManagementEnvelope {
+            protocol_version: AGENT_WORKER_PROTOCOL_VERSION,
+            action,
+            request_id: "request-1".to_string(),
+            idempotency_key: "idempotency-1".to_string(),
+            issued_at_unix_millis: 900,
+            deadline_unix_millis: 2_000,
+            tenant_id: "tenant-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            worker_id: "agent-worker-fake-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            security: AgentWorkerManagementSecurity {
+                key_id: "agent-worker-key-1".to_string(),
+                nonce: "nonce-1".to_string(),
+                signature: "signature-1".to_string(),
+                algorithm: AgentWorkerSecurityAlgorithm::SharedSecretHmacSha256,
+                encrypted: true,
+            },
+        }
+    }
+
     fn backend(name: &str, kind: IsolationBackendKind) -> IsolationBackendDescriptor {
         IsolationBackendDescriptor {
             backend_name: name.to_string(),
@@ -919,6 +1164,7 @@ mod tests {
     }
 
     struct FakeAgentWorker {
+        handlers: Vec<AgentWorkerFrameworkHandler>,
         backends: Vec<IsolationBackendDescriptor>,
         calls: Vec<&'static str>,
         fail_exec: bool,
@@ -929,6 +1175,13 @@ mod tests {
     impl FakeAgentWorker {
         fn new(backends: Vec<IsolationBackendDescriptor>) -> Self {
             Self {
+                handlers: vec![AgentWorkerFrameworkHandler {
+                    adapter_name: "codex".to_string(),
+                    framework: "codex".to_string(),
+                    version: "test-1".to_string(),
+                    ready: true,
+                    readiness_reason: None,
+                }],
                 backends,
                 calls: Vec::new(),
                 fail_exec: false,
@@ -954,6 +1207,11 @@ mod tests {
     }
 
     impl AgentWorkerControlClient for FakeAgentWorker {
+        fn framework_handlers(&mut self) -> &[AgentWorkerFrameworkHandler] {
+            self.calls.push("framework_handlers");
+            &self.handlers
+        }
+
         fn backends(&mut self) -> &[IsolationBackendDescriptor] {
             self.calls.push("backends");
             &self.backends
