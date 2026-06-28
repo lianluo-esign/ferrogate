@@ -8,6 +8,7 @@ mod agent_runs;
 mod body;
 mod chat;
 mod dispatch;
+mod external_actions;
 mod handlers;
 mod local;
 mod mcp_rpc;
@@ -45,6 +46,10 @@ use crate::{
     routing::UpstreamEndpoint,
     state::{RuntimeRoute, SharedAppState},
     telemetry::{start_analytics_background_sender, start_otlp_background_sender},
+};
+
+use self::external_actions::{
+    serve_gateway_external_action_authorizer_unix, GatewayExternalActionAuthorizerService,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -155,6 +160,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let _acme_renewal =
         start_acme_renewal_if_configured(&tls, resolved_tls.as_ref(), acme_renewal_state, &state);
     let _mcp_health = start_mcp_health_scheduler(&state);
+    let _external_action_authorizer = start_external_action_authorizer_if_configured(&state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -193,6 +199,51 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     server.add_service(service);
 
     server.run_forever();
+}
+
+#[cfg(unix)]
+fn start_external_action_authorizer_if_configured(
+    state: &SharedAppState,
+) -> Option<JoinHandle<()>> {
+    let current = state.current();
+    let config = &current.config.agent_runtime;
+    if !config.enabled
+        || config.provider != crate::config::AgentRuntimeProvider::ManagedWorker
+        || config
+            .managed_worker
+            .external_action_authorizer_socket
+            .as_deref()
+            .is_none()
+    {
+        return None;
+    }
+    let socket_path = PathBuf::from(
+        config
+            .managed_worker
+            .external_action_authorizer_socket
+            .as_deref()?,
+    );
+    let max_requests = config
+        .managed_worker
+        .external_action_authorizer_max_requests;
+    let service = GatewayExternalActionAuthorizerService::new(
+        current.clone(),
+        ferrogate_runtime::CapabilityPolicy::default(),
+    );
+    Some(thread::spawn(move || {
+        if let Err(error) =
+            serve_gateway_external_action_authorizer_unix(&socket_path, service, max_requests)
+        {
+            tracing::warn!("gateway external action authorizer exited: {error}");
+        }
+    }))
+}
+
+#[cfg(not(unix))]
+fn start_external_action_authorizer_if_configured(
+    _state: &SharedAppState,
+) -> Option<JoinHandle<()>> {
+    None
 }
 
 #[derive(Debug)]

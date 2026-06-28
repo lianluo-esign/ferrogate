@@ -322,6 +322,47 @@ agent_runtime:
 }
 
 #[test]
+fn parses_yaml_managed_worker_authorizer_socket_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferrogate.yaml");
+    std::fs::write(
+        &path,
+        r#"
+listen: "127.0.0.1:8080"
+agent_runtime:
+  enabled: true
+  provider: managed_worker
+  managed_worker:
+    external_action_authorizer_socket: /tmp/ferrogate-agent-actions.sock
+    external_action_authorizer_max_requests: 2
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+    assert!(config.agent_runtime.enabled);
+    assert_eq!(
+        config.agent_runtime.provider,
+        AgentRuntimeProvider::ManagedWorker
+    );
+    assert_eq!(
+        config
+            .agent_runtime
+            .managed_worker
+            .external_action_authorizer_socket
+            .as_deref(),
+        Some("/tmp/ferrogate-agent-actions.sock")
+    );
+    assert_eq!(
+        config
+            .agent_runtime
+            .managed_worker
+            .external_action_authorizer_max_requests,
+        Some(2)
+    );
+}
+
+#[test]
 fn parses_yaml_storage_postgres_operational_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.yaml");

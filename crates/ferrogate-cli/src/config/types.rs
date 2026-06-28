@@ -134,6 +134,8 @@ pub(crate) struct AgentRuntimeConfig {
     pub(crate) timeout_millis: u64,
     #[serde(default)]
     pub(crate) external: AgentRuntimeExternalConfig,
+    #[serde(default)]
+    pub(crate) managed_worker: AgentRuntimeManagedWorkerConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -152,6 +154,14 @@ pub(crate) struct AgentRuntimeExternalConfig {
     pub(crate) args: Vec<String>,
     #[serde(default)]
     pub(crate) timeout_millis: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentRuntimeManagedWorkerConfig {
+    #[serde(default)]
+    pub(crate) external_action_authorizer_socket: Option<String>,
+    #[serde(default)]
+    pub(crate) external_action_authorizer_max_requests: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1495,6 +1505,7 @@ impl Default for AgentRuntimeConfig {
             max_turns: default_agent_runtime_max_turns(),
             timeout_millis: default_agent_runtime_timeout_millis(),
             external: AgentRuntimeExternalConfig::default(),
+            managed_worker: AgentRuntimeManagedWorkerConfig::default(),
         }
     }
 }

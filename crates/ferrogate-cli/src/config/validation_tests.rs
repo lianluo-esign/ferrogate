@@ -1702,6 +1702,40 @@ fn accepts_agent_runtime_opt_in_config() {
 }
 
 #[test]
+fn rejects_invalid_managed_worker_authorizer_socket_config() {
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
+                external_action_authorizer_socket: Some(" ".into()),
+                external_action_authorizer_max_requests: None,
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field agent_runtime.managed_worker.external_action_authorizer_socket"));
+
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
+                external_action_authorizer_socket: Some("/tmp/ferrogate.sock".into()),
+                external_action_authorizer_max_requests: Some(0),
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error
+        .contains("field agent_runtime.managed_worker.external_action_authorizer_max_requests"));
+}
+
+#[test]
 fn rejects_external_agent_runtime_without_command() {
     let config = Config {
         agent_runtime: AgentRuntimeConfig {

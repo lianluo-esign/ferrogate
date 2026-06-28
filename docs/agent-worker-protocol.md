@@ -361,6 +361,28 @@ contract used for local gateway-to-worker integration tests; production
 deployment can wrap the same request/response body in stronger process
 management and symmetric encryption without changing handler semantics.
 
+The gateway/control-plane side can serve this local Unix socket authorizer when
+managed runtime is enabled with:
+
+```yaml
+agent_runtime:
+  enabled: true
+  provider: managed_worker
+  managed_worker:
+    external_action_authorizer_socket: /run/ferrogate/agent-actions.sock
+    # Optional test/smoke limit. Omit for the long-running gateway service.
+    external_action_authorizer_max_requests: 1
+```
+
+The gateway service owns the shared
+`GatewayExternalActionTransportRequest`/`GatewayExternalActionTransportResponse`
+contract, applies the gateway capability authorizer, and appends the normalized
+capability event to the agent run timeline before replying. The initial service
+uses a fail-closed default policy unless later operator policy wiring grants a
+capability. That means the socket path is a real control-plane enforcement
+boundary, but it is not yet a broad permission engine and it still does not run
+the handler action or manage the Firecracker microVM lifecycle.
+
 The current typed action specs are:
 
 - `ManagedToolAction`: governed built-in or plugin tool call with argument

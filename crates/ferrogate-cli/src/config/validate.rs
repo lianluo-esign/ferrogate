@@ -725,7 +725,30 @@ impl Config {
             bail!("field agent_runtime.timeout_millis: must be greater than zero");
         }
         match self.agent_runtime.provider {
-            crate::config::AgentRuntimeProvider::ManagedWorker => {}
+            crate::config::AgentRuntimeProvider::ManagedWorker => {
+                if let Some(socket_path) = self
+                    .agent_runtime
+                    .managed_worker
+                    .external_action_authorizer_socket
+                    .as_deref()
+                {
+                    if socket_path.trim().is_empty() {
+                        bail!(
+                            "field agent_runtime.managed_worker.external_action_authorizer_socket: must not be empty when provided"
+                        );
+                    }
+                }
+                if self
+                    .agent_runtime
+                    .managed_worker
+                    .external_action_authorizer_max_requests
+                    == Some(0)
+                {
+                    bail!(
+                        "field agent_runtime.managed_worker.external_action_authorizer_max_requests: must be greater than zero when provided"
+                    );
+                }
+            }
             crate::config::AgentRuntimeProvider::External => {
                 if self.agent_runtime.external.command.trim().is_empty() {
                     bail!("field agent_runtime.external.command: must not be empty when provider is external");
