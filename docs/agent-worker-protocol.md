@@ -343,6 +343,14 @@ authentication failure. A ready Firecracker report only means the configured
 worker bundle exists: `AGENT_WORKER_FIRECRACKER_BIN`,
 `AGENT_WORKER_FIRECRACKER_KERNEL`, and `AGENT_WORKER_FIRECRACKER_ROOTFS` all
 point to files. It must not be treated as evidence that a microVM can boot.
+For operator/debug evidence, `agent-worker firecracker-prepare-plan` can emit
+the worker-owned prepare plan for that configured bundle without starting
+Firecracker. The plan reports `process=agent-worker`,
+`host_lifecycle_owner=agent-worker`, `gateway_controls_firecracker=false`, the
+configured bundle paths, planned host lifecycle steps, default resource policy,
+no-direct-egress network policy, read-only rootfs/workspace filesystem policy,
+and `proves_microvm_boot=false`. This is a preflight planning contract for #82,
+not a provision success signal.
 Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 `stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
 worker-owned lifecycle or handler dispatch. The dispatch still does not boot
