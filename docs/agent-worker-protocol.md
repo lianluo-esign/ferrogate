@@ -170,12 +170,16 @@ The first concrete process transport is a Unix-domain socket contract smoke:
 agent-worker serve-management-unix \
   --socket-path "$AGENT_WORKER_MANAGEMENT_SOCKET" \
   --key-id "$AGENT_WORKER_MANAGEMENT_KEY_ID" \
-  --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET"
+  --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET" \
+  --max-requests 1
 ```
 
-This one-shot command accepts one JSON envelope over the socket, verifies it
-through the same management verifier, writes one JSON response, removes the
-socket file, and exits. The envelope should use
+This command accepts signed JSON envelopes over the socket, verifies them
+through the same management verifier, writes one JSON response per request,
+removes the socket file, and exits after `--max-requests` requests. The default
+is one request for deterministic contract smokes. The same server instance keeps
+verifier state across accepted connections, so nonce replay and idempotency
+checks are not reset per connection. The envelope should use
 `security.transport_security=local_unix_socket` for this transport. It proves
 the `agent-worker` process can receive management requests over an explicit
 same-host process boundary. It is not the final long-running lifecycle server,

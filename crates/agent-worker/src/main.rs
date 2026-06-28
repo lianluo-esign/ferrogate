@@ -64,6 +64,9 @@ enum Command {
         /// Verification time override for deterministic contract tests.
         #[arg(long)]
         now_unix_millis: Option<u64>,
+        /// Number of management requests to accept before exiting.
+        #[arg(long, default_value_t = 1)]
+        max_requests: usize,
     },
 }
 
@@ -82,7 +85,14 @@ fn main() -> Result<()> {
             key_id,
             shared_secret,
             now_unix_millis,
-        } => serve_management_unix_command(&socket_path, &key_id, &shared_secret, now_unix_millis),
+            max_requests,
+        } => serve_management_unix_command(
+            &socket_path,
+            &key_id,
+            &shared_secret,
+            now_unix_millis,
+            max_requests,
+        ),
     }
 }
 
@@ -137,48 +147,74 @@ fn serve_management_unix_command(
     key_id: &str,
     shared_secret: &str,
     now_unix_millis: Option<u64>,
+    max_requests: usize,
 ) -> Result<()> {
-    let response = serve_one_management_unix(socket_path, key_id, shared_secret, now_unix_millis)?;
+    let responses = serve_management_unix(
+        socket_path,
+        key_id,
+        shared_secret,
+        now_unix_millis,
+        max_requests,
+    )?;
+    let Some(response) = responses.last() else {
+        anyhow::bail!("max_requests must be greater than zero");
+    };
     println!(
-        "agent-worker unix management accepted request_id={} accepted={}",
-        response.request_id, response.accepted
+        "agent-worker unix management served requests={} last_request_id={} last_accepted={}",
+        responses.len(),
+        response.request_id,
+        response.accepted
     );
     Ok(())
 }
 
-fn serve_one_management_unix(
+fn serve_management_unix(
     socket_path: &Path,
     key_id: &str,
     shared_secret: &str,
     now_unix_millis: Option<u64>,
-) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
+    max_requests: usize,
+) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
+    if max_requests == 0 {
+        anyhow::bail!("max_requests must be greater than zero");
+    }
     if socket_path.exists() {
         std::fs::remove_file(socket_path)?;
     }
     let listener = UnixListener::bind(socket_path)?;
-    let result = accept_one_management_unix_connection(
-        &listener,
-        key_id,
-        shared_secret,
-        now_unix_millis.unwrap_or_else(current_unix_millis),
-    );
+    let mut transport =
+        InMemoryAgentWorkerManagementTransport::new(AgentWorkerManagementVerifier::new(vec![
+            AgentWorkerManagementKey {
+                key_id: key_id.to_string(),
+                shared_secret: shared_secret.to_string(),
+            },
+        ])?);
+    let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
+    let mut responses = Vec::with_capacity(max_requests);
+    for _ in 0..max_requests {
+        responses.push(accept_one_management_unix_connection(
+            &listener,
+            &mut transport,
+            now_unix_millis,
+        )?);
+    }
     let _ = std::fs::remove_file(socket_path);
-    result
+    Ok(responses)
 }
 
 fn accept_one_management_unix_connection(
     listener: &UnixListener,
-    key_id: &str,
-    shared_secret: &str,
+    transport: &mut InMemoryAgentWorkerManagementTransport,
     now_unix_millis: u64,
 ) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
     let (mut stream, _) = listener.accept()?;
     let mut input = String::new();
     stream.read_to_string(&mut input)?;
-    let response_json = accept_management_json(&input, key_id, shared_secret, now_unix_millis)?;
+    let envelope: AgentWorkerManagementEnvelope = serde_json::from_str(&input)?;
+    let response = transport.accept_management_request(envelope, now_unix_millis);
+    let response_json = serde_json::to_string(&response)?;
     stream.write_all(response_json.as_bytes())?;
     stream.write_all(b"\n")?;
-    let response = serde_json::from_str(&response_json)?;
     Ok(response)
 }
 
@@ -428,11 +464,12 @@ mod tests {
         let socket_path = temp.path().join("agent-worker-management.sock");
         let socket_for_server = socket_path.clone();
         let server = thread::spawn(move || {
-            serve_one_management_unix(
+            serve_management_unix(
                 &socket_for_server,
                 "agent-worker-smoke-key",
                 SMOKE_SHARED_SECRET,
                 Some(1_000),
+                1,
             )
             .unwrap()
         });
@@ -448,9 +485,49 @@ mod tests {
         assert_eq!(response.action, AgentWorkerManagementAction::ProbeHandlers);
         assert!(response.error.is_none());
 
-        let server_response = server.join().unwrap();
-        assert!(server_response.accepted);
-        assert_eq!(server_response.request_id, "agent-worker-smoke-request");
+        let server_responses = server.join().unwrap();
+        assert_eq!(server_responses.len(), 1);
+        assert!(server_responses[0].accepted);
+        assert_eq!(server_responses[0].request_id, "agent-worker-smoke-request");
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn unix_socket_server_keeps_verifier_state_across_connections() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("agent-worker-management.sock");
+        let socket_for_server = socket_path.clone();
+        let server = thread::spawn(move || {
+            serve_management_unix(
+                &socket_for_server,
+                "agent-worker-smoke-key",
+                SMOKE_SHARED_SECRET,
+                Some(1_000),
+                2,
+            )
+            .unwrap()
+        });
+
+        wait_for_socket(&socket_path);
+        let client = AgentWorkerUnixManagementClient::new(&socket_path);
+        let first = client
+            .send_management_request(&smoke_envelope().unwrap())
+            .unwrap();
+        let replay = client
+            .send_management_request(&smoke_envelope().unwrap())
+            .unwrap();
+
+        assert!(first.accepted);
+        assert!(!replay.accepted);
+        assert_eq!(
+            replay.error.as_ref().map(|error| error.code.as_str()),
+            Some("nonce_replay")
+        );
+
+        let server_responses = server.join().unwrap();
+        assert_eq!(server_responses.len(), 2);
+        assert!(server_responses[0].accepted);
+        assert!(!server_responses[1].accepted);
         assert!(!socket_path.exists());
     }
 
