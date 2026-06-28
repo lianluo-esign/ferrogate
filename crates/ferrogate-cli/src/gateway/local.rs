@@ -4391,7 +4391,15 @@ impl FerroGateway {
                                 checkpoint_metadata_implemented: true,
                                 identity_fingerprint_rotation_implemented: true,
                                 stale_visibility_implemented: true,
-                                worker_transport_implemented: false,
+                                worker_transport_implemented: true,
+                                worker_transport_paths: vec![
+                                    "/v1/self-hosted-workers/heartbeat",
+                                    "/v1/self-hosted-workers/events",
+                                    "/v1/self-hosted-workers/artifacts",
+                                    "/v1/self-hosted-workers/checkpoints",
+                                    "/v1/self-hosted-workers/runs/poll",
+                                    "/v1/self-hosted-workers/runs/ack",
+                                ],
                                 contract_version: storage.contract_version,
                             },
                         }]);

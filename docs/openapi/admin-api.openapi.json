@@ -10110,6 +10110,7 @@
           "identity_fingerprint_rotation_implemented",
           "stale_visibility_implemented",
           "worker_transport_implemented",
+          "worker_transport_paths",
           "contract_version"
         ],
         "properties": {
@@ -10161,7 +10162,22 @@
           },
           "worker_transport_implemented": {
             "type": "boolean",
-            "description": "True only after real mutually authenticated worker transport is implemented."
+            "description": "True when the worker-facing HTTP wire contract paths are implemented. This does not imply production mTLS is implemented; check dispatch_contract.production_mtls_transport_implemented for that boundary."
+          },
+          "worker_transport_paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "/v1/self-hosted-workers/heartbeat",
+                "/v1/self-hosted-workers/events",
+                "/v1/self-hosted-workers/artifacts",
+                "/v1/self-hosted-workers/checkpoints",
+                "/v1/self-hosted-workers/runs/poll",
+                "/v1/self-hosted-workers/runs/ack"
+              ]
+            },
+            "description": "Worker-facing transport paths currently implemented behind the local HTTP wire contract marker."
           }
         },
         "additionalProperties": false

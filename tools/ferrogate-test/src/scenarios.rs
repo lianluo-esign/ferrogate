@@ -240,8 +240,24 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             );
             assert_eq!(
                 body["data"][0]["persistence"]["worker_transport_implemented"],
-                false
+                true
             );
+            let transport_paths = body["data"][0]["persistence"]["worker_transport_paths"]
+                .as_array()
+                .context("self-hosted worker transport paths should be listed")?;
+            for path in [
+                "/v1/self-hosted-workers/heartbeat",
+                "/v1/self-hosted-workers/events",
+                "/v1/self-hosted-workers/artifacts",
+                "/v1/self-hosted-workers/checkpoints",
+                "/v1/self-hosted-workers/runs/poll",
+                "/v1/self-hosted-workers/runs/ack",
+            ] {
+                assert!(
+                    transport_paths.iter().any(|entry| entry == path),
+                    "self-hosted worker transport path {path} should be listed"
+                );
+            }
             assert_eq!(body["data"][0]["persistence"]["provider"], "memory");
             Ok(())
         },

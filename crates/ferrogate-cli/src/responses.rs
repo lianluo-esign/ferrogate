@@ -214,6 +214,7 @@ pub(crate) struct AdminSelfHostedWorkerPersistence {
     pub(crate) identity_fingerprint_rotation_implemented: bool,
     pub(crate) stale_visibility_implemented: bool,
     pub(crate) worker_transport_implemented: bool,
+    pub(crate) worker_transport_paths: Vec<&'static str>,
     pub(crate) contract_version: u32,
 }
 
