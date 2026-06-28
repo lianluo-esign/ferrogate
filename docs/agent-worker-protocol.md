@@ -306,6 +306,27 @@ routes that action through `authorize_managed_external_action` before any
 handler touches tools, MCP, shell, filesystem, browser automation, REST, secrets,
 memory, or network egress.
 
+The standalone `agent-worker` process now has a handler-facing external action
+gate for this contract. Framework handlers prepare typed action specs inside the
+worker, but `authorize_handler_external_action` requires a gateway authorization
+client before the handler may continue. If that client is unavailable, if the
+session is not a managed worker session, or if the gateway decision is denied or
+approval-required, the gate fails closed before the handler executes the
+requested action. This keeps Codex, Claude Code, Hermes, MCP, CLI, and REST
+adapter code behind the same gateway-mediated boundary instead of letting
+worker-local sandbox execution become an authorization shortcut.
+
+The local smoke entrypoint is:
+
+```bash
+agent-worker external-action-smoke
+```
+
+It emits the normalized `capability.allowed` event JSON for a built-in native
+tool authorization smoke and does not execute the tool. Real managed execution
+must replace the smoke authorizer with the gateway/control-plane authorizer and
+append the resulting timeline event through the durable run evidence path.
+
 The current typed action specs are:
 
 - `ManagedToolAction`: governed built-in or plugin tool call with argument

@@ -10,6 +10,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod backends;
+mod external_actions;
 mod handlers;
 mod lifecycle;
 mod management;
@@ -43,6 +44,8 @@ enum Command {
     ProtocolSmoke,
     /// Probe framework handler readiness inside the agent-worker process.
     ProbeHandlers,
+    /// Run a managed external-action authorization smoke without executing the action.
+    ExternalActionSmoke,
     /// Accept one signed management envelope as JSON on stdin and emit a JSON response.
     AcceptManagementJson {
         /// Management key id expected in the signed envelope.
@@ -83,6 +86,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
+        Command::ExternalActionSmoke => external_actions::external_action_smoke_command(),
         Command::AcceptManagementJson {
             key_id,
             shared_secret,
