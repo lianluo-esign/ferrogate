@@ -3925,9 +3925,13 @@ impl FerroGateway {
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
         method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
-        match *method {
-            Method::GET => {
+        let path_worker_id = path
+            .strip_prefix("/admin/v1/self-hosted-workers/")
+            .filter(|worker_id| !worker_id.is_empty());
+        match (method, path_worker_id) {
+            (&Method::GET, None) => {
                 let state = self.state.current();
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
                     Ok(_) => {
@@ -3987,7 +3991,38 @@ impl FerroGateway {
                     }
                 }
             }
-            Method::POST => {
+            (&Method::GET, Some(worker_id)) if !worker_id.contains('/') => {
+                let state = self.state.current();
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => match state.self_hosted_worker_record(worker_id) {
+                        Some(worker) => {
+                            write_json_response(session, StatusCode::OK, &worker, &ctx.request_id)
+                                .await
+                        }
+                        None => {
+                            write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "self_hosted_worker_not_found",
+                                format!("self-hosted worker {worker_id} was not found"),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
+                    },
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            (&Method::POST, None) => {
                 let state = self.state.current();
                 let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
                     Ok(auth) => auth,
@@ -4110,6 +4145,16 @@ impl FerroGateway {
                         .await
                     }
                 }
+            }
+            (_, Some(_)) => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "self-hosted worker detail endpoint supports GET; rotate is not implemented",
+                    &ctx.request_id,
+                )
+                .await
             }
             _ => {
                 write_json_error(

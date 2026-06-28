@@ -259,10 +259,12 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        if path == "/admin/v1/self-hosted-workers" {
+        if path == "/admin/v1/self-hosted-workers"
+            || path.starts_with("/admin/v1/self-hosted-workers/")
+        {
             let headers = req.headers.clone();
             let method = req.method.clone();
-            self.handle_admin_self_hosted_workers(session, ctx, &headers, &method)
+            self.handle_admin_self_hosted_workers(session, ctx, &headers, &method, &path)
                 .await?;
             return Ok(true);
         }

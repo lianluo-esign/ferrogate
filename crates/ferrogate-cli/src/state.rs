@@ -4630,6 +4630,15 @@ impl AppState {
             })
     }
 
+    pub(crate) fn self_hosted_worker_record(
+        &self,
+        id: &str,
+    ) -> Option<crate::responses::AdminSelfHostedWorkerRecord> {
+        self.self_hosted_worker_records()
+            .into_iter()
+            .find(|record| record.id == id)
+    }
+
     fn self_hosted_worker_records(&self) -> Vec<crate::responses::AdminSelfHostedWorkerRecord> {
         let heartbeats = self.repositories.self_hosted_worker_heartbeats();
         let telemetry_events = self.repositories.self_hosted_worker_telemetry_events();
@@ -7423,6 +7432,24 @@ mod tests {
         let heartbeat = page.data[0].latest_heartbeat.as_ref().unwrap();
         assert_eq!(heartbeat.id, "heartbeat-new");
         assert_eq!(heartbeat.status, "degraded");
+
+        let detail = state
+            .self_hosted_worker_record("worker-1")
+            .expect("worker detail should be readable by id");
+        assert_eq!(detail.id, "worker-1");
+        assert_eq!(detail.worker_name, "customer-worker");
+        assert_eq!(detail.telemetry_event_count, 1);
+        assert_eq!(detail.artifact_count, 1);
+        assert_eq!(detail.checkpoint_count, 1);
+        assert_eq!(
+            detail
+                .latest_heartbeat
+                .as_ref()
+                .map(|heartbeat| heartbeat.id.as_str()),
+            Some("heartbeat-new")
+        );
+
+        assert!(state.self_hosted_worker_record("missing-worker").is_none());
     }
 
     #[test]

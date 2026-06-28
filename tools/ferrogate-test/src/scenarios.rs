@@ -15,10 +15,11 @@ use crate::{
     mocks::spawn_mock_third_party_auth_server,
 };
 use anyhow::{Context, Result};
-use std::{thread, time::Duration};
+use std::{cell::RefCell, thread, time::Duration};
 
 pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let case = LocalHarness::start(&args.ferrogate_bin, 4)?;
+    let self_hosted_worker_id = RefCell::new(String::new());
 
     case.expect_json("GET", "/healthz", &[], "", 200, |body| {
         assert_eq!(body["status"], "ok");
@@ -223,9 +224,11 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         201,
         |body| {
             assert_eq!(body["object"], "self_hosted_worker");
-            assert!(body["worker"]["id"]
+            let worker_id = body["worker"]["id"]
                 .as_str()
-                .is_some_and(|id| id.starts_with("self-hosted-worker-")));
+                .context("self-hosted worker id should be present")?;
+            assert!(worker_id.starts_with("self-hosted-worker-"));
+            self_hosted_worker_id.replace(worker_id.to_string());
             assert_eq!(body["worker"]["workspace_id"], "workspace-1");
             assert_eq!(body["worker"]["worker_name"], "customer-worker-a");
             assert_eq!(body["worker"]["status"], "registered");
@@ -238,6 +241,41 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["worker"]["telemetry_event_count"], 0);
             assert_eq!(body["worker"]["artifact_count"], 0);
             assert_eq!(body["worker"]["checkpoint_count"], 0);
+            Ok(())
+        },
+    )?;
+    let self_hosted_worker_detail_path = format!(
+        "/admin/v1/self-hosted-workers/{}",
+        self_hosted_worker_id.borrow()
+    );
+    case.expect_json(
+        "GET",
+        &self_hosted_worker_detail_path,
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["workspace_id"], "workspace-1");
+            assert_eq!(body["worker_name"], "customer-worker-a");
+            assert_eq!(body["status"], "registered");
+            assert_eq!(body["identity_fingerprint"], "sha256:test-worker");
+            assert_eq!(body["orchestration_enabled"], true);
+            assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
+            assert_eq!(body["telemetry_event_count"], 0);
+            assert_eq!(body["artifact_count"], 0);
+            assert_eq!(body["checkpoint_count"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/self-hosted-workers/missing-worker",
+        &[ADMIN_AUTH],
+        "",
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], "self_hosted_worker_not_found");
             Ok(())
         },
     )?;
