@@ -133,8 +133,6 @@ pub(crate) struct AgentRuntimeConfig {
     #[serde(default = "default_agent_runtime_timeout_millis")]
     pub(crate) timeout_millis: u64,
     #[serde(default)]
-    pub(crate) wasm: AgentRuntimeWasmConfig,
-    #[serde(default)]
     pub(crate) external: AgentRuntimeExternalConfig,
 }
 
@@ -142,22 +140,8 @@ pub(crate) struct AgentRuntimeConfig {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AgentRuntimeProvider {
     #[default]
-    Wasm,
+    ManagedWorker,
     External,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct AgentRuntimeWasmConfig {
-    #[serde(default = "default_agent_runtime_wasm_max_fuel")]
-    pub(crate) max_fuel: u64,
-    #[serde(default)]
-    pub(crate) module_path: Option<String>,
-    #[serde(default = "default_agent_runtime_wasm_export_name")]
-    pub(crate) export_name: String,
-    #[serde(default)]
-    pub(crate) host_abi: bool,
-    #[serde(default)]
-    pub(crate) allow_wasi: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1152,14 +1136,6 @@ fn default_agent_runtime_timeout_millis() -> u64 {
     30_000
 }
 
-fn default_agent_runtime_wasm_max_fuel() -> u64 {
-    1_000_000
-}
-
-fn default_agent_runtime_wasm_export_name() -> String {
-    "run".to_string()
-}
-
 fn default_skill_package_version() -> String {
     "0.1.0".into()
 }
@@ -1515,23 +1491,10 @@ impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            provider: AgentRuntimeProvider::Wasm,
+            provider: AgentRuntimeProvider::ManagedWorker,
             max_turns: default_agent_runtime_max_turns(),
             timeout_millis: default_agent_runtime_timeout_millis(),
-            wasm: AgentRuntimeWasmConfig::default(),
             external: AgentRuntimeExternalConfig::default(),
-        }
-    }
-}
-
-impl Default for AgentRuntimeWasmConfig {
-    fn default() -> Self {
-        Self {
-            max_fuel: default_agent_runtime_wasm_max_fuel(),
-            module_path: None,
-            export_name: default_agent_runtime_wasm_export_name(),
-            host_abi: false,
-            allow_wasi: false,
         }
     }
 }

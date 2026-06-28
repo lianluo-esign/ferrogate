@@ -5325,7 +5325,6 @@ impl AppState {
                 ferrogate_runtime::IsolationBackendKind::KataContainers => "kata_containers",
                 ferrogate_runtime::IsolationBackendKind::Gvisor => "gvisor",
                 ferrogate_runtime::IsolationBackendKind::RootlessDocker => "rootless_docker",
-                ferrogate_runtime::IsolationBackendKind::WasmSandbox => "wasm_sandbox",
             }
         }
 

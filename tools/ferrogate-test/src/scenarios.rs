@@ -249,6 +249,34 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             "api_key_id": "key_admin"
           },
           "workspace_id": "workspace-1",
+          "worker_name": "customer-worker-invalid",
+          "identity_fingerprint": "sha256:test-worker-invalid",
+          "orchestration_enabled": true,
+          "capability_envelope_json": "{not-json"
+        }"#,
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_registration"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("capability_envelope_json")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/self-hosted-workers",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "tenant": {
+            "organization_id": "org_demo",
+            "project_id": "project_gateway",
+            "api_key_id": "key_admin"
+          },
+          "workspace_id": "workspace-1",
           "worker_name": "customer-worker-a",
           "identity_fingerprint": "sha256:test-worker",
           "orchestration_enabled": true,
@@ -347,6 +375,27 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &[ADMIN_AUTH, JSON_CONTENT],
         r#"{
           "status": "online",
+          "reported_at_unix": 122,
+          "heartbeat_json": "{not-json"
+        }"#,
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_heartbeat"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("heartbeat_json")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_heartbeat_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "status": "online",
           "reported_at_unix": 123,
           "heartbeat_json": "{\"load\":0.42}"
         }"#,
@@ -391,6 +440,26 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         r#"{
           "session_id": "session-1",
           "run_id": "run-1",
+          "kind": "unknown",
+          "occurred_at_unix": 455,
+          "event_json": "{\"message\":\"bad kind\"}"
+        }"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_event");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("kind must be one of")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_events_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "session_id": "session-1",
+          "run_id": "run-1",
           "kind": "tool_call",
           "occurred_at_unix": 456,
           "event_json": "{\"tool\":\"shell\"}"
@@ -428,6 +497,29 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         },
     )?;
     let self_hosted_worker_artifacts_path = format!("{self_hosted_worker_detail_path}/artifacts");
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_artifacts_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "artifact_id": "artifact-too-large",
+          "session_id": "session-1",
+          "run_id": "run-1",
+          "artifact_name": "oversized.bin",
+          "content_type": "application/octet-stream",
+          "size_bytes": 16777217,
+          "created_at_unix": 788,
+          "artifact_json": "{\"sha256\":\"oversized\"}"
+        }"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_artifact");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("size_bytes")));
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "POST",
         &self_hosted_worker_artifacts_path,
@@ -481,6 +573,31 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     )?;
     let self_hosted_worker_checkpoints_path =
         format!("{self_hosted_worker_detail_path}/checkpoints");
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_checkpoints_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "checkpoint_id": "checkpoint-too-large",
+          "session_id": "session-1",
+          "run_id": "run-1",
+          "checkpoint_name": "oversized-state",
+          "size_bytes": 16777217,
+          "created_at_unix": 889,
+          "checkpoint_json": "{\"sha256\":\"oversized\"}"
+        }"#,
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_checkpoint"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("size_bytes")));
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "POST",
         &self_hosted_worker_checkpoints_path,
@@ -2101,7 +2218,7 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["summary"]["agent_event_count"], 6);
             assert_eq!(body["run"]["id"], "agent-run-harness");
             assert_eq!(body["run"]["status"], "completed");
-            assert_eq!(body["run"]["provider"], "ferrogate.default");
+            assert_eq!(body["run"]["provider"], "ferrogate.external");
             assert_eq!(body["agent_events"].as_array().unwrap().len(), 6);
             assert!(body["agent_events"]
                 .as_array()

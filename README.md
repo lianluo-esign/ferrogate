@@ -13,8 +13,9 @@
 FerroGate is an open-source Rust API gateway and AI gateway built on
 Cloudflare Pingora. It gives teams a self-hostable control point for AI traffic:
 OpenAI-compatible APIs, provider routing, virtual API keys, policy checks,
-token accounting, MCP/tool execution, opt-in agent runs, WASM sandboxed agent
-execution, observability, Admin APIs, cluster operations, and automatic HTTPS.
+token accounting, MCP/tool execution, opt-in agent runs, managed agent-worker
+runtime contracts, observability, Admin APIs, cluster operations, and automatic
+HTTPS.
 
 The project is developed as the open-source gateway foundation behind
 [Token4AI Cloud](https://token4ai.cloud).
@@ -34,7 +35,8 @@ For the longer capability inventory and current implementation status, read the
   request rate limits, token budgets, and exact-match response caching.
 - **Agent and tool traffic:** MCP host/client support, native `POST /v1/mcp`
   JSON-RPC ingress, explicit `POST /v1/agent-runs`, governed tool execution,
-  plugin registration, opt-in WASM sandbox execution, and audit events.
+  plugin registration, managed `agent-worker` runtime boundaries, and audit
+  events.
 - **Operator visibility:** request logs, usage and metering events, provider
   health, cache/tool metrics, agent run timelines, structured agent-run OTLP
   spans, Prometheus, OTLP export, Admin API, and dashboard.
@@ -110,11 +112,13 @@ Implemented agentic gateway surfaces include:
   `agents.read`/`agents.invoke` scopes, request forwarding, and streaming
   forwarding for `message:stream` paths.
 - Explicit `POST /v1/agent-runs` execution with max-turn and timeout limits.
-- Default, external-process, and configured Wasmtime-backed agent providers.
-- Deny-by-default WASM execution with fuel and timeout bounds, no ambient
-  WASI/network/filesystem access, and an optional host ABI for
-  `ferrogate.log`, `ferrogate.state_get`, `ferrogate.state_set`, and
-  `ferrogate.tool_dispatch`.
+- Managed agent runtime contract that defaults to an external `agent-worker`
+  process owning Firecracker microVM lifecycle. The gateway records policy,
+  quota, template selection, capability-envelope, and evidence state; it does
+  not run the microVM in the request handler.
+- Explicit external-process provider support for local tests and harness
+  adapters. Production managed execution should go through `agent-worker` and
+  Firecracker microVM isolation.
 - Workflow graph policies with model/tool nodes, edge conditions, model-call
   and tool-call budgets, token budgets, iteration limits, counters, and runtime
   timelines.
@@ -124,15 +128,15 @@ Implemented agentic gateway surfaces include:
   output for Chat Completions or Responses request bodies.
 - Plugin registration and plugin-owned tool exposure with permissions, approval
   policy, secret redaction, lifecycle status, and Admin API inspection.
-- Tool calls from agent runs and WASM host ABI dispatch go through the same
-  gateway governance path as ordinary tool execution: auth, scopes, policy,
-  approvals, billing, and audit evidence.
+- Tool calls from agent runs go through the same gateway governance path as
+  ordinary tool execution: auth, scopes, policy, approvals, billing, and audit
+  evidence.
 - Durable `agent_run` and `agent_run_event` records, plus
   `GET /admin/v1/agent-runs` and `GET /admin/v1/agent-runs/{run_id}` timelines
   for request, billing, audit, tool, and run-event evidence.
 - Agent run timelines export as structured OTLP traces with
-  `ferrogate.agent.run`, provider-step, billing-write, audit/tool, and WASM
-  host-ABI spans, while preserving W3C trace context for external correlation.
+  `ferrogate.agent.run`, provider-step, billing-write, audit/tool, and runtime
+  lifecycle spans, while preserving W3C trace context for external correlation.
 
 ## Configuration
 
@@ -199,7 +203,7 @@ crates/
   ferrogate-storage         Repository traits and control-plane storage boundary
   ferrogate-billing         Token usage metering models and local event retention
   ferrogate-observability   Metrics, spans, exporter contracts
-  ferrogate-runtime         Reload, lifecycle, bounded agent harness, WASM sandbox
+  ferrogate-runtime         Reload, lifecycle, bounded harness, managed worker isolation
   ferrogate-mcp             MCP host/client manager and tool execution bridge
 ```
 

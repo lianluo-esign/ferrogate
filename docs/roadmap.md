@@ -89,9 +89,11 @@ These areas are implemented in the current open-source gateway:
   storage wiring for configured control-plane resources, with PostgreSQL and
   MySQL compatibility paths and Turso/libSQL retired from the production
   provider surface.
-- Opt-in agent runtime primitives in `ferrogate-runtime`: a deny-by-default
-  Wasmtime sandbox executor and a bounded harness/provider boundary. These are
-  not wired into default gateway endpoints yet.
+- Managed agent runtime primitives in `ferrogate-runtime`: the default contract
+  is an external `agent-worker` process that owns Firecracker microVM lifecycle,
+  while the gateway owns policy, quota, template selection, capability
+  envelopes, and evidence. Local test harnesses may use an external mock
+  provider, but production managed execution should use Firecracker microVMs.
 - Automatic HTTPS with manual TLS, ACME HTTP-01, ACME DNS-01 through
   Cloudflare, certificate renewal, and graceful-upgrade handoff.
 - Docker, Kubernetes, Helm examples, cluster identity, shared file state, Redis
@@ -102,7 +104,7 @@ These areas are implemented in the current open-source gateway:
 | Theme | Goal | Tracking |
 | --- | --- | --- |
 | Agent run evidence | Move from retained evidence aggregation to durable `agent_run` and `agent_run_event` records, lifecycle events, checkpoint/resume evidence, cancellation events, and tenant/API-key filters. | [#49](https://github.com/lianluo-esign/ferrogate/issues/49) |
-| Sandboxed runtime | Continue the opt-in WASM sandboxed agent runtime without moving the loop into the gateway hot path: request opt-in, governed tool ABI, provider adapters, and durable run timeline remain the next slices. | [#59](https://github.com/lianluo-esign/ferrogate/issues/59) |
+| Managed runtime | Complete the `agent-worker` Firecracker microVM transport and local microVM E2E harness for Codex CLI, Claude Code, Hermes, and native adapters without moving VM lifecycle into the gateway hot path. | [#82](https://github.com/lianluo-esign/ferrogate/issues/82), [#85](https://github.com/lianluo-esign/ferrogate/issues/85) |
 | Durable control plane | Close the full durable control-plane boundary for API keys, policies, gateway configs, prompt templates, plugin registrations, MCP servers, tool approvals, and agent run records. | [#12](https://github.com/lianluo-esign/ferrogate/issues/12), [#66](https://github.com/lianluo-esign/ferrogate/issues/66), [#67](https://github.com/lianluo-esign/ferrogate/issues/67), [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#69](https://github.com/lianluo-esign/ferrogate/issues/69) |
 | Prompt workflows | Complete versioned prompt template management and render APIs as first-class agent workflow inputs. | [#44](https://github.com/lianluo-esign/ferrogate/issues/44) |
 

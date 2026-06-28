@@ -163,7 +163,7 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ferrogate.toml");
-    std::fs::write(&config, agent_run_config(&gateway_addr)).unwrap();
+    std::fs::write(&config, external_echo_agent_run_config(&gateway_addr)).unwrap();
 
     let mut gateway = start_gateway(&config);
     wait_for_gateway(&gateway_addr);
@@ -205,7 +205,7 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
     assert_eq!(timeline["summary"]["agent_event_count"], 6);
     assert_eq!(timeline["run"]["id"], "agent-run-direct");
     assert_eq!(timeline["run"]["status"], "completed");
-    assert_eq!(timeline["run"]["provider"], "ferrogate.default");
+    assert_eq!(timeline["run"]["provider"], "ferrogate.external");
     assert_eq!(timeline["run"]["turns_executed"], 2);
     assert_eq!(timeline["run"]["output_recorded"], true);
     assert_eq!(timeline["agent_events"].as_array().unwrap().len(), 6);
@@ -256,6 +256,50 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
 }
 
 #[test]
+fn default_agent_runtime_requires_agent_worker_transport() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(&config, agent_run_config(&gateway_addr)).unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let failed = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-agent-run-id: agent-run-managed-default",
+        ],
+        r#"{"input":"start managed worker","max_turns":1,"timeout_millis":1000}"#,
+    ));
+    assert_eq!(
+        failed["error"]["code"],
+        "agent_worker_transport_unavailable"
+    );
+    assert!(failed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Firecracker microVM"));
+
+    let timeline = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-runs/agent-run-managed-default",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert_eq!(timeline["run"]["status"], "failed");
+    assert_eq!(timeline["run"]["provider"], "ferrogate.agent-worker");
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn agent_run_endpoint_can_use_external_provider_adapter() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
@@ -299,160 +343,6 @@ fn agent_run_endpoint_can_use_external_provider_adapter() {
         .iter()
         .any(|event| event["action"] == "agent.run_completed"
             && event["agent_run_id"] == "agent-run-external"));
-
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
-}
-
-#[test]
-fn agent_run_endpoint_can_execute_configured_wasm_provider() {
-    let gateway_addr = free_addr();
-    let dir = tempfile::tempdir().unwrap();
-    let module_path = dir.path().join("agent.wasm");
-    std::fs::write(
-        &module_path,
-        wat::parse_str(
-            r#"
-            (module
-              (func (export "run") (result i32)
-                i32.const 42))
-            "#,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let config = dir.path().join("ferrogate.toml");
-    std::fs::write(
-        &config,
-        wasm_agent_run_config(&gateway_addr, module_path.to_str().unwrap()),
-    )
-    .unwrap();
-
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
-
-    let created = response_json(http_request(
-        &gateway_addr,
-        "POST",
-        "/v1/agent-runs",
-        &[
-            "Authorization: Bearer agent-secret",
-            "Content-Type: application/json",
-            "x-ferrogate-agent-run-id: agent-run-wasm",
-        ],
-        r#"{"input":"wasm-agent-input","max_turns":1,"timeout_millis":1000}"#,
-    ));
-    assert_eq!(created["object"], "agent_run");
-    assert_eq!(created["id"], "agent-run-wasm");
-    assert_eq!(created["status"], "completed");
-    assert_eq!(created["output"], "wasm:run result=42");
-
-    let timeline = response_json(http_request(
-        &gateway_addr,
-        "GET",
-        "/admin/v1/agent-runs/agent-run-wasm",
-        &["Authorization: Bearer admin-secret"],
-        "",
-    ));
-    assert_eq!(timeline["object"], "agent_run_timeline");
-    assert_eq!(timeline["run"]["provider"], "ferrogate.wasm");
-    assert_eq!(timeline["summary"]["status"], "completed");
-
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
-}
-
-#[test]
-fn wasm_agent_host_abi_dispatches_tools_through_gateway_governance() {
-    let gateway_addr = free_addr();
-    let dir = tempfile::tempdir().unwrap();
-    let module_path = dir.path().join("agent-host.wasm");
-    std::fs::write(
-        &module_path,
-        wat::parse_str(
-            r#"
-            (module
-              (import "ferrogate" "log" (func $log (param i32)))
-              (import "ferrogate" "state_get" (func $state_get (param i32) (result i32)))
-              (import "ferrogate" "state_set" (func $state_set (param i32 i32) (result i32)))
-              (import "ferrogate" "tool_dispatch" (func $tool_dispatch (param i32) (result i32)))
-              (func (export "run") (result i32)
-                i32.const 7
-                call $log
-                i32.const 3
-                i32.const 35
-                call $state_set
-                drop
-                i32.const 3
-                call $state_get
-                i32.const 1
-                call $tool_dispatch
-                i32.add))
-            "#,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let config = dir.path().join("ferrogate.toml");
-    std::fs::write(
-        &config,
-        wasm_agent_host_abi_config(&gateway_addr, module_path.to_str().unwrap()),
-    )
-    .unwrap();
-
-    let mut gateway = start_gateway(&config);
-    wait_for_gateway(&gateway_addr);
-
-    let created = response_json(http_request(
-        &gateway_addr,
-        "POST",
-        "/v1/agent-runs",
-        &[
-            "Authorization: Bearer agent-secret",
-            "Content-Type: application/json",
-            "x-ferrogate-agent-run-id: agent-run-wasm-host",
-        ],
-        r#"{"input":"wasm-host-agent-input","max_turns":2,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"from-wasm-host"},"session_id":"wasm-host-tool-session"}]}"#,
-    ));
-    assert_eq!(created["object"], "agent_run");
-    assert_eq!(created["status"], "completed");
-    assert_eq!(created["output"], "wasm:run result=35");
-
-    let timeline = response_json(http_request(
-        &gateway_addr,
-        "GET",
-        "/admin/v1/agent-runs/agent-run-wasm-host",
-        &["Authorization: Bearer admin-secret"],
-        "",
-    ));
-    assert_eq!(timeline["run"]["provider"], "ferrogate.wasm");
-    let events = timeline["audit_events"].as_array().unwrap();
-    assert!(events.iter().any(|event| {
-        event["action"] == "agent.wasm.log"
-            && event["agent_run_id"] == "agent-run-wasm-host"
-            && event["outcome"] == "recorded"
-    }));
-    assert!(events.iter().any(|event| {
-        event["action"] == "agent.wasm.state_set"
-            && event["target"] == "agent_run:agent-run-wasm-host/state:3"
-            && event["outcome"] == "success"
-    }));
-    assert!(events.iter().any(|event| {
-        event["action"] == "agent.wasm.state_get"
-            && event["target"] == "agent_run:agent-run-wasm-host/state:3"
-            && event["outcome"] == "success"
-    }));
-    assert!(events.iter().any(|event| {
-        event["action"] == "tool.execute"
-            && event["target"] == "tool_session:wasm-host-tool-session"
-            && event["outcome"] == "success"
-            && event["agent_run_id"] == "agent-run-wasm-host"
-    }));
-    assert!(events.iter().any(|event| {
-        event["action"] == "agent.wasm.tool_dispatch"
-            && event["target"] == "agent_run:agent-run-wasm-host/tool_handle:1"
-            && event["outcome"] == "success"
-    }));
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
@@ -1300,7 +1190,7 @@ tenant_allowlist = ["org_demo"]
     )
 }
 
-fn external_agent_run_config(gateway_addr: &str) -> String {
+fn external_echo_agent_run_config(gateway_addr: &str) -> String {
     format!(
         r#"
 listen = "{gateway_addr}"
@@ -1315,78 +1205,9 @@ timeout_millis = 5000
 command = "sh"
 args = [
   "-c",
-  "payload=$(cat); case \"$payload\" in *external-agent-input*) printf 'finish\\texternal-provider-ok\\n' ;; *) printf 'unexpected input\\n' >&2; exit 7 ;; esac"
+  "payload=$(cat); if printf '%s' \"$payload\" | grep -q '\"tool_result_count\":0'; then printf 'tool\\tmock-tool-call\\ttool.echo\\t{{\"message\":\"from agent\"}}\\n'; else printf 'finish\\t%s\\n' \"$(printf '%s' \"$payload\" | sed -n 's/.*\"input\":\"\\([^\"]*\\)\".*/\\1/p')\"; fi"
 ]
 timeout_millis = 1000
-
-[[api_keys]]
-id = "admin"
-name = "Admin"
-key = "admin-secret"
-scopes = ["admin.read"]
-
-[[api_keys]]
-id = "agent-client"
-name = "Agent client"
-key = "agent-secret"
-scopes = ["agent.runs.create", "tools.execute"]
-organization_id = "org_demo"
-project_id = "project_gateway"
-"#
-    )
-}
-
-fn wasm_agent_run_config(gateway_addr: &str, module_path: &str) -> String {
-    format!(
-        r#"
-listen = "{gateway_addr}"
-
-[agent_runtime]
-enabled = true
-provider = "wasm"
-max_turns = 3
-timeout_millis = 5000
-
-[agent_runtime.wasm]
-max_fuel = 100000
-module_path = "{module_path}"
-export_name = "run"
-allow_wasi = false
-
-[[api_keys]]
-id = "admin"
-name = "Admin"
-key = "admin-secret"
-scopes = ["admin.read"]
-
-[[api_keys]]
-id = "agent-client"
-name = "Agent client"
-key = "agent-secret"
-scopes = ["agent.runs.create", "tools.execute"]
-organization_id = "org_demo"
-project_id = "project_gateway"
-"#
-    )
-}
-
-fn wasm_agent_host_abi_config(gateway_addr: &str, module_path: &str) -> String {
-    format!(
-        r#"
-listen = "{gateway_addr}"
-
-[agent_runtime]
-enabled = true
-provider = "wasm"
-max_turns = 3
-timeout_millis = 5000
-
-[agent_runtime.wasm]
-max_fuel = 100000
-module_path = "{module_path}"
-export_name = "run"
-host_abi = true
-allow_wasi = false
 
 [[api_keys]]
 id = "admin"
@@ -1422,10 +1243,24 @@ tenant_allowlist = ["org_demo"]
     )
 }
 
-fn non_blocking_hook_failure_config(gateway_addr: &str) -> String {
+fn external_agent_run_config(gateway_addr: &str) -> String {
     format!(
         r#"
 listen = "{gateway_addr}"
+
+[agent_runtime]
+enabled = true
+provider = "external"
+max_turns = 3
+timeout_millis = 5000
+
+[agent_runtime.external]
+command = "sh"
+args = [
+  "-c",
+  "payload=$(cat); case \"$payload\" in *external-agent-input*) printf 'finish\\texternal-provider-ok\\n' ;; *) printf 'unexpected input\\n' >&2; exit 7 ;; esac"
+]
+timeout_millis = 1000
 
 [[api_keys]]
 id = "admin"
@@ -1434,30 +1269,12 @@ key = "admin-secret"
 scopes = ["admin.read"]
 
 [[api_keys]]
-id = "tool-client"
-name = "Tool client"
-key = "tool-secret"
-scopes = ["tools.read"]
-
-[[extensions]]
-id = "tool.echo"
-kind = "tool_provider"
-source = "builtin"
-enabled = true
-order = 10
-
-[extensions.permissions]
-tools = ["tool.echo"]
-
-[[extensions]]
-id = "hook.noop"
-kind = "request_hook"
-source = "builtin"
-enabled = true
-order = 20
-
-[extensions.config]
-fail_pre_request = true
+id = "agent-client"
+name = "Agent client"
+key = "agent-secret"
+scopes = ["agent.runs.create", "tools.execute"]
+organization_id = "org_demo"
+project_id = "project_gateway"
 "#
     )
 }
@@ -1536,6 +1353,46 @@ shell = false
 [extensions.config]
 endpoint = "http://{mcp_addr}/mcp"
 timeout_ms = 3000
+"#
+    )
+}
+
+fn non_blocking_hook_failure_config(gateway_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read"]
+
+[[api_keys]]
+id = "tool-client"
+name = "Tool client"
+key = "tool-secret"
+scopes = ["tools.read"]
+
+[[extensions]]
+id = "tool.echo"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+
+[extensions.permissions]
+tools = ["tool.echo"]
+
+[[extensions]]
+id = "hook.noop"
+kind = "request_hook"
+source = "builtin"
+enabled = true
+order = 20
+
+[extensions.config]
+fail_pre_request = true
 "#
     )
 }

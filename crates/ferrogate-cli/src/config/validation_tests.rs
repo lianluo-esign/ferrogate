@@ -1684,58 +1684,6 @@ fn rejects_invalid_agent_runtime_limits() {
     };
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("field agent_runtime.timeout_millis"));
-
-    let config = Config {
-        agent_runtime: AgentRuntimeConfig {
-            wasm: AgentRuntimeWasmConfig {
-                max_fuel: 0,
-                ..AgentRuntimeWasmConfig::default()
-            },
-            ..AgentRuntimeConfig::default()
-        },
-        ..Config::default()
-    };
-    let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field agent_runtime.wasm.max_fuel"));
-}
-
-#[test]
-fn rejects_wasi_until_agent_runtime_host_abi_exists() {
-    let config = Config {
-        agent_runtime: AgentRuntimeConfig {
-            enabled: true,
-            wasm: AgentRuntimeWasmConfig {
-                allow_wasi: true,
-                ..AgentRuntimeWasmConfig::default()
-            },
-            ..AgentRuntimeConfig::default()
-        },
-        ..Config::default()
-    };
-
-    let error = config.validate().unwrap_err().to_string();
-
-    assert!(error.contains("field agent_runtime.wasm.allow_wasi"));
-}
-
-#[test]
-fn rejects_wasm_agent_runtime_module_with_empty_export() {
-    let config = Config {
-        agent_runtime: AgentRuntimeConfig {
-            enabled: true,
-            wasm: AgentRuntimeWasmConfig {
-                module_path: Some("/tmp/agent.wasm".into()),
-                export_name: " ".into(),
-                ..AgentRuntimeWasmConfig::default()
-            },
-            ..AgentRuntimeConfig::default()
-        },
-        ..Config::default()
-    };
-
-    let error = config.validate().unwrap_err().to_string();
-
-    assert!(error.contains("field agent_runtime.wasm.export_name"));
 }
 
 #[test]
@@ -1745,11 +1693,6 @@ fn accepts_agent_runtime_opt_in_config() {
             enabled: true,
             max_turns: 3,
             timeout_millis: 5_000,
-            wasm: AgentRuntimeWasmConfig {
-                max_fuel: 500_000,
-                allow_wasi: false,
-                ..AgentRuntimeWasmConfig::default()
-            },
             ..AgentRuntimeConfig::default()
         },
         ..Config::default()

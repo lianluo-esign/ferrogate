@@ -13,8 +13,6 @@ mod isolation;
 mod managed_worker;
 mod reload;
 mod self_hosted_worker;
-#[cfg(feature = "wasm")]
-pub mod wasm;
 
 pub use agent::{
     AgentCancellation, AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider,
@@ -62,11 +60,6 @@ pub use self_hosted_worker::{
     SelfHostedTelemetryKind, SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel,
     SelfHostedWorkerError, SelfHostedWorkerHeartbeat, SelfHostedWorkerIdentity,
     SelfHostedWorkerRegistration, SelfHostedWorkerRegistry, SelfHostedWorkerTransport,
-};
-#[cfg(feature = "wasm")]
-pub use wasm::{
-    WasmHostAbi, WasmHostRunOutcome, WasmRunOutcome, WasmSandboxConfig, WasmSandboxError,
-    WasmSandboxExecutor,
 };
 
 /// Runtime lifecycle commands exposed by the CLI and future control plane.

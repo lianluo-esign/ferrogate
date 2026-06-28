@@ -462,7 +462,7 @@ impl ManagedWorkerSession {
             selected_backend: IsolationBackendDescriptor {
                 backend_name: String::new(),
                 backend_version: String::new(),
-                kind: crate::IsolationBackendKind::WasmSandbox,
+                kind: crate::IsolationBackendKind::FirecrackerMicroVm,
                 capabilities: crate::IsolationBackendCapabilities::default(),
             },
             instance_id: String::new(),

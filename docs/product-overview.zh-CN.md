@@ -73,7 +73,7 @@
   run、workflow graph execution、workflow budget、tool-call limit、immutable
   approval/audit evidence 和 agent run timeline。
 - agent run timeline 会导出为可重建的 OTLP trace tree，包含 agent root、
-  provider-step、billing-write、audit/tool 和 WASM host-ABI span。
+  provider-step、billing-write、audit/tool 和 runtime lifecycle span。
 - Plugin registration、plugin-owned tool exposure、skill package compatibility
   metadata 和 skill-owned resource materialization。
 - 请求日志、token metering event、usage aggregate、供应商健康、缓存指标、MCP 工具

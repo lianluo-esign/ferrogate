@@ -88,7 +88,7 @@ Validated end to end:
   agent runs, workflow graph execution, workflow budgets, tool-call limits,
   immutable approval/audit evidence, and agent run timelines.
 - Agent run timelines exported as reconstructable OTLP trace trees with agent
-  root, provider-step, billing-write, audit/tool, and WASM host-ABI spans.
+  root, provider-step, billing-write, audit/tool, and runtime lifecycle spans.
 - Plugin registration, plugin-owned tool exposure, skill package compatibility
   metadata, and skill-owned resource materialization.
 - Request logs, token metering events, usage aggregates, provider health, cache

@@ -3773,12 +3773,6 @@ impl FerroGateway {
                             commercial_preference: 4,
                             host_lifecycle_owner: "agent-worker",
                         },
-                        AdminManagedWorkerIsolationBackend {
-                            kind: "wasm_sandbox",
-                            backend_name: "wasm",
-                            commercial_preference: 5,
-                            host_lifecycle_owner: "agent-worker",
-                        },
                     ],
                     capability_boundary: "gateway_mediated",
                     persistence: AdminManagedWorkerPersistence {

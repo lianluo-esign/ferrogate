@@ -36,7 +36,7 @@ ferrogate-mcp = { path = "../ferrogate-mcp" }
 ferrogate-observability = { path = "../ferrogate-observability" }
 ferrogate-policy = { path = "../ferrogate-policy" }
 ferrogate-providers = { path = "../ferrogate-providers" }
-ferrogate-runtime = { path = "../ferrogate-runtime", features = ["wasm"] }
+ferrogate-runtime = { path = "../ferrogate-runtime" }
 ferrogate-storage = { path = "../ferrogate-storage" }
 http.workspace = true
 instant-acme.workspace = true
@@ -56,7 +56,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-wat.workspace = true
 
 [features]
 default = []

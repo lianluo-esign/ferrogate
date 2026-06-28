@@ -21,7 +21,6 @@ pub enum IsolationBackendKind {
     KataContainers,
     Gvisor,
     RootlessDocker,
-    WasmSandbox,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,7 +223,6 @@ fn isolation_preference_rank(kind: &IsolationBackendKind) -> u8 {
         IsolationBackendKind::KataContainers => 1,
         IsolationBackendKind::Gvisor => 2,
         IsolationBackendKind::RootlessDocker => 3,
-        IsolationBackendKind::WasmSandbox => 4,
     }
 }
 

@@ -9731,8 +9731,7 @@
               "firecracker_microvm",
               "kata_containers",
               "gvisor",
-              "rootless_docker",
-              "wasm_sandbox"
+              "rootless_docker"
             ]
           },
           "backend_name": {
@@ -10615,8 +10614,7 @@
               "firecracker_microvm",
               "kata_containers",
               "gvisor",
-              "rootless_docker",
-              "wasm_sandbox"
+              "rootless_docker"
             ]
           },
           "microvm_id": {

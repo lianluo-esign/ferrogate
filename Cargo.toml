@@ -69,5 +69,3 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-wasmtime = { version = "36.0.2", default-features = false, features = ["cranelift", "runtime", "std"] }
-wat = "1.252.0"

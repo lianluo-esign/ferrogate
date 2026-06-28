@@ -97,8 +97,14 @@ mcp_dispatch_max_concurrency = 4
 
 [agent_runtime]
 enabled = true
+provider = "external"
 max_turns = 3
 timeout_millis = 5000
+
+[agent_runtime.external]
+command = "sh"
+args = ["-c", "payload=$(cat); if printf '%s' \"$payload\" | grep -q '\"tool_result_count\":0'; then printf 'tool\tmock-tool-call\ttool.echo\t{{\"message\":\"from ferrogate-test\"}}\n'; else printf 'finish\t%s\n' \"$(printf '%s' \"$payload\" | sed -n 's/.*\"input\":\"\\([^\"]*\\)\".*/\\1/p')\"; fi"]
+timeout_millis = 1000
 
 [[extensions]]
 id = "tool.echo"
