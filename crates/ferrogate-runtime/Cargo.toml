@@ -21,5 +21,8 @@ ferrogate-core = { path = "../ferrogate-core" }
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 default = []

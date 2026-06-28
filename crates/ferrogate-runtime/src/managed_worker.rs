@@ -15,6 +15,13 @@ use std::{
     error::Error,
     fmt,
 };
+#[cfg(unix)]
+use std::{
+    io::{Read, Write},
+    net::Shutdown,
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+};
 
 use blake2::{
     digest::{KeyInit, Mac},
@@ -635,6 +642,63 @@ impl AgentWorkerManagementTransport for InMemoryAgentWorkerManagementTransport {
         };
         self.responses.push(response.clone());
         response
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerUnixManagementClient {
+    socket_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl AgentWorkerUnixManagementClient {
+    pub fn new(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+        }
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    pub fn send_management_request(
+        &self,
+        envelope: &AgentWorkerManagementEnvelope,
+    ) -> Result<AgentWorkerManagementResponse, ManagedWorkerError> {
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker Unix management connect failed at {}: {error}",
+                self.socket_path.display()
+            ))
+        })?;
+        let request = serde_json::to_string(envelope).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker Unix management request serialization failed: {error}"
+            ))
+        })?;
+        stream.write_all(request.as_bytes()).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker Unix management request write failed: {error}"
+            ))
+        })?;
+        stream.shutdown(Shutdown::Write).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker Unix management request shutdown failed: {error}"
+            ))
+        })?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker Unix management response read failed: {error}"
+            ))
+        })?;
+        serde_json::from_str(response.trim()).map_err(|error| {
+            ManagedWorkerError::AgentWorker(format!(
+                "agent-worker Unix management response decode failed: {error}"
+            ))
+        })
     }
 }
 
@@ -1819,6 +1883,26 @@ mod tests {
                 .map(|error| error.code.as_str()),
             Some("invalid_signature")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_management_client_reports_missing_socket_as_agent_worker_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("missing-agent-worker.sock");
+        let client = AgentWorkerUnixManagementClient::new(&socket_path);
+
+        let error = client
+            .send_management_request(&management_envelope(
+                AgentWorkerManagementAction::ProbeHandlers,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(error, ManagedWorkerError::AgentWorker(_)));
+        assert!(error
+            .to_string()
+            .contains("agent-worker Unix management connect failed"));
+        assert!(error.to_string().contains("missing-agent-worker.sock"));
     }
 
     #[test]

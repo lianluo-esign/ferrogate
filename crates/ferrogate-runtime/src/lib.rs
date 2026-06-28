@@ -45,6 +45,8 @@ pub use isolation::{
     IsolationPrepared, IsolationResourceLimits, IsolationResult, IsolationSnapshotOutcome,
     IsolationStarted, IsolationStopOutcome,
 };
+#[cfg(unix)]
+pub use managed_worker::AgentWorkerUnixManagementClient;
 pub use managed_worker::{
     AgentWorkerControlClient, AgentWorkerFrameworkHandler, AgentWorkerManagementAction,
     AgentWorkerManagementEnvelope, AgentWorkerManagementError, AgentWorkerManagementErrorCode,

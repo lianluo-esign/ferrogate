@@ -325,7 +325,7 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixStream;
+    use ferrogate_runtime::AgentWorkerUnixManagementClient;
     use std::thread;
 
     #[test]
@@ -438,22 +438,15 @@ mod tests {
         });
 
         wait_for_socket(&socket_path);
-        let mut stream = UnixStream::connect(&socket_path).unwrap();
-        let request = serde_json::to_string(&smoke_envelope().unwrap()).unwrap();
-        stream.write_all(request.as_bytes()).unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
-        let mut response_json = String::new();
-        stream.read_to_string(&mut response_json).unwrap();
-        let response: serde_json::Value = serde_json::from_str(response_json.trim()).unwrap();
+        let client = AgentWorkerUnixManagementClient::new(&socket_path);
+        let response = client
+            .send_management_request(&smoke_envelope().unwrap())
+            .unwrap();
 
-        assert_eq!(response["accepted"], true);
-        assert_eq!(response["request_id"], "agent-worker-smoke-request");
-        assert_eq!(response["action"], "probe_handlers");
-        assert_eq!(
-            response["error"],
-            serde_json::Value::Null,
-            "local Unix socket management transport should be accepted after MAC verification"
-        );
+        assert!(response.accepted);
+        assert_eq!(response.request_id, "agent-worker-smoke-request");
+        assert_eq!(response.action, AgentWorkerManagementAction::ProbeHandlers);
+        assert!(response.error.is_none());
 
         let server_response = server.join().unwrap();
         assert!(server_response.accepted);

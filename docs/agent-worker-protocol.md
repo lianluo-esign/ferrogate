@@ -181,6 +181,14 @@ the `agent-worker` process can receive management requests over an explicit
 same-host process boundary. It is not the final long-running lifecycle server,
 does not provide cross-host encryption, and does not boot Firecracker.
 
+The gateway/control-plane side uses the same wire contract through
+`AgentWorkerUnixManagementClient`. The client serializes an
+`AgentWorkerManagementEnvelope`, sends it to the configured Unix socket, shuts
+down the request side of the stream, reads one
+`AgentWorkerManagementResponse`, and maps IPC failures to `AgentWorker`
+control errors. It does not verify signatures or execute lifecycle actions;
+those remain worker-side responsibilities behind the management API.
+
 ### Core Objects
 
 - `tenant`
