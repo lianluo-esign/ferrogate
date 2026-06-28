@@ -49,13 +49,14 @@ pub use managed_worker::{
     AgentWorkerControlClient, AgentWorkerFrameworkHandler, AgentWorkerManagementAction,
     AgentWorkerManagementEnvelope, AgentWorkerManagementError, AgentWorkerManagementErrorCode,
     AgentWorkerManagementKey, AgentWorkerManagementResponse, AgentWorkerManagementSecurity,
-    AgentWorkerManagementVerification, AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
-    ManagedWorkerCancellation, ManagedWorkerError, ManagedWorkerExecution,
-    ManagedWorkerFailedExecution, ManagedWorkerFailure, ManagedWorkerLifecycleAction,
-    ManagedWorkerLifecycleRecord, ManagedWorkerRunRequest, ManagedWorkerScheduler,
-    ManagedWorkerSchedulerConfig, ManagedWorkerSession, ManagedWorkerSessionRequest,
-    ManagedWorkerSessionStatus, WorkerTemplate, AGENT_WORKER_CLOCK_SKEW_MILLIS,
-    AGENT_WORKER_PROTOCOL_VERSION,
+    AgentWorkerManagementTransport, AgentWorkerManagementVerification,
+    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
+    InMemoryAgentWorkerManagementTransport, ManagedWorkerCancellation, ManagedWorkerError,
+    ManagedWorkerExecution, ManagedWorkerFailedExecution, ManagedWorkerFailure,
+    ManagedWorkerLifecycleAction, ManagedWorkerLifecycleRecord, ManagedWorkerRunRequest,
+    ManagedWorkerScheduler, ManagedWorkerSchedulerConfig, ManagedWorkerSession,
+    ManagedWorkerSessionRequest, ManagedWorkerSessionStatus, WorkerTemplate,
+    AGENT_WORKER_CLOCK_SKEW_MILLIS, AGENT_WORKER_PROTOCOL_VERSION,
 };
 pub use reload::{ReloadCandidate, ReloadCoordinator, ReloadOutcome, RuntimeSnapshot};
 pub use self_hosted_worker::{

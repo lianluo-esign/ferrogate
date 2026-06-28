@@ -549,6 +549,48 @@ impl AgentWorkerManagementVerifier {
     }
 }
 
+pub trait AgentWorkerManagementTransport {
+    fn accept_management_request(
+        &mut self,
+        envelope: AgentWorkerManagementEnvelope,
+        now_unix_millis: u64,
+    ) -> AgentWorkerManagementResponse;
+}
+
+#[derive(Debug, Clone)]
+pub struct InMemoryAgentWorkerManagementTransport {
+    verifier: AgentWorkerManagementVerifier,
+    responses: Vec<AgentWorkerManagementResponse>,
+}
+
+impl InMemoryAgentWorkerManagementTransport {
+    pub fn new(verifier: AgentWorkerManagementVerifier) -> Self {
+        Self {
+            verifier,
+            responses: Vec::new(),
+        }
+    }
+
+    pub fn responses(&self) -> &[AgentWorkerManagementResponse] {
+        &self.responses
+    }
+}
+
+impl AgentWorkerManagementTransport for InMemoryAgentWorkerManagementTransport {
+    fn accept_management_request(
+        &mut self,
+        envelope: AgentWorkerManagementEnvelope,
+        now_unix_millis: u64,
+    ) -> AgentWorkerManagementResponse {
+        let response = match self.verifier.verify(&envelope, now_unix_millis) {
+            Ok(verification) => AgentWorkerManagementResponse::accepted(verification),
+            Err(error) => AgentWorkerManagementResponse::rejected(&envelope, &error),
+        };
+        self.responses.push(response.clone());
+        response
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentWorkerFrameworkHandler {
     pub adapter_name: String,
@@ -1657,6 +1699,55 @@ mod tests {
         );
         assert_eq!(rejected_error.code.as_str(), "unsupported_protocol_version");
         assert!(!rejected_error.retryable);
+    }
+
+    #[test]
+    fn management_transport_wraps_verifier_into_recorded_responses() {
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(management_verifier());
+
+        let accepted = transport.accept_management_request(
+            management_envelope(AgentWorkerManagementAction::Provision),
+            1_000,
+        );
+        assert!(accepted.accepted);
+        assert!(accepted.error.is_none());
+
+        let duplicate = transport.accept_management_request(
+            management_envelope_with(
+                AgentWorkerManagementAction::Provision,
+                "request-2",
+                "idempotency-1",
+                "nonce-2",
+            ),
+            1_000,
+        );
+        assert!(duplicate.accepted);
+        assert!(duplicate.duplicate_idempotency_key);
+
+        let mut wrong_signature = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-3",
+            "idempotency-3",
+            "nonce-3",
+        );
+        wrong_signature.security.signature = "blake2b-mac:bad".to_string();
+        let rejected = transport.accept_management_request(wrong_signature, 1_000);
+        assert!(!rejected.accepted);
+        assert_eq!(
+            rejected.error.as_ref().map(|error| error.code),
+            Some(AgentWorkerManagementErrorCode::InvalidSignature)
+        );
+
+        assert_eq!(transport.responses().len(), 3);
+        assert!(transport.responses()[0].accepted);
+        assert!(transport.responses()[1].duplicate_idempotency_key);
+        assert_eq!(
+            transport.responses()[2]
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("invalid_signature")
+        );
     }
 
     fn scheduler() -> ManagedWorkerScheduler {
