@@ -325,7 +325,7 @@ fn dispatch_management_action(
         }
         AgentWorkerManagementAction::ListBackends => {
             Ok(Some(AgentWorkerManagementResult::IsolationBackends {
-                registry_implemented: false,
+                registry_implemented: true,
                 backends: isolation_backends(),
             }))
         }
@@ -347,7 +347,45 @@ fn dispatch_management_action(
 }
 
 fn isolation_backends() -> Vec<AgentWorkerIsolationBackendReport> {
-    Vec::new()
+    vec![probed_isolation_backend(
+        "firecracker",
+        "firecracker_micro_vm",
+        "AGENT_WORKER_FIRECRACKER_BIN",
+        "Firecracker binary path was not configured",
+    )]
+}
+
+fn probed_isolation_backend(
+    backend_name: &str,
+    kind: &str,
+    env_var: &str,
+    missing_message: &str,
+) -> AgentWorkerIsolationBackendReport {
+    match env::var(env_var) {
+        Ok(path) if !path.trim().is_empty() && Path::new(&path).is_file() => {
+            AgentWorkerIsolationBackendReport {
+                backend_name: backend_name.to_string(),
+                backend_version: "external".to_string(),
+                kind: kind.to_string(),
+                ready: true,
+                readiness_reason: Some(format!("{env_var} points to executable candidate {path}")),
+            }
+        }
+        Ok(path) if !path.trim().is_empty() => AgentWorkerIsolationBackendReport {
+            backend_name: backend_name.to_string(),
+            backend_version: "unknown".to_string(),
+            kind: kind.to_string(),
+            ready: false,
+            readiness_reason: Some(format!("{env_var} does not point to a file: {path}")),
+        },
+        _ => AgentWorkerIsolationBackendReport {
+            backend_name: backend_name.to_string(),
+            backend_version: "unknown".to_string(),
+            kind: kind.to_string(),
+            ready: false,
+            readiness_reason: Some(missing_message.to_string()),
+        },
+    }
 }
 
 fn current_unix_millis() -> u64 {
@@ -607,7 +645,8 @@ mod tests {
     }
 
     #[test]
-    fn routes_signed_backend_listing_to_typed_empty_registry_result() {
+    fn routes_signed_backend_listing_to_firecracker_registry_result() {
+        env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
         let mut envelope = smoke_envelope().unwrap();
         envelope.action = AgentWorkerManagementAction::ListBackends;
         envelope.request_id = "agent-worker-list-backends-request".to_string();
@@ -627,12 +666,52 @@ mod tests {
         assert_eq!(response["request_id"], "agent-worker-list-backends-request");
         assert_eq!(response["action"], "list_backends");
         assert_eq!(response["result"]["kind"], "isolation_backends");
-        assert_eq!(response["result"]["registry_implemented"], false);
+        assert_eq!(response["result"]["registry_implemented"], true);
         assert_eq!(
-            response["result"]["backends"],
-            serde_json::Value::Array(Vec::new())
+            response["result"]["backends"][0]["backend_name"],
+            "firecracker"
         );
+        assert_eq!(
+            response["result"]["backends"][0]["kind"],
+            "firecracker_micro_vm"
+        );
+        assert_eq!(response["result"]["backends"][0]["ready"], false);
+        assert!(response["result"]["backends"][0]["readiness_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("was not configured")));
         assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn backend_registry_reports_firecracker_ready_only_from_configured_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let firecracker_path = temp.path().join("firecracker");
+        std::fs::write(&firecracker_path, b"not executed").unwrap();
+        env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+
+        let backends = isolation_backends();
+
+        env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        assert_eq!(backends.len(), 1);
+        assert_eq!(backends[0].backend_name, "firecracker");
+        assert_eq!(backends[0].kind, "firecracker_micro_vm");
+        assert!(backends[0].ready);
+        assert!(backends[0]
+            .readiness_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("AGENT_WORKER_FIRECRACKER_BIN")));
+
+        env::set_var(
+            "AGENT_WORKER_FIRECRACKER_BIN",
+            temp.path().join("missing-firecracker"),
+        );
+        let missing = isolation_backends();
+        env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        assert!(!missing[0].ready);
+        assert!(missing[0]
+            .readiness_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("does not point to a file")));
     }
 
     #[test]

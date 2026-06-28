@@ -1849,7 +1849,7 @@ mod tests {
 
         let backend_result_json = serde_json::to_value(response.clone().with_result(
             AgentWorkerManagementResult::IsolationBackends {
-                registry_implemented: false,
+                registry_implemented: true,
                 backends: vec![AgentWorkerIsolationBackendReport {
                     backend_name: "firecracker".to_string(),
                     backend_version: "not-wired".to_string(),
@@ -1863,7 +1863,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(backend_result_json["result"]["kind"], "isolation_backends");
-        assert_eq!(backend_result_json["result"]["registry_implemented"], false);
+        assert_eq!(backend_result_json["result"]["registry_implemented"], true);
         assert_eq!(
             backend_result_json["result"]["backends"][0]["kind"],
             "firecracker_micro_vm"

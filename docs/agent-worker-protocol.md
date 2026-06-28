@@ -133,8 +133,10 @@ stable `result.kind` value so future actions can add typed data without changing
 the response envelope. The current executable `probe_handlers` action returns
 `result.kind=framework_handlers` with normalized handler readiness records.
 `list_backends` returns `result.kind=isolation_backends` with
-`registry_implemented=false` and an empty backend list until a real worker-side
-backend registry exists.
+`registry_implemented=true` and worker-side backend readiness records. The
+initial registry reports the Firecracker backend as ready only when
+`AGENT_WORKER_FIRECRACKER_BIN` points to a configured local file; the worker
+does not scan `PATH` or execute the binary during readiness reporting.
 Stable error codes include `invalid_request`, `unsupported_protocol_version`,
 `unsupported_action`, `transport_security_required`, `policy_denied`,
 `quota_exceeded`, `incompatible_backend`, `handler_unavailable`, `worker_busy`,
@@ -236,10 +238,11 @@ not provide cross-host encryption, and does not boot Firecracker.
 Until lifecycle handlers land, this server dispatches every authenticated
 request by action instead of treating authentication as execution support.
 `probe_handlers` returns a `framework_handlers` result payload. `list_backends`
-returns an `isolation_backends` result with `registry_implemented=false` and no
-available backends, so the gateway can distinguish "registry not wired yet" from
-a transport or authentication failure. It must not be treated as evidence that
-Firecracker can boot. Lifecycle, status, and artifact actions such as
+returns an `isolation_backends` result with explicit Firecracker readiness, so
+the gateway can distinguish a configured worker backend from a transport or
+authentication failure. A ready Firecracker report only means the configured
+binary path exists; it must not be treated as evidence that a microVM can boot.
+Lifecycle, status, and artifact actions such as
 `provision`, `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and
 `collect_artifacts` are rejected with
 `unsupported_action` instead of returning a false positive `accepted=true`.
