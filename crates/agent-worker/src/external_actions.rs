@@ -12,15 +12,22 @@
 //! requests, but the authorization decision must come from the gateway-mediated
 //! capability boundary.
 
+use std::{
+    collections::BTreeSet,
+    io::{self, Read},
+};
+
+use anyhow::Result;
 use ferrogate_runtime::{
     authorize_managed_external_action, CapabilityAction, CapabilityAuthorizationDecision,
     CapabilityAuthorizer, CapabilityPolicy, FrameworkAdapterError, FrameworkAdapterMode,
-    FrameworkAdapterSession, ManagedExternalAction, ManagedExternalActionRequest,
-    ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
+    FrameworkAdapterSession, ManagedCliAction, ManagedExternalAction, ManagedExternalActionRequest,
+    ManagedMcpToolAction, ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent,
+    SimpleCapabilityAuthorizer, SupportedFramework,
 };
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
 
-use anyhow::Result;
+const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExternalActionGateRequest {
@@ -33,6 +40,103 @@ pub(crate) struct ExternalActionGateRequest {
 pub(crate) struct ExternalActionGateDecision {
     pub(crate) decision: CapabilityAuthorizationDecision,
     pub(crate) event: NormalizedFrameworkEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExternalActionAuthorizationRequest {
+    pub(crate) session: ExternalActionSession,
+    pub(crate) action: ExternalActionSpec,
+    #[serde(default)]
+    pub(crate) high_risk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExternalActionSession {
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) tenant_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) worker_id: String,
+    pub(crate) isolation_backend: String,
+    pub(crate) adapter_name: String,
+    pub(crate) adapter_version: String,
+    pub(crate) framework: ExternalActionFramework,
+    #[serde(default = "default_external_action_mode")]
+    pub(crate) mode: ExternalActionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExternalActionFramework {
+    ClaudeCode,
+    Codex,
+    Hermes,
+    NativeHarness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExternalActionMode {
+    Managed,
+    SelfHosted,
+}
+
+fn default_external_action_mode() -> ExternalActionMode {
+    ExternalActionMode::Managed
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ExternalActionSpec {
+    Tool {
+        tool_name: String,
+        arguments_policy: String,
+    },
+    McpTool {
+        server_name: String,
+        tool_name: String,
+        arguments_policy: String,
+    },
+    Cli {
+        command: String,
+        args: Vec<String>,
+        working_dir: String,
+        env_policy: String,
+        timeout_millis: u64,
+        stdout_limit_bytes: u64,
+        stderr_limit_bytes: u64,
+        artifact_capture: bool,
+    },
+    Rest {
+        method: String,
+        url: String,
+        headers_policy: String,
+        body_policy: String,
+        timeout_millis: u64,
+        retry_limit: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExternalActionAuthorizationResponse {
+    pub(crate) accepted: bool,
+    pub(crate) decision: Option<ExternalActionDecision>,
+    pub(crate) event: Option<serde_json::Value>,
+    pub(crate) error: Option<ExternalActionAuthorizationError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExternalActionDecision {
+    Allowed,
+    Denied,
+    ApprovalRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExternalActionAuthorizationError {
+    pub(crate) code: String,
+    pub(crate) message: String,
 }
 
 impl ExternalActionGateDecision {
@@ -114,6 +218,45 @@ pub(crate) fn external_action_smoke_command() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn accept_external_action_json_command() -> Result<()> {
+    let mut input = String::new();
+    read_external_action_stream(&mut io::stdin(), &mut input)?;
+    let response = accept_external_action_json(
+        &input,
+        &RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            },
+        )),
+    )?;
+    println!("{}", serde_json::to_string(&response)?);
+    Ok(())
+}
+
+fn accept_external_action_json<A>(
+    input: &str,
+    authorizer: &A,
+) -> Result<ExternalActionAuthorizationResponse>
+where
+    A: GatewayExternalActionAuthorizer,
+{
+    if input.len() > EXTERNAL_ACTION_MAX_MESSAGE_BYTES {
+        anyhow::bail!("agent-worker external action request exceeds maximum message size");
+    }
+    let request: ExternalActionAuthorizationRequest = serde_json::from_str(input)?;
+    let gate_request = match request.try_into_gate_request() {
+        Ok(request) => request,
+        Err(error) => return Ok(ExternalActionAuthorizationResponse::rejected(error)),
+    };
+    Ok(
+        match authorize_handler_external_action(Some(authorizer), gate_request) {
+            Ok(decision) => ExternalActionAuthorizationResponse::from_decision(decision),
+            Err(error) => ExternalActionAuthorizationResponse::rejected(error),
+        },
+    )
+}
+
 fn external_action_smoke() -> Result<ExternalActionGateDecision> {
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
@@ -147,6 +290,157 @@ fn smoke_session() -> FrameworkAdapterSession {
         adapter_version: env!("CARGO_PKG_VERSION").to_string(),
         framework: SupportedFramework::NativeHarness,
         mode: FrameworkAdapterMode::Managed,
+    }
+}
+
+fn read_external_action_stream<R: Read>(reader: &mut R, output: &mut String) -> Result<()> {
+    let mut limited = reader.take((EXTERNAL_ACTION_MAX_MESSAGE_BYTES + 1) as u64);
+    limited.read_to_string(output)?;
+    if output.len() > EXTERNAL_ACTION_MAX_MESSAGE_BYTES {
+        anyhow::bail!("agent-worker external action request exceeds maximum message size");
+    }
+    Ok(())
+}
+
+impl ExternalActionAuthorizationRequest {
+    fn try_into_gate_request(self) -> Result<ExternalActionGateRequest, FrameworkAdapterError> {
+        Ok(ExternalActionGateRequest {
+            session: self.session.try_into_framework_session()?,
+            action: self.action.into_managed_action(),
+            high_risk: self.high_risk,
+        })
+    }
+}
+
+impl ExternalActionSession {
+    fn try_into_framework_session(self) -> Result<FrameworkAdapterSession, FrameworkAdapterError> {
+        Ok(FrameworkAdapterSession {
+            session_id: self.session_id,
+            run_id: self.run_id,
+            tenant_id: self.tenant_id,
+            workspace_id: self.workspace_id,
+            worker_id: self.worker_id,
+            isolation_backend: self.isolation_backend,
+            adapter_name: self.adapter_name,
+            adapter_version: self.adapter_version,
+            framework: self.framework.into_supported_framework(),
+            mode: self.mode.into_framework_mode(),
+        })
+    }
+}
+
+impl ExternalActionFramework {
+    fn into_supported_framework(self) -> SupportedFramework {
+        match self {
+            Self::ClaudeCode => SupportedFramework::ClaudeCode,
+            Self::Codex => SupportedFramework::Codex,
+            Self::Hermes => SupportedFramework::Hermes,
+            Self::NativeHarness => SupportedFramework::NativeHarness,
+        }
+    }
+}
+
+impl ExternalActionMode {
+    fn into_framework_mode(self) -> FrameworkAdapterMode {
+        match self {
+            Self::Managed => FrameworkAdapterMode::Managed,
+            Self::SelfHosted => FrameworkAdapterMode::SelfHosted,
+        }
+    }
+}
+
+impl ExternalActionSpec {
+    fn into_managed_action(self) -> ManagedExternalAction {
+        match self {
+            Self::Tool {
+                tool_name,
+                arguments_policy,
+            } => ManagedExternalAction::Tool(ManagedToolAction {
+                tool_name,
+                arguments_policy,
+            }),
+            Self::McpTool {
+                server_name,
+                tool_name,
+                arguments_policy,
+            } => ManagedExternalAction::McpTool(ManagedMcpToolAction {
+                server_name,
+                tool_name,
+                arguments_policy,
+            }),
+            Self::Cli {
+                command,
+                args,
+                working_dir,
+                env_policy,
+                timeout_millis,
+                stdout_limit_bytes,
+                stderr_limit_bytes,
+                artifact_capture,
+            } => ManagedExternalAction::Cli(ManagedCliAction {
+                command,
+                args,
+                working_dir,
+                env_policy,
+                timeout_millis,
+                stdout_limit_bytes,
+                stderr_limit_bytes,
+                artifact_capture,
+            }),
+            Self::Rest {
+                method,
+                url,
+                headers_policy,
+                body_policy,
+                timeout_millis,
+                retry_limit,
+            } => ManagedExternalAction::Rest(ManagedRestAction {
+                method,
+                url,
+                headers_policy,
+                body_policy,
+                timeout_millis,
+                retry_limit,
+            }),
+        }
+    }
+}
+
+impl ExternalActionAuthorizationResponse {
+    fn from_decision(decision: ExternalActionGateDecision) -> Self {
+        let decision_label = match decision.decision {
+            CapabilityAuthorizationDecision::Allowed => ExternalActionDecision::Allowed,
+            CapabilityAuthorizationDecision::Denied => ExternalActionDecision::Denied,
+            CapabilityAuthorizationDecision::ApprovalRequired => {
+                ExternalActionDecision::ApprovalRequired
+            }
+        };
+        Self {
+            accepted: decision.allowed(),
+            decision: Some(decision_label),
+            event: Some(decision.event.canonical_json()),
+            error: None,
+        }
+    }
+
+    fn rejected(error: FrameworkAdapterError) -> Self {
+        Self {
+            accepted: false,
+            decision: None,
+            event: None,
+            error: Some(ExternalActionAuthorizationError {
+                code: external_action_error_code(&error).to_string(),
+                message: error.to_string(),
+            }),
+        }
+    }
+}
+
+fn external_action_error_code(error: &FrameworkAdapterError) -> &'static str {
+    match error {
+        FrameworkAdapterError::InvalidDescriptor(_) => "invalid_descriptor",
+        FrameworkAdapterError::InvalidRequest(_) => "invalid_request",
+        FrameworkAdapterError::CapabilityDenied(_) => "capability_denied",
     }
 }
 
@@ -349,6 +643,82 @@ mod tests {
         assert_eq!(json["metadata"]["worker_id"], "agent-worker-smoke");
     }
 
+    #[test]
+    fn external_action_json_contract_allows_tool_without_executing_it() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let input = serde_json::to_string(&tool_json_request()).unwrap();
+
+        let response = accept_external_action_json(&input, &gate).unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(response.decision, Some(ExternalActionDecision::Allowed));
+        let event = response.event.unwrap();
+        assert_eq!(event["kind"], "capability.allowed");
+        assert_eq!(event["metadata"]["external_target"], "tool:native.echo");
+    }
+
+    #[test]
+    fn external_action_json_contract_rejects_cli_approval_before_execution() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let mut request = tool_json_request();
+        request.high_risk = true;
+        request.action = ExternalActionSpec::Cli {
+            command: "bash".to_string(),
+            args: vec!["-lc".to_string(), "curl https://example.test".to_string()],
+            working_dir: "/workspace".to_string(),
+            env_policy: "deny_all_except_path".to_string(),
+            timeout_millis: 1_000,
+            stdout_limit_bytes: 4096,
+            stderr_limit_bytes: 4096,
+            artifact_capture: false,
+        };
+        let input = serde_json::to_string(&request).unwrap();
+
+        let response = accept_external_action_json(&input, &gate).unwrap();
+
+        assert!(!response.accepted);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("capability_denied")
+        );
+        assert!(response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("requires approval")));
+    }
+
+    #[test]
+    fn external_action_json_contract_rejects_self_hosted_enforcement() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let mut request = tool_json_request();
+        request.session.mode = ExternalActionMode::SelfHosted;
+        let input = serde_json::to_string(&request).unwrap();
+
+        let response = accept_external_action_json(&input, &gate).unwrap();
+
+        assert!(!response.accepted);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("invalid_request")
+        );
+    }
+
     fn session() -> FrameworkAdapterSession {
         FrameworkAdapterSession {
             session_id: "session-1".to_string(),
@@ -361,6 +731,28 @@ mod tests {
             adapter_version: env!("CARGO_PKG_VERSION").to_string(),
             framework: SupportedFramework::NativeHarness,
             mode: FrameworkAdapterMode::Managed,
+        }
+    }
+
+    fn tool_json_request() -> ExternalActionAuthorizationRequest {
+        ExternalActionAuthorizationRequest {
+            session: ExternalActionSession {
+                session_id: "session-1".to_string(),
+                run_id: "run-1".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "worker-1".to_string(),
+                isolation_backend: "firecracker".to_string(),
+                adapter_name: "native-harness".to_string(),
+                adapter_version: env!("CARGO_PKG_VERSION").to_string(),
+                framework: ExternalActionFramework::NativeHarness,
+                mode: ExternalActionMode::Managed,
+            },
+            action: ExternalActionSpec::Tool {
+                tool_name: "native.echo".to_string(),
+                arguments_policy: "redacted_json".to_string(),
+            },
+            high_risk: false,
         }
     }
 }

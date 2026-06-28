@@ -23,6 +23,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 ferrogate-runtime = { path = "../ferrogate-runtime" }
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

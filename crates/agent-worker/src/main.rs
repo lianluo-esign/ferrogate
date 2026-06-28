@@ -46,6 +46,8 @@ enum Command {
     ProbeHandlers,
     /// Run a managed external-action authorization smoke without executing the action.
     ExternalActionSmoke,
+    /// Accept one managed external-action authorization request as JSON on stdin.
+    AcceptExternalActionJson,
     /// Accept one signed management envelope as JSON on stdin and emit a JSON response.
     AcceptManagementJson {
         /// Management key id expected in the signed envelope.
@@ -87,6 +89,9 @@ fn main() -> Result<()> {
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
         Command::ExternalActionSmoke => external_actions::external_action_smoke_command(),
+        Command::AcceptExternalActionJson => {
+            external_actions::accept_external_action_json_command()
+        }
         Command::AcceptManagementJson {
             key_id,
             shared_secret,

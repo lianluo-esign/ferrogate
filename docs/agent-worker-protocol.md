@@ -327,6 +327,20 @@ tool authorization smoke and does not execute the tool. Real managed execution
 must replace the smoke authorizer with the gateway/control-plane authorizer and
 append the resulting timeline event through the durable run evidence path.
 
+The JSON contract smoke for handler-to-gateway authorization is:
+
+```bash
+agent-worker accept-external-action-json
+```
+
+It reads one managed external action authorization request from stdin and writes
+one response with `accepted`, `decision`, optional normalized framework `event`,
+and optional error object. The first JSON contract supports `tool`, `mcp_tool`,
+`cli`, and `rest` action specs. Allowed responses prove only that the handler may
+continue to the next execution step; the command itself still does not execute
+the external action. Denied, approval-required, invalid, or self-hosted requests
+fail closed before handler execution.
+
 The current typed action specs are:
 
 - `ManagedToolAction`: governed built-in or plugin tool call with argument
