@@ -35,6 +35,7 @@ use ferrogate_runtime::{
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const DEFAULT_EXTERNAL_ACTION_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExternalActionGateRequest {
@@ -354,11 +355,16 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
 
 pub(crate) struct HttpGatewayExternalActionAuthorizer {
     endpoint: SocketAddr,
+    timeout: Duration,
 }
 
 impl HttpGatewayExternalActionAuthorizer {
     pub(crate) fn new(endpoint: SocketAddr) -> Self {
-        Self { endpoint }
+        Self::new_with_timeout(endpoint, DEFAULT_EXTERNAL_ACTION_HTTP_TIMEOUT)
+    }
+
+    pub(crate) fn new_with_timeout(endpoint: SocketAddr, timeout: Duration) -> Self {
+        Self { endpoint, timeout }
     }
 }
 
@@ -383,11 +389,26 @@ impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
                     .to_string(),
             ));
         }
-        let mut stream = TcpStream::connect(self.endpoint).map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
-                "gateway external action HTTP authorizer transport unavailable: {error}"
-            ))
-        })?;
+        let mut stream =
+            TcpStream::connect_timeout(&self.endpoint, self.timeout).map_err(|error| {
+                FrameworkAdapterError::CapabilityDenied(format!(
+                    "gateway external action HTTP authorizer transport unavailable: {error}"
+                ))
+            })?;
+        stream
+            .set_read_timeout(Some(self.timeout))
+            .map_err(|error| {
+                FrameworkAdapterError::CapabilityDenied(format!(
+                    "gateway external action HTTP authorizer read timeout setup failed: {error}"
+                ))
+            })?;
+        stream
+            .set_write_timeout(Some(self.timeout))
+            .map_err(|error| {
+                FrameworkAdapterError::CapabilityDenied(format!(
+                    "gateway external action HTTP authorizer write timeout setup failed: {error}"
+                ))
+            })?;
         let request = format!(
             "POST /v1/agent-worker/external-actions/authorize HTTP/1.1\r\n\
              host: {}\r\n\
@@ -1173,6 +1194,34 @@ mod tests {
         assert!(error.to_string().contains("request_id mismatch"));
     }
 
+    #[test]
+    fn http_gateway_authorizer_transport_times_out_fail_closed() {
+        let server = spawn_stalled_http_authorizer_server();
+        let client = HttpGatewayExternalActionAuthorizer::new_with_timeout(
+            server.endpoint,
+            Duration::from_millis(50),
+        );
+
+        let error = authorize_handler_external_action(
+            Some(&client),
+            ExternalActionGateRequest {
+                session: session(),
+                action: ManagedExternalAction::Tool(ManagedToolAction {
+                    tool_name: "native.echo".to_string(),
+                    arguments_policy: "redacted_json".to_string(),
+                }),
+                high_risk: false,
+            },
+        )
+        .unwrap_err();
+        server.join();
+
+        let FrameworkAdapterError::CapabilityDenied(message) = error else {
+            panic!("expected fail-closed capability denial, got {error}");
+        };
+        assert!(message.contains("response read failed"));
+    }
+
     fn session() -> FrameworkAdapterSession {
         FrameworkAdapterSession {
             session_id: "session-1".to_string(),
@@ -1239,6 +1288,18 @@ mod tests {
                 body
             );
             stream.write_all(response.as_bytes()).unwrap();
+        });
+        HttpAuthorizerContractServer { endpoint, handle }
+    }
+
+    fn spawn_stalled_http_authorizer_server() -> HttpAuthorizerContractServer {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            thread::sleep(Duration::from_millis(150));
         });
         HttpAuthorizerContractServer { endpoint, handle }
     }
