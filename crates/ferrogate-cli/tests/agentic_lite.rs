@@ -271,6 +271,81 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
 }
 
 #[test]
+fn agent_run_endpoint_records_denied_tool_capability_in_timeline() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        external_echo_agent_run_config_without_tool_scope(&gateway_addr),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let failed = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/agent-runs",
+        &[
+            "Authorization: Bearer agent-secret",
+            "Content-Type: application/json",
+            "x-ferrogate-agent-run-id: agent-run-denied-tool",
+        ],
+        r#"{"input":"attempt a denied tool","max_turns":3,"timeout_millis":1000,"tool_calls":[{"name":"tool.echo","arguments":{"message":"blocked"},"session_id":"agent-denied-tool-session"}]}"#,
+    ));
+    assert_eq!(failed["object"], "agent_run");
+    assert_eq!(failed["id"], "agent-run-denied-tool");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["tool_results"].as_array().unwrap().len(), 0);
+
+    let timeline = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/agent-runs/agent-run-denied-tool",
+        &["Authorization: Bearer admin-secret"],
+        "",
+    ));
+    assert_eq!(timeline["object"], "agent_run_timeline");
+    assert_eq!(timeline["run"]["id"], "agent-run-denied-tool");
+    assert_eq!(timeline["run"]["status"], "failed");
+    assert_eq!(timeline["run"]["provider"], "ferrogate.external");
+    assert!(timeline["agent_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event["kind"] == "capability.denied"
+                && event["run_id"] == "agent-run-denied-tool"
+                && event["target"] == "tool.echo"
+                && event["outcome"] == "denied"
+                && event["tool_call_id"] == "mock-tool-call"
+                && event["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("denied before dispatch")
+                && event["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("missing tools.execute scope")
+        }));
+    assert!(timeline["audit_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event["action"] == "agent.run_stopped"
+                && event["agent_run_id"] == "agent-run-denied-tool"
+                && event["outcome"] == "stopped"
+                && event["message"].as_str().unwrap().contains("scope_denied")
+        }));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn default_agent_runtime_requires_agent_worker_transport() {
     let gateway_addr = free_addr();
     let dir = tempfile::tempdir().unwrap();
@@ -1255,6 +1330,13 @@ tenant_scope = true
 [extensions.config]
 tenant_allowlist = ["org_demo"]
 "#
+    )
+}
+
+fn external_echo_agent_run_config_without_tool_scope(gateway_addr: &str) -> String {
+    external_echo_agent_run_config(gateway_addr).replace(
+        r#"scopes = ["agent.runs.create", "tools.execute"]"#,
+        r#"scopes = ["agent.runs.create"]"#,
     )
 }
 
