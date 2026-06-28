@@ -21,9 +21,11 @@ use anyhow::Result;
 use ferrogate_runtime::{
     authorize_managed_external_action, CapabilityAction, CapabilityAuthorizationDecision,
     CapabilityAuthorizer, CapabilityPolicy, FrameworkAdapterError, FrameworkAdapterMode,
-    FrameworkAdapterSession, ManagedCliAction, ManagedExternalAction, ManagedExternalActionRequest,
-    ManagedMcpToolAction, ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent,
-    SimpleCapabilityAuthorizer, SupportedFramework,
+    FrameworkAdapterSession, ManagedBrowserAction, ManagedBrowserOperation, ManagedCliAction,
+    ManagedExternalAction, ManagedExternalActionRequest, ManagedFilesystemAccess,
+    ManagedFilesystemAction, ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction,
+    ManagedNetworkEgressAction, ManagedRestAction, ManagedSecretAction, ManagedSkillAction,
+    ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +109,20 @@ pub(crate) enum ExternalActionSpec {
         stderr_limit_bytes: u64,
         artifact_capture: bool,
     },
+    Skill {
+        skill_id: String,
+        declared_capabilities: Vec<String>,
+    },
+    Filesystem {
+        path: String,
+        access: ExternalActionFilesystemAccess,
+        workspace_relative: bool,
+    },
+    Browser {
+        operation: ExternalActionBrowserOperation,
+        url: String,
+        timeout_millis: u64,
+    },
     Rest {
         method: String,
         url: String,
@@ -115,6 +131,44 @@ pub(crate) enum ExternalActionSpec {
         timeout_millis: u64,
         retry_limit: u32,
     },
+    Secret {
+        secret_id: String,
+        purpose: String,
+    },
+    Memory {
+        access: ExternalActionMemoryAccess,
+        namespace: String,
+        key: String,
+    },
+    NetworkEgress {
+        host: String,
+        port: u16,
+        protocol: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExternalActionFilesystemAccess {
+    Read,
+    Write,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExternalActionBrowserOperation {
+    Navigate,
+    Screenshot,
+    Click,
+    Script,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExternalActionMemoryAccess {
+    Read,
+    Write,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +441,31 @@ impl ExternalActionSpec {
                 stderr_limit_bytes,
                 artifact_capture,
             }),
+            Self::Skill {
+                skill_id,
+                declared_capabilities,
+            } => ManagedExternalAction::Skill(ManagedSkillAction {
+                skill_id,
+                declared_capabilities,
+            }),
+            Self::Filesystem {
+                path,
+                access,
+                workspace_relative,
+            } => ManagedExternalAction::Filesystem(ManagedFilesystemAction {
+                path,
+                access: access.into_managed_access(),
+                workspace_relative,
+            }),
+            Self::Browser {
+                operation,
+                url,
+                timeout_millis,
+            } => ManagedExternalAction::Browser(ManagedBrowserAction {
+                operation: operation.into_managed_operation(),
+                url,
+                timeout_millis,
+            }),
             Self::Rest {
                 method,
                 url,
@@ -402,6 +481,57 @@ impl ExternalActionSpec {
                 timeout_millis,
                 retry_limit,
             }),
+            Self::Secret { secret_id, purpose } => {
+                ManagedExternalAction::Secret(ManagedSecretAction { secret_id, purpose })
+            }
+            Self::Memory {
+                access,
+                namespace,
+                key,
+            } => ManagedExternalAction::Memory(ManagedMemoryAction {
+                access: access.into_managed_access(),
+                namespace,
+                key,
+            }),
+            Self::NetworkEgress {
+                host,
+                port,
+                protocol,
+            } => ManagedExternalAction::NetworkEgress(ManagedNetworkEgressAction {
+                host,
+                port,
+                protocol,
+            }),
+        }
+    }
+}
+
+impl ExternalActionFilesystemAccess {
+    fn into_managed_access(self) -> ManagedFilesystemAccess {
+        match self {
+            Self::Read => ManagedFilesystemAccess::Read,
+            Self::Write => ManagedFilesystemAccess::Write,
+            Self::Delete => ManagedFilesystemAccess::Delete,
+        }
+    }
+}
+
+impl ExternalActionBrowserOperation {
+    fn into_managed_operation(self) -> ManagedBrowserOperation {
+        match self {
+            Self::Navigate => ManagedBrowserOperation::Navigate,
+            Self::Screenshot => ManagedBrowserOperation::Screenshot,
+            Self::Click => ManagedBrowserOperation::Click,
+            Self::Script => ManagedBrowserOperation::Script,
+        }
+    }
+}
+
+impl ExternalActionMemoryAccess {
+    fn into_managed_access(self) -> ManagedMemoryAccess {
+        match self {
+            Self::Read => ManagedMemoryAccess::Read,
+            Self::Write => ManagedMemoryAccess::Write,
         }
     }
 }
@@ -719,6 +849,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn external_action_json_contract_covers_every_managed_action_surface() {
+        let allowed_actions = BTreeSet::from([
+            CapabilityAction::Tool,
+            CapabilityAction::McpTool,
+            CapabilityAction::Cli,
+            CapabilityAction::Skill,
+            CapabilityAction::Filesystem,
+            CapabilityAction::Browser,
+            CapabilityAction::Rest,
+            CapabilityAction::Secret,
+            CapabilityAction::MemoryRead,
+            CapabilityAction::MemoryWrite,
+            CapabilityAction::NetworkEgress,
+        ]);
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions,
+                allow_direct_network_egress: true,
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        for (action, expected_action, expected_target) in external_action_contract_cases() {
+            let mut request = tool_json_request();
+            request.action = action;
+            let input = serde_json::to_string(&request).unwrap();
+
+            let response = accept_external_action_json(&input, &gate).unwrap();
+
+            assert!(response.accepted, "{expected_action}:{expected_target}");
+            assert_eq!(response.decision, Some(ExternalActionDecision::Allowed));
+            let event = response.event.unwrap();
+            assert_eq!(event["kind"], "capability.allowed");
+            assert_eq!(event["metadata"]["external_action"], expected_action);
+            assert_eq!(event["metadata"]["external_target"], expected_target);
+            assert_eq!(event["metadata"]["tenant_id"], "tenant-1");
+            assert_eq!(event["metadata"]["worker_id"], "worker-1");
+            assert_eq!(event["metadata"]["isolation_backend"], "firecracker");
+        }
+    }
+
+    #[test]
+    fn external_action_json_contract_keeps_network_egress_fail_closed_by_default() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
+                allow_direct_network_egress: false,
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let mut request = tool_json_request();
+        request.action = ExternalActionSpec::NetworkEgress {
+            host: "api.example.test".to_string(),
+            port: 443,
+            protocol: "https".to_string(),
+        };
+        let input = serde_json::to_string(&request).unwrap();
+
+        let response = accept_external_action_json(&input, &gate).unwrap();
+
+        assert!(!response.accepted);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("capability_denied")
+        );
+        assert!(response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("direct network egress")));
+    }
+
     fn session() -> FrameworkAdapterSession {
         FrameworkAdapterSession {
             session_id: "session-1".to_string(),
@@ -754,5 +956,114 @@ mod tests {
             },
             high_risk: false,
         }
+    }
+
+    fn external_action_contract_cases() -> Vec<(ExternalActionSpec, &'static str, &'static str)> {
+        vec![
+            (
+                ExternalActionSpec::Tool {
+                    tool_name: "native.echo".to_string(),
+                    arguments_policy: "redacted_json".to_string(),
+                },
+                "tool",
+                "tool:native.echo",
+            ),
+            (
+                ExternalActionSpec::McpTool {
+                    server_name: "filesystem".to_string(),
+                    tool_name: "read_file".to_string(),
+                    arguments_policy: "workspace_only".to_string(),
+                },
+                "mcp.tool",
+                "mcp:filesystem:read_file",
+            ),
+            (
+                ExternalActionSpec::Cli {
+                    command: "cargo".to_string(),
+                    args: vec!["test".to_string()],
+                    working_dir: "/workspace".to_string(),
+                    env_policy: "allowlist".to_string(),
+                    timeout_millis: 30_000,
+                    stdout_limit_bytes: 65_536,
+                    stderr_limit_bytes: 65_536,
+                    artifact_capture: true,
+                },
+                "cli",
+                "cargo",
+            ),
+            (
+                ExternalActionSpec::Skill {
+                    skill_id: "repo-test".to_string(),
+                    declared_capabilities: vec!["cli".to_string(), "filesystem".to_string()],
+                },
+                "skill",
+                "skill:repo-test",
+            ),
+            (
+                ExternalActionSpec::Filesystem {
+                    path: "src/lib.rs".to_string(),
+                    access: ExternalActionFilesystemAccess::Read,
+                    workspace_relative: true,
+                },
+                "filesystem",
+                "read:src/lib.rs",
+            ),
+            (
+                ExternalActionSpec::Browser {
+                    operation: ExternalActionBrowserOperation::Navigate,
+                    url: "https://docs.example.test".to_string(),
+                    timeout_millis: 5_000,
+                },
+                "browser",
+                "browser:navigate:https://docs.example.test",
+            ),
+            (
+                ExternalActionSpec::Rest {
+                    method: "POST".to_string(),
+                    url: "https://api.example.test/v1/jobs".to_string(),
+                    headers_policy: "redact_authorization".to_string(),
+                    body_policy: "guardrail_scan".to_string(),
+                    timeout_millis: 10_000,
+                    retry_limit: 2,
+                },
+                "rest",
+                "POST https://api.example.test/v1/jobs",
+            ),
+            (
+                ExternalActionSpec::Secret {
+                    secret_id: "openai-api-key".to_string(),
+                    purpose: "provider_call".to_string(),
+                },
+                "secret",
+                "secret:openai-api-key",
+            ),
+            (
+                ExternalActionSpec::Memory {
+                    access: ExternalActionMemoryAccess::Read,
+                    namespace: "session".to_string(),
+                    key: "plan".to_string(),
+                },
+                "memory.read",
+                "memory:read:session:plan",
+            ),
+            (
+                ExternalActionSpec::Memory {
+                    access: ExternalActionMemoryAccess::Write,
+                    namespace: "session".to_string(),
+                    key: "summary".to_string(),
+                },
+                "memory.write",
+                "memory:write:session:summary",
+            ),
+            (
+                ExternalActionSpec::NetworkEgress {
+                    host: "api.example.test".to_string(),
+                    port: 443,
+                    protocol: "https".to_string(),
+                },
+                "network.egress",
+                "api.example.test:443",
+            ),
+        ]
     }
 }

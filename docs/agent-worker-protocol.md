@@ -335,11 +335,13 @@ agent-worker accept-external-action-json
 
 It reads one managed external action authorization request from stdin and writes
 one response with `accepted`, `decision`, optional normalized framework `event`,
-and optional error object. The first JSON contract supports `tool`, `mcp_tool`,
-`cli`, and `rest` action specs. Allowed responses prove only that the handler may
-continue to the next execution step; the command itself still does not execute
-the external action. Denied, approval-required, invalid, or self-hosted requests
-fail closed before handler execution.
+and optional error object. The JSON contract supports the same managed action
+surface as the runtime contract: `tool`, `mcp_tool`, `cli`, `skill`,
+`filesystem`, `browser`, `rest`, `secret`, `memory`, and `network_egress` action
+specs. Allowed responses prove only that the handler may continue to the next
+execution step; the command itself still does not execute the external action.
+Denied, approval-required, invalid, or self-hosted requests fail closed before
+handler execution.
 
 The current typed action specs are:
 
