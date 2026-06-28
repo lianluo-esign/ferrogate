@@ -238,6 +238,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["worker"]["trust_level"],
                 "reported_by_self_hosted_worker"
             );
+            assert_eq!(body["worker"]["stale"], false);
+            assert!(body["worker"]["stale_after_unix"].is_null());
+            assert_eq!(body["worker"]["stale_threshold_secs"], 300);
             assert_eq!(body["worker"]["telemetry_event_count"], 0);
             assert_eq!(body["worker"]["artifact_count"], 0);
             assert_eq!(body["worker"]["checkpoint_count"], 0);
@@ -262,6 +265,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["identity_fingerprint"], "sha256:test-worker");
             assert_eq!(body["orchestration_enabled"], true);
             assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
+            assert_eq!(body["stale"], false);
+            assert!(body["stale_after_unix"].is_null());
+            assert_eq!(body["stale_threshold_secs"], 300);
             assert_eq!(body["telemetry_event_count"], 0);
             assert_eq!(body["artifact_count"], 0);
             assert_eq!(body["checkpoint_count"], 0);
@@ -338,6 +344,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["latest_heartbeat"]["status"], "online");
             assert_eq!(body["latest_heartbeat"]["reported_at_unix"], 123);
             assert!(body["last_seen_at_unix"].as_u64().is_some());
+            assert_eq!(body["stale"], false);
+            assert!(body["stale_after_unix"].as_u64().is_some());
+            assert_eq!(body["stale_threshold_secs"], 300);
             Ok(())
         },
     )?;
@@ -522,6 +531,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["data"][0]["trust_level"],
                 "reported_by_self_hosted_worker"
             );
+            assert_eq!(body["data"][0]["stale"], false);
+            assert!(body["data"][0]["stale_after_unix"].as_u64().is_some());
+            assert_eq!(body["data"][0]["stale_threshold_secs"], 300);
             assert_eq!(body["data"][0]["latest_heartbeat"]["status"], "online");
             assert_eq!(body["data"][0]["telemetry_event_count"], 1);
             assert_eq!(body["data"][0]["latest_event_at_unix"], 456);

@@ -74,6 +74,7 @@ use tracing::warn;
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
 pub(crate) const RELOAD_MODE_LISTENER_LEVEL_REQUIRED: &str = "listener-level-required";
 const SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+const SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS: u64 = 300;
 
 pub(crate) struct ToolApprovalCreateRequest<'a> {
     pub(crate) tool: &'a ToolExecutionRequest,
@@ -2561,6 +2562,19 @@ fn next_self_hosted_telemetry_event_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("self-hosted-event-{nanos}-{}", std::process::id())
+}
+
+fn self_hosted_worker_stale_state(
+    last_seen_at_unix: Option<u64>,
+    now_unix: Option<u64>,
+) -> (bool, Option<u64>) {
+    let stale_after_unix =
+        last_seen_at_unix.map(|seen| seen.saturating_add(SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS));
+    let stale = match (stale_after_unix, now_unix) {
+        (Some(stale_after), Some(now)) => now > stale_after,
+        _ => false,
+    };
+    (stale, stale_after_unix)
 }
 
 impl AppState {
@@ -5065,6 +5079,7 @@ impl AppState {
         let telemetry_events = self.repositories.self_hosted_worker_telemetry_events();
         let artifacts = self.repositories.self_hosted_worker_artifacts();
         let checkpoints = self.repositories.self_hosted_worker_checkpoints();
+        let now_unix = now_unix_seconds();
         self.repositories
             .self_hosted_worker_registrations()
             .into_iter()
@@ -5082,6 +5097,8 @@ impl AppState {
                     .iter()
                     .filter(|checkpoint| checkpoint.worker_id == registration.id)
                     .collect::<Vec<_>>();
+                let (stale, stale_after_unix) =
+                    self_hosted_worker_stale_state(registration.last_seen_at_unix, now_unix);
                 crate::responses::AdminSelfHostedWorkerRecord {
                     id: registration.id,
                     tenant: registration.tenant,
@@ -5093,6 +5110,9 @@ impl AppState {
                     registered_at_unix: registration.registered_at_unix,
                     last_seen_at_unix: registration.last_seen_at_unix,
                     trust_level: registration.trust_level,
+                    stale,
+                    stale_after_unix,
+                    stale_threshold_secs: SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS,
                     latest_heartbeat: latest_heartbeat.map(|heartbeat| {
                         crate::responses::AdminSelfHostedWorkerHeartbeat {
                             id: heartbeat.id,
@@ -7850,6 +7870,15 @@ mod tests {
         assert_eq!(page.data[0].latest_event_at_unix, Some(25));
         assert_eq!(page.data[0].latest_artifact_at_unix, Some(27));
         assert_eq!(page.data[0].latest_checkpoint_at_unix, Some(28));
+        assert_eq!(
+            page.data[0].stale_threshold_secs,
+            SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS
+        );
+        assert_eq!(
+            page.data[0].stale_after_unix,
+            Some(20 + SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS)
+        );
+        assert!(page.data[0].stale);
         let heartbeat = page.data[0].latest_heartbeat.as_ref().unwrap();
         assert_eq!(heartbeat.id, "heartbeat-new");
         assert_eq!(heartbeat.status, "degraded");
@@ -7871,6 +7900,26 @@ mod tests {
         );
 
         assert!(state.self_hosted_worker_record("missing-worker").is_none());
+    }
+
+    #[test]
+    fn self_hosted_worker_stale_state_uses_last_seen_threshold() {
+        assert_eq!(
+            self_hosted_worker_stale_state(None, Some(1_000)),
+            (false, None)
+        );
+        assert_eq!(
+            self_hosted_worker_stale_state(Some(100), Some(399)),
+            (false, Some(400))
+        );
+        assert_eq!(
+            self_hosted_worker_stale_state(Some(100), Some(400)),
+            (false, Some(400))
+        );
+        assert_eq!(
+            self_hosted_worker_stale_state(Some(100), Some(401)),
+            (true, Some(400))
+        );
     }
 
     #[test]

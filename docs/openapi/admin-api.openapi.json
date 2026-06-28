@@ -10340,6 +10340,9 @@
           "identity_fingerprint",
           "orchestration_enabled",
           "trust_level",
+          "stale",
+          "stale_after_unix",
+          "stale_threshold_secs",
           "latest_heartbeat",
           "telemetry_event_count",
           "artifact_count",
@@ -10427,6 +10430,23 @@
               "null"
             ],
             "minimum": 0
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "True when the latest observed self-hosted worker heartbeat is older than the stale threshold. This is control-plane visibility only, not transport enforcement."
+          },
+          "stale_after_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Unix timestamp after which the worker is considered stale based on last_seen_at_unix and stale_threshold_secs. Null until a heartbeat has been observed."
+          },
+          "stale_threshold_secs": {
+            "type": "integer",
+            "minimum": 1,
+            "const": 300
           }
         },
         "additionalProperties": false
