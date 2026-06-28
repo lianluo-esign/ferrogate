@@ -127,8 +127,12 @@ The initial standard actions are `probe_handlers`, `list_backends`,
 `collect_artifacts`.
 
 Every response uses the same envelope identity fields plus `accepted`,
-`duplicate_idempotency_key`, and an optional standardized error object. Stable
-error codes include `invalid_request`, `unsupported_protocol_version`,
+`duplicate_idempotency_key`, an optional action-specific `result`, and an
+optional standardized error object. Successful action payloads are tagged with a
+stable `result.kind` value so future actions can add typed data without changing
+the response envelope. The current executable `probe_handlers` action returns
+`result.kind=framework_handlers` with normalized handler readiness records.
+Stable error codes include `invalid_request`, `unsupported_protocol_version`,
 `unsupported_action`, `transport_security_required`, `policy_denied`,
 `quota_exceeded`, `incompatible_backend`, `handler_unavailable`, `worker_busy`,
 `provision_failed`, `run_failed`, `timeout`, `cancelled`, `cleanup_failed`,
@@ -228,11 +232,12 @@ not provide cross-host encryption, and does not boot Firecracker.
 
 Until lifecycle handlers land, this server dispatches every authenticated
 request by action instead of treating authentication as execution support.
-`probe_handlers` is the only executable action. `list_backends` reaches the
-backend dispatch branch and currently returns `incompatible_backend` because no
-real isolation backend registry is wired into the worker process. Lifecycle,
-status, and artifact actions such as `provision`, `exec_or_attach`, `stop`,
-`cleanup`, `stream_status`, and `collect_artifacts` are rejected with
+`probe_handlers` is the only executable action and returns a
+`framework_handlers` result payload. `list_backends` reaches the backend
+dispatch branch and currently returns `incompatible_backend` because no real
+isolation backend registry is wired into the worker process. Lifecycle, status,
+and artifact actions such as `provision`, `exec_or_attach`, `stop`, `cleanup`,
+`stream_status`, and `collect_artifacts` are rejected with
 `unsupported_action` instead of returning a false positive `accepted=true`.
 Adding a lifecycle action requires both the handler implementation and contract
 coverage for the reported response.

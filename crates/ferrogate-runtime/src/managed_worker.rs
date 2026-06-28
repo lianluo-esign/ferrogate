@@ -505,6 +505,7 @@ pub struct AgentWorkerManagementResponse {
     pub action: AgentWorkerManagementAction,
     pub accepted: bool,
     pub duplicate_idempotency_key: bool,
+    pub result: Option<AgentWorkerManagementResult>,
     pub error: Option<AgentWorkerManagementError>,
 }
 
@@ -517,8 +518,14 @@ impl AgentWorkerManagementResponse {
             action: verification.action,
             accepted: true,
             duplicate_idempotency_key: verification.duplicate_idempotency_key,
+            result: None,
             error: None,
         }
+    }
+
+    pub fn with_result(mut self, result: AgentWorkerManagementResult) -> Self {
+        self.result = Some(result);
+        self
     }
 
     pub fn rejected(envelope: &AgentWorkerManagementEnvelope, error: &ManagedWorkerError) -> Self {
@@ -529,9 +536,18 @@ impl AgentWorkerManagementResponse {
             action: envelope.action,
             accepted: false,
             duplicate_idempotency_key: false,
+            result: None,
             error: Some(error.management_error()),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentWorkerManagementResult {
+    FrameworkHandlers {
+        handlers: Vec<AgentWorkerFrameworkHandler>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1794,7 +1810,29 @@ mod tests {
         assert_eq!(response.idempotency_key, "idempotency-1");
         assert_eq!(response.action, AgentWorkerManagementAction::Provision);
         assert!(!response.duplicate_idempotency_key);
+        assert!(response.result.is_none());
         assert!(response.error.is_none());
+
+        let response_with_result =
+            response
+                .clone()
+                .with_result(AgentWorkerManagementResult::FrameworkHandlers {
+                    handlers: vec![AgentWorkerFrameworkHandler {
+                        adapter_name: "native-harness".to_string(),
+                        framework: "native_harness".to_string(),
+                        version: "test".to_string(),
+                        ready: true,
+                        readiness_reason: Some(
+                            "native harness is built into the worker".to_string(),
+                        ),
+                    }],
+                });
+        let result_json = serde_json::to_value(&response_with_result).unwrap();
+        assert_eq!(result_json["result"]["kind"], "framework_handlers");
+        assert_eq!(
+            result_json["result"]["handlers"][0]["adapter_name"],
+            "native-harness"
+        );
 
         let duplicate_idempotency = management_envelope_with(
             AgentWorkerManagementAction::Provision,
@@ -1963,6 +2001,7 @@ mod tests {
 
         assert_eq!(rejected_json["accepted"], false);
         assert_eq!(rejected_json["action"], "provision");
+        assert_eq!(rejected_json["result"], serde_json::Value::Null);
         assert_eq!(rejected_json["error"]["code"], "invalid_signature");
         assert_eq!(rejected_json["error"]["retryable"], false);
 

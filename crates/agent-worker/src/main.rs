@@ -19,8 +19,8 @@ use clap::{Parser, Subcommand};
 use ferrogate_runtime::{
     AgentWorkerFrameworkHandler, AgentWorkerManagementAction, AgentWorkerManagementEnvelope,
     AgentWorkerManagementErrorCode, AgentWorkerManagementKey, AgentWorkerManagementResponse,
-    AgentWorkerManagementSecurity, AgentWorkerManagementTransport, AgentWorkerManagementVerifier,
-    AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
+    AgentWorkerManagementResult, AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
+    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
     InMemoryAgentWorkerManagementTransport, ManagedWorkerError, AGENT_WORKER_PROTOCOL_VERSION,
 };
 use serde_json::json;
@@ -299,19 +299,22 @@ fn accept_management_envelope(
         return response;
     }
     match dispatch_management_action(envelope.clone()) {
-        Ok(()) => response,
+        Ok(Some(result)) => response.with_result(result),
+        Ok(None) => response,
         Err(error) => AgentWorkerManagementResponse::rejected(&envelope, &error),
     }
 }
 
 fn dispatch_management_action(
     envelope: AgentWorkerManagementEnvelope,
-) -> Result<(), ManagedWorkerError> {
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     match envelope.action {
         AgentWorkerManagementAction::ProbeHandlers => {
             let handlers = framework_handlers();
             if handlers.iter().any(|handler| handler.ready) {
-                Ok(())
+                Ok(Some(AgentWorkerManagementResult::FrameworkHandlers {
+                    handlers,
+                }))
             } else {
                 Err(ManagedWorkerError::management_protocol_error(
                     AgentWorkerManagementErrorCode::HandlerUnavailable,
@@ -526,6 +529,15 @@ mod tests {
         assert_eq!(response["accepted"], true);
         assert_eq!(response["request_id"], "agent-worker-smoke-request");
         assert_eq!(response["action"], "probe_handlers");
+        assert_eq!(response["result"]["kind"], "framework_handlers");
+        assert_eq!(
+            response["result"]["handlers"][0]["adapter_name"],
+            "native-harness"
+        );
+        assert_eq!(
+            response["result"]["handlers"][0]["framework"],
+            "native_harness"
+        );
         assert_eq!(response["error"], serde_json::Value::Null);
     }
 
@@ -639,6 +651,13 @@ mod tests {
         assert!(response.accepted);
         assert_eq!(response.request_id, "agent-worker-smoke-request");
         assert_eq!(response.action, AgentWorkerManagementAction::ProbeHandlers);
+        let Some(AgentWorkerManagementResult::FrameworkHandlers { handlers }) = response.result
+        else {
+            panic!("probe_handlers response did not include framework handler result");
+        };
+        assert!(handlers
+            .iter()
+            .any(|handler| handler.adapter_name == "native-harness" && handler.ready));
         assert!(response.error.is_none());
 
         let server_responses = server.join().unwrap();
