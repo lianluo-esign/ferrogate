@@ -94,7 +94,7 @@ pub(crate) fn authorize_handler_external_action<A>(
     request: ExternalActionGateRequest,
 ) -> Result<ExternalActionGateDecision, FrameworkAdapterError>
 where
-    A: GatewayExternalActionAuthorizer,
+    A: GatewayExternalActionAuthorizer + ?Sized,
 {
     validate_managed_worker_session(&request.session)?;
     let Some(authorizer) = authorizer else {
@@ -491,7 +491,7 @@ where
     Ok(accept_external_action_authorization(request, authorizer))
 }
 
-fn accept_external_action_authorization_request<A>(
+pub(crate) fn accept_external_action_authorization_request<A>(
     request: GatewayExternalActionTransportRequest,
     authorizer: &A,
 ) -> GatewayExternalActionTransportResponse

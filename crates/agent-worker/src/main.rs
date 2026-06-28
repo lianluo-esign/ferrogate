@@ -95,6 +95,9 @@ enum Command {
         /// HTTP listen address for the management API.
         #[arg(long, env = "AGENT_WORKER_MANAGEMENT_HTTP_ADDR")]
         listen: SocketAddr,
+        /// Gateway external action authorizer endpoint required before handler actions continue.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_HTTP_ENDPOINT")]
+        external_action_authorizer_http_endpoint: Option<SocketAddr>,
         /// Management key id expected in the signed envelope.
         #[arg(long, env = "AGENT_WORKER_MANAGEMENT_KEY_ID")]
         key_id: String,
@@ -152,6 +155,7 @@ fn main() -> Result<()> {
         ),
         Command::ServeManagementHttp {
             listen,
+            external_action_authorizer_http_endpoint,
             key_id,
             shared_secret,
             now_unix_millis,
@@ -164,6 +168,7 @@ fn main() -> Result<()> {
             now_unix_millis,
             max_requests,
             idle_timeout_millis,
+            external_action_authorizer_http_endpoint,
         ),
     }
 }

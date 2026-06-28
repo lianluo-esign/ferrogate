@@ -167,11 +167,15 @@ Lifecycle dispatch now reaches worker-owned action branches for `provision`,
 `provision` fails closed with `incompatible_backend` when Firecracker is not
 configured and with `provision_failed` when the binary is configured but the
 real microVM provision/start implementation is still absent. `exec_or_attach`
-now has a worker-owned native harness execution smoke that returns
-`result.kind=handler_events` with normalized framework events such as
-`session.started`, `run.started`, `artifact.created`, `run.completed`, and
-`session.closed`. `stream_status` can replay stored native-harness events as
-`handler_events`, and `collect_artifacts` can return
+now has a worker-owned native harness execution smoke, but the worker must have
+a gateway external-action HTTP authorizer configured before the handler may
+continue. Without that gateway authorization client, `exec_or_attach` fails
+closed with `run_failed` before `run.completed` is emitted. With an allowed
+gateway decision, the result returns `result.kind=handler_events` with
+normalized framework events such as `session.started`, `capability.allowed`,
+`run.started`, `artifact.created`, `run.completed`, and `session.closed`.
+`stream_status` can replay stored native-harness events as `handler_events`,
+and `collect_artifacts` can return
 `result.kind=handler_artifacts` with an artifact manifest plus the related
 events. This is handler execution proof inside `agent-worker`, not Firecracker
 boot proof and not Codex/Claude/Hermes process execution proof. The worker also
@@ -262,6 +266,7 @@ The primary local process transport smoke is HTTP:
 ```bash
 agent-worker serve-management-http \
   --listen 127.0.0.1:7777 \
+  --external-action-authorizer-http-endpoint 127.0.0.1:7778 \
   --key-id "$AGENT_WORKER_MANAGEMENT_KEY_ID" \
   --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET" \
   --max-requests 1 \
@@ -274,7 +279,12 @@ This command accepts `POST /v1/agent-worker/management`, requires
 signed envelope or encrypted frame, dispatches the requested management action,
 writes one JSON `AgentWorkerManagementResponse`, and exits after
 `--max-requests` requests. It is a std-library bounded smoke server for the HTTP
-contract, not the final async production HTTP/mTLS server.
+contract, not the final async production HTTP/mTLS server. Handler execution
+actions such as `exec_or_attach` require the
+`--external-action-authorizer-http-endpoint` gateway callback before the native
+harness or a future Codex/Claude/Hermes handler may continue past its first
+managed external action. Omitting that endpoint is valid for discovery and
+non-execution lifecycle smokes, but managed handler execution fails closed.
 
 There is also a Unix-domain socket local-only contract smoke:
 
@@ -324,10 +334,13 @@ Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 worker-owned lifecycle or handler dispatch. The dispatch still does not boot
 Firecracker: `provision` fails closed until real microVM lifecycle code exists,
 while `exec_or_attach`, `stream_status`, and `collect_artifacts` can exercise
-the built-in native harness inside `agent-worker` and return normalized handler
-events/artifact metadata. Adding real lifecycle success requires the Firecracker
-handler implementation, HTTP/mTLS production transport, and contract coverage
-for Codex/Claude/Hermes handler launch.
+the built-in native harness inside `agent-worker` only after the worker receives
+a `capability.allowed` decision from the configured gateway HTTP authorizer.
+The recorded handler events therefore prove the managed action gate was crossed
+before native harness completion; they still do not prove real tool execution or
+microVM boot. Adding real lifecycle success requires the Firecracker handler
+implementation, HTTP/mTLS production transport, and contract coverage for
+Codex/Claude/Hermes handler launch.
 
 The gateway/control-plane side uses `AgentWorkerHttpManagementClient` for the
 primary worker management path. The client sends `POST

@@ -27,12 +27,34 @@ use ferrogate_runtime::{
 
 use crate::{
     backends::isolation_backends,
+    external_actions::{GatewayExternalActionAuthorizer, HttpGatewayExternalActionAuthorizer},
     handlers::framework_handlers,
     lifecycle::dispatch_lifecycle_action,
     state::{AgentWorkerStateStore, InMemoryAgentWorkerStateStore},
 };
 
 const SMOKE_SHARED_SECRET: &str = "agent-worker-smoke-secret";
+
+#[derive(Default)]
+struct AgentWorkerRuntime {
+    external_action_authorizer: Option<Box<dyn GatewayExternalActionAuthorizer + Send + Sync>>,
+}
+
+impl AgentWorkerRuntime {
+    fn with_http_external_action_authorizer(endpoint: SocketAddr) -> Self {
+        Self {
+            external_action_authorizer: Some(Box::new(HttpGatewayExternalActionAuthorizer::new(
+                endpoint,
+            ))),
+        }
+    }
+
+    fn external_action_authorizer(&self) -> Option<&dyn GatewayExternalActionAuthorizer> {
+        self.external_action_authorizer
+            .as_deref()
+            .map(|authorizer| authorizer as &dyn GatewayExternalActionAuthorizer)
+    }
+}
 
 pub(crate) fn protocol_smoke() -> Result<()> {
     let mut transport =
@@ -44,7 +66,9 @@ pub(crate) fn protocol_smoke() -> Result<()> {
         ])?);
     let envelope = smoke_envelope()?;
     let mut state = InMemoryAgentWorkerStateStore::new();
-    let response = accept_management_envelope(&mut transport, &mut state, envelope, 1_000);
+    let runtime = AgentWorkerRuntime::default();
+    let response =
+        accept_management_envelope(&mut transport, &mut state, &runtime, envelope, 1_000);
     if !response.accepted {
         anyhow::bail!(
             "agent-worker management protocol smoke rejected request: {:?}",
@@ -112,6 +136,7 @@ pub(crate) fn serve_management_http_command(
     now_unix_millis: Option<u64>,
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
+    external_action_authorizer_http_endpoint: Option<SocketAddr>,
 ) -> Result<()> {
     let responses = serve_management_http(
         listen,
@@ -120,6 +145,7 @@ pub(crate) fn serve_management_http_command(
         now_unix_millis,
         max_requests,
         idle_timeout_millis,
+        external_action_authorizer_http_endpoint,
     )?;
     if let Some(response) = responses.last() {
         println!(
@@ -141,6 +167,7 @@ fn serve_management_http(
     now_unix_millis: Option<u64>,
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
+    external_action_authorizer_http_endpoint: Option<SocketAddr>,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -153,6 +180,10 @@ fn serve_management_http(
         }])?,
     )));
     let state = Arc::new(Mutex::new(InMemoryAgentWorkerStateStore::new()));
+    let runtime = Arc::new(match external_action_authorizer_http_endpoint {
+        Some(endpoint) => AgentWorkerRuntime::with_http_external_action_authorizer(endpoint),
+        None => AgentWorkerRuntime::default(),
+    });
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
     let mut handles = Vec::with_capacity(max_requests);
     let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
@@ -168,12 +199,14 @@ fn serve_management_http(
             Ok((stream, _)) => {
                 let transport = Arc::clone(&transport);
                 let state = Arc::clone(&state);
+                let runtime = Arc::clone(&runtime);
                 let shared_secret = shared_secret.to_string();
                 handles.push(thread::spawn(move || {
                     handle_management_http_stream(
                         stream,
                         transport,
                         state,
+                        runtime,
                         &shared_secret,
                         now_unix_millis,
                     )
@@ -209,6 +242,7 @@ fn handle_management_http_stream(
     mut stream: TcpStream,
     transport: Arc<Mutex<InMemoryAgentWorkerManagementTransport>>,
     state: Arc<Mutex<InMemoryAgentWorkerStateStore>>,
+    runtime: Arc<AgentWorkerRuntime>,
     shared_secret: &str,
     now_unix_millis: u64,
 ) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
@@ -226,7 +260,7 @@ fn handle_management_http_stream(
             let mut state = state
                 .lock()
                 .map_err(|_| anyhow::anyhow!("agent-worker HTTP management state lock poisoned"))?;
-            accept_verified_management_response(&mut *state, envelope, response)
+            accept_verified_management_response(&mut *state, &runtime, envelope, response)
         }
         Err(response) => response,
     };
@@ -490,7 +524,8 @@ fn handle_management_unix_stream(
     let mut state = state
         .lock()
         .map_err(|_| anyhow::anyhow!("agent-worker management state lock poisoned"))?;
-    let response = accept_verified_management_response(&mut *state, envelope, response);
+    let runtime = AgentWorkerRuntime::default();
+    let response = accept_verified_management_response(&mut *state, &runtime, envelope, response);
     let response_json = serde_json::to_string(&response)?;
     stream.write_all(response_json.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -515,8 +550,14 @@ fn accept_management_json(
             },
         ])?);
     let mut state = InMemoryAgentWorkerStateStore::new();
-    let response =
-        accept_management_envelope(&mut transport, &mut state, envelope, now_unix_millis);
+    let runtime = AgentWorkerRuntime::default();
+    let response = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        envelope,
+        now_unix_millis,
+    );
     Ok(serde_json::to_string(&response)?)
 }
 
@@ -543,15 +584,17 @@ fn read_management_stream<R: Read>(reader: &mut R, output: &mut String) -> Resul
 fn accept_management_envelope(
     transport: &mut InMemoryAgentWorkerManagementTransport,
     state: &mut impl AgentWorkerStateStore,
+    runtime: &AgentWorkerRuntime,
     envelope: AgentWorkerManagementEnvelope,
     now_unix_millis: u64,
 ) -> AgentWorkerManagementResponse {
     let response = transport.accept_management_request(envelope.clone(), now_unix_millis);
-    accept_verified_management_response(state, envelope, response)
+    accept_verified_management_response(state, runtime, envelope, response)
 }
 
 fn accept_verified_management_response(
     state: &mut impl AgentWorkerStateStore,
+    runtime: &AgentWorkerRuntime,
     envelope: AgentWorkerManagementEnvelope,
     response: AgentWorkerManagementResponse,
 ) -> AgentWorkerManagementResponse {
@@ -563,7 +606,7 @@ fn accept_verified_management_response(
             return replayed;
         }
     }
-    match dispatch_management_action(state, envelope.clone()) {
+    match dispatch_management_action(state, runtime, envelope.clone()) {
         Ok(Some(result)) => state
             .record_management_response(&envelope, response.with_result(result))
             .map(|outcome| outcome.into_response())
@@ -584,6 +627,7 @@ fn accept_verified_management_response(
 
 fn dispatch_management_action(
     state: &mut impl AgentWorkerStateStore,
+    runtime: &AgentWorkerRuntime,
     envelope: AgentWorkerManagementEnvelope,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     match envelope.action {
@@ -612,7 +656,7 @@ fn dispatch_management_action(
         | AgentWorkerManagementAction::Cleanup
         | AgentWorkerManagementAction::StreamStatus
         | AgentWorkerManagementAction::CollectArtifacts => {
-            dispatch_lifecycle_action(state, &envelope)
+            dispatch_lifecycle_action(state, &envelope, runtime.external_action_authorizer())
         }
     }
 }
@@ -655,8 +699,16 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::external_actions::{
+        accept_external_action_authorization_request, RuntimeGatewayExternalActionAuthorizer,
+    };
     use crate::{state::AgentWorkerStateStore, test_support::lock_firecracker_env};
-    use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
+    use ferrogate_runtime::{
+        AgentWorkerManagementFrame, AgentWorkerUnixManagementClient, CapabilityAction,
+        CapabilityPolicy, GatewayExternalActionTransportRequest,
+        GatewayExternalActionTransportResponse, SimpleCapabilityAuthorizer,
+    };
+    use std::collections::BTreeSet;
     use std::thread;
     use std::{net::TcpStream, os::unix::net::UnixStream};
 
@@ -780,6 +832,7 @@ mod tests {
                 Some(1_000),
                 1,
                 None,
+                None,
             )
             .unwrap()
         });
@@ -889,10 +942,17 @@ mod tests {
             .unwrap(),
         );
         let mut state = InMemoryAgentWorkerStateStore::new();
+        let runtime = AgentWorkerRuntime::default();
 
-        let first = accept_management_envelope(&mut transport, &mut state, first_envelope, 1_000);
-        let duplicate =
-            accept_management_envelope(&mut transport, &mut state, duplicate_envelope, 1_000);
+        let first =
+            accept_management_envelope(&mut transport, &mut state, &runtime, first_envelope, 1_000);
+        let duplicate = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            duplicate_envelope,
+            1_000,
+        );
 
         assert!(first.accepted);
         assert!(duplicate.accepted);
@@ -931,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_or_attach_runs_native_harness_inside_agent_worker() {
+    fn exec_or_attach_without_gateway_authorizer_fails_closed() {
         let envelope = lifecycle_envelope(
             AgentWorkerManagementAction::ExecOrAttach,
             "agent-worker-native-run",
@@ -943,22 +1003,17 @@ mod tests {
                 .unwrap();
         let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
-        assert_eq!(response["accepted"], true);
+        assert_eq!(response["accepted"], false);
         assert_eq!(response["action"], "exec_or_attach");
-        assert_eq!(response["result"]["kind"], "handler_events");
-        let events = response["result"]["events"].as_array().unwrap();
-        assert!(events.iter().any(|event| {
-            event["kind"] == "session.started"
-                && event["framework"] == "native_harness"
-                && event["mode"] == "managed"
-        }));
-        assert!(events.iter().any(|event| event["kind"] == "run.completed"));
-        assert!(events.iter().any(|event| event["kind"] == "session.closed"));
-        assert_eq!(response["error"], serde_json::Value::Null);
+        assert_eq!(response["error"]["code"], "run_failed");
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("gateway authorization client")));
+        assert_eq!(response["result"], serde_json::Value::Null);
     }
 
     #[test]
-    fn native_harness_status_and_artifacts_reuse_worker_process_state() {
+    fn unix_management_exec_or_attach_fails_closed_without_gateway_authorizer() {
         let temp = tempfile::tempdir().unwrap();
         let socket_path = temp.path().join("agent-worker-management.sock");
         let socket_for_server = socket_path.clone();
@@ -968,7 +1023,7 @@ mod tests {
                 "agent-worker-smoke-key",
                 SMOKE_SHARED_SECRET,
                 Some(1_000),
-                3,
+                1,
                 None,
             )
             .unwrap()
@@ -983,49 +1038,26 @@ mod tests {
                 "exec",
             ))
             .unwrap();
-        let status = client
-            .send_management_request(&shared_lifecycle_envelope(
-                AgentWorkerManagementAction::StreamStatus,
-                "agent-worker-native-socket",
-                "status",
-            ))
-            .unwrap();
-        let artifacts = client
-            .send_management_request(&shared_lifecycle_envelope(
-                AgentWorkerManagementAction::CollectArtifacts,
-                "agent-worker-native-socket",
-                "artifacts",
-            ))
-            .unwrap();
 
-        assert!(exec.accepted);
-        assert!(status.accepted);
-        assert!(artifacts.accepted);
-        let Some(AgentWorkerManagementResult::HandlerEvents { events }) = status.result else {
-            panic!("status did not return handler events");
-        };
-        assert!(events.iter().any(|event| event.kind == "run.completed"));
-        let Some(AgentWorkerManagementResult::HandlerArtifacts {
-            artifacts: collected,
-            events,
-        }) = artifacts.result
-        else {
-            panic!("artifact collection did not return handler artifacts");
-        };
-        assert_eq!(collected[0].artifact_id, "native-artifact");
-        assert!(events.iter().any(|event| event.kind == "artifact.created"));
+        assert!(!exec.accepted);
+        assert_eq!(
+            exec.error.as_ref().map(|error| error.code.as_str()),
+            Some("run_failed")
+        );
 
         let server_responses = server.join().unwrap();
-        assert_eq!(server_responses.len(), 3);
-        assert!(server_responses.iter().all(|response| response.accepted));
+        assert_eq!(server_responses.len(), 1);
+        assert!(!server_responses[0].accepted);
         assert!(!socket_path.exists());
     }
 
     #[test]
-    fn native_harness_status_and_artifacts_reuse_http_worker_process_state() {
+    fn http_management_exec_or_attach_calls_gateway_authorizer_before_native_harness_run() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
+        let authorizer = spawn_allowing_http_authorizer(1);
+        let authorizer_endpoint = authorizer.endpoint;
         let server = thread::spawn(move || {
             serve_management_http(
                 addr,
@@ -1034,6 +1066,7 @@ mod tests {
                 Some(1_000),
                 3,
                 None,
+                Some(authorizer_endpoint),
             )
             .unwrap()
         });
@@ -1072,10 +1105,18 @@ mod tests {
         assert!(exec.accepted);
         assert!(status.accepted);
         assert!(artifacts.accepted);
-        assert!(matches!(
-            status.result,
-            Some(AgentWorkerManagementResult::HandlerEvents { .. })
-        ));
+        let Some(AgentWorkerManagementResult::HandlerEvents { events }) = exec.result else {
+            panic!("exec did not return handler events");
+        };
+        let capability_position = events
+            .iter()
+            .position(|event| event.kind == "capability.allowed")
+            .expect("missing capability.allowed event");
+        let run_position = events
+            .iter()
+            .position(|event| event.kind == "run.completed")
+            .expect("missing run.completed event");
+        assert!(capability_position < run_position);
         let Some(AgentWorkerManagementResult::HandlerArtifacts {
             artifacts: collected,
             events,
@@ -1089,6 +1130,7 @@ mod tests {
         let server_responses = server.join().unwrap();
         assert_eq!(server_responses.len(), 3);
         assert!(server_responses.iter().all(|response| response.accepted));
+        assert_eq!(authorizer.join().len(), 1);
     }
 
     #[test]
@@ -1403,6 +1445,50 @@ mod tests {
         stream.read_to_string(&mut response).unwrap();
         let (_, body) = response.split_once("\r\n\r\n").unwrap();
         serde_json::from_str(body.trim()).unwrap()
+    }
+
+    struct TestHttpAuthorizer {
+        endpoint: SocketAddr,
+        handle: thread::JoinHandle<Vec<GatewayExternalActionTransportResponse>>,
+    }
+
+    impl TestHttpAuthorizer {
+        fn join(self) -> Vec<GatewayExternalActionTransportResponse> {
+            self.handle.join().unwrap()
+        }
+    }
+
+    fn spawn_allowing_http_authorizer(max_requests: usize) -> TestHttpAuthorizer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let authorizer = RuntimeGatewayExternalActionAuthorizer::new(
+                SimpleCapabilityAuthorizer::new(CapabilityPolicy {
+                    allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                    ..CapabilityPolicy::default()
+                }),
+            );
+            let mut responses = Vec::with_capacity(max_requests);
+            for _ in 0..max_requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                stream.read_to_string(&mut request).unwrap();
+                let body = request.split_once("\r\n\r\n").unwrap().1;
+                let request: GatewayExternalActionTransportRequest =
+                    serde_json::from_str(body).unwrap();
+                let response = accept_external_action_authorization_request(request, &authorizer);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    serde_json::to_string(&response).unwrap().len(),
+                    serde_json::to_string(&response).unwrap()
+                )
+                .unwrap();
+                responses.push(response);
+            }
+            responses
+        });
+        TestHttpAuthorizer { endpoint, handle }
     }
 
     fn lifecycle_envelope(

@@ -17,8 +17,12 @@ use ferrogate_runtime::{
     AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
     FrameworkAdapter, FrameworkAdapterArtifact, FrameworkAdapterArtifactRequest,
     FrameworkAdapterCapabilities, FrameworkAdapterMode, FrameworkAdapterRunRequest,
-    FrameworkAdapterSession, FrameworkAdapterSessionRequest, ManagedWorkerError,
-    NativeHarnessAdapter, NormalizedFrameworkEvent,
+    FrameworkAdapterSession, FrameworkAdapterSessionRequest, ManagedExternalAction,
+    ManagedToolAction, ManagedWorkerError, NativeHarnessAdapter, NormalizedFrameworkEvent,
+};
+
+use crate::external_actions::{
+    authorize_handler_external_action, ExternalActionGateRequest, GatewayExternalActionAuthorizer,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +33,9 @@ pub(crate) struct HandlerRunState {
     pub(crate) closed: bool,
 }
 
-pub(crate) fn exec_or_attach_native_harness(
+pub(crate) fn exec_or_attach_native_harness_with_authorizer(
     envelope: &AgentWorkerManagementEnvelope,
+    external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
 ) -> Result<(HandlerRunState, AgentWorkerManagementResult), ManagedWorkerError> {
     let mut adapter = NativeHarnessAdapter::default();
     let session_request = FrameworkAdapterSessionRequest {
@@ -53,6 +58,19 @@ pub(crate) fn exec_or_attach_native_harness(
         .start_session(session_request)
         .map_err(handler_runtime_error)?;
     let mut events = vec![started];
+    let decision = authorize_handler_external_action(
+        external_action_authorizer,
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Tool(ManagedToolAction {
+                tool_name: "native.echo".to_string(),
+                arguments_policy: "redacted_json".to_string(),
+            }),
+            high_risk: false,
+        },
+    )
+    .map_err(handler_runtime_error)?;
+    events.push(decision.event);
     events.extend(
         adapter
             .submit_run(FrameworkAdapterRunRequest {
@@ -193,14 +211,18 @@ mod tests {
     use super::*;
     use ferrogate_runtime::{
         AgentWorkerManagementAction, AgentWorkerManagementSecurity, AgentWorkerSecurityAlgorithm,
-        AgentWorkerTransportSecurity, AGENT_WORKER_PROTOCOL_VERSION,
+        AgentWorkerTransportSecurity, CapabilityAction, CapabilityPolicy,
+        SimpleCapabilityAuthorizer, AGENT_WORKER_PROTOCOL_VERSION,
     };
+    use std::collections::BTreeSet;
 
     #[test]
-    fn native_harness_execution_returns_normalized_worker_events() {
+    fn native_harness_execution_returns_normalized_worker_events_after_authorization() {
         let envelope = envelope();
+        let authorizer = authorizer();
 
-        let (state, result) = exec_or_attach_native_harness(&envelope).unwrap();
+        let (state, result) =
+            exec_or_attach_native_harness_with_authorizer(&envelope, Some(&authorizer)).unwrap();
 
         let AgentWorkerManagementResult::HandlerEvents { events } = result else {
             panic!("expected handler events");
@@ -210,6 +232,9 @@ mod tests {
         assert!(events.iter().any(|event| event.kind == "session.started"
             && event.framework == "native_harness"
             && event.mode == "managed"));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "capability.allowed"));
         assert!(events.iter().any(|event| event.kind == "run.completed"));
         assert!(events.iter().any(|event| event.kind == "session.closed"));
         assert_eq!(state.artifacts[0].artifact_id, "native-artifact");
@@ -217,7 +242,9 @@ mod tests {
 
     #[test]
     fn native_harness_artifacts_reuse_recorded_worker_state() {
-        let (state, _) = exec_or_attach_native_harness(&envelope()).unwrap();
+        let authorizer = authorizer();
+        let (state, _) =
+            exec_or_attach_native_harness_with_authorizer(&envelope(), Some(&authorizer)).unwrap();
 
         let result = collect_native_harness_artifacts(&state);
 
@@ -226,6 +253,26 @@ mod tests {
         };
         assert_eq!(artifacts[0].artifact_id, "native-artifact");
         assert!(events.iter().any(|event| event.kind == "artifact.created"));
+    }
+
+    #[test]
+    fn native_harness_execution_fails_closed_without_gateway_authorizer() {
+        let error = exec_or_attach_native_harness_with_authorizer(&envelope(), None).unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("run_failed"));
+        assert!(message.contains("gateway authorization client is unavailable"));
+    }
+
+    fn authorizer(
+    ) -> crate::external_actions::RuntimeGatewayExternalActionAuthorizer<SimpleCapabilityAuthorizer>
+    {
+        crate::external_actions::RuntimeGatewayExternalActionAuthorizer::new(
+            SimpleCapabilityAuthorizer::new(CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            }),
+        )
     }
 
     fn envelope() -> AgentWorkerManagementEnvelope {

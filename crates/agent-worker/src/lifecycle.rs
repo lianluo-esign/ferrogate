@@ -18,9 +18,10 @@ use ferrogate_runtime::{
 
 use crate::{
     backends::isolation_backends,
+    external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
-        exec_or_attach_native_harness, stream_native_harness_status,
+        exec_or_attach_native_harness_with_authorizer, stream_native_harness_status,
     },
     state::AgentWorkerStateStore,
 };
@@ -28,10 +29,13 @@ use crate::{
 pub(crate) fn dispatch_lifecycle_action(
     state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
+    external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     match envelope.action {
         AgentWorkerManagementAction::Provision => provision(envelope),
-        AgentWorkerManagementAction::ExecOrAttach => exec_or_attach(state, envelope),
+        AgentWorkerManagementAction::ExecOrAttach => {
+            exec_or_attach(state, envelope, external_action_authorizer)
+        }
         AgentWorkerManagementAction::Stop => stop(state, envelope),
         AgentWorkerManagementAction::Cleanup => cleanup(state, envelope),
         AgentWorkerManagementAction::StreamStatus => stream_status(state, envelope),
@@ -73,13 +77,15 @@ fn provision(
 fn exec_or_attach(
     state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
+    external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
     if let Some(existing) = state.get_handler_run_state(&session_id, &run_id) {
         return Ok(Some(stream_native_harness_status(&existing)));
     }
-    let (handler_state, result) = exec_or_attach_native_harness(envelope)?;
+    let (handler_state, result) =
+        exec_or_attach_native_harness_with_authorizer(envelope, external_action_authorizer)?;
     state.put_handler_run_state(handler_state);
     Ok(Some(result))
 }
