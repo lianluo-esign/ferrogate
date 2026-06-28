@@ -726,6 +726,23 @@ impl Config {
         }
         match self.agent_runtime.provider {
             crate::config::AgentRuntimeProvider::ManagedWorker => {
+                if let Some(http_listen) = self
+                    .agent_runtime
+                    .managed_worker
+                    .external_action_authorizer_http_listen
+                    .as_deref()
+                {
+                    if http_listen.trim().is_empty() {
+                        bail!(
+                            "field agent_runtime.managed_worker.external_action_authorizer_http_listen: must not be empty when provided"
+                        );
+                    }
+                    http_listen.parse::<std::net::SocketAddr>().map_err(|error| {
+                        anyhow::anyhow!(
+                            "field agent_runtime.managed_worker.external_action_authorizer_http_listen: invalid socket address: {error}"
+                        )
+                    })?;
+                }
                 if let Some(socket_path) = self
                     .agent_runtime
                     .managed_worker

@@ -159,6 +159,8 @@ pub(crate) struct AgentRuntimeExternalConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct AgentRuntimeManagedWorkerConfig {
     #[serde(default)]
+    pub(crate) external_action_authorizer_http_listen: Option<String>,
+    #[serde(default)]
     pub(crate) external_action_authorizer_socket: Option<String>,
     #[serde(default)]
     pub(crate) external_action_authorizer_max_requests: Option<usize>,

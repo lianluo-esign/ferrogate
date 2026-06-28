@@ -14,6 +14,7 @@
 
 use std::{
     io::{Read, Write},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::Path,
     sync::Arc,
     thread,
@@ -165,7 +166,40 @@ pub(super) fn serve_gateway_external_action_authorizer_unix(
     Ok(responses)
 }
 
-#[cfg(unix)]
+pub(super) fn serve_gateway_external_action_authorizer_http(
+    listen: SocketAddr,
+    service: GatewayExternalActionAuthorizerService,
+    max_requests: Option<usize>,
+) -> AnyResult<Vec<GatewayExternalActionTransportResponse>> {
+    if max_requests == Some(0) {
+        anyhow::bail!("max_requests must be greater than zero");
+    }
+    let listener = TcpListener::bind(listen).with_context(|| {
+        format!("failed to bind gateway external action HTTP authorizer at {listen}")
+    })?;
+    let service = Arc::new(service);
+    let mut handles = Vec::with_capacity(max_requests.unwrap_or(0));
+    while max_requests.is_none_or(|limit| handles.len() < limit) {
+        let (stream, _) = listener.accept().with_context(|| {
+            format!(
+                "failed to accept gateway external action HTTP authorizer connection at {listen}"
+            )
+        })?;
+        let service = Arc::clone(&service);
+        handles.push(thread::spawn(move || {
+            handle_gateway_external_action_authorizer_http_stream(stream, service)
+        }));
+        reap_finished_authorizer_threads(&mut handles)?;
+    }
+    let mut responses = Vec::with_capacity(handles.len());
+    for handle in handles {
+        responses.push(handle.join().map_err(|_| {
+            anyhow::anyhow!("gateway external action HTTP authorizer thread panicked")
+        })??);
+    }
+    Ok(responses)
+}
+
 fn reap_finished_authorizer_threads(
     handles: &mut Vec<thread::JoinHandle<AnyResult<GatewayExternalActionTransportResponse>>>,
 ) -> AnyResult<()> {
@@ -181,6 +215,128 @@ fn reap_finished_authorizer_threads(
         }
     }
     Ok(())
+}
+
+fn handle_gateway_external_action_authorizer_http_stream(
+    mut stream: TcpStream,
+    service: Arc<GatewayExternalActionAuthorizerService>,
+) -> AnyResult<GatewayExternalActionTransportResponse> {
+    let body = read_external_action_authorizer_http_request(&mut stream)?;
+    let request: GatewayExternalActionTransportRequest = serde_json::from_str(&body)
+        .context("failed to decode external action HTTP authorization request")?;
+    let response = service.authorize_transport_request(request);
+    write_external_action_authorizer_http_response(&mut stream, 200, &response)?;
+    stream.shutdown(Shutdown::Write).ok();
+    Ok(response)
+}
+
+fn read_external_action_authorizer_http_request(stream: &mut TcpStream) -> AnyResult<String> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    let header_end = loop {
+        let read = stream
+            .read(&mut buffer)
+            .context("failed to read external action HTTP authorization request")?;
+        if read == 0 {
+            anyhow::bail!("external action HTTP authorization request closed before headers");
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.len() > EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES {
+            anyhow::bail!(
+                "gateway external action HTTP authorization request exceeds maximum message size"
+            );
+        }
+        if let Some(index) = find_header_end(&request) {
+            break index;
+        }
+    };
+    let headers = std::str::from_utf8(&request[..header_end])
+        .context("external action HTTP authorization request headers are not valid UTF-8")?;
+    let mut lines = headers.lines();
+    let request_line = lines.next().unwrap_or_default();
+    if request_line != "POST /v1/agent-worker/external-actions/authorize HTTP/1.1" {
+        anyhow::bail!(
+            "gateway external action HTTP authorizer requires POST /v1/agent-worker/external-actions/authorize"
+        );
+    }
+    let mut content_length = None;
+    let mut content_type_ok = false;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .context("external action HTTP authorization content-length is invalid")?,
+            );
+        }
+        if name.eq_ignore_ascii_case("content-type")
+            && value
+                .trim()
+                .split(';')
+                .next()
+                .is_some_and(|media_type| media_type.eq_ignore_ascii_case("application/json"))
+        {
+            content_type_ok = true;
+        }
+    }
+    if !content_type_ok {
+        anyhow::bail!("gateway external action HTTP authorizer requires application/json");
+    }
+    let content_length =
+        content_length.context("gateway external action HTTP authorizer missing content-length")?;
+    if content_length > EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES {
+        anyhow::bail!(
+            "gateway external action HTTP authorization content-length exceeds maximum message size"
+        );
+    }
+    let body_start = header_end + 4;
+    while request.len().saturating_sub(body_start) < content_length {
+        let read = stream
+            .read(&mut buffer)
+            .context("failed to read external action HTTP authorization body")?;
+        if read == 0 {
+            anyhow::bail!("external action HTTP authorization request closed before body");
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.len() > EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES + body_start {
+            anyhow::bail!(
+                "gateway external action HTTP authorization body exceeds maximum message size"
+            );
+        }
+    }
+    let body = &request[body_start..body_start + content_length];
+    let body = std::str::from_utf8(body)
+        .context("external action HTTP authorization body is not valid UTF-8")?;
+    Ok(body.to_string())
+}
+
+fn write_external_action_authorizer_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    response: &GatewayExternalActionTransportResponse,
+) -> AnyResult<()> {
+    let body = serde_json::to_string(response)?;
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        _ => "Error",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .context("failed to write external action HTTP authorization response")
+}
+
+fn find_header_end(request: &[u8]) -> Option<usize> {
+    request.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 #[cfg(unix)]
@@ -238,7 +394,7 @@ mod tests {
     use std::{
         collections::BTreeSet,
         io::{Read, Write},
-        net::Shutdown,
+        net::{Shutdown, TcpListener, TcpStream},
         os::unix::net::UnixStream,
         time::Duration,
     };
@@ -456,6 +612,45 @@ mod tests {
         assert_eq!(timeline.agent_events[0].kind, "capability.allowed");
     }
 
+    #[test]
+    fn gateway_external_action_authorizer_serves_shared_http_transport_contract() {
+        let state = AppState::new(crate::config::Config::default());
+        let service = GatewayExternalActionAuthorizerService::new(
+            state.clone(),
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            },
+        );
+        let listen = free_tcp_addr();
+        let server = thread::spawn(move || {
+            serve_gateway_external_action_authorizer_http(listen, service, Some(1))
+        });
+
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let request = GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        };
+        let response = send_http_authorization_request(listen, &request);
+        let served = server.join().unwrap().unwrap();
+
+        assert_eq!(served.len(), 1);
+        assert_eq!(served[0].request_id, request.request_id);
+        assert_eq!(response.request_id, request.request_id);
+        assert!(response.response.accepted);
+        assert_eq!(
+            response.response.decision,
+            Some(ExternalActionDecision::Allowed)
+        );
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("HTTP authorizer transport should record timeline evidence");
+        assert_eq!(timeline.agent_events.len(), 1);
+        assert_eq!(timeline.agent_events[0].kind, "capability.allowed");
+    }
+
     fn managed_tool_request() -> ManagedExternalActionRequest {
         ManagedExternalActionRequest {
             session: managed_session(),
@@ -518,6 +713,46 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         serde_json::from_str(&response).unwrap()
+    }
+
+    fn free_tcp_addr() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    }
+
+    fn send_http_authorization_request(
+        addr: std::net::SocketAddr,
+        request: &GatewayExternalActionTransportRequest,
+    ) -> GatewayExternalActionTransportResponse {
+        let body = serde_json::to_string(request).unwrap();
+        let mut stream = (0..100)
+            .find_map(|_| match TcpStream::connect(addr) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(5));
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("timed out connecting to TCP listener {addr}"));
+        let request = format!(
+            "POST /v1/agent-worker/external-actions/authorize HTTP/1.1\r\n\
+             host: {addr}\r\n\
+             content-type: application/json\r\n\
+             content-length: {}\r\n\
+             connection: close\r\n\
+             \r\n\
+             {body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        serde_json::from_str(body).unwrap()
     }
 
     #[test]

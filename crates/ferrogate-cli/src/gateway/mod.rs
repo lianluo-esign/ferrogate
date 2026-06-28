@@ -26,6 +26,7 @@ use pingora::{
     },
 };
 use std::{
+    net::SocketAddr,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -49,7 +50,8 @@ use crate::{
 };
 
 use self::external_actions::{
-    serve_gateway_external_action_authorizer_unix, GatewayExternalActionAuthorizerService,
+    serve_gateway_external_action_authorizer_http, serve_gateway_external_action_authorizer_unix,
+    GatewayExternalActionAuthorizerService,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -201,28 +203,14 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     server.run_forever();
 }
 
-#[cfg(unix)]
 fn start_external_action_authorizer_if_configured(
     state: &SharedAppState,
 ) -> Option<JoinHandle<()>> {
     let current = state.current();
     let config = &current.config.agent_runtime;
-    if !config.enabled
-        || config.provider != crate::config::AgentRuntimeProvider::ManagedWorker
-        || config
-            .managed_worker
-            .external_action_authorizer_socket
-            .as_deref()
-            .is_none()
-    {
+    if !config.enabled || config.provider != crate::config::AgentRuntimeProvider::ManagedWorker {
         return None;
     }
-    let socket_path = PathBuf::from(
-        config
-            .managed_worker
-            .external_action_authorizer_socket
-            .as_deref()?,
-    );
     let max_requests = config
         .managed_worker
         .external_action_authorizer_max_requests;
@@ -230,13 +218,48 @@ fn start_external_action_authorizer_if_configured(
         current.clone(),
         managed_worker_capability_policy(&config.managed_worker),
     );
-    Some(thread::spawn(move || {
+
+    if let Some(http_listen) = config
+        .managed_worker
+        .external_action_authorizer_http_listen
+        .as_deref()
+    {
+        let listen: SocketAddr = match http_listen.parse() {
+            Ok(listen) => listen,
+            Err(error) => {
+                tracing::warn!(
+                    "gateway external action HTTP authorizer listen address is invalid: {error}"
+                );
+                return None;
+            }
+        };
+        return Some(thread::spawn(move || {
+            if let Err(error) =
+                serve_gateway_external_action_authorizer_http(listen, service, max_requests)
+            {
+                tracing::warn!("gateway external action HTTP authorizer exited: {error}");
+            }
+        }));
+    }
+
+    #[cfg(unix)]
+    let socket_path = config
+        .managed_worker
+        .external_action_authorizer_socket
+        .as_deref()
+        .map(PathBuf::from)?;
+
+    #[cfg(unix)]
+    return Some(thread::spawn(move || {
         if let Err(error) =
             serve_gateway_external_action_authorizer_unix(&socket_path, service, max_requests)
         {
             tracing::warn!("gateway external action authorizer exited: {error}");
         }
-    }))
+    }));
+
+    #[cfg(not(unix))]
+    None
 }
 
 fn managed_worker_capability_policy(
@@ -255,13 +278,6 @@ fn managed_worker_capability_policy(
             .collect(),
         allow_direct_network_egress: config.allow_direct_network_egress,
     }
-}
-
-#[cfg(not(unix))]
-fn start_external_action_authorizer_if_configured(
-    _state: &SharedAppState,
-) -> Option<JoinHandle<()>> {
-    None
 }
 
 #[derive(Debug)]

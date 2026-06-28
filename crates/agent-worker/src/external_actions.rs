@@ -15,6 +15,7 @@
 use std::{
     collections::BTreeSet,
     io::{self, Read, Write},
+    net::{Shutdown, SocketAddr, TcpStream},
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
     sync::Arc,
@@ -185,6 +186,23 @@ pub(crate) fn external_action_unix_transport_smoke_command() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn external_action_http_transport_smoke_command(endpoint: SocketAddr) -> Result<()> {
+    let client = HttpGatewayExternalActionAuthorizer::new(endpoint);
+    let decision = authorize_handler_external_action(
+        Some(&client),
+        ExternalActionGateRequest {
+            session: smoke_session(),
+            action: ManagedExternalAction::Tool(ManagedToolAction {
+                tool_name: "native.echo".to_string(),
+                arguments_policy: "redacted_json".to_string(),
+            }),
+            high_risk: false,
+        },
+    )?;
+    println!("{}", decision.event.canonical_json());
+    Ok(())
+}
+
 pub(crate) fn serve_gateway_authorizer_unix(
     socket_path: &Path,
     authorizer: impl GatewayExternalActionAuthorizer + Send + Sync + 'static,
@@ -322,6 +340,141 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
                 event: decision.event,
             })
     }
+}
+
+pub(crate) struct HttpGatewayExternalActionAuthorizer {
+    endpoint: SocketAddr,
+}
+
+impl HttpGatewayExternalActionAuthorizer {
+    pub(crate) fn new(endpoint: SocketAddr) -> Self {
+        Self { endpoint }
+    }
+}
+
+impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
+    fn authorize_external_action(
+        &self,
+        request: ManagedExternalActionRequest,
+    ) -> Result<ExternalActionGateDecision, FrameworkAdapterError> {
+        let authorization = ExternalActionAuthorizationRequest::from_managed_request(request);
+        let transport_request = GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        };
+        let payload = serde_json::to_string(&transport_request).map_err(|error| {
+            FrameworkAdapterError::InvalidRequest(format!(
+                "gateway external action HTTP authorization request serialization failed: {error}"
+            ))
+        })?;
+        if payload.len() > EXTERNAL_ACTION_MAX_MESSAGE_BYTES {
+            return Err(FrameworkAdapterError::InvalidRequest(
+                "gateway external action HTTP authorization request exceeds maximum message size"
+                    .to_string(),
+            ));
+        }
+        let mut stream = TcpStream::connect(self.endpoint).map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "gateway external action HTTP authorizer transport unavailable: {error}"
+            ))
+        })?;
+        let request = format!(
+            "POST /v1/agent-worker/external-actions/authorize HTTP/1.1\r\n\
+             host: {}\r\n\
+             content-type: application/json\r\n\
+             content-length: {}\r\n\
+             connection: close\r\n\
+             \r\n\
+             {}",
+            self.endpoint,
+            payload.len(),
+            payload
+        );
+        stream.write_all(request.as_bytes()).map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "gateway external action HTTP authorizer write failed: {error}"
+            ))
+        })?;
+        stream.shutdown(Shutdown::Write).map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "gateway external action HTTP authorizer request shutdown failed: {error}"
+            ))
+        })?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "gateway external action HTTP authorizer response read failed: {error}"
+            ))
+        })?;
+        if response.len() > EXTERNAL_ACTION_MAX_MESSAGE_BYTES {
+            return Err(FrameworkAdapterError::InvalidRequest(
+                "gateway external action HTTP authorization response exceeds maximum message size"
+                    .to_string(),
+            ));
+        }
+        let response = decode_http_authorizer_response(&response)?;
+        if response.request_id != transport_request.request_id {
+            return Err(FrameworkAdapterError::InvalidRequest(
+                "gateway external action HTTP authorization response request_id mismatch"
+                    .to_string(),
+            ));
+        }
+        response
+            .response
+            .into_decision()
+            .map(|decision| ExternalActionGateDecision {
+                decision: decision.decision,
+                event: decision.event,
+            })
+    }
+}
+
+fn decode_http_authorizer_response(
+    response: &[u8],
+) -> Result<GatewayExternalActionTransportResponse, FrameworkAdapterError> {
+    let response = std::str::from_utf8(response).map_err(|_| {
+        FrameworkAdapterError::InvalidRequest(
+            "gateway external action HTTP authorizer response is not valid UTF-8".to_string(),
+        )
+    })?;
+    let Some(header_end) = response.find("\r\n\r\n") else {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "gateway external action HTTP authorizer response missing header terminator"
+                .to_string(),
+        ));
+    };
+    let (headers, body) = response.split_at(header_end);
+    let status_line = headers.lines().next().unwrap_or_default();
+    let status_code = parse_http_status_code(status_line)?;
+    if status_code != 200 {
+        return Err(FrameworkAdapterError::CapabilityDenied(format!(
+            "gateway external action HTTP authorizer returned status {status_code}"
+        )));
+    }
+    serde_json::from_str(body[4..].trim()).map_err(|error| {
+        FrameworkAdapterError::InvalidRequest(format!(
+            "gateway external action HTTP authorization response decode failed: {error}"
+        ))
+    })
+}
+
+fn parse_http_status_code(status_line: &str) -> Result<u16, FrameworkAdapterError> {
+    let mut parts = status_line.split_whitespace();
+    let version = parts.next().unwrap_or_default();
+    if !version.starts_with("HTTP/") {
+        return Err(FrameworkAdapterError::InvalidRequest(format!(
+            "gateway external action HTTP authorizer response has invalid status line: {status_line}"
+        )));
+    }
+    parts
+        .next()
+        .unwrap_or_default()
+        .parse::<u16>()
+        .map_err(|_| {
+            FrameworkAdapterError::InvalidRequest(format!(
+                "gateway external action HTTP authorizer response has invalid status code: {status_line}"
+            ))
+        })
 }
 
 fn accept_external_action_json<A>(
@@ -919,6 +1072,84 @@ mod tests {
         assert!(error.to_string().contains("request_id mismatch"));
     }
 
+    #[test]
+    fn http_gateway_authorizer_transport_allows_managed_handler_action() {
+        let expected_response = GatewayExternalActionTransportResponse {
+            request_id: "run-1:session-1:worker-1:native-harness:tool".to_string(),
+            response: ExternalActionAuthorizationResponse {
+                accepted: true,
+                decision: Some(ExternalActionDecision::Allowed),
+                event: Some(allowed_tool_event_json()),
+                error: None,
+            },
+        };
+        let server = spawn_http_authorizer_contract_server(
+            |request| {
+                assert!(request
+                    .starts_with("POST /v1/agent-worker/external-actions/authorize HTTP/1.1\r\n"));
+                assert!(request.contains("\r\ncontent-type: application/json\r\n"));
+                let body = http_request_body(&request);
+                let request: GatewayExternalActionTransportRequest =
+                    serde_json::from_str(body).unwrap();
+                assert_eq!(
+                    request.request_id,
+                    "run-1:session-1:worker-1:native-harness:tool"
+                );
+            },
+            expected_response,
+            200,
+        );
+        let client = HttpGatewayExternalActionAuthorizer::new(server.endpoint);
+
+        let decision = authorize_handler_external_action(
+            Some(&client),
+            ExternalActionGateRequest {
+                session: session(),
+                action: ManagedExternalAction::Tool(ManagedToolAction {
+                    tool_name: "native.echo".to_string(),
+                    arguments_policy: "redacted_json".to_string(),
+                }),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+        server.join();
+
+        assert!(decision.allowed());
+        assert_eq!(decision.event.kind.as_str(), "capability.allowed");
+    }
+
+    #[test]
+    fn http_gateway_authorizer_transport_rejects_response_identity_mismatch() {
+        let response = GatewayExternalActionTransportResponse {
+            request_id: "tampered-request-id".to_string(),
+            response: ExternalActionAuthorizationResponse {
+                accepted: true,
+                decision: Some(ExternalActionDecision::Allowed),
+                event: Some(allowed_tool_event_json()),
+                error: None,
+            },
+        };
+        let server = spawn_http_authorizer_contract_server(|_| {}, response, 200);
+        let client = HttpGatewayExternalActionAuthorizer::new(server.endpoint);
+
+        let error = authorize_handler_external_action(
+            Some(&client),
+            ExternalActionGateRequest {
+                session: session(),
+                action: ManagedExternalAction::Tool(ManagedToolAction {
+                    tool_name: "native.echo".to_string(),
+                    arguments_policy: "redacted_json".to_string(),
+                }),
+                high_risk: false,
+            },
+        )
+        .unwrap_err();
+        server.join();
+
+        assert!(error.to_string().contains("request_id mismatch"));
+    }
+
     fn session() -> FrameworkAdapterSession {
         FrameworkAdapterSession {
             session_id: "session-1".to_string(),
@@ -932,6 +1163,68 @@ mod tests {
             framework: SupportedFramework::NativeHarness,
             mode: FrameworkAdapterMode::Managed,
         }
+    }
+
+    struct HttpAuthorizerContractServer {
+        endpoint: SocketAddr,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl HttpAuthorizerContractServer {
+        fn join(self) {
+            self.handle.join().unwrap();
+        }
+    }
+
+    fn spawn_http_authorizer_contract_server<F>(
+        inspect_request: F,
+        response: GatewayExternalActionTransportResponse,
+        status_code: u16,
+    ) -> HttpAuthorizerContractServer
+    where
+        F: FnOnce(String) + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            inspect_request(request);
+            let body = serde_json::to_string(&response).unwrap();
+            let reason = match status_code {
+                200 => "OK",
+                400 => "Bad Request",
+                _ => "Error",
+            };
+            let response = format!(
+                "HTTP/1.1 {status_code} {reason}\r\n\
+                 content-type: application/json\r\n\
+                 content-length: {}\r\n\
+                 connection: close\r\n\
+                 \r\n\
+                 {}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        HttpAuthorizerContractServer { endpoint, handle }
+    }
+
+    fn http_request_body(request: &str) -> &str {
+        request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default()
     }
 
     fn tool_json_request() -> ExternalActionAuthorizationRequest {

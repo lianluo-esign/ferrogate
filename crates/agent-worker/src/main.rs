@@ -51,6 +51,12 @@ enum Command {
     AcceptExternalActionJson,
     /// Run the Unix socket gateway-authorizer transport smoke without executing the action.
     ExternalActionUnixTransportSmoke,
+    /// Call a gateway HTTP authorizer transport smoke without executing the action.
+    ExternalActionHttpTransportSmoke {
+        /// Gateway external action authorizer HTTP endpoint.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_HTTP_ENDPOINT")]
+        gateway_authorizer_http_endpoint: SocketAddr,
+    },
     /// Accept one signed management envelope as JSON on stdin and emit a JSON response.
     AcceptManagementJson {
         /// Management key id expected in the signed envelope.
@@ -119,6 +125,11 @@ fn main() -> Result<()> {
         Command::ExternalActionUnixTransportSmoke => {
             external_actions::external_action_unix_transport_smoke_command()
         }
+        Command::ExternalActionHttpTransportSmoke {
+            gateway_authorizer_http_endpoint,
+        } => external_actions::external_action_http_transport_smoke_command(
+            gateway_authorizer_http_endpoint,
+        ),
         Command::AcceptManagementJson {
             key_id,
             shared_secret,

@@ -397,7 +397,14 @@ Denied, approval-required, invalid, or self-hosted requests fail closed before
 handler execution.
 
 The worker-side transport contract for the real gateway/control-plane
-authorizer uses the same JSON body wrapped as
+authorizer uses HTTP as the primary path:
+
+```text
+POST /v1/agent-worker/external-actions/authorize
+content-type: application/json
+```
+
+The request body is the same shared JSON envelope wrapped as
 `GatewayExternalActionTransportRequest`:
 
 - `request_id`: stable request identity derived from run, session, worker,
@@ -409,12 +416,22 @@ same `request_id` and carrying the same authorization response shape used by the
 stdin smoke. The standalone worker client rejects mismatched response ids,
 missing accepted-event evidence, malformed canonical event JSON, denied
 decisions, approval-required decisions, and transport failures before handler
-execution. The first concrete transport is a local Unix socket client/server
-contract used for local gateway-to-worker integration tests; production
-deployment can wrap the same request/response body in stronger process
-management and symmetric encryption without changing handler semantics.
+execution. Same-host Unix socket transport remains available for local
+development and deterministic tests, but it is not the product callback
+protocol. Production deployments must run this HTTP callback path inside the
+same encrypted gateway-to-worker channel family as the management API.
 
-The gateway/control-plane side can serve this local Unix socket authorizer when
+The worker-side HTTP transport smoke is:
+
+```bash
+agent-worker external-action-http-transport-smoke \
+  --gateway-authorizer-http-endpoint 127.0.0.1:7778
+```
+
+It calls the gateway HTTP authorizer, requires a `capability.allowed` response,
+prints the normalized event JSON, and still does not execute the requested tool.
+
+The gateway/control-plane side can serve this HTTP authorizer when
 managed runtime is enabled with:
 
 ```yaml
@@ -422,6 +439,8 @@ agent_runtime:
   enabled: true
   provider: managed_worker
   managed_worker:
+    external_action_authorizer_http_listen: 127.0.0.1:7778
+    # Optional local-only development/test path.
     external_action_authorizer_socket: /run/ferrogate/agent-actions.sock
     # Optional test/smoke limit. Omit for the long-running gateway service.
     external_action_authorizer_max_requests: 1

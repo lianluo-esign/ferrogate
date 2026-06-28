@@ -1707,6 +1707,23 @@ fn rejects_invalid_managed_worker_authorizer_socket_config() {
         agent_runtime: AgentRuntimeConfig {
             enabled: true,
             managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
+                external_action_authorizer_http_listen: Some("not-a-socket".into()),
+                ..crate::config::AgentRuntimeManagedWorkerConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("field agent_runtime.managed_worker.external_action_authorizer_http_listen")
+    );
+
+    let config = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
                 external_action_authorizer_socket: Some(" ".into()),
                 external_action_authorizer_max_requests: None,
                 ..crate::config::AgentRuntimeManagedWorkerConfig::default()

@@ -333,6 +333,7 @@ agent_runtime:
   enabled: true
   provider: managed_worker
   managed_worker:
+    external_action_authorizer_http_listen: 127.0.0.1:7778
     external_action_authorizer_socket: /tmp/ferrogate-agent-actions.sock
     external_action_authorizer_max_requests: 2
     allowed_actions: [tool, mcp_tool, network_egress]
@@ -347,6 +348,14 @@ agent_runtime:
     assert_eq!(
         config.agent_runtime.provider,
         AgentRuntimeProvider::ManagedWorker
+    );
+    assert_eq!(
+        config
+            .agent_runtime
+            .managed_worker
+            .external_action_authorizer_http_listen
+            .as_deref(),
+        Some("127.0.0.1:7778")
     );
     assert_eq!(
         config
