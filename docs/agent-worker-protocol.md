@@ -226,11 +226,16 @@ explicit same-host process boundary and can shut down cleanly without leaving a
 stale socket. It is not the final unbounded concurrent lifecycle server, does
 not provide cross-host encryption, and does not boot Firecracker.
 
-Until lifecycle handlers land, this server only accepts `probe_handlers`.
-Authenticated lifecycle requests such as `provision`, `exec_or_attach`, `stop`,
-and `cleanup` are rejected with `unsupported_action` instead of returning a
-false positive `accepted=true`. Adding a lifecycle action requires both the
-handler implementation and contract coverage for the reported response.
+Until lifecycle handlers land, this server dispatches every authenticated
+request by action instead of treating authentication as execution support.
+`probe_handlers` is the only executable action. `list_backends` reaches the
+backend dispatch branch and currently returns `incompatible_backend` because no
+real isolation backend registry is wired into the worker process. Lifecycle,
+status, and artifact actions such as `provision`, `exec_or_attach`, `stop`,
+`cleanup`, `stream_status`, and `collect_artifacts` are rejected with
+`unsupported_action` instead of returning a false positive `accepted=true`.
+Adding a lifecycle action requires both the handler implementation and contract
+coverage for the reported response.
 
 The gateway/control-plane side uses the same wire contract through
 `AgentWorkerUnixManagementClient`. The client serializes an

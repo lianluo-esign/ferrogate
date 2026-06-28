@@ -298,23 +298,48 @@ fn accept_management_envelope(
     if !response.accepted {
         return response;
     }
-    if management_action_supported(envelope.action) {
-        return response;
+    match dispatch_management_action(envelope.clone()) {
+        Ok(()) => response,
+        Err(error) => AgentWorkerManagementResponse::rejected(&envelope, &error),
     }
-    AgentWorkerManagementResponse::rejected(
-        &envelope,
-        &ManagedWorkerError::management_protocol_error(
-            AgentWorkerManagementErrorCode::UnsupportedAction,
-            format!(
-                "agent-worker management action {} is not implemented by this worker process",
-                envelope.action.as_str()
-            ),
-        ),
-    )
 }
 
-fn management_action_supported(action: AgentWorkerManagementAction) -> bool {
-    matches!(action, AgentWorkerManagementAction::ProbeHandlers)
+fn dispatch_management_action(
+    envelope: AgentWorkerManagementEnvelope,
+) -> Result<(), ManagedWorkerError> {
+    match envelope.action {
+        AgentWorkerManagementAction::ProbeHandlers => {
+            let handlers = framework_handlers();
+            if handlers.iter().any(|handler| handler.ready) {
+                Ok(())
+            } else {
+                Err(ManagedWorkerError::management_protocol_error(
+                    AgentWorkerManagementErrorCode::HandlerUnavailable,
+                    "agent-worker reported no ready framework handlers",
+                ))
+            }
+        }
+        AgentWorkerManagementAction::ListBackends => {
+            Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::IncompatibleBackend,
+                "agent-worker isolation backend registry is not implemented by this worker process",
+            ))
+        }
+        AgentWorkerManagementAction::Provision
+        | AgentWorkerManagementAction::ExecOrAttach
+        | AgentWorkerManagementAction::Stop
+        | AgentWorkerManagementAction::Cleanup
+        | AgentWorkerManagementAction::StreamStatus
+        | AgentWorkerManagementAction::CollectArtifacts => {
+            Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::UnsupportedAction,
+                format!(
+                    "agent-worker management action {} is not implemented by this worker process",
+                    envelope.action.as_str()
+                ),
+            ))
+        }
+    }
 }
 
 fn current_unix_millis() -> u64 {
@@ -561,6 +586,30 @@ mod tests {
         assert_eq!(response["request_id"], "agent-worker-provision-request");
         assert_eq!(response["action"], "provision");
         assert_eq!(response["error"]["code"], "unsupported_action");
+        assert_eq!(response["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn routes_signed_backend_listing_to_backend_dispatch_stub() {
+        let mut envelope = smoke_envelope().unwrap();
+        envelope.action = AgentWorkerManagementAction::ListBackends;
+        envelope.request_id = "agent-worker-list-backends-request".to_string();
+        envelope.idempotency_key = "agent-worker-list-backends-idempotency".to_string();
+        envelope.security.nonce = "agent-worker-list-backends-nonce".to_string();
+        envelope.security.signature = envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let input = serde_json::to_string(&envelope).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], false);
+        assert_eq!(response["request_id"], "agent-worker-list-backends-request");
+        assert_eq!(response["action"], "list_backends");
+        assert_eq!(response["error"]["code"], "incompatible_backend");
         assert_eq!(response["error"]["retryable"], false);
     }
 
