@@ -9947,6 +9947,7 @@
           "identity_scope",
           "transport_actions",
           "telemetry_kinds",
+          "dispatch_contract",
           "registration_api",
           "persistence"
         ],
@@ -9991,6 +9992,8 @@
                 "register_worker",
                 "probe_worker",
                 "heartbeat",
+                "poll_run",
+                "ack_run",
                 "stream_events",
                 "upload_artifact",
                 "fetch_checkpoint"
@@ -10014,11 +10017,61 @@
               ]
             }
           },
+          "dispatch_contract": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerDispatchContract"
+          },
           "registration_api": {
             "$ref": "#/components/schemas/AdminSelfHostedWorkerSurface"
           },
           "persistence": {
             "$ref": "#/components/schemas/AdminSelfHostedWorkerPersistence"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerDispatchContract": {
+        "type": "object",
+        "required": [
+          "implemented",
+          "transport_shape",
+          "lease_ack_implemented",
+          "inbound_customer_host_required",
+          "production_mtls_transport_implemented",
+          "actions"
+        ],
+        "properties": {
+          "implemented": {
+            "type": "boolean",
+            "description": "True when the runner-style poll/lease/ack runtime contract is implemented."
+          },
+          "transport_shape": {
+            "type": "string",
+            "enum": [
+              "worker_initiated_outbound_polling"
+            ],
+            "description": "Remote workers initiate the transport session and poll for leased work instead of requiring inbound customer-host reachability."
+          },
+          "lease_ack_implemented": {
+            "type": "boolean",
+            "description": "True when the runtime contract supports leased dispatch and worker acknowledgements."
+          },
+          "inbound_customer_host_required": {
+            "type": "boolean",
+            "description": "False for the primary self-hosted worker transport; FerroGate should not require inbound access to customer hosts."
+          },
+          "production_mtls_transport_implemented": {
+            "type": "boolean",
+            "description": "True only after the production mutually authenticated HTTP worker transport is implemented."
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "poll_run",
+                "ack_run"
+              ]
+            }
           }
         },
         "additionalProperties": false

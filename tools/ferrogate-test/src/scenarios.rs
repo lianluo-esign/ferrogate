@@ -185,6 +185,27 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 "reported_by_self_hosted_worker"
             );
             assert_eq!(body["data"][0]["transport_actions"][0], "register_worker");
+            assert!(body["data"][0]["transport_actions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| action == "poll_run")
+                    && actions.iter().any(|action| action == "ack_run")));
+            assert_eq!(body["data"][0]["dispatch_contract"]["implemented"], true);
+            assert_eq!(
+                body["data"][0]["dispatch_contract"]["transport_shape"],
+                "worker_initiated_outbound_polling"
+            );
+            assert_eq!(
+                body["data"][0]["dispatch_contract"]["lease_ack_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["dispatch_contract"]["inbound_customer_host_required"],
+                false
+            );
+            assert_eq!(
+                body["data"][0]["dispatch_contract"]["production_mtls_transport_implemented"],
+                false
+            );
             assert_eq!(body["data"][0]["registration_api"]["implemented"], true);
             assert_eq!(body["data"][0]["persistence"]["implemented"], false);
             assert_eq!(
