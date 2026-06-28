@@ -383,6 +383,23 @@ pub(crate) struct AdminSelfHostedWorkerArtifactRequest {
     pub(crate) artifact_json: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelfHostedWorkerArtifactTransportRequest {
+    pub(crate) identity: SelfHostedWorkerIdentity,
+    pub(crate) artifact_id: String,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) artifact_name: String,
+    #[serde(default)]
+    pub(crate) content_type: Option<String>,
+    pub(crate) size_bytes: u64,
+    #[serde(default)]
+    pub(crate) created_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) artifact_json: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminSelfHostedWorkerArtifactResponse {
     pub(crate) object: &'static str,

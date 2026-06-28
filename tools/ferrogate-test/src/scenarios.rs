@@ -765,6 +765,63 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/artifacts",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_artifact_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "artifact-transport-too-large",
+            "transport-oversized.bin",
+            16_777_217,
+            786,
+        ),
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_artifact");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("size_bytes")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/artifacts",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_artifact_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "artifact-transport",
+            "transport.log",
+            64,
+            787,
+        ),
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_artifact");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["worker"]["artifact_count"], 1);
+            assert_eq!(body["worker"]["latest_artifact_at_unix"], 787);
+            assert_eq!(body["artifact"]["id"], "artifact-transport");
+            assert_eq!(
+                body["artifact"]["worker_id"],
+                *self_hosted_worker_id.borrow()
+            );
+            assert_eq!(body["artifact"]["session_id"], "session-transport");
+            assert_eq!(body["artifact"]["run_id"], "run-transport");
+            assert_eq!(body["artifact"]["artifact_name"], "transport.log");
+            assert_eq!(body["artifact"]["content_type"], "text/plain");
+            assert_eq!(body["artifact"]["size_bytes"], 64);
+            assert_eq!(
+                body["artifact"]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["artifact"]["created_at_unix"], 787);
+            Ok(())
+        },
+    )?;
     let self_hosted_worker_artifacts_path = format!("{self_hosted_worker_detail_path}/artifacts");
     case.expect_json(
         "POST",
@@ -807,7 +864,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         |body| {
             assert_eq!(body["object"], "self_hosted_worker_artifact");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
-            assert_eq!(body["worker"]["artifact_count"], 1);
+            assert_eq!(body["worker"]["artifact_count"], 2);
             assert_eq!(body["worker"]["latest_artifact_at_unix"], 789);
             assert_eq!(body["artifact"]["id"], "artifact-1");
             assert_eq!(
@@ -835,7 +892,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert_eq!(body["id"], *self_hosted_worker_id.borrow());
-            assert_eq!(body["artifact_count"], 1);
+            assert_eq!(body["artifact_count"], 2);
             assert_eq!(body["latest_artifact_at_unix"], 789);
             Ok(())
         },
@@ -956,7 +1013,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["data"][0]["latest_heartbeat"]["status"], "online");
             assert_eq!(body["data"][0]["telemetry_event_count"], 2);
             assert_eq!(body["data"][0]["latest_event_at_unix"], 456);
-            assert_eq!(body["data"][0]["artifact_count"], 1);
+            assert_eq!(body["data"][0]["artifact_count"], 2);
             assert_eq!(body["data"][0]["latest_artifact_at_unix"], 789);
             assert_eq!(body["data"][0]["checkpoint_count"], 1);
             assert_eq!(body["data"][0]["latest_checkpoint_at_unix"], 890);
@@ -1575,6 +1632,35 @@ fn self_hosted_worker_event_body(
           "kind": "{kind}",
           "occurred_at_unix": {occurred_at_unix},
           "event_json": "{{\"message\":\"worker transport event\"}}"
+        }}"#
+    )
+}
+
+fn self_hosted_worker_artifact_body(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    artifact_id: &str,
+    artifact_name: &str,
+    size_bytes: u64,
+    created_at_unix: u64,
+) -> String {
+    format!(
+        r#"{{
+          "identity": {{
+            "tenant_id": "org_demo",
+            "workspace_id": "workspace-1",
+            "worker_id": "{worker_id}",
+            "token_id": "{identity_fingerprint}",
+            "token_secret": "{identity_fingerprint}"
+          }},
+          "artifact_id": "{artifact_id}",
+          "session_id": "session-transport",
+          "run_id": "run-transport",
+          "artifact_name": "{artifact_name}",
+          "content_type": "text/plain",
+          "size_bytes": {size_bytes},
+          "created_at_unix": {created_at_unix},
+          "artifact_json": "{{\"sha256\":\"transport\"}}"
         }}"#
     )
 }

@@ -113,6 +113,7 @@ impl FerroGateway {
 
         if path == "/v1/self-hosted-workers/heartbeat"
             || path == "/v1/self-hosted-workers/events"
+            || path == "/v1/self-hosted-workers/artifacts"
             || path == "/v1/self-hosted-workers/runs/poll"
             || path == "/v1/self-hosted-workers/runs/ack"
         {

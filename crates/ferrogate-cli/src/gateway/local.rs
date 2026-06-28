@@ -46,9 +46,9 @@ use crate::{
         AdminSelfHostedWorkerTelemetryEventRequest, AdminSelfHostedWorkerTelemetryEventResponse,
         AdminSkillPackage, AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage,
         AgentUpstreamDiscovery, HealthResponse, OpenAiModel, OpenAiModelList,
-        PromptTemplateRenderRequest, ReadinessResponse, SelfHostedWorkerHeartbeatTransportRequest,
-        SelfHostedWorkerRunAckResponse, SelfHostedWorkerRunLeaseResponse,
-        SelfHostedWorkerTelemetryEventTransportRequest,
+        PromptTemplateRenderRequest, ReadinessResponse, SelfHostedWorkerArtifactTransportRequest,
+        SelfHostedWorkerHeartbeatTransportRequest, SelfHostedWorkerRunAckResponse,
+        SelfHostedWorkerRunLeaseResponse, SelfHostedWorkerTelemetryEventTransportRequest,
     },
     state::{
         AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord,
@@ -3958,22 +3958,23 @@ impl FerroGateway {
             "/v1/self-hosted-workers/events" => {
                 self.handle_self_hosted_worker_event(session, ctx).await
             }
+            "/v1/self-hosted-workers/artifacts" => {
+                self.handle_self_hosted_worker_artifact(session, ctx).await
+            }
             "/v1/self-hosted-workers/runs/poll" => {
                 self.handle_self_hosted_worker_run_poll(session, ctx).await
             }
             "/v1/self-hosted-workers/runs/ack" => {
                 self.handle_self_hosted_worker_run_ack(session, ctx).await
             }
-            _ => {
-                write_json_error(
-                    session,
-                    StatusCode::NOT_FOUND,
-                    "self_hosted_worker_transport_path_not_found",
-                    "self-hosted worker transport supports heartbeat, events, poll, and ack",
-                    &ctx.request_id,
-                )
-                .await
-            }
+            _ => write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "self_hosted_worker_transport_path_not_found",
+                "self-hosted worker transport supports heartbeat, events, artifacts, poll, and ack",
+                &ctx.request_id,
+            )
+            .await,
         }
     }
 
@@ -4036,6 +4037,78 @@ impl FerroGateway {
                     session,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "self_hosted_worker_heartbeat_failed",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_self_hosted_worker_artifact(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+    ) -> PingoraResult<()> {
+        let request = match read_self_hosted_transport_body::<
+            SelfHostedWorkerArtifactTransportRequest,
+        >(session)
+        .await?
+        {
+            Ok(request) => request,
+            Err(error) => {
+                return write_self_hosted_worker_transport_error(session, ctx, error).await;
+            }
+        };
+        let state = self.state.current();
+        if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
+            return write_self_hosted_worker_transport_error(session, ctx, error).await;
+        }
+        let worker_id = request.identity.worker_id.clone();
+        let artifact = AdminSelfHostedWorkerArtifactRequest {
+            artifact_id: request.artifact_id,
+            session_id: request.session_id,
+            run_id: request.run_id,
+            artifact_name: request.artifact_name,
+            content_type: request.content_type,
+            size_bytes: request.size_bytes,
+            created_at_unix: request.created_at_unix,
+            artifact_json: request.artifact_json,
+        };
+        match state.record_self_hosted_worker_artifact(&worker_id, artifact) {
+            Ok((worker, artifact)) => {
+                let body = AdminSelfHostedWorkerArtifactResponse {
+                    object: "self_hosted_worker_artifact",
+                    worker,
+                    artifact,
+                };
+                write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+            }
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_self_hosted_worker_artifact",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::NotFound(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_self_hosted_worker_identity",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::Storage(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "self_hosted_worker_artifact_failed",
                     message,
                     &ctx.request_id,
                 )
