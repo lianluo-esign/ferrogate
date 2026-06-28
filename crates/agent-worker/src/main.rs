@@ -9,6 +9,8 @@ use std::{
     io::{self, Read, Write},
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -192,15 +194,14 @@ fn serve_management_unix(
         std::fs::remove_file(socket_path)?;
     }
     let listener = UnixListener::bind(socket_path)?;
-    let mut transport =
-        InMemoryAgentWorkerManagementTransport::new(AgentWorkerManagementVerifier::new(vec![
-            AgentWorkerManagementKey {
-                key_id: key_id.to_string(),
-                shared_secret: shared_secret.to_string(),
-            },
-        ])?);
+    let transport = Arc::new(Mutex::new(InMemoryAgentWorkerManagementTransport::new(
+        AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+            key_id: key_id.to_string(),
+            shared_secret: shared_secret.to_string(),
+        }])?,
+    )));
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
-    let mut responses = Vec::with_capacity(max_requests);
+    let mut handles = Vec::with_capacity(max_requests);
     let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
     if let Some(timeout) = idle_timeout {
         if timeout.is_zero() {
@@ -209,18 +210,16 @@ fn serve_management_unix(
         listener.set_nonblocking(true)?;
     }
     let mut idle_started = Instant::now();
-    while responses.len() < max_requests {
-        match accept_one_management_unix_connection(&listener, &mut transport, now_unix_millis) {
-            Ok(response) => {
-                responses.push(response);
+    while handles.len() < max_requests {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let transport = Arc::clone(&transport);
+                handles.push(thread::spawn(move || {
+                    handle_management_unix_stream(stream, transport, now_unix_millis)
+                }));
                 idle_started = Instant::now();
             }
-            Err(error)
-                if idle_timeout.is_some()
-                    && error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(is_idle_accept_error) =>
-            {
+            Err(error) if idle_timeout.is_some() && is_idle_accept_error(&error) => {
                 let timeout = idle_timeout.expect("guarded by idle_timeout.is_some()");
                 if idle_started.elapsed() >= timeout {
                     break;
@@ -231,10 +230,18 @@ fn serve_management_unix(
                         .min(Duration::from_millis(10)),
                 );
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
     }
     let _ = std::fs::remove_file(socket_path);
+    let mut responses = Vec::with_capacity(handles.len());
+    for handle in handles {
+        responses.push(
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("agent-worker Unix management thread panicked"))??,
+        );
+    }
     Ok(responses)
 }
 
@@ -245,17 +252,19 @@ fn is_idle_accept_error(error: &std::io::Error) -> bool {
     )
 }
 
-fn accept_one_management_unix_connection(
-    listener: &UnixListener,
-    transport: &mut InMemoryAgentWorkerManagementTransport,
+fn handle_management_unix_stream(
+    mut stream: std::os::unix::net::UnixStream,
+    transport: Arc<Mutex<InMemoryAgentWorkerManagementTransport>>,
     now_unix_millis: u64,
 ) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
-    let (mut stream, _) = listener.accept()?;
     stream.set_nonblocking(false)?;
     let mut input = String::new();
     stream.read_to_string(&mut input)?;
     let envelope: AgentWorkerManagementEnvelope = serde_json::from_str(&input)?;
-    let response = accept_management_envelope(transport, envelope, now_unix_millis);
+    let mut transport = transport
+        .lock()
+        .map_err(|_| anyhow::anyhow!("agent-worker management transport lock poisoned"))?;
+    let response = accept_management_envelope(&mut transport, envelope, now_unix_millis);
     let response_json = serde_json::to_string(&response)?;
     stream.write_all(response_json.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -434,6 +443,7 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
 mod tests {
     use super::*;
     use ferrogate_runtime::AgentWorkerUnixManagementClient;
+    use std::os::unix::net::UnixStream;
     use std::thread;
 
     #[test]
@@ -626,6 +636,69 @@ mod tests {
         assert_eq!(server_responses.len(), 2);
         assert!(server_responses[0].accepted);
         assert!(!server_responses[1].accepted);
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn unix_socket_server_handles_later_connection_while_first_is_slow() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("agent-worker-management.sock");
+        let socket_for_server = socket_path.clone();
+        let server = thread::spawn(move || {
+            serve_management_unix(
+                &socket_for_server,
+                "agent-worker-smoke-key",
+                SMOKE_SHARED_SECRET,
+                Some(1_000),
+                2,
+                None,
+            )
+            .unwrap()
+        });
+
+        wait_for_socket(&socket_path);
+        let mut slow_stream = UnixStream::connect(&socket_path).unwrap();
+
+        let mut fast_envelope = smoke_envelope().unwrap();
+        fast_envelope.request_id = "agent-worker-fast-request".to_string();
+        fast_envelope.idempotency_key = "agent-worker-fast-idempotency".to_string();
+        fast_envelope.security.nonce = "agent-worker-fast-nonce".to_string();
+        fast_envelope.security.signature = fast_envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let client = AgentWorkerUnixManagementClient::new(&socket_path);
+        let fast = client.send_management_request(&fast_envelope).unwrap();
+
+        assert!(fast.accepted);
+        assert_eq!(fast.request_id, "agent-worker-fast-request");
+
+        let mut slow_envelope = smoke_envelope().unwrap();
+        slow_envelope.request_id = "agent-worker-slow-request".to_string();
+        slow_envelope.idempotency_key = "agent-worker-slow-idempotency".to_string();
+        slow_envelope.security.nonce = "agent-worker-slow-nonce".to_string();
+        slow_envelope.security.signature = slow_envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        slow_stream
+            .write_all(serde_json::to_string(&slow_envelope).unwrap().as_bytes())
+            .unwrap();
+        slow_stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut slow_response = String::new();
+        slow_stream.read_to_string(&mut slow_response).unwrap();
+        let slow_response: AgentWorkerManagementResponse =
+            serde_json::from_str(slow_response.trim()).unwrap();
+
+        assert!(slow_response.accepted);
+        assert_eq!(slow_response.request_id, "agent-worker-slow-request");
+
+        let server_responses = server.join().unwrap();
+        assert_eq!(server_responses.len(), 2);
+        assert!(server_responses.iter().any(|response| {
+            response.accepted && response.request_id == "agent-worker-fast-request"
+        }));
+        assert!(server_responses.iter().any(|response| {
+            response.accepted && response.request_id == "agent-worker-slow-request"
+        }));
         assert!(!socket_path.exists());
     }
 

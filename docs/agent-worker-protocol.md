@@ -215,8 +215,11 @@ is one request for deterministic contract smokes. When
 `--idle-timeout-millis` is set, the server exits cleanly after that idle period
 without a new connection and still removes the socket file. The same server
 instance keeps verifier state across accepted connections, so nonce replay and
-idempotency checks are not reset per connection. The envelope should use
-`security.transport_security=local_unix_socket` for this transport.
+idempotency checks are not reset per connection. Accepted connections are
+handled independently, so one slow client cannot block the listener from
+accepting a later management request during the same bounded server run. The
+envelope should use `security.transport_security=local_unix_socket` for this
+transport.
 
 This proves the `agent-worker` process can receive management requests over an
 explicit same-host process boundary and can shut down cleanly without leaving a
