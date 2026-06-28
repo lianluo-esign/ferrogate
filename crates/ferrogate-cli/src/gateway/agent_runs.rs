@@ -10,7 +10,7 @@ use ferrogate_core::{RequestContext, ToolResult};
 use ferrogate_runtime::{
     AgentHarness, AgentHarnessConfig, AgentProvider, AgentRunEvent, AgentRunEventKind,
     AgentRunEventSink, AgentRunInput, AgentRunOutcome, AgentRunStatus, AgentRuntimeError,
-    AgentToolDispatchRequest, ExternalAgentProvider, ExternalAgentProviderConfig,
+    AgentToolDispatchRequest, CapabilityAction, ExternalAgentProvider, ExternalAgentProviderConfig,
     GovernedAgentToolDispatcher, NormalizedFrameworkEvent,
 };
 use http::{HeaderMap, Method, StatusCode};
@@ -729,6 +729,7 @@ struct GatewayAgentToolDispatcher {
     gateway: FerroGateway,
     ctx: ProxyContext,
     auth: AuthContext,
+    state: AppState,
     scripted_tool_calls: Vec<AgentRunToolCallRequest>,
     workflow_use: Option<AgentWorkflowUse>,
 }
@@ -741,13 +742,46 @@ impl GatewayAgentToolDispatcher {
         scripted_tool_calls: Vec<AgentRunToolCallRequest>,
         workflow_use: Option<AgentWorkflowUse>,
     ) -> Self {
+        let state = gateway.state.current();
         Self {
             gateway,
             ctx: ctx.clone(),
             auth,
+            state,
             scripted_tool_calls,
             workflow_use,
         }
+    }
+
+    fn record_capability_event(
+        &self,
+        request: &AgentToolDispatchRequest<'_>,
+        outcome: &'static str,
+        message: impl Into<String>,
+    ) {
+        self.state.record_agent_run_event(stored_timeline_event(
+            TimelineEventContext::new(
+                self.ctx.request_id.clone(),
+                self.ctx.trace_id.clone(),
+                self.auth.tenant_context(),
+                request.turn,
+            ),
+            TimelineEventRecord {
+                id: format!(
+                    "agent-capability:{}:{}:{}:{}",
+                    request.run_id,
+                    request.turn,
+                    CapabilityAction::Tool.as_str().replace('.', "_"),
+                    sanitize_timeline_id_part(&request.tool_call.id)
+                ),
+                run_id: request.run_id.to_string(),
+                kind: format!("capability.{outcome}"),
+                target: request.tool_call.name.clone(),
+                outcome: outcome.to_string(),
+                tool_call_id: Some(request.tool_call.id.clone()),
+                message: Some(message.into()),
+            },
+        ));
     }
 }
 
@@ -757,6 +791,11 @@ impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
         request: AgentToolDispatchRequest<'_>,
     ) -> Result<ToolResult, AgentRuntimeError> {
         if !self.auth.has_scope("tools.execute") {
+            self.record_capability_event(
+                &request,
+                "denied",
+                "tool capability denied before dispatch: missing tools.execute scope",
+            );
             return Err(AgentRuntimeError::ToolDispatch(
                 "scope_denied: API key does not have required scope tools.execute".to_string(),
             ));
@@ -775,15 +814,33 @@ impl GovernedAgentToolDispatcher for GatewayAgentToolDispatcher {
                 .and_then(|tool_call| tool_call.session_id.clone())
                 .or_else(|| Some(format!("agent_run:{}", request.run_id))),
         };
+        let tool_name = tool_request.name.clone();
         let response =
-            block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
+            match block_on_agent_tool_dispatch(self.gateway.execute_tool_request_with_governance(
                 &self.ctx,
                 &self.auth,
                 tool_execution_context(request.run_id, self.workflow_use.as_ref()),
                 tool_request,
                 ToolExecuteBackend::Extension,
-            ))
-            .map_err(tool_dispatch_error)?;
+            )) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.record_capability_event(
+                        &request,
+                        "denied",
+                        format!(
+                            "tool capability failed in gateway-mediated governance: {}: {}",
+                            error.code, error.message
+                        ),
+                    );
+                    return Err(tool_dispatch_error(error));
+                }
+            };
+        self.record_capability_event(
+            &request,
+            "allowed",
+            format!("tool capability routed through gateway-mediated governance: {tool_name}"),
+        );
         Ok(ToolResult {
             tool_call_id: request.tool_call.id.clone(),
             content: response.content,
@@ -937,6 +994,24 @@ fn stored_timeline_event(
         tool_call_id: record.tool_call_id,
         message: record.message,
         occurred_at_unix: context.occurred_at_unix,
+    }
+}
+
+fn sanitize_timeline_id_part(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
     }
 }
 

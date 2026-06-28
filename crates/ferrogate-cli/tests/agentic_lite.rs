@@ -202,13 +202,13 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
     assert_eq!(timeline["summary"]["status"], "completed");
     assert_eq!(timeline["summary"]["request_count"], 0);
     assert_eq!(timeline["summary"]["audit_event_count"], 7);
-    assert_eq!(timeline["summary"]["agent_event_count"], 6);
+    assert_eq!(timeline["summary"]["agent_event_count"], 7);
     assert_eq!(timeline["run"]["id"], "agent-run-direct");
     assert_eq!(timeline["run"]["status"], "completed");
     assert_eq!(timeline["run"]["provider"], "ferrogate.external");
     assert_eq!(timeline["run"]["turns_executed"], 2);
     assert_eq!(timeline["run"]["output_recorded"], true);
-    assert_eq!(timeline["agent_events"].as_array().unwrap().len(), 6);
+    assert_eq!(timeline["agent_events"].as_array().unwrap().len(), 7);
     assert!(timeline["agent_events"]
         .as_array()
         .unwrap()
@@ -217,6 +217,21 @@ fn agent_run_endpoint_creates_observable_opt_in_run() {
             event["kind"] == "tool_call_completed"
                 && event["run_id"] == "agent-run-direct"
                 && event["outcome"] == "success"
+        }));
+    assert!(timeline["agent_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event["kind"] == "capability.allowed"
+                && event["run_id"] == "agent-run-direct"
+                && event["target"] == "tool.echo"
+                && event["outcome"] == "allowed"
+                && event["tool_call_id"] == "mock-tool-call"
+                && event["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("gateway-mediated governance")
         }));
     let events = timeline["audit_events"].as_array().unwrap();
     assert!(events.iter().any(|event| {
