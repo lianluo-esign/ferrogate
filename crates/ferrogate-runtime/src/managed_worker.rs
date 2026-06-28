@@ -20,6 +20,7 @@ use blake2::{
     digest::{KeyInit, Mac},
     Blake2bMac512,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     select_isolation_backend, IsolationBackendDescriptor, IsolationCleanupOutcome, IsolationError,
@@ -144,7 +145,8 @@ pub enum ManagedWorkerLifecycleAction {
 pub const AGENT_WORKER_PROTOCOL_VERSION: u32 = 1;
 pub const AGENT_WORKER_CLOCK_SKEW_MILLIS: u64 = 30_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentWorkerManagementAction {
     ProbeHandlers,
     ListBackends,
@@ -171,7 +173,8 @@ impl AgentWorkerManagementAction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentWorkerManagementErrorCode {
     InvalidRequest,
     UnsupportedProtocolVersion,
@@ -212,7 +215,7 @@ impl AgentWorkerManagementErrorCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorkerManagementSecurity {
     pub key_id: String,
     pub nonce: String,
@@ -221,7 +224,8 @@ pub struct AgentWorkerManagementSecurity {
     pub encrypted: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentWorkerSecurityAlgorithm {
     SharedSecretBlake2b,
     MtlsBoundBlake2b,
@@ -236,7 +240,7 @@ impl AgentWorkerSecurityAlgorithm {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorkerManagementEnvelope {
     pub protocol_version: u32,
     pub action: AgentWorkerManagementAction,
@@ -380,13 +384,13 @@ impl AgentWorkerManagementEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorkerManagementKey {
     pub key_id: String,
     pub shared_secret: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorkerManagementVerification {
     pub request_id: String,
     pub idempotency_key: String,
@@ -396,7 +400,7 @@ pub struct AgentWorkerManagementVerification {
     pub duplicate_idempotency_key: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorkerManagementError {
     pub code: AgentWorkerManagementErrorCode,
     pub message: String,
@@ -413,7 +417,7 @@ impl AgentWorkerManagementError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorkerManagementResponse {
     pub protocol_version: u32,
     pub request_id: String,
@@ -591,7 +595,7 @@ impl AgentWorkerManagementTransport for InMemoryAgentWorkerManagementTransport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentWorkerFrameworkHandler {
     pub adapter_name: String,
     pub framework: String,
@@ -1748,6 +1752,37 @@ mod tests {
                 .map(|error| error.code.as_str()),
             Some("invalid_signature")
         );
+    }
+
+    #[test]
+    fn management_wire_json_round_trips_signed_envelope_and_response_codes() {
+        let envelope = management_envelope(AgentWorkerManagementAction::ProbeHandlers);
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        assert!(encoded.contains(r#""action":"probe_handlers""#));
+        assert!(encoded.contains(r#""algorithm":"shared_secret_blake2b""#));
+
+        let decoded: AgentWorkerManagementEnvelope = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, envelope);
+        decoded
+            .verify_shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+
+        let mut verifier = management_verifier();
+        let mut wrong_signature = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-wire",
+            "idempotency-wire",
+            "nonce-wire",
+        );
+        wrong_signature.security.signature = "blake2b-mac:bad".to_string();
+        let error = verifier.verify(&wrong_signature, 1_000).unwrap_err();
+        let rejected = AgentWorkerManagementResponse::rejected(&wrong_signature, &error);
+        let rejected_json = serde_json::to_value(&rejected).unwrap();
+
+        assert_eq!(rejected_json["accepted"], false);
+        assert_eq!(rejected_json["action"], "provision");
+        assert_eq!(rejected_json["error"]["code"], "invalid_signature");
+        assert_eq!(rejected_json["error"]["retryable"], false);
     }
 
     fn scheduler() -> ManagedWorkerScheduler {
