@@ -158,7 +158,13 @@ configured and with `provision_failed` when the binary is configured but the
 real microVM provision/start implementation is still absent. `cleanup` and
 `stream_status` can return `result.kind=lifecycle` with explicit `not_started`
 evidence before any Firecracker instance exists; this is lifecycle evidence, not
-microVM boot proof.
+microVM boot proof. The worker also keeps a process-local management state store
+for bounded contract smokes: accepted idempotency retries replay the first stored
+action outcome instead of re-dispatching lifecycle logic, and lifecycle result
+events are recorded behind the worker-owned store boundary. This is intentionally
+not a production durability claim; Postgres/Supabase-backed nonce, idempotency,
+session, run, and evidence persistence is still required before long-running
+deployment.
 Stable error codes include `invalid_request`, `unsupported_protocol_version`,
 `unsupported_action`, `transport_security_required`, `policy_denied`,
 `quota_exceeded`, `incompatible_backend`, `handler_unavailable`, `worker_busy`,
@@ -253,11 +259,14 @@ is one request for deterministic contract smokes. When
 `--idle-timeout-millis` is set, the server exits cleanly after that idle period
 without a new connection and still removes the socket file. The same server
 instance keeps verifier state across accepted connections, so nonce replay and
-idempotency checks are not reset per connection. Accepted connections are
-handled independently, so one slow client cannot block the listener from
-accepting a later management request during the same bounded server run. The
-envelope should use `security.transport_security=local_unix_socket` for this
-transport.
+idempotency checks are not reset per connection. The same process also keeps
+worker-owned management state, so an accepted retry with the same scoped
+idempotency key and lifecycle fingerprint returns the stored action result with
+`duplicate_idempotency_key=true` instead of executing the action branch again.
+Accepted connections are handled independently, so one slow client cannot block
+the listener from accepting a later management request during the same bounded
+server run. The envelope should use
+`security.transport_security=local_unix_socket` for this transport.
 
 This proves the `agent-worker` process can receive management requests over an
 explicit same-host process boundary and can shut down cleanly without leaving a

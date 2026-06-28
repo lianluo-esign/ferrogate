@@ -53,9 +53,11 @@ fn probed_isolation_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::lock_firecracker_env;
 
     #[test]
     fn backend_registry_reports_firecracker_ready_only_from_configured_file() {
+        let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
         let firecracker_path = temp.path().join("firecracker");
         std::fs::write(&firecracker_path, b"not executed").unwrap();

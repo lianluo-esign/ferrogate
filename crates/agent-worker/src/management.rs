@@ -24,8 +24,10 @@ use ferrogate_runtime::{
 };
 
 use crate::{
-    backends::isolation_backends, handlers::framework_handlers,
+    backends::isolation_backends,
+    handlers::framework_handlers,
     lifecycle::dispatch_lifecycle_action,
+    state::{AgentWorkerStateStore, InMemoryAgentWorkerStateStore},
 };
 
 const SMOKE_SHARED_SECRET: &str = "agent-worker-smoke-secret";
@@ -38,7 +40,9 @@ pub(crate) fn protocol_smoke() -> Result<()> {
                 shared_secret: SMOKE_SHARED_SECRET.to_string(),
             },
         ])?);
-    let response = transport.accept_management_request(smoke_envelope()?, 1_000);
+    let envelope = smoke_envelope()?;
+    let mut state = InMemoryAgentWorkerStateStore::new();
+    let response = accept_management_envelope(&mut transport, &mut state, envelope, 1_000);
     if !response.accepted {
         anyhow::bail!(
             "agent-worker management protocol smoke rejected request: {:?}",
@@ -120,6 +124,7 @@ fn serve_management_unix(
             shared_secret: shared_secret.to_string(),
         }])?,
     )));
+    let state = Arc::new(Mutex::new(InMemoryAgentWorkerStateStore::new()));
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
     let mut handles = Vec::with_capacity(max_requests);
     let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
@@ -134,11 +139,13 @@ fn serve_management_unix(
         match listener.accept() {
             Ok((stream, _)) => {
                 let transport = Arc::clone(&transport);
+                let state = Arc::clone(&state);
                 let shared_secret = shared_secret.to_string();
                 handles.push(thread::spawn(move || {
                     handle_management_unix_stream(
                         stream,
                         transport,
+                        state,
                         &shared_secret,
                         now_unix_millis,
                     )
@@ -181,6 +188,7 @@ fn is_idle_accept_error(error: &std::io::Error) -> bool {
 fn handle_management_unix_stream(
     mut stream: std::os::unix::net::UnixStream,
     transport: Arc<Mutex<InMemoryAgentWorkerManagementTransport>>,
+    state: Arc<Mutex<InMemoryAgentWorkerStateStore>>,
     shared_secret: &str,
     now_unix_millis: u64,
 ) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
@@ -188,10 +196,16 @@ fn handle_management_unix_stream(
     let mut input = String::new();
     read_management_stream(&mut stream, &mut input)?;
     let envelope = decode_management_input(&input, shared_secret)?;
-    let mut transport = transport
+    let response = {
+        let mut transport = transport
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent-worker management transport lock poisoned"))?;
+        transport.accept_management_request(envelope.clone(), now_unix_millis)
+    };
+    let mut state = state
         .lock()
-        .map_err(|_| anyhow::anyhow!("agent-worker management transport lock poisoned"))?;
-    let response = accept_management_envelope(&mut transport, envelope, now_unix_millis);
+        .map_err(|_| anyhow::anyhow!("agent-worker management state lock poisoned"))?;
+    let response = accept_verified_management_response(&mut *state, envelope, response);
     let response_json = serde_json::to_string(&response)?;
     stream.write_all(response_json.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -215,7 +229,9 @@ fn accept_management_json(
                 shared_secret: shared_secret.to_string(),
             },
         ])?);
-    let response = accept_management_envelope(&mut transport, envelope, now_unix_millis);
+    let mut state = InMemoryAgentWorkerStateStore::new();
+    let response =
+        accept_management_envelope(&mut transport, &mut state, envelope, now_unix_millis);
     Ok(serde_json::to_string(&response)?)
 }
 
@@ -241,17 +257,43 @@ fn read_management_stream<R: Read>(reader: &mut R, output: &mut String) -> Resul
 
 fn accept_management_envelope(
     transport: &mut InMemoryAgentWorkerManagementTransport,
+    state: &mut impl AgentWorkerStateStore,
     envelope: AgentWorkerManagementEnvelope,
     now_unix_millis: u64,
 ) -> AgentWorkerManagementResponse {
     let response = transport.accept_management_request(envelope.clone(), now_unix_millis);
+    accept_verified_management_response(state, envelope, response)
+}
+
+fn accept_verified_management_response(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: AgentWorkerManagementEnvelope,
+    response: AgentWorkerManagementResponse,
+) -> AgentWorkerManagementResponse {
     if !response.accepted {
         return response;
     }
+    if response.duplicate_idempotency_key {
+        if let Some(replayed) = state.replay_idempotent_response(&envelope, &response) {
+            return replayed;
+        }
+    }
     match dispatch_management_action(envelope.clone()) {
-        Ok(Some(result)) => response.with_result(result),
-        Ok(None) => response,
-        Err(error) => AgentWorkerManagementResponse::rejected(&envelope, &error),
+        Ok(Some(result)) => state
+            .record_management_response(&envelope, response.with_result(result))
+            .map(|outcome| outcome.into_response())
+            .unwrap_or_else(|error| AgentWorkerManagementResponse::rejected(&envelope, &error)),
+        Ok(None) => state
+            .record_management_response(&envelope, response)
+            .map(|outcome| outcome.into_response())
+            .unwrap_or_else(|error| AgentWorkerManagementResponse::rejected(&envelope, &error)),
+        Err(error) => {
+            let rejected = AgentWorkerManagementResponse::rejected(&envelope, &error);
+            state
+                .record_management_response(&envelope, rejected)
+                .map(|outcome| outcome.into_response())
+                .unwrap_or_else(|error| AgentWorkerManagementResponse::rejected(&envelope, &error))
+        }
     }
 }
 
@@ -325,6 +367,7 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{state::AgentWorkerStateStore, test_support::lock_firecracker_env};
     use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
     use std::os::unix::net::UnixStream;
     use std::thread;
@@ -438,6 +481,8 @@ mod tests {
 
     #[test]
     fn routes_signed_provision_to_firecracker_lifecycle_branch_fail_closed() {
+        let _env_lock = lock_firecracker_env();
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
         let envelope = lifecycle_envelope(
             AgentWorkerManagementAction::Provision,
             "agent-worker-provision",
@@ -488,6 +533,43 @@ mod tests {
         );
         assert_eq!(response["result"]["lifecycle"]["outcome"], "not_started");
         assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn duplicate_lifecycle_request_replays_stored_result_without_new_event() {
+        let first_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::Cleanup,
+            "agent-worker-dup-cleanup",
+        );
+        let mut duplicate_envelope = first_envelope.clone();
+        duplicate_envelope.request_id = "agent-worker-dup-cleanup-retry-request".to_string();
+        duplicate_envelope.security.nonce = "agent-worker-dup-cleanup-retry-nonce".to_string();
+        duplicate_envelope.security.signature = duplicate_envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+
+        let first = accept_management_envelope(&mut transport, &mut state, first_envelope, 1_000);
+        let duplicate =
+            accept_management_envelope(&mut transport, &mut state, duplicate_envelope, 1_000);
+
+        assert!(first.accepted);
+        assert!(duplicate.accepted);
+        assert!(!first.duplicate_idempotency_key);
+        assert!(duplicate.duplicate_idempotency_key);
+        assert_eq!(
+            duplicate.request_id,
+            "agent-worker-dup-cleanup-retry-request"
+        );
+        assert_eq!(first.result, duplicate.result);
+        assert_eq!(state.lifecycle_events().len(), 1);
     }
 
     #[test]
@@ -627,6 +709,84 @@ mod tests {
         assert!(server_responses[0].accepted);
         assert!(!server_responses[1].accepted);
         assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn unix_socket_server_replays_duplicate_idempotency_result_across_connections() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("agent-worker-management.sock");
+        let socket_for_server = socket_path.clone();
+        let server = thread::spawn(move || {
+            serve_management_unix(
+                &socket_for_server,
+                "agent-worker-smoke-key",
+                SMOKE_SHARED_SECRET,
+                Some(1_000),
+                2,
+                None,
+            )
+            .unwrap()
+        });
+
+        wait_for_socket(&socket_path);
+        let client = AgentWorkerUnixManagementClient::new(&socket_path);
+        let first_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::Cleanup,
+            "agent-worker-socket-dup",
+        );
+        let mut duplicate_envelope = first_envelope.clone();
+        duplicate_envelope.request_id = "agent-worker-socket-dup-retry-request".to_string();
+        duplicate_envelope.security.nonce = "agent-worker-socket-dup-retry-nonce".to_string();
+        duplicate_envelope.security.signature = duplicate_envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+
+        let first = client.send_management_request(&first_envelope).unwrap();
+        let duplicate = client.send_management_request(&duplicate_envelope).unwrap();
+
+        assert!(first.accepted);
+        assert!(duplicate.accepted);
+        assert!(!first.duplicate_idempotency_key);
+        assert!(duplicate.duplicate_idempotency_key);
+        assert_eq!(
+            duplicate.request_id,
+            "agent-worker-socket-dup-retry-request"
+        );
+        assert_eq!(first.result, duplicate.result);
+
+        let server_responses = server.join().unwrap();
+        assert_eq!(server_responses.len(), 2);
+        assert!(server_responses[1].duplicate_idempotency_key);
+        assert_eq!(server_responses[0].result, server_responses[1].result);
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn provision_still_fails_closed_when_firecracker_binary_is_configured() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let firecracker_path = temp.path().join("firecracker");
+        std::fs::write(&firecracker_path, b"not executed").unwrap();
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+        let envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::Provision,
+            "agent-worker-configured-provision",
+        );
+        let input = serde_json::to_string(&envelope).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], false);
+        assert_eq!(response["action"], "provision");
+        assert_eq!(response["error"]["code"], "provision_failed");
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not implemented")));
+        assert_eq!(response["result"], serde_json::Value::Null);
     }
 
     #[test]

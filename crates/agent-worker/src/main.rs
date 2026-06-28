@@ -13,6 +13,21 @@ mod backends;
 mod handlers;
 mod lifecycle;
 mod management;
+mod state;
+
+#[cfg(test)]
+mod test_support {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static FIRECRACKER_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub(crate) fn lock_firecracker_env() -> MutexGuard<'static, ()> {
+        FIRECRACKER_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("firecracker env test lock poisoned")
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "agent-worker")]
