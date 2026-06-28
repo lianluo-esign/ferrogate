@@ -10,7 +10,11 @@
 //! lifecycle work to an `agent-worker` control client. It must not own
 //! Firecracker or other isolation backend implementation details.
 
-use std::{error::Error, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+};
 
 use blake2::{
     digest::{KeyInit, Mac},
@@ -309,6 +313,129 @@ impl AgentWorkerManagementEnvelope {
             ));
         }
         Ok(())
+    }
+
+    fn idempotency_fingerprint(&self) -> String {
+        [
+            self.protocol_version.to_string(),
+            self.action.as_str().to_string(),
+            self.tenant_id.clone(),
+            self.workspace_id.clone(),
+            self.worker_id.clone(),
+            self.session_id.clone().unwrap_or_default(),
+            self.run_id.clone().unwrap_or_default(),
+        ]
+        .join("\n")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerManagementKey {
+    pub key_id: String,
+    pub shared_secret: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerManagementVerification {
+    pub request_id: String,
+    pub idempotency_key: String,
+    pub key_id: String,
+    pub nonce: String,
+    pub action: AgentWorkerManagementAction,
+    pub duplicate_idempotency_key: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentWorkerManagementVerifier {
+    shared_secrets: HashMap<String, String>,
+    seen_nonces: HashSet<String>,
+    idempotency_bindings: HashMap<String, String>,
+}
+
+impl AgentWorkerManagementVerifier {
+    pub fn new(keys: Vec<AgentWorkerManagementKey>) -> Result<Self, ManagedWorkerError> {
+        let mut shared_secrets = HashMap::new();
+        for key in keys {
+            require_non_empty("management_key.key_id", &key.key_id)?;
+            require_non_empty("management_key.shared_secret", &key.shared_secret)?;
+            if shared_secrets
+                .insert(key.key_id.clone(), key.shared_secret)
+                .is_some()
+            {
+                return Err(ManagedWorkerError::InvalidConfig(format!(
+                    "duplicate agent-worker management key_id {}",
+                    key.key_id
+                )));
+            }
+        }
+        if shared_secrets.is_empty() {
+            return Err(ManagedWorkerError::InvalidConfig(
+                "at least one agent-worker management key is required".to_string(),
+            ));
+        }
+        Ok(Self {
+            shared_secrets,
+            seen_nonces: HashSet::new(),
+            idempotency_bindings: HashMap::new(),
+        })
+    }
+
+    pub fn verify(
+        &mut self,
+        envelope: &AgentWorkerManagementEnvelope,
+        now_unix_millis: u64,
+    ) -> Result<AgentWorkerManagementVerification, ManagedWorkerError> {
+        envelope.validate(now_unix_millis)?;
+        let Some(shared_secret) = self.shared_secrets.get(&envelope.security.key_id) else {
+            return Err(ManagedWorkerError::InvalidRequest(format!(
+                "unknown agent-worker management key_id {}",
+                envelope.security.key_id
+            )));
+        };
+        envelope.verify_shared_secret_signature(shared_secret)?;
+
+        let nonce_key = format!("{}\n{}", envelope.security.key_id, envelope.security.nonce);
+        if self.seen_nonces.contains(&nonce_key) {
+            return Err(ManagedWorkerError::InvalidRequest(
+                "agent-worker management nonce replayed".to_string(),
+            ));
+        }
+
+        let idempotency_key = self.scoped_idempotency_key(envelope);
+        let fingerprint = envelope.idempotency_fingerprint();
+        let duplicate_idempotency_key = match self.idempotency_bindings.get(&idempotency_key) {
+            Some(previous) if previous == &fingerprint => true,
+            Some(_) => {
+                return Err(ManagedWorkerError::InvalidRequest(
+                    "idempotency_key reused for a different agent-worker management request"
+                        .to_string(),
+                ));
+            }
+            None => {
+                self.idempotency_bindings
+                    .insert(idempotency_key, fingerprint);
+                false
+            }
+        };
+
+        self.seen_nonces.insert(nonce_key);
+        Ok(AgentWorkerManagementVerification {
+            request_id: envelope.request_id.clone(),
+            idempotency_key: envelope.idempotency_key.clone(),
+            key_id: envelope.security.key_id.clone(),
+            nonce: envelope.security.nonce.clone(),
+            action: envelope.action,
+            duplicate_idempotency_key,
+        })
+    }
+
+    fn scoped_idempotency_key(&self, envelope: &AgentWorkerManagementEnvelope) -> String {
+        [
+            envelope.tenant_id.clone(),
+            envelope.workspace_id.clone(),
+            envelope.idempotency_key.clone(),
+        ]
+        .join("\n")
     }
 }
 
@@ -1201,6 +1328,73 @@ mod tests {
             .contains("deadline expired"));
     }
 
+    #[test]
+    fn management_verifier_rejects_unknown_keys_replays_and_idempotency_conflicts() {
+        let mut verifier = AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+            key_id: "agent-worker-key-1".to_string(),
+            shared_secret: "agent-worker-shared-secret".to_string(),
+        }])
+        .unwrap();
+
+        let envelope = management_envelope(AgentWorkerManagementAction::Provision);
+        let verified = verifier.verify(&envelope, 1_000).unwrap();
+        assert_eq!(verified.action, AgentWorkerManagementAction::Provision);
+        assert_eq!(verified.request_id, "request-1");
+        assert_eq!(verified.idempotency_key, "idempotency-1");
+        assert_eq!(verified.key_id, "agent-worker-key-1");
+        assert_eq!(verified.nonce, "nonce-1");
+        assert!(!verified.duplicate_idempotency_key);
+
+        let replayed_nonce = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-2",
+            "idempotency-2",
+            "nonce-1",
+        );
+        assert!(verifier
+            .verify(&replayed_nonce, 1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("nonce replayed"));
+
+        let duplicate_idempotency = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-3",
+            "idempotency-1",
+            "nonce-3",
+        );
+        let verified = verifier.verify(&duplicate_idempotency, 1_000).unwrap();
+        assert!(verified.duplicate_idempotency_key);
+
+        let conflicting_idempotency = management_envelope_with(
+            AgentWorkerManagementAction::Cleanup,
+            "request-4",
+            "idempotency-1",
+            "nonce-4",
+        );
+        assert!(verifier
+            .verify(&conflicting_idempotency, 1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_key reused"));
+
+        let mut unknown_key = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-5",
+            "idempotency-5",
+            "nonce-5",
+        );
+        unknown_key.security.key_id = "unknown-key".to_string();
+        unknown_key.security.signature = unknown_key
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        assert!(verifier
+            .verify(&unknown_key, 1_000)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown agent-worker management key_id"));
+    }
+
     fn scheduler() -> ManagedWorkerScheduler {
         ManagedWorkerScheduler::new(ManagedWorkerSchedulerConfig::default(), vec![template()])
             .unwrap()
@@ -1239,11 +1433,20 @@ mod tests {
     }
 
     fn management_envelope(action: AgentWorkerManagementAction) -> AgentWorkerManagementEnvelope {
+        management_envelope_with(action, "request-1", "idempotency-1", "nonce-1")
+    }
+
+    fn management_envelope_with(
+        action: AgentWorkerManagementAction,
+        request_id: &str,
+        idempotency_key: &str,
+        nonce: &str,
+    ) -> AgentWorkerManagementEnvelope {
         let mut envelope = AgentWorkerManagementEnvelope {
             protocol_version: AGENT_WORKER_PROTOCOL_VERSION,
             action,
-            request_id: "request-1".to_string(),
-            idempotency_key: "idempotency-1".to_string(),
+            request_id: request_id.to_string(),
+            idempotency_key: idempotency_key.to_string(),
             issued_at_unix_millis: 900,
             deadline_unix_millis: 2_000,
             tenant_id: "tenant-1".to_string(),
@@ -1253,7 +1456,7 @@ mod tests {
             run_id: Some("run-1".to_string()),
             security: AgentWorkerManagementSecurity {
                 key_id: "agent-worker-key-1".to_string(),
-                nonce: "nonce-1".to_string(),
+                nonce: nonce.to_string(),
                 signature: String::new(),
                 algorithm: AgentWorkerSecurityAlgorithm::SharedSecretBlake2b,
                 encrypted: true,

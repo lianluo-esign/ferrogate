@@ -47,7 +47,8 @@ pub use isolation::{
 };
 pub use managed_worker::{
     AgentWorkerControlClient, AgentWorkerFrameworkHandler, AgentWorkerManagementAction,
-    AgentWorkerManagementEnvelope, AgentWorkerManagementSecurity, AgentWorkerSecurityAlgorithm,
+    AgentWorkerManagementEnvelope, AgentWorkerManagementKey, AgentWorkerManagementSecurity,
+    AgentWorkerManagementVerification, AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm,
     ManagedWorkerCancellation, ManagedWorkerError, ManagedWorkerExecution,
     ManagedWorkerFailedExecution, ManagedWorkerFailure, ManagedWorkerLifecycleAction,
     ManagedWorkerLifecycleRecord, ManagedWorkerRunRequest, ManagedWorkerScheduler,
