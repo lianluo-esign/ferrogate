@@ -245,6 +245,20 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct AdminSelfHostedWorkerRotateRequest {
+    pub(crate) identity_fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerRotateResponse {
+    pub(crate) object: &'static str,
+    pub(crate) worker: AdminSelfHostedWorkerRecord,
+    pub(crate) previous_identity_fingerprint: String,
+    pub(crate) rotated_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AdminSelfHostedWorkerHeartbeatRequest {
     pub(crate) status: String,
     #[serde(default)]

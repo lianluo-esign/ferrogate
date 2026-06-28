@@ -268,6 +268,39 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    let self_hosted_worker_rotate_path = format!("{self_hosted_worker_detail_path}/rotate");
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_rotate_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "identity_fingerprint": "sha256:test-worker-rotated"
+        }"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_identity_rotation");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(
+                body["worker"]["identity_fingerprint"],
+                "sha256:test-worker-rotated"
+            );
+            assert_eq!(body["previous_identity_fingerprint"], "sha256:test-worker");
+            assert!(body["rotated_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        &self_hosted_worker_detail_path,
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["identity_fingerprint"], "sha256:test-worker-rotated");
+            Ok(())
+        },
+    )?;
     let self_hosted_worker_heartbeat_path = format!("{self_hosted_worker_detail_path}/heartbeat");
     case.expect_json(
         "POST",
@@ -482,7 +515,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["data"][0]["status"], "online");
             assert_eq!(
                 body["data"][0]["identity_fingerprint"],
-                "sha256:test-worker"
+                "sha256:test-worker-rotated"
             );
             assert_eq!(body["data"][0]["orchestration_enabled"], true);
             assert_eq!(

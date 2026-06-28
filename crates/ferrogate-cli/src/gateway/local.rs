@@ -40,11 +40,12 @@ use crate::{
         AdminSelfHostedWorkerCheckpointResponse, AdminSelfHostedWorkerHeartbeatRequest,
         AdminSelfHostedWorkerHeartbeatResponse, AdminSelfHostedWorkerPersistence,
         AdminSelfHostedWorkerRegistrationRequest, AdminSelfHostedWorkerRegistrationResponse,
-        AdminSelfHostedWorkerRuntime, AdminSelfHostedWorkerSurface,
-        AdminSelfHostedWorkerTelemetryEventRequest, AdminSelfHostedWorkerTelemetryEventResponse,
-        AdminSkillPackage, AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage,
-        AgentUpstreamDiscovery, HealthResponse, OpenAiModel, OpenAiModelList,
-        PromptTemplateRenderRequest, ReadinessResponse,
+        AdminSelfHostedWorkerRotateRequest, AdminSelfHostedWorkerRuntime,
+        AdminSelfHostedWorkerSurface, AdminSelfHostedWorkerTelemetryEventRequest,
+        AdminSelfHostedWorkerTelemetryEventResponse, AdminSkillPackage,
+        AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery,
+        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
+        ReadinessResponse,
     },
     state::{
         AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord,
@@ -4235,11 +4236,26 @@ impl FerroGateway {
                         )
                         .await;
                 }
+                if let Some(worker_id) = rest.strip_suffix("/rotate") {
+                    if worker_id.is_empty() || worker_id.contains('/') {
+                        return write_json_error(
+                            session,
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "method_not_allowed",
+                            "self-hosted worker rotate endpoint expects one worker id",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    return self
+                        .handle_admin_self_hosted_worker_rotate(session, ctx, headers, worker_id)
+                        .await;
+                }
                 write_json_error(
                     session,
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method_not_allowed",
-                    "self-hosted worker detail endpoint supports GET; rotate is not implemented",
+                    "self-hosted worker detail endpoint supports GET",
                     &ctx.request_id,
                 )
                 .await
@@ -4249,7 +4265,7 @@ impl FerroGateway {
                     session,
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method_not_allowed",
-                    "self-hosted worker detail endpoint supports GET; rotate is not implemented",
+                    "self-hosted worker detail endpoint supports GET",
                     &ctx.request_id,
                 )
                 .await
@@ -4260,6 +4276,145 @@ impl FerroGateway {
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method_not_allowed",
                     "self-hosted worker endpoint supports GET and POST",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_admin_self_hosted_worker_rotate(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        worker_id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "self_hosted_worker.rotate",
+                    worker_id,
+                    "error",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                ));
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let payload = match serde_json::from_slice::<AdminSelfHostedWorkerRotateRequest>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "self_hosted_worker.rotate",
+                    worker_id,
+                    "error",
+                    format!("invalid request body: {error}"),
+                ));
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_json",
+                    format!("invalid request body: {error}"),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        match state.rotate_self_hosted_worker_identity(worker_id, payload) {
+            Ok(response) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "self_hosted_worker.rotate",
+                    worker_id,
+                    "success",
+                    "rotated self-hosted worker identity fingerprint",
+                ));
+                write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
+            }
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "self_hosted_worker.rotate",
+                    worker_id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_self_hosted_worker_rotation",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::NotFound(message)) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "self_hosted_worker.rotate",
+                    worker_id,
+                    "rejected",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "self_hosted_worker_not_found",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::Storage(message)) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "self_hosted_worker.rotate",
+                    worker_id,
+                    "error",
+                    message.clone(),
+                ));
+                write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "self_hosted_worker_rotation_failed",
+                    message,
                     &ctx.request_id,
                 )
                 .await

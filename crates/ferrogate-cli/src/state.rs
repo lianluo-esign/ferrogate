@@ -2395,6 +2395,13 @@ fn validate_self_hosted_registration_request(
     Ok(())
 }
 
+fn validate_self_hosted_rotate_request(
+    request: &crate::responses::AdminSelfHostedWorkerRotateRequest,
+) -> Result<(), SelfHostedWorkerRecordError> {
+    require_self_hosted_field("identity_fingerprint", &request.identity_fingerprint)?;
+    Ok(())
+}
+
 fn validate_self_hosted_heartbeat_request(
     request: &crate::responses::AdminSelfHostedWorkerHeartbeatRequest,
 ) -> Result<(), SelfHostedWorkerRecordError> {
@@ -4767,6 +4774,42 @@ impl AppState {
                     "self-hosted worker registration was not readable after write".into(),
                 )
             })
+    }
+
+    pub(crate) fn rotate_self_hosted_worker_identity(
+        &self,
+        worker_id: &str,
+        request: crate::responses::AdminSelfHostedWorkerRotateRequest,
+    ) -> Result<crate::responses::AdminSelfHostedWorkerRotateResponse, SelfHostedWorkerRecordError>
+    {
+        validate_self_hosted_rotate_request(&request)?;
+        let mut registration = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .find(|registration| registration.id == worker_id)
+            .ok_or_else(|| {
+                SelfHostedWorkerRecordError::NotFound(format!(
+                    "self-hosted worker {worker_id} was not found"
+                ))
+            })?;
+        let previous_identity_fingerprint = registration.identity_fingerprint.clone();
+        registration.identity_fingerprint = request.identity_fingerprint.trim().to_string();
+        let rotated_at_unix = now_unix_seconds();
+        self.repositories
+            .upsert_self_hosted_worker_registration(registration)
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
+            SelfHostedWorkerRecordError::Storage(
+                "self-hosted worker was not readable after identity rotation".into(),
+            )
+        })?;
+        Ok(crate::responses::AdminSelfHostedWorkerRotateResponse {
+            object: "self_hosted_worker_identity_rotation",
+            worker,
+            previous_identity_fingerprint,
+            rotated_at_unix,
+        })
     }
 
     pub(crate) fn record_self_hosted_worker_heartbeat(
@@ -7923,6 +7966,86 @@ mod tests {
             .repositories
             .self_hosted_worker_registrations()
             .is_empty());
+    }
+
+    #[test]
+    fn rotate_self_hosted_worker_identity_updates_durable_registration() {
+        let state = AppState::new(Config::default());
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext::default(),
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:old".into(),
+                    orchestration_enabled: false,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+
+        let response = state
+            .rotate_self_hosted_worker_identity(
+                &worker.id,
+                crate::responses::AdminSelfHostedWorkerRotateRequest {
+                    identity_fingerprint: " sha256:new ".into(),
+                },
+            )
+            .expect("rotation should be accepted");
+
+        assert_eq!(response.object, "self_hosted_worker_identity_rotation");
+        assert_eq!(response.previous_identity_fingerprint, "sha256:old");
+        assert_eq!(response.worker.id, worker.id);
+        assert_eq!(response.worker.identity_fingerprint, "sha256:new");
+        assert!(response.rotated_at_unix.is_some());
+
+        let records = state.repositories.self_hosted_worker_registrations();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].identity_fingerprint, "sha256:new");
+    }
+
+    #[test]
+    fn rotate_self_hosted_worker_identity_rejects_missing_or_invalid_payloads() {
+        let state = AppState::new(Config::default());
+
+        let missing = state.rotate_self_hosted_worker_identity(
+            "missing-worker",
+            crate::responses::AdminSelfHostedWorkerRotateRequest {
+                identity_fingerprint: "sha256:new".into(),
+            },
+        );
+        assert!(matches!(
+            missing,
+            Err(SelfHostedWorkerRecordError::NotFound(message))
+                if message == "self-hosted worker missing-worker was not found"
+        ));
+
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext::default(),
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:old".into(),
+                    orchestration_enabled: false,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+        let blank = state.rotate_self_hosted_worker_identity(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerRotateRequest {
+                identity_fingerprint: " ".into(),
+            },
+        );
+        assert!(matches!(
+            blank,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "identity_fingerprint must not be empty"
+        ));
+
+        let records = state.repositories.self_hosted_worker_registrations();
+        assert_eq!(records[0].identity_fingerprint, "sha256:old");
     }
 
     #[test]

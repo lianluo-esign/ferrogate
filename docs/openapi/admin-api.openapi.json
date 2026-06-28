@@ -3728,6 +3728,64 @@
           }
         }
       }
+    },
+    "/admin/v1/self-hosted-workers/{id}/rotate": {
+      "post": {
+        "operationId": "rotateAdminSelfHostedWorkerIdentity",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Rotate the durable identity fingerprint for a registered self-hosted worker.",
+        "description": "Updates the stored identity fingerprint projection. This does not implement final mTLS transport token rotation or secret issuance.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSelfHostedWorkerRotateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rotated self-hosted worker identity fingerprint and returned the updated worker projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerRotateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10832,6 +10890,48 @@
             "const": "reported_by_self_hosted_worker"
           },
           "created_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerRotateRequest": {
+        "type": "object",
+        "required": [
+          "identity_fingerprint"
+        ],
+        "properties": {
+          "identity_fingerprint": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerRotateResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "worker",
+          "previous_identity_fingerprint",
+          "rotated_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_worker_identity_rotation"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+          },
+          "previous_identity_fingerprint": {
+            "type": "string"
+          },
+          "rotated_at_unix": {
             "type": [
               "integer",
               "null"
