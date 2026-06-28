@@ -171,6 +171,47 @@ impl AgentWorkerManagementAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWorkerManagementErrorCode {
+    InvalidRequest,
+    UnsupportedProtocolVersion,
+    MissingRequiredField,
+    TransportSecurityRequired,
+    InvalidDeadline,
+    DeadlineExpired,
+    ClockSkewExceeded,
+    InvalidMacKey,
+    UnsupportedSignatureAlgorithm,
+    InvalidSignature,
+    UnknownKey,
+    NonceReplay,
+    IdempotencyConflict,
+}
+
+impl AgentWorkerManagementErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::UnsupportedProtocolVersion => "unsupported_protocol_version",
+            Self::MissingRequiredField => "missing_required_field",
+            Self::TransportSecurityRequired => "transport_security_required",
+            Self::InvalidDeadline => "invalid_deadline",
+            Self::DeadlineExpired => "deadline_expired",
+            Self::ClockSkewExceeded => "clock_skew_exceeded",
+            Self::InvalidMacKey => "invalid_mac_key",
+            Self::UnsupportedSignatureAlgorithm => "unsupported_signature_algorithm",
+            Self::InvalidSignature => "invalid_signature",
+            Self::UnknownKey => "unknown_key",
+            Self::NonceReplay => "nonce_replay",
+            Self::IdempotencyConflict => "idempotency_conflict",
+        }
+    }
+
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::DeadlineExpired | Self::ClockSkewExceeded)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentWorkerManagementSecurity {
     pub key_id: String,
@@ -214,40 +255,47 @@ pub struct AgentWorkerManagementEnvelope {
 impl AgentWorkerManagementEnvelope {
     pub fn validate(&self, now_unix_millis: u64) -> Result<(), ManagedWorkerError> {
         if self.protocol_version != AGENT_WORKER_PROTOCOL_VERSION {
-            return Err(ManagedWorkerError::InvalidRequest(format!(
-                "unsupported agent-worker protocol version {}",
-                self.protocol_version
-            )));
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::UnsupportedProtocolVersion,
+                format!(
+                    "unsupported agent-worker protocol version {}",
+                    self.protocol_version
+                ),
+            ));
         }
-        require_non_empty("request_id", &self.request_id)?;
-        require_non_empty("idempotency_key", &self.idempotency_key)?;
-        require_non_empty("tenant_id", &self.tenant_id)?;
-        require_non_empty("workspace_id", &self.workspace_id)?;
-        require_non_empty("worker_id", &self.worker_id)?;
-        require_non_empty("security.key_id", &self.security.key_id)?;
-        require_non_empty("security.nonce", &self.security.nonce)?;
-        require_non_empty("security.signature", &self.security.signature)?;
+        require_management_non_empty("request_id", &self.request_id)?;
+        require_management_non_empty("idempotency_key", &self.idempotency_key)?;
+        require_management_non_empty("tenant_id", &self.tenant_id)?;
+        require_management_non_empty("workspace_id", &self.workspace_id)?;
+        require_management_non_empty("worker_id", &self.worker_id)?;
+        require_management_non_empty("security.key_id", &self.security.key_id)?;
+        require_management_non_empty("security.nonce", &self.security.nonce)?;
+        require_management_non_empty("security.signature", &self.security.signature)?;
         if !self.security.encrypted
             && self.security.algorithm != AgentWorkerSecurityAlgorithm::MtlsBoundBlake2b
         {
-            return Err(ManagedWorkerError::InvalidRequest(
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::TransportSecurityRequired,
                 "agent-worker management requests must be encrypted or mTLS-bound".to_string(),
             ));
         }
         if self.deadline_unix_millis <= self.issued_at_unix_millis {
-            return Err(ManagedWorkerError::InvalidRequest(
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::InvalidDeadline,
                 "deadline_unix_millis must be after issued_at_unix_millis".to_string(),
             ));
         }
         if now_unix_millis > self.deadline_unix_millis {
-            return Err(ManagedWorkerError::InvalidRequest(
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::DeadlineExpired,
                 "agent-worker management request deadline expired".to_string(),
             ));
         }
         if self.issued_at_unix_millis
             > now_unix_millis.saturating_add(AGENT_WORKER_CLOCK_SKEW_MILLIS)
         {
-            return Err(ManagedWorkerError::InvalidRequest(
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::ClockSkewExceeded,
                 "agent-worker management request issued_at is too far in the future".to_string(),
             ));
         }
@@ -282,7 +330,8 @@ impl AgentWorkerManagementEnvelope {
         require_non_empty("shared_secret", shared_secret)?;
         let mut mac = <Blake2bMac512 as KeyInit>::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| {
-                ManagedWorkerError::InvalidRequest(
+                ManagedWorkerError::management_protocol(
+                    AgentWorkerManagementErrorCode::InvalidMacKey,
                     "shared_secret is not a valid MAC key".to_string(),
                 )
             })?;
@@ -302,13 +351,15 @@ impl AgentWorkerManagementEnvelope {
             AgentWorkerSecurityAlgorithm::SharedSecretBlake2b
                 | AgentWorkerSecurityAlgorithm::MtlsBoundBlake2b
         ) {
-            return Err(ManagedWorkerError::InvalidRequest(
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::UnsupportedSignatureAlgorithm,
                 "unsupported agent-worker signature algorithm".to_string(),
             ));
         }
         let expected = self.shared_secret_signature(shared_secret)?;
         if !constant_time_eq(expected.as_bytes(), self.security.signature.as_bytes()) {
-            return Err(ManagedWorkerError::InvalidRequest(
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::InvalidSignature,
                 "agent-worker management request signature verification failed".to_string(),
             ));
         }
@@ -343,6 +394,60 @@ pub struct AgentWorkerManagementVerification {
     pub nonce: String,
     pub action: AgentWorkerManagementAction,
     pub duplicate_idempotency_key: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerManagementError {
+    pub code: AgentWorkerManagementErrorCode,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl AgentWorkerManagementError {
+    pub fn new(code: AgentWorkerManagementErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retryable: code.retryable(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentWorkerManagementResponse {
+    pub protocol_version: u32,
+    pub request_id: String,
+    pub idempotency_key: String,
+    pub action: AgentWorkerManagementAction,
+    pub accepted: bool,
+    pub duplicate_idempotency_key: bool,
+    pub error: Option<AgentWorkerManagementError>,
+}
+
+impl AgentWorkerManagementResponse {
+    pub fn accepted(verification: AgentWorkerManagementVerification) -> Self {
+        Self {
+            protocol_version: AGENT_WORKER_PROTOCOL_VERSION,
+            request_id: verification.request_id,
+            idempotency_key: verification.idempotency_key,
+            action: verification.action,
+            accepted: true,
+            duplicate_idempotency_key: verification.duplicate_idempotency_key,
+            error: None,
+        }
+    }
+
+    pub fn rejected(envelope: &AgentWorkerManagementEnvelope, error: &ManagedWorkerError) -> Self {
+        Self {
+            protocol_version: envelope.protocol_version,
+            request_id: envelope.request_id.clone(),
+            idempotency_key: envelope.idempotency_key.clone(),
+            action: envelope.action,
+            accepted: false,
+            duplicate_idempotency_key: false,
+            error: Some(error.management_error()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -387,16 +492,20 @@ impl AgentWorkerManagementVerifier {
     ) -> Result<AgentWorkerManagementVerification, ManagedWorkerError> {
         envelope.validate(now_unix_millis)?;
         let Some(shared_secret) = self.shared_secrets.get(&envelope.security.key_id) else {
-            return Err(ManagedWorkerError::InvalidRequest(format!(
-                "unknown agent-worker management key_id {}",
-                envelope.security.key_id
-            )));
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::UnknownKey,
+                format!(
+                    "unknown agent-worker management key_id {}",
+                    envelope.security.key_id
+                ),
+            ));
         };
         envelope.verify_shared_secret_signature(shared_secret)?;
 
         let nonce_key = format!("{}\n{}", envelope.security.key_id, envelope.security.nonce);
         if self.seen_nonces.contains(&nonce_key) {
-            return Err(ManagedWorkerError::InvalidRequest(
+            return Err(ManagedWorkerError::management_protocol(
+                AgentWorkerManagementErrorCode::NonceReplay,
                 "agent-worker management nonce replayed".to_string(),
             ));
         }
@@ -406,7 +515,8 @@ impl AgentWorkerManagementVerifier {
         let duplicate_idempotency_key = match self.idempotency_bindings.get(&idempotency_key) {
             Some(previous) if previous == &fingerprint => true,
             Some(_) => {
-                return Err(ManagedWorkerError::InvalidRequest(
+                return Err(ManagedWorkerError::management_protocol(
+                    AgentWorkerManagementErrorCode::IdempotencyConflict,
                     "idempotency_key reused for a different agent-worker management request"
                         .to_string(),
                 ));
@@ -937,6 +1047,16 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), ManagedWorkerError>
     Ok(())
 }
 
+fn require_management_non_empty(field: &str, value: &str) -> Result<(), ManagedWorkerError> {
+    if value.trim().is_empty() {
+        return Err(ManagedWorkerError::management_protocol(
+            AgentWorkerManagementErrorCode::MissingRequiredField,
+            format!("{field} must not be empty"),
+        ));
+    }
+    Ok(())
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -961,10 +1081,61 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 pub enum ManagedWorkerError {
     InvalidConfig(String),
     InvalidRequest(String),
+    ManagementProtocol(AgentWorkerManagementError),
     QuotaExceeded(String),
     NoCompatibleTemplate(String),
     Isolation(IsolationError),
     AgentWorker(String),
+}
+
+impl ManagedWorkerError {
+    fn management_protocol(
+        code: AgentWorkerManagementErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::management_protocol_error(code, message)
+    }
+
+    pub fn management_protocol_error(
+        code: AgentWorkerManagementErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::ManagementProtocol(AgentWorkerManagementError::new(code, message))
+    }
+
+    pub fn management_error(&self) -> AgentWorkerManagementError {
+        match self {
+            Self::ManagementProtocol(error) => error.clone(),
+            Self::InvalidRequest(message) => AgentWorkerManagementError::new(
+                AgentWorkerManagementErrorCode::InvalidRequest,
+                message.clone(),
+            ),
+            Self::InvalidConfig(message) => AgentWorkerManagementError::new(
+                AgentWorkerManagementErrorCode::InvalidRequest,
+                message.clone(),
+            ),
+            Self::QuotaExceeded(message) => AgentWorkerManagementError {
+                code: AgentWorkerManagementErrorCode::InvalidRequest,
+                message: message.clone(),
+                retryable: true,
+            },
+            Self::NoCompatibleTemplate(message) => AgentWorkerManagementError {
+                code: AgentWorkerManagementErrorCode::InvalidRequest,
+                message: message.clone(),
+                retryable: false,
+            },
+            Self::Isolation(error) => AgentWorkerManagementError {
+                code: AgentWorkerManagementErrorCode::InvalidRequest,
+                message: error.to_string(),
+                retryable: true,
+            },
+            Self::AgentWorker(message) => AgentWorkerManagementError {
+                code: AgentWorkerManagementErrorCode::InvalidRequest,
+                message: message.clone(),
+                retryable: true,
+            },
+        }
+    }
 }
 
 impl fmt::Display for ManagedWorkerError {
@@ -975,6 +1146,14 @@ impl fmt::Display for ManagedWorkerError {
             }
             Self::InvalidRequest(message) => {
                 write!(formatter, "invalid managed worker request: {message}")
+            }
+            Self::ManagementProtocol(error) => {
+                write!(
+                    formatter,
+                    "agent-worker management protocol rejected request: {} ({})",
+                    error.message,
+                    error.code.as_str()
+                )
             }
             Self::QuotaExceeded(message) => {
                 write!(formatter, "managed worker quota exceeded: {message}")
@@ -1395,6 +1574,91 @@ mod tests {
             .contains("unknown agent-worker management key_id"));
     }
 
+    #[test]
+    fn management_responses_standardize_acceptance_and_rejection_errors() {
+        let mut verifier = management_verifier();
+
+        let envelope = management_envelope(AgentWorkerManagementAction::Provision);
+        let response =
+            AgentWorkerManagementResponse::accepted(verifier.verify(&envelope, 1_000).unwrap());
+        assert!(response.accepted);
+        assert_eq!(response.protocol_version, AGENT_WORKER_PROTOCOL_VERSION);
+        assert_eq!(response.request_id, "request-1");
+        assert_eq!(response.idempotency_key, "idempotency-1");
+        assert_eq!(response.action, AgentWorkerManagementAction::Provision);
+        assert!(!response.duplicate_idempotency_key);
+        assert!(response.error.is_none());
+
+        let duplicate_idempotency = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-2",
+            "idempotency-1",
+            "nonce-2",
+        );
+        let retry_response = AgentWorkerManagementResponse::accepted(
+            verifier.verify(&duplicate_idempotency, 1_000).unwrap(),
+        );
+        assert!(retry_response.accepted);
+        assert!(retry_response.duplicate_idempotency_key);
+
+        let mut wrong_signature = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-3",
+            "idempotency-3",
+            "nonce-3",
+        );
+        wrong_signature.security.signature = "blake2b-mac:bad".to_string();
+        let error = verifier.verify(&wrong_signature, 1_000).unwrap_err();
+        let rejected = AgentWorkerManagementResponse::rejected(&wrong_signature, &error);
+        assert!(!rejected.accepted);
+        let rejected_error = rejected.error.unwrap();
+        assert_eq!(
+            rejected_error.code,
+            AgentWorkerManagementErrorCode::InvalidSignature
+        );
+        assert_eq!(rejected_error.code.as_str(), "invalid_signature");
+        assert!(!rejected_error.retryable);
+
+        let mut expired = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-4",
+            "idempotency-4",
+            "nonce-4",
+        );
+        expired.deadline_unix_millis = 999;
+        expired.security.signature = expired
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        let error = verifier.verify(&expired, 1_000).unwrap_err();
+        let rejected = AgentWorkerManagementResponse::rejected(&expired, &error);
+        let rejected_error = rejected.error.unwrap();
+        assert_eq!(
+            rejected_error.code,
+            AgentWorkerManagementErrorCode::DeadlineExpired
+        );
+        assert!(rejected_error.retryable);
+
+        let mut unsupported_version = management_envelope_with(
+            AgentWorkerManagementAction::Provision,
+            "request-5",
+            "idempotency-5",
+            "nonce-5",
+        );
+        unsupported_version.protocol_version = AGENT_WORKER_PROTOCOL_VERSION + 1;
+        unsupported_version.security.signature = unsupported_version
+            .shared_secret_signature("agent-worker-shared-secret")
+            .unwrap();
+        let error = verifier.verify(&unsupported_version, 1_000).unwrap_err();
+        let rejected = AgentWorkerManagementResponse::rejected(&unsupported_version, &error);
+        let rejected_error = rejected.error.unwrap();
+        assert_eq!(
+            rejected_error.code,
+            AgentWorkerManagementErrorCode::UnsupportedProtocolVersion
+        );
+        assert_eq!(rejected_error.code.as_str(), "unsupported_protocol_version");
+        assert!(!rejected_error.retryable);
+    }
+
     fn scheduler() -> ManagedWorkerScheduler {
         ManagedWorkerScheduler::new(ManagedWorkerSchedulerConfig::default(), vec![template()])
             .unwrap()
@@ -1434,6 +1698,14 @@ mod tests {
 
     fn management_envelope(action: AgentWorkerManagementAction) -> AgentWorkerManagementEnvelope {
         management_envelope_with(action, "request-1", "idempotency-1", "nonce-1")
+    }
+
+    fn management_verifier() -> AgentWorkerManagementVerifier {
+        AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+            key_id: "agent-worker-key-1".to_string(),
+            shared_secret: "agent-worker-shared-secret".to_string(),
+        }])
+        .unwrap()
     }
 
     fn management_envelope_with(
