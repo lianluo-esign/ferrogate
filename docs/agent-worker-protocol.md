@@ -87,6 +87,69 @@ targets should include:
 
 The protocol should be event-driven and session-scoped.
 
+### Gateway-To-Agent-Worker Management API
+
+Managed FerroGate execution uses a separate `agent-worker` process. The
+gateway/control plane makes the scheduling decision, then calls the
+`agent-worker` management API. The gateway must not probe adapter binaries,
+spawn Codex, Claude Code, or Hermes, or manage Firecracker lifecycle details.
+
+Every gateway-to-`agent-worker` management request uses a versioned JSON
+envelope with stable snake_case enum values. The envelope carries:
+
+- `protocol_version`
+- `action`
+- `request_id`
+- `idempotency_key`
+- `issued_at_unix_millis`
+- `deadline_unix_millis`
+- `tenant_id`
+- `workspace_id`
+- `worker_id`
+- optional `session_id`
+- optional `run_id`
+- `security.key_id`
+- `security.nonce`
+- `security.signature`
+- `security.algorithm`
+- `security.encrypted`
+
+The initial standard actions are `probe_handlers`, `list_backends`,
+`provision`, `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and
+`collect_artifacts`.
+
+The management API fails closed:
+
+- unsupported protocol versions are rejected;
+- missing identity or security fields are rejected;
+- expired deadlines and excessive clock skew are rejected;
+- unknown `key_id` values are rejected;
+- invalid signatures are rejected with constant-time comparison;
+- replayed nonces are rejected;
+- reused idempotency keys are accepted only when they bind to the same
+  lifecycle fingerprint.
+
+The supported MAC algorithms are `shared_secret_blake2b` and
+`mtls_bound_blake2b`. The MAC proves request authenticity and integrity. It
+does not encrypt payloads. Management traffic must also run over encrypted
+transport or an mTLS-bound channel. If the request is not marked encrypted and
+is not mTLS-bound, `agent-worker` rejects it with
+`transport_security_required`.
+
+The standalone worker binary exposes a local contract entrypoint for this
+wire format:
+
+```bash
+agent-worker accept-management-json \
+  --key-id "$AGENT_WORKER_MANAGEMENT_KEY_ID" \
+  --shared-secret "$AGENT_WORKER_MANAGEMENT_SHARED_SECRET"
+```
+
+The command reads one signed management envelope from stdin and writes one
+`AgentWorkerManagementResponse` JSON object to stdout. It verifies the same
+contract future HTTP, gRPC, or Unix-socket transports must use; it does not
+execute Firecracker lifecycle actions by itself.
+
 ### Core Objects
 
 - `tenant`

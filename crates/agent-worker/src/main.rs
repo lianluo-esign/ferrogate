@@ -4,7 +4,12 @@
 // Created: 2026-06-11
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
-use std::{env, path::Path};
+use std::{
+    env,
+    io::{self, Read},
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -32,6 +37,18 @@ enum Command {
     ProtocolSmoke,
     /// Probe framework handler readiness inside the agent-worker process.
     ProbeHandlers,
+    /// Accept one signed management envelope as JSON on stdin and emit a JSON response.
+    AcceptManagementJson {
+        /// Management key id expected in the signed envelope.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_KEY_ID")]
+        key_id: String,
+        /// Shared secret used to verify the envelope MAC.
+        #[arg(long, env = "AGENT_WORKER_MANAGEMENT_SHARED_SECRET")]
+        shared_secret: String,
+        /// Verification time override for deterministic contract tests.
+        #[arg(long)]
+        now_unix_millis: Option<u64>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -39,6 +56,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::ProtocolSmoke => protocol_smoke(),
         Command::ProbeHandlers => probe_handlers(),
+        Command::AcceptManagementJson {
+            key_id,
+            shared_secret,
+            now_unix_millis,
+        } => accept_management_json_command(&key_id, &shared_secret, now_unix_millis),
     }
 }
 
@@ -69,6 +91,50 @@ fn probe_handlers() -> Result<()> {
     let handlers = framework_handlers();
     println!("{}", handlers_json(&handlers));
     Ok(())
+}
+
+fn accept_management_json_command(
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: Option<u64>,
+) -> Result<()> {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    let response = accept_management_json(
+        &input,
+        key_id,
+        shared_secret,
+        now_unix_millis.unwrap_or_else(current_unix_millis),
+    )?;
+    println!("{response}");
+    Ok(())
+}
+
+fn accept_management_json(
+    input: &str,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: u64,
+) -> Result<String> {
+    let envelope: AgentWorkerManagementEnvelope = serde_json::from_str(input)?;
+    let mut transport =
+        InMemoryAgentWorkerManagementTransport::new(AgentWorkerManagementVerifier::new(vec![
+            AgentWorkerManagementKey {
+                key_id: key_id.to_string(),
+                shared_secret: shared_secret.to_string(),
+            },
+        ])?);
+    let response = transport.accept_management_request(envelope, now_unix_millis);
+    Ok(serde_json::to_string(&response)?)
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn framework_handlers() -> Vec<AgentWorkerFrameworkHandler> {
@@ -228,5 +294,55 @@ mod tests {
         let json = handlers_json(&handlers);
         assert!(json.contains(r#""handler_owner":"agent-worker""#));
         assert!(json.contains(r#""gateway_handler_probe":false"#));
+    }
+
+    #[test]
+    fn accepts_signed_management_json_from_gateway_contract() {
+        let input = serde_json::to_string(&smoke_envelope().unwrap()).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], true);
+        assert_eq!(response["request_id"], "agent-worker-smoke-request");
+        assert_eq!(response["action"], "probe_handlers");
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn rejects_management_json_with_wrong_secret_as_standard_response() {
+        let input = serde_json::to_string(&smoke_envelope().unwrap()).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", "wrong-secret", 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], false);
+        assert_eq!(response["request_id"], "agent-worker-smoke-request");
+        assert_eq!(response["action"], "probe_handlers");
+        assert_eq!(response["error"]["code"], "invalid_signature");
+        assert_eq!(response["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn rejects_management_json_with_unencrypted_channel_marker() {
+        let mut envelope = smoke_envelope().unwrap();
+        envelope.security.encrypted = false;
+        envelope.security.signature = envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let input = serde_json::to_string(&envelope).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], false);
+        assert_eq!(response["error"]["code"], "transport_security_required");
+        assert_eq!(response["error"]["retryable"], false);
     }
 }
