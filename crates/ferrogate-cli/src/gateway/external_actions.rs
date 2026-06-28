@@ -247,7 +247,7 @@ mod tests {
         CapabilityAction, ExternalActionAuthorizationRequest, ExternalActionDecision,
         ExternalActionMode, FrameworkAdapterMode, GatewayExternalActionTransportRequest,
         GatewayExternalActionTransportResponse, ManagedExternalAction,
-        ManagedExternalActionRequest, ManagedToolAction,
+        ManagedExternalActionRequest, ManagedNetworkEgressAction, ManagedToolAction,
     };
 
     use super::*;
@@ -317,6 +317,69 @@ mod tests {
         assert_eq!(event.kind, "capability.denied");
         assert_eq!(event.target, "tool:native.echo");
         assert_eq!(event.outcome, "denied");
+    }
+
+    #[test]
+    fn gateway_external_action_authorizer_uses_configured_approval_policy() {
+        let state = AppState::new(crate::config::Config::default());
+        let service = GatewayExternalActionAuthorizerService::new(
+            state.clone(),
+            CapabilityPolicy {
+                approval_required_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            },
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(!response.response.accepted);
+        assert_eq!(
+            response.response.decision,
+            Some(ExternalActionDecision::ApprovalRequired)
+        );
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("approval-required external action should record timeline evidence");
+        assert_eq!(timeline.agent_events.len(), 1);
+        let event = &timeline.agent_events[0];
+        assert_eq!(event.kind, "capability.requested");
+        assert_eq!(event.target, "tool:native.echo");
+        assert_eq!(event.outcome, "approval_required");
+    }
+
+    #[test]
+    fn gateway_external_action_authorizer_can_allow_direct_network_egress_by_policy() {
+        let state = AppState::new(crate::config::Config::default());
+        let service = GatewayExternalActionAuthorizerService::new(
+            state.clone(),
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
+                allow_direct_network_egress: true,
+                ..CapabilityPolicy::default()
+            },
+        );
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(managed_network_request());
+        let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
+            request_id: authorization.stable_request_id(),
+            authorization,
+        });
+
+        assert!(response.response.accepted);
+        assert_eq!(
+            response.response.decision,
+            Some(ExternalActionDecision::Allowed)
+        );
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("network egress authorization should record timeline evidence");
+        assert_eq!(timeline.agent_events.len(), 1);
+        assert_eq!(timeline.agent_events[0].kind, "capability.allowed");
+        assert_eq!(timeline.agent_events[0].target, "api.example.com:443");
     }
 
     #[test]
@@ -395,23 +458,39 @@ mod tests {
 
     fn managed_tool_request() -> ManagedExternalActionRequest {
         ManagedExternalActionRequest {
-            session: ferrogate_runtime::FrameworkAdapterSession {
-                session_id: "session-1".to_string(),
-                run_id: "run-1".to_string(),
-                tenant_id: "tenant-1".to_string(),
-                workspace_id: "workspace-1".to_string(),
-                worker_id: "agent-worker-1".to_string(),
-                isolation_backend: "firecracker".to_string(),
-                adapter_name: "native-harness".to_string(),
-                adapter_version: "2026.6.22".to_string(),
-                framework: ferrogate_runtime::SupportedFramework::NativeHarness,
-                mode: FrameworkAdapterMode::Managed,
-            },
+            session: managed_session(),
             action: ManagedExternalAction::Tool(ManagedToolAction {
                 tool_name: "native.echo".to_string(),
                 arguments_policy: "redacted_json".to_string(),
             }),
             high_risk: false,
+        }
+    }
+
+    fn managed_network_request() -> ManagedExternalActionRequest {
+        ManagedExternalActionRequest {
+            session: managed_session(),
+            action: ManagedExternalAction::NetworkEgress(ManagedNetworkEgressAction {
+                host: "api.example.com".to_string(),
+                port: 443,
+                protocol: "tcp".to_string(),
+            }),
+            high_risk: false,
+        }
+    }
+
+    fn managed_session() -> ferrogate_runtime::FrameworkAdapterSession {
+        ferrogate_runtime::FrameworkAdapterSession {
+            session_id: "session-1".to_string(),
+            run_id: "run-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            worker_id: "agent-worker-1".to_string(),
+            isolation_backend: "firecracker".to_string(),
+            adapter_name: "native-harness".to_string(),
+            adapter_version: "2026.6.22".to_string(),
+            framework: ferrogate_runtime::SupportedFramework::NativeHarness,
+            mode: FrameworkAdapterMode::Managed,
         }
     }
 

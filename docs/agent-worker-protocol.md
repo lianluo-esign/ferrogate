@@ -372,16 +372,20 @@ agent_runtime:
     external_action_authorizer_socket: /run/ferrogate/agent-actions.sock
     # Optional test/smoke limit. Omit for the long-running gateway service.
     external_action_authorizer_max_requests: 1
+    allowed_actions: [tool, mcp_tool]
+    approval_required_actions: [cli, rest, network_egress]
+    allow_direct_network_egress: false
 ```
 
 The gateway service owns the shared
 `GatewayExternalActionTransportRequest`/`GatewayExternalActionTransportResponse`
 contract, applies the gateway capability authorizer, and appends the normalized
-capability event to the agent run timeline before replying. The initial service
-uses a fail-closed default policy unless later operator policy wiring grants a
-capability. That means the socket path is a real control-plane enforcement
-boundary, but it is not yet a broad permission engine and it still does not run
-the handler action or manage the Firecracker microVM lifecycle.
+capability event to the agent run timeline before replying. Operator policy can
+grant low-risk actions, require approval for high-risk actions, and explicitly
+opt in to direct managed-worker network egress. Unlisted actions remain denied.
+That means the socket path is a real control-plane enforcement boundary, but it
+still does not run the handler action or manage the Firecracker microVM
+lifecycle.
 
 The current typed action specs are:
 

@@ -228,7 +228,7 @@ fn start_external_action_authorizer_if_configured(
         .external_action_authorizer_max_requests;
     let service = GatewayExternalActionAuthorizerService::new(
         current.clone(),
-        ferrogate_runtime::CapabilityPolicy::default(),
+        managed_worker_capability_policy(&config.managed_worker),
     );
     Some(thread::spawn(move || {
         if let Err(error) =
@@ -237,6 +237,24 @@ fn start_external_action_authorizer_if_configured(
             tracing::warn!("gateway external action authorizer exited: {error}");
         }
     }))
+}
+
+fn managed_worker_capability_policy(
+    config: &crate::config::AgentRuntimeManagedWorkerConfig,
+) -> ferrogate_runtime::CapabilityPolicy {
+    ferrogate_runtime::CapabilityPolicy {
+        allowed_actions: config
+            .allowed_actions
+            .iter()
+            .map(|action| action.as_policy_action())
+            .collect(),
+        approval_required_actions: config
+            .approval_required_actions
+            .iter()
+            .map(|action| action.as_policy_action())
+            .collect(),
+        allow_direct_network_egress: config.allow_direct_network_egress,
+    }
 }
 
 #[cfg(not(unix))]
@@ -383,7 +401,9 @@ fn pingora_server_conf(config: &Config) -> ServerConf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ReliabilityConfig;
+    use crate::config::{
+        AgentRuntimeManagedWorkerConfig, ManagedWorkerCapabilityActionConfig, ReliabilityConfig,
+    };
 
     #[test]
     fn pingora_server_conf_uses_graceful_shutdown_settings() {
@@ -424,6 +444,30 @@ mod tests {
 
         let pid = std::fs::read_to_string(pid_file).unwrap();
         assert_eq!(pid, std::process::id().to_string());
+    }
+
+    #[test]
+    fn managed_worker_capability_policy_uses_operator_config() {
+        let policy = managed_worker_capability_policy(&AgentRuntimeManagedWorkerConfig {
+            allowed_actions: vec![
+                ManagedWorkerCapabilityActionConfig::Tool,
+                ManagedWorkerCapabilityActionConfig::NetworkEgress,
+            ],
+            approval_required_actions: vec![ManagedWorkerCapabilityActionConfig::Cli],
+            allow_direct_network_egress: true,
+            ..AgentRuntimeManagedWorkerConfig::default()
+        });
+
+        assert!(policy
+            .allowed_actions
+            .contains(&ferrogate_runtime::CapabilityAction::Tool));
+        assert!(policy
+            .allowed_actions
+            .contains(&ferrogate_runtime::CapabilityAction::NetworkEgress));
+        assert!(policy
+            .approval_required_actions
+            .contains(&ferrogate_runtime::CapabilityAction::Cli));
+        assert!(policy.allow_direct_network_egress);
     }
 
     #[test]

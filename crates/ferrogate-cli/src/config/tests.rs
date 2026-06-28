@@ -335,6 +335,9 @@ agent_runtime:
   managed_worker:
     external_action_authorizer_socket: /tmp/ferrogate-agent-actions.sock
     external_action_authorizer_max_requests: 2
+    allowed_actions: [tool, mcp_tool, network_egress]
+    approval_required_actions: [cli, rest]
+    allow_direct_network_egress: true
 "#,
     )
     .unwrap();
@@ -359,6 +362,30 @@ agent_runtime:
             .managed_worker
             .external_action_authorizer_max_requests,
         Some(2)
+    );
+    assert_eq!(
+        config.agent_runtime.managed_worker.allowed_actions,
+        [
+            crate::config::ManagedWorkerCapabilityActionConfig::Tool,
+            crate::config::ManagedWorkerCapabilityActionConfig::McpTool,
+            crate::config::ManagedWorkerCapabilityActionConfig::NetworkEgress,
+        ]
+    );
+    assert_eq!(
+        config
+            .agent_runtime
+            .managed_worker
+            .approval_required_actions,
+        [
+            crate::config::ManagedWorkerCapabilityActionConfig::Cli,
+            crate::config::ManagedWorkerCapabilityActionConfig::Rest,
+        ]
+    );
+    assert!(
+        config
+            .agent_runtime
+            .managed_worker
+            .allow_direct_network_egress
     );
 }
 

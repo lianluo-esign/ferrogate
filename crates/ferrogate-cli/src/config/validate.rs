@@ -748,6 +748,14 @@ impl Config {
                         "field agent_runtime.managed_worker.external_action_authorizer_max_requests: must be greater than zero when provided"
                     );
                 }
+                validate_managed_worker_action_list(
+                    "agent_runtime.managed_worker.allowed_actions",
+                    &self.agent_runtime.managed_worker.allowed_actions,
+                )?;
+                validate_managed_worker_action_list(
+                    "agent_runtime.managed_worker.approval_required_actions",
+                    &self.agent_runtime.managed_worker.approval_required_actions,
+                )?;
             }
             crate::config::AgentRuntimeProvider::External => {
                 if self.agent_runtime.external.command.trim().is_empty() {
@@ -1919,6 +1927,20 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_managed_worker_action_list(
+    field: &str,
+    actions: &[crate::config::ManagedWorkerCapabilityActionConfig],
+) -> AnyResult<()> {
+    let mut seen = HashSet::new();
+    for action in actions {
+        let label = format!("{action:?}");
+        if !seen.insert(label) {
+            bail!("field {field}: duplicate capability action");
+        }
+    }
+    Ok(())
 }
 
 fn validate_postgres_identifier(field: &str, value: &str) -> AnyResult<()> {

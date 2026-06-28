@@ -162,6 +162,46 @@ pub(crate) struct AgentRuntimeManagedWorkerConfig {
     pub(crate) external_action_authorizer_socket: Option<String>,
     #[serde(default)]
     pub(crate) external_action_authorizer_max_requests: Option<usize>,
+    #[serde(default)]
+    pub(crate) allowed_actions: Vec<ManagedWorkerCapabilityActionConfig>,
+    #[serde(default)]
+    pub(crate) approval_required_actions: Vec<ManagedWorkerCapabilityActionConfig>,
+    #[serde(default)]
+    pub(crate) allow_direct_network_egress: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ManagedWorkerCapabilityActionConfig {
+    Tool,
+    McpTool,
+    Cli,
+    Skill,
+    Filesystem,
+    Browser,
+    Rest,
+    Secret,
+    MemoryRead,
+    MemoryWrite,
+    NetworkEgress,
+}
+
+impl ManagedWorkerCapabilityActionConfig {
+    pub(crate) fn as_policy_action(self) -> ferrogate_runtime::CapabilityAction {
+        match self {
+            Self::Tool => ferrogate_runtime::CapabilityAction::Tool,
+            Self::McpTool => ferrogate_runtime::CapabilityAction::McpTool,
+            Self::Cli => ferrogate_runtime::CapabilityAction::Cli,
+            Self::Skill => ferrogate_runtime::CapabilityAction::Skill,
+            Self::Filesystem => ferrogate_runtime::CapabilityAction::Filesystem,
+            Self::Browser => ferrogate_runtime::CapabilityAction::Browser,
+            Self::Rest => ferrogate_runtime::CapabilityAction::Rest,
+            Self::Secret => ferrogate_runtime::CapabilityAction::Secret,
+            Self::MemoryRead => ferrogate_runtime::CapabilityAction::MemoryRead,
+            Self::MemoryWrite => ferrogate_runtime::CapabilityAction::MemoryWrite,
+            Self::NetworkEgress => ferrogate_runtime::CapabilityAction::NetworkEgress,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
