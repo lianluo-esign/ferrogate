@@ -14,8 +14,8 @@ use ferrogate_runtime::{
     AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider, AgentRunEvent,
     AgentRunEventKind, AgentRunEventSink, AgentRunInput, AgentRunOutcome, AgentRunStatus,
     AgentRuntimeError, AgentStep, AgentToolDispatchRequest, ExternalAgentProvider,
-    ExternalAgentProviderConfig, GovernedAgentToolDispatcher, WasmHostAbi, WasmSandboxConfig,
-    WasmSandboxExecutor,
+    ExternalAgentProviderConfig, GovernedAgentToolDispatcher, NormalizedFrameworkEvent,
+    WasmHostAbi, WasmSandboxConfig, WasmSandboxExecutor,
 };
 use http::{HeaderMap, Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
@@ -1184,6 +1184,29 @@ impl AuditEventSink {
             workflow_use,
         }
     }
+
+    #[allow(dead_code)]
+    fn record_framework_event(&self, event: NormalizedFrameworkEvent) -> Result<(), String> {
+        let record = event.timeline_record().map_err(|error| error.to_string())?;
+        self.state.record_agent_run_event(stored_timeline_event(
+            TimelineEventContext::new(
+                self.request_id.clone(),
+                self.trace_id.clone(),
+                self.tenant.clone(),
+                0,
+            ),
+            TimelineEventRecord {
+                id: record.event_id,
+                run_id: record.run_id,
+                kind: record.kind,
+                target: record.target,
+                outcome: record.outcome,
+                tool_call_id: None,
+                message: record.message,
+            },
+        ));
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1449,6 +1472,74 @@ mod tests {
         assert_eq!(stored.outcome, "denied");
         assert_eq!(stored.turn, 0);
         assert_eq!(stored.occurred_at_unix, Some(42));
+        assert!(stored
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("not allowed by capability policy"));
+    }
+
+    #[test]
+    fn audit_sink_records_managed_framework_capability_event_into_timeline() {
+        let state = AppState::new(crate::config::Config::default());
+        let sink = AuditEventSink {
+            state: state.clone(),
+            request_id: "fg-1".to_string(),
+            trace_id: Some("trace-1".to_string()),
+            actor_api_key_id: Some("key".to_string()),
+            tenant: TenantContext {
+                organization_id: Some("tenant-1".to_string()),
+                team_id: None,
+                project_id: Some("workspace-1".to_string()),
+                user_id: None,
+                api_key_id: Some("key".to_string()),
+            },
+            workflow_use: None,
+        };
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter
+            .start_session(FrameworkAdapterSessionRequest {
+                session_id: "session-1".to_string(),
+                run_id: "run-1".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "agent-worker-1".to_string(),
+                isolation_backend: "firecracker".to_string(),
+                mode: FrameworkAdapterMode::Managed,
+                required_capabilities: FrameworkAdapterCapabilities {
+                    tools: true,
+                    ..FrameworkAdapterCapabilities::default()
+                },
+            })
+            .unwrap();
+        let (_, event) = authorize_framework_capability(
+            &SimpleCapabilityAuthorizer::default(),
+            FrameworkCapabilityRequest {
+                session,
+                action: CapabilityAction::Cli,
+                target: "bash".to_string(),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+
+        sink.record_framework_event(event).unwrap();
+
+        let timeline = state
+            .agent_run_timeline("run-1", crate::state::AgentRunFilter::default())
+            .expect("framework event should create a run timeline");
+        assert_eq!(timeline.agent_events.len(), 1);
+        let stored = &timeline.agent_events[0];
+        assert!(stored
+            .id
+            .starts_with("framework:run-1:session-1:native-harness:capability.denied:"));
+        assert_eq!(stored.request_id, "fg-1");
+        assert_eq!(stored.trace_id.as_deref(), Some("trace-1"));
+        assert_eq!(stored.tenant.organization_id.as_deref(), Some("tenant-1"));
+        assert_eq!(stored.tenant.project_id.as_deref(), Some("workspace-1"));
+        assert_eq!(stored.kind, "capability.denied");
+        assert_eq!(stored.target, "bash");
+        assert_eq!(stored.outcome, "denied");
         assert!(stored
             .message
             .as_deref()
