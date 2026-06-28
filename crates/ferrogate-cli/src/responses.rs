@@ -192,6 +192,15 @@ pub(crate) struct AdminSelfHostedWorkerPersistence {
     pub(crate) provider: ferrogate_storage::StorageProviderKind,
     pub(crate) durable: bool,
     pub(crate) implemented: bool,
+    pub(crate) registration_implemented: bool,
+    pub(crate) detail_implemented: bool,
+    pub(crate) heartbeat_implemented: bool,
+    pub(crate) telemetry_event_implemented: bool,
+    pub(crate) artifact_metadata_implemented: bool,
+    pub(crate) checkpoint_metadata_implemented: bool,
+    pub(crate) identity_fingerprint_rotation_implemented: bool,
+    pub(crate) stale_visibility_implemented: bool,
+    pub(crate) worker_transport_implemented: bool,
     pub(crate) contract_version: u32,
 }
 

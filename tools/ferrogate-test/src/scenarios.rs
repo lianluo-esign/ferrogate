@@ -187,6 +187,39 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["data"][0]["transport_actions"][0], "register_worker");
             assert_eq!(body["data"][0]["registration_api"]["implemented"], true);
             assert_eq!(body["data"][0]["persistence"]["implemented"], false);
+            assert_eq!(
+                body["data"][0]["persistence"]["registration_implemented"],
+                true
+            );
+            assert_eq!(body["data"][0]["persistence"]["detail_implemented"], true);
+            assert_eq!(
+                body["data"][0]["persistence"]["heartbeat_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["telemetry_event_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["artifact_metadata_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["checkpoint_metadata_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["identity_fingerprint_rotation_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["stale_visibility_implemented"],
+                true
+            );
+            assert_eq!(
+                body["data"][0]["persistence"]["worker_transport_implemented"],
+                false
+            );
             assert_eq!(body["data"][0]["persistence"]["provider"], "memory");
             Ok(())
         },

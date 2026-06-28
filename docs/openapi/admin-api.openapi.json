@@ -10049,6 +10049,15 @@
           "provider",
           "durable",
           "implemented",
+          "registration_implemented",
+          "detail_implemented",
+          "heartbeat_implemented",
+          "telemetry_event_implemented",
+          "artifact_metadata_implemented",
+          "checkpoint_metadata_implemented",
+          "identity_fingerprint_rotation_implemented",
+          "stale_visibility_implemented",
+          "worker_transport_implemented",
           "contract_version"
         ],
         "properties": {
@@ -10060,11 +10069,47 @@
           },
           "implemented": {
             "type": "boolean",
-            "description": "False until self-hosted worker registration, heartbeat, telemetry, artifact, and checkpoint records are persisted through the Supabase-backed control-plane storage path."
+            "description": "Overall self-hosted worker persistence/transport completion. Remains false until durable registration, heartbeat, telemetry, artifact, checkpoint, rotation, stale visibility, and real worker transport are all implemented."
           },
           "contract_version": {
             "type": "integer",
             "minimum": 1
+          },
+          "registration_implemented": {
+            "type": "boolean",
+            "description": "True when POST /admin/v1/self-hosted-workers writes durable self-hosted worker registrations."
+          },
+          "detail_implemented": {
+            "type": "boolean",
+            "description": "True when GET /admin/v1/self-hosted-workers/{id} reads storage-backed worker details."
+          },
+          "heartbeat_implemented": {
+            "type": "boolean",
+            "description": "True when heartbeat/status ingestion writes durable heartbeat records."
+          },
+          "telemetry_event_implemented": {
+            "type": "boolean",
+            "description": "True when telemetry event ingestion writes durable event records."
+          },
+          "artifact_metadata_implemented": {
+            "type": "boolean",
+            "description": "True when artifact metadata ingestion writes durable artifact metadata records."
+          },
+          "checkpoint_metadata_implemented": {
+            "type": "boolean",
+            "description": "True when checkpoint metadata ingestion writes durable checkpoint metadata records."
+          },
+          "identity_fingerprint_rotation_implemented": {
+            "type": "boolean",
+            "description": "True when Admin rotation updates the durable identity fingerprint projection."
+          },
+          "stale_visibility_implemented": {
+            "type": "boolean",
+            "description": "True when Admin records expose stale visibility derived from durable heartbeat evidence."
+          },
+          "worker_transport_implemented": {
+            "type": "boolean",
+            "description": "True only after real mutually authenticated worker transport is implemented."
           }
         },
         "additionalProperties": false
