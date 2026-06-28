@@ -552,6 +552,43 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/heartbeat",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_heartbeat_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+            "online",
+            124,
+        ),
+        401,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_identity");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/heartbeat",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_heartbeat_body(
+            &self_hosted_worker_id.borrow(),
+            "sha256:test-worker-rotated",
+            "online",
+            125,
+        ),
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_heartbeat");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["worker"]["status"], "online");
+            assert_eq!(body["heartbeat"]["status"], "online");
+            assert_eq!(body["heartbeat"]["reported_at_unix"], 125);
+            assert!(body["heartbeat"]["observed_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
     let self_hosted_worker_heartbeat_path = format!("{self_hosted_worker_detail_path}/heartbeat");
     case.expect_json(
         "POST",
@@ -580,7 +617,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &[ADMIN_AUTH, JSON_CONTENT],
         r#"{
           "status": "online",
-          "reported_at_unix": 123,
+          "reported_at_unix": 126,
           "heartbeat_json": "{\"load\":0.42}"
         }"#,
         201,
@@ -593,7 +630,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["heartbeat"]["id"]
             );
             assert_eq!(body["heartbeat"]["status"], "online");
-            assert_eq!(body["heartbeat"]["reported_at_unix"], 123);
+            assert_eq!(body["heartbeat"]["reported_at_unix"], 126);
             assert!(body["heartbeat"]["observed_at_unix"].as_u64().is_some());
             Ok(())
         },
@@ -608,7 +645,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["status"], "online");
             assert_eq!(body["latest_heartbeat"]["status"], "online");
-            assert_eq!(body["latest_heartbeat"]["reported_at_unix"], 123);
+            assert_eq!(body["latest_heartbeat"]["reported_at_unix"], 126);
             assert!(body["last_seen_at_unix"].as_u64().is_some());
             assert_eq!(body["stale"], false);
             assert!(body["stale_after_unix"].as_u64().is_some());
@@ -1444,6 +1481,28 @@ fn self_hosted_worker_ack_body_for_scope(
           "run_id": "self-hosted-run-{worker_id}",
           "status": "accepted",
           "reported_at_unix": 1001
+        }}"#
+    )
+}
+
+fn self_hosted_worker_heartbeat_body(
+    worker_id: &str,
+    identity_fingerprint: &str,
+    status: &str,
+    reported_at_unix: u64,
+) -> String {
+    format!(
+        r#"{{
+          "identity": {{
+            "tenant_id": "org_demo",
+            "workspace_id": "workspace-1",
+            "worker_id": "{worker_id}",
+            "token_id": "{identity_fingerprint}",
+            "token_secret": "{identity_fingerprint}"
+          }},
+          "status": "{status}",
+          "reported_at_unix": {reported_at_unix},
+          "heartbeat_json": "{{\"load\":0.24}}"
         }}"#
     )
 }

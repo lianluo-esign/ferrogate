@@ -2640,6 +2640,13 @@ impl SelfHostedWorkerDispatchRuntime {
         self.queue.ack_run(&self.registry, request)
     }
 
+    fn validate_worker_identity(
+        &self,
+        identity: &SelfHostedWorkerIdentity,
+    ) -> Result<(), SelfHostedWorkerError> {
+        self.registry.validate_identity(identity).map(|_| ())
+    }
+
     fn seed_run(
         &mut self,
         registration: &StoredSelfHostedWorkerRegistration,
@@ -5041,6 +5048,17 @@ impl AppState {
             Ok(mut dispatch) => dispatch.ack_run(request),
             Err(poisoned) => poisoned.into_inner().ack_run(request),
         }
+    }
+
+    pub(crate) fn validate_self_hosted_worker_identity(
+        &self,
+        identity: &SelfHostedWorkerIdentity,
+    ) -> Result<(), SelfHostedWorkerError> {
+        match self.self_hosted_dispatch.lock() {
+            Ok(dispatch) => dispatch.validate_worker_identity(identity),
+            Err(poisoned) => poisoned.into_inner().validate_worker_identity(identity),
+        }
+        .map(|_| ())
     }
 
     pub(crate) fn record_self_hosted_worker_heartbeat(

@@ -111,11 +111,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        if path == "/v1/self-hosted-workers/runs/poll" || path == "/v1/self-hosted-workers/runs/ack"
+        if path == "/v1/self-hosted-workers/heartbeat"
+            || path == "/v1/self-hosted-workers/runs/poll"
+            || path == "/v1/self-hosted-workers/runs/ack"
         {
             let headers = req.headers.clone();
             let method = req.method.clone();
-            self.handle_self_hosted_worker_runs(session, ctx, &headers, &method, &path)
+            self.handle_self_hosted_worker_transport(session, ctx, &headers, &method, &path)
                 .await?;
             return Ok(true);
         }

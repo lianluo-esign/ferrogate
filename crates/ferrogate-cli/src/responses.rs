@@ -8,6 +8,8 @@ use bytes::Bytes;
 use http::{header, StatusCode};
 use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
+
+use ferrogate_runtime::SelfHostedWorkerIdentity;
 use std::{collections::BTreeMap, io::Read};
 use tokio::{sync::mpsc, task};
 
@@ -295,6 +297,17 @@ pub(crate) struct AdminSelfHostedWorkerHeartbeatResponse {
     pub(crate) object: &'static str,
     pub(crate) worker: AdminSelfHostedWorkerRecord,
     pub(crate) heartbeat: AdminSelfHostedWorkerHeartbeat,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelfHostedWorkerHeartbeatTransportRequest {
+    pub(crate) identity: SelfHostedWorkerIdentity,
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) reported_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) heartbeat_json: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

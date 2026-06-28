@@ -582,16 +582,20 @@ The current runtime contract includes an in-memory lease queue and gateway-side
 HTTP poll/ack endpoints to lock the worker-initiated wire shape:
 
 ```text
+POST /v1/self-hosted-workers/heartbeat
 POST /v1/self-hosted-workers/runs/poll
 POST /v1/self-hosted-workers/runs/ack
 ```
 
 The gateway endpoints require the `x-ferrogate-transport-security: mutual_tls`
-contract header, decode the same JSON request bodies as the worker-side client,
-and return `SelfHostedRunLease` / `SelfHostedRunAck` responses. This proves
-scope matching, adapter matching, capability matching, active lease ownership,
-idempotent dispatch identity, fail-closed identity errors, and ack semantics
-through the real local gateway HTTP path.
+contract header. The heartbeat endpoint validates the worker identity envelope
+before writing reported heartbeat evidence through the same storage-backed
+worker record path used by the Admin API. The run endpoints decode the same
+JSON request bodies as the worker-side client and return `SelfHostedRunLease` /
+`SelfHostedRunAck` responses. This proves scope matching, adapter matching,
+capability matching, active lease ownership, idempotent dispatch identity,
+fail-closed identity errors, heartbeat ingestion, and ack semantics through the
+real local gateway HTTP path.
 
 This is still not the production mTLS listener. The current header is a
 contract marker for local wire-shape tests; it does not validate certificates,

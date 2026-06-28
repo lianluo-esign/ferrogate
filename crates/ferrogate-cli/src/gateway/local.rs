@@ -46,8 +46,8 @@ use crate::{
         AdminSelfHostedWorkerTelemetryEventRequest, AdminSelfHostedWorkerTelemetryEventResponse,
         AdminSkillPackage, AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage,
         AgentUpstreamDiscovery, HealthResponse, OpenAiModel, OpenAiModelList,
-        PromptTemplateRenderRequest, ReadinessResponse, SelfHostedWorkerRunAckResponse,
-        SelfHostedWorkerRunLeaseResponse,
+        PromptTemplateRenderRequest, ReadinessResponse, SelfHostedWorkerHeartbeatTransportRequest,
+        SelfHostedWorkerRunAckResponse, SelfHostedWorkerRunLeaseResponse,
     },
     state::{
         AdminAuditEventDraft, RequestLogExportFilter, RequestLogExportRecord,
@@ -3922,7 +3922,7 @@ impl FerroGateway {
         }
     }
 
-    pub(super) async fn handle_self_hosted_worker_runs(
+    pub(super) async fn handle_self_hosted_worker_transport(
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
@@ -3935,7 +3935,7 @@ impl FerroGateway {
                 session,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method_not_allowed",
-                "self-hosted worker run transport requires POST",
+                "self-hosted worker transport requires POST",
                 &ctx.request_id,
             )
             .await;
@@ -3951,6 +3951,9 @@ impl FerroGateway {
             .await;
         }
         match path {
+            "/v1/self-hosted-workers/heartbeat" => {
+                self.handle_self_hosted_worker_heartbeat(session, ctx).await
+            }
             "/v1/self-hosted-workers/runs/poll" => {
                 self.handle_self_hosted_worker_run_poll(session, ctx).await
             }
@@ -3962,7 +3965,74 @@ impl FerroGateway {
                     session,
                     StatusCode::NOT_FOUND,
                     "self_hosted_worker_transport_path_not_found",
-                    "self-hosted worker run transport supports poll and ack",
+                    "self-hosted worker transport supports heartbeat, poll, and ack",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_self_hosted_worker_heartbeat(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+    ) -> PingoraResult<()> {
+        let request = match read_self_hosted_transport_body::<
+            SelfHostedWorkerHeartbeatTransportRequest,
+        >(session)
+        .await?
+        {
+            Ok(request) => request,
+            Err(error) => {
+                return write_self_hosted_worker_transport_error(session, ctx, error).await;
+            }
+        };
+        let state = self.state.current();
+        if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
+            return write_self_hosted_worker_transport_error(session, ctx, error).await;
+        }
+        let worker_id = request.identity.worker_id.clone();
+        let heartbeat = AdminSelfHostedWorkerHeartbeatRequest {
+            status: request.status,
+            reported_at_unix: request.reported_at_unix,
+            heartbeat_json: request.heartbeat_json,
+        };
+        match state.record_self_hosted_worker_heartbeat(&worker_id, heartbeat) {
+            Ok((worker, heartbeat)) => {
+                let body = AdminSelfHostedWorkerHeartbeatResponse {
+                    object: "self_hosted_worker_heartbeat",
+                    worker,
+                    heartbeat,
+                };
+                write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+            }
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_self_hosted_worker_heartbeat",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::NotFound(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_self_hosted_worker_identity",
+                    message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(SelfHostedWorkerRecordError::Storage(message)) => {
+                write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "self_hosted_worker_heartbeat_failed",
+                    message,
                     &ctx.request_id,
                 )
                 .await
