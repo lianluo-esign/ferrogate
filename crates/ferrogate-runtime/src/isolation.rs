@@ -89,6 +89,8 @@ pub struct IsolationBackendDescriptor {
     pub backend_name: String,
     pub backend_version: String,
     pub kind: IsolationBackendKind,
+    pub host_lifecycle_owner: String,
+    pub gateway_controls_backend: bool,
     pub capabilities: IsolationBackendCapabilities,
 }
 
@@ -536,6 +538,8 @@ mod tests {
             backend_name: backend_name.to_string(),
             backend_version: "test-1".to_string(),
             kind,
+            host_lifecycle_owner: "agent-worker".to_string(),
+            gateway_controls_backend: false,
             capabilities: IsolationBackendCapabilities::full(),
         }
     }

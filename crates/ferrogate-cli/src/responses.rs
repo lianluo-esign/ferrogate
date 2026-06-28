@@ -108,6 +108,7 @@ pub(crate) struct AdminManagedWorkerIsolationBackend {
     pub(crate) backend_name: &'static str,
     pub(crate) commercial_preference: u8,
     pub(crate) host_lifecycle_owner: &'static str,
+    pub(crate) gateway_controls_backend: bool,
 }
 
 #[derive(Debug, Serialize)]

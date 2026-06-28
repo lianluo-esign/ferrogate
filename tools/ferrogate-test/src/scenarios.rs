@@ -106,6 +106,10 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["data"][0]["isolation_backends"][0]["host_lifecycle_owner"],
                 "agent-worker"
             );
+            assert_eq!(
+                body["data"][0]["isolation_backends"][0]["gateway_controls_backend"],
+                false
+            );
             assert_eq!(body["data"][0]["persistence"]["provider"], "memory");
             assert_eq!(body["data"][0]["persistence"]["implemented"], false);
             assert_eq!(

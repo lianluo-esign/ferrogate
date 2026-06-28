@@ -64,6 +64,8 @@ fn probed_firecracker_backend() -> AgentWorkerIsolationBackendReport {
             backend_name: "firecracker".to_string(),
             backend_version: "external_bundle".to_string(),
             kind: "firecracker_micro_vm".to_string(),
+            host_lifecycle_owner: "agent-worker".to_string(),
+            gateway_controls_backend: false,
             ready: true,
             readiness_reason: Some(
                 "Firecracker binary, kernel image, and rootfs image are configured".to_string(),
@@ -74,6 +76,8 @@ fn probed_firecracker_backend() -> AgentWorkerIsolationBackendReport {
             backend_name: "firecracker".to_string(),
             backend_version: "unknown".to_string(),
             kind: "firecracker_micro_vm".to_string(),
+            host_lifecycle_owner: "agent-worker".to_string(),
+            gateway_controls_backend: false,
             ready: false,
             readiness_reason: Some(missing.join("; ")),
         }
@@ -170,6 +174,8 @@ mod tests {
         assert_eq!(backends.len(), 1);
         assert_eq!(backends[0].backend_name, "firecracker");
         assert_eq!(backends[0].kind, "firecracker_micro_vm");
+        assert_eq!(backends[0].host_lifecycle_owner, "agent-worker");
+        assert!(!backends[0].gateway_controls_backend);
         assert!(backends[0].ready);
         assert_eq!(backends[0].backend_version, "external_bundle");
         assert!(backends[0]

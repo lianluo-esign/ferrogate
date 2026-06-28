@@ -9722,7 +9722,8 @@
           "kind",
           "backend_name",
           "commercial_preference",
-          "host_lifecycle_owner"
+          "host_lifecycle_owner",
+          "gateway_controls_backend"
         ],
         "properties": {
           "kind": {
@@ -9744,6 +9745,10 @@
           "host_lifecycle_owner": {
             "type": "string",
             "const": "agent-worker"
+          },
+          "gateway_controls_backend": {
+            "type": "boolean",
+            "const": false
           }
         },
         "additionalProperties": false

@@ -961,6 +961,8 @@ pub struct AgentWorkerIsolationBackendReport {
     pub backend_name: String,
     pub backend_version: String,
     pub kind: String,
+    pub host_lifecycle_owner: String,
+    pub gateway_controls_backend: bool,
     pub ready: bool,
     pub readiness_reason: Option<String>,
 }
@@ -1752,6 +1754,8 @@ impl ManagedWorkerSession {
                 backend_name: String::new(),
                 backend_version: String::new(),
                 kind: crate::IsolationBackendKind::FirecrackerMicroVm,
+                host_lifecycle_owner: "agent-worker".to_string(),
+                gateway_controls_backend: false,
                 capabilities: crate::IsolationBackendCapabilities::default(),
             },
             instance_id: String::new(),
@@ -2070,6 +2074,11 @@ mod tests {
             execution.session.selected_backend.kind,
             IsolationBackendKind::FirecrackerMicroVm
         );
+        assert_eq!(
+            execution.session.selected_backend.host_lifecycle_owner,
+            "agent-worker"
+        );
+        assert!(!execution.session.selected_backend.gateway_controls_backend);
         assert_eq!(execution.session.worker_template_id, "template-codex");
         assert_eq!(execution.session.capability_envelope_id, "capability-1");
         assert_eq!(execution.exec.exit_code, Some(0));
@@ -2562,6 +2571,8 @@ mod tests {
                     backend_name: "firecracker".to_string(),
                     backend_version: "not-wired".to_string(),
                     kind: "firecracker_micro_vm".to_string(),
+                    host_lifecycle_owner: "agent-worker".to_string(),
+                    gateway_controls_backend: false,
                     ready: false,
                     readiness_reason: Some(
                         "Firecracker backend registry is not implemented".to_string(),
@@ -2575,6 +2586,14 @@ mod tests {
         assert_eq!(
             backend_result_json["result"]["backends"][0]["kind"],
             "firecracker_micro_vm"
+        );
+        assert_eq!(
+            backend_result_json["result"]["backends"][0]["host_lifecycle_owner"],
+            "agent-worker"
+        );
+        assert_eq!(
+            backend_result_json["result"]["backends"][0]["gateway_controls_backend"],
+            false
         );
 
         let lifecycle_result_json = serde_json::to_value(response.clone().with_result(
@@ -3173,6 +3192,8 @@ mod tests {
             backend_name: name.to_string(),
             backend_version: "test-1".to_string(),
             kind,
+            host_lifecycle_owner: "agent-worker".to_string(),
+            gateway_controls_backend: false,
             capabilities: IsolationBackendCapabilities::full(),
         }
     }
