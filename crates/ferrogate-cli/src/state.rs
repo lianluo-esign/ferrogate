@@ -54,15 +54,14 @@ use ferrogate_providers::{
     ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
-#[cfg(test)]
-use ferrogate_storage::StoredSelfHostedWorkerCheckpoint;
 use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
     StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
-    StoredRequestLog, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerHeartbeat,
-    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
+    StoredRequestLog, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
+    StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -2494,6 +2493,36 @@ fn validate_self_hosted_artifact_request(
     Ok(())
 }
 
+fn validate_self_hosted_checkpoint_request(
+    request: &crate::responses::AdminSelfHostedWorkerCheckpointRequest,
+) -> Result<(), SelfHostedWorkerRecordError> {
+    require_self_hosted_field("checkpoint_id", &request.checkpoint_id)?;
+    require_self_hosted_field("session_id", &request.session_id)?;
+    require_self_hosted_field("run_id", &request.run_id)?;
+    require_self_hosted_field("checkpoint_name", &request.checkpoint_name)?;
+    if request.size_bytes > SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES {
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
+            "size_bytes must be less than or equal to {SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES}"
+        )));
+    }
+    if !request
+        .checkpoint_json
+        .as_deref()
+        .unwrap_or("{}")
+        .trim()
+        .is_empty()
+        && serde_json::from_str::<serde_json::Value>(
+            request.checkpoint_json.as_deref().unwrap_or("{}"),
+        )
+        .is_err()
+    {
+        return Err(SelfHostedWorkerRecordError::InvalidRequest(
+            "checkpoint_json must be valid JSON when provided".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn require_self_hosted_field(field: &str, value: &str) -> Result<(), SelfHostedWorkerRecordError> {
     if value.trim().is_empty() {
         return Err(SelfHostedWorkerRecordError::InvalidRequest(format!(
@@ -4917,6 +4946,66 @@ impl AppState {
             created_at_unix: stored_artifact.created_at_unix,
         };
         Ok((worker, artifact))
+    }
+
+    pub(crate) fn record_self_hosted_worker_checkpoint(
+        &self,
+        worker_id: &str,
+        request: crate::responses::AdminSelfHostedWorkerCheckpointRequest,
+    ) -> Result<
+        (
+            crate::responses::AdminSelfHostedWorkerRecord,
+            crate::responses::AdminSelfHostedWorkerCheckpoint,
+        ),
+        SelfHostedWorkerRecordError,
+    > {
+        validate_self_hosted_checkpoint_request(&request)?;
+        let registration = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .find(|registration| registration.id == worker_id)
+            .ok_or_else(|| {
+                SelfHostedWorkerRecordError::NotFound(format!(
+                    "self-hosted worker {worker_id} was not found"
+                ))
+            })?;
+        let created_at_unix = request.created_at_unix.or_else(now_unix_seconds);
+        let stored_checkpoint = StoredSelfHostedWorkerCheckpoint {
+            id: request.checkpoint_id.trim().to_string(),
+            worker_id: registration.id.clone(),
+            tenant: registration.tenant,
+            workspace_id: registration.workspace_id,
+            session_id: request.session_id.trim().to_string(),
+            run_id: request.run_id.trim().to_string(),
+            checkpoint_name: request.checkpoint_name.trim().to_string(),
+            size_bytes: request.size_bytes,
+            trust_level: "reported_by_self_hosted_worker".into(),
+            created_at_unix,
+            checkpoint_json: request
+                .checkpoint_json
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "{}".into()),
+        };
+        self.repositories
+            .upsert_self_hosted_worker_checkpoint(stored_checkpoint.clone())
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+        let worker = self.self_hosted_worker_record(worker_id).ok_or_else(|| {
+            SelfHostedWorkerRecordError::Storage(
+                "self-hosted worker was not readable after checkpoint write".into(),
+            )
+        })?;
+        let checkpoint = crate::responses::AdminSelfHostedWorkerCheckpoint {
+            id: stored_checkpoint.id,
+            worker_id: stored_checkpoint.worker_id,
+            session_id: stored_checkpoint.session_id,
+            run_id: stored_checkpoint.run_id,
+            checkpoint_name: stored_checkpoint.checkpoint_name,
+            size_bytes: stored_checkpoint.size_bytes,
+            trust_level: stored_checkpoint.trust_level,
+            created_at_unix: stored_checkpoint.created_at_unix,
+        };
+        Ok((worker, checkpoint))
     }
 
     pub(crate) fn self_hosted_worker_record(
@@ -8240,6 +8329,156 @@ mod tests {
         ));
 
         assert!(state.repositories.self_hosted_worker_artifacts().is_empty());
+    }
+
+    #[test]
+    fn record_self_hosted_worker_checkpoint_updates_checkpoint_projection() {
+        let state = AppState::new(Config::default());
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext {
+                        organization_id: Some("org".into()),
+                        team_id: None,
+                        project_id: Some("project".into()),
+                        user_id: None,
+                        api_key_id: Some("key".into()),
+                    },
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: true,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+
+        let (updated_worker, checkpoint) = state
+            .record_self_hosted_worker_checkpoint(
+                &worker.id,
+                crate::responses::AdminSelfHostedWorkerCheckpointRequest {
+                    checkpoint_id: "checkpoint-1".into(),
+                    session_id: "session-1".into(),
+                    run_id: "run-1".into(),
+                    checkpoint_name: "resume-state".into(),
+                    size_bytes: 256,
+                    created_at_unix: Some(890),
+                    checkpoint_json: Some(r#"{"sha256":"def"}"#.into()),
+                },
+            )
+            .expect("checkpoint should be accepted");
+
+        assert_eq!(checkpoint.id, "checkpoint-1");
+        assert_eq!(checkpoint.worker_id, worker.id);
+        assert_eq!(checkpoint.session_id, "session-1");
+        assert_eq!(checkpoint.run_id, "run-1");
+        assert_eq!(checkpoint.checkpoint_name, "resume-state");
+        assert_eq!(checkpoint.size_bytes, 256);
+        assert_eq!(checkpoint.trust_level, "reported_by_self_hosted_worker");
+        assert_eq!(checkpoint.created_at_unix, Some(890));
+        assert_eq!(updated_worker.id, worker.id);
+        assert_eq!(updated_worker.checkpoint_count, 1);
+        assert_eq!(updated_worker.latest_checkpoint_at_unix, Some(890));
+
+        let stored_checkpoints = state.repositories.self_hosted_worker_checkpoints();
+        assert_eq!(stored_checkpoints.len(), 1);
+        assert_eq!(stored_checkpoints[0].id, "checkpoint-1");
+        assert_eq!(stored_checkpoints[0].worker_id, worker.id);
+        assert_eq!(stored_checkpoints[0].checkpoint_json, r#"{"sha256":"def"}"#);
+    }
+
+    #[test]
+    fn record_self_hosted_worker_checkpoint_rejects_missing_or_invalid_payloads() {
+        let state = AppState::new(Config::default());
+
+        let missing = state.record_self_hosted_worker_checkpoint(
+            "missing-worker",
+            crate::responses::AdminSelfHostedWorkerCheckpointRequest {
+                checkpoint_id: "checkpoint-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                checkpoint_name: "resume-state".into(),
+                size_bytes: 256,
+                created_at_unix: None,
+                checkpoint_json: None,
+            },
+        );
+        assert!(matches!(
+            missing,
+            Err(SelfHostedWorkerRecordError::NotFound(message))
+                if message == "self-hosted worker missing-worker was not found"
+        ));
+
+        let worker = state
+            .register_self_hosted_worker(
+                crate::responses::AdminSelfHostedWorkerRegistrationRequest {
+                    tenant: ferrogate_core::TenantContext::default(),
+                    workspace_id: "workspace-1".into(),
+                    worker_name: "customer-worker".into(),
+                    identity_fingerprint: "sha256:worker".into(),
+                    orchestration_enabled: false,
+                    capability_envelope_json: None,
+                },
+            )
+            .expect("registration should be accepted");
+        let blank_name = state.record_self_hosted_worker_checkpoint(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerCheckpointRequest {
+                checkpoint_id: "checkpoint-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                checkpoint_name: " ".into(),
+                size_bytes: 256,
+                created_at_unix: None,
+                checkpoint_json: None,
+            },
+        );
+        assert!(matches!(
+            blank_name,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "checkpoint_name must not be empty"
+        ));
+
+        let oversized = state.record_self_hosted_worker_checkpoint(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerCheckpointRequest {
+                checkpoint_id: "checkpoint-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                checkpoint_name: "resume-state".into(),
+                size_bytes: SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES + 1,
+                created_at_unix: None,
+                checkpoint_json: None,
+            },
+        );
+        assert!(matches!(
+            oversized,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message.contains("size_bytes must be less than or equal to")
+        ));
+
+        let invalid_json = state.record_self_hosted_worker_checkpoint(
+            &worker.id,
+            crate::responses::AdminSelfHostedWorkerCheckpointRequest {
+                checkpoint_id: "checkpoint-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                checkpoint_name: "resume-state".into(),
+                size_bytes: 256,
+                created_at_unix: None,
+                checkpoint_json: Some("{not-json".into()),
+            },
+        );
+        assert!(matches!(
+            invalid_json,
+            Err(SelfHostedWorkerRecordError::InvalidRequest(message))
+                if message == "checkpoint_json must be valid JSON when provided"
+        ));
+
+        assert!(state
+            .repositories
+            .self_hosted_worker_checkpoints()
+            .is_empty());
     }
 
     #[test]

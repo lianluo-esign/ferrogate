@@ -3671,6 +3671,63 @@
           }
         }
       }
+    },
+    "/admin/v1/self-hosted-workers/{id}/checkpoints": {
+      "post": {
+        "operationId": "recordAdminSelfHostedWorkerCheckpoint",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Record self-hosted worker checkpoint metadata in durable control-plane storage.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSelfHostedWorkerCheckpointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded self-hosted worker checkpoint metadata and updated worker projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerCheckpointResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10651,6 +10708,120 @@
               "string",
               "null"
             ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "created_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerCheckpointRequest": {
+        "type": "object",
+        "required": [
+          "checkpoint_id",
+          "session_id",
+          "run_id",
+          "checkpoint_name",
+          "size_bytes"
+        ],
+        "properties": {
+          "checkpoint_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "checkpoint_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16777216
+          },
+          "created_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "checkpoint_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional customer-reported checkpoint metadata document encoded as JSON. Checkpoint fetch/restore payload transfer is not implemented by this metadata endpoint."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerCheckpointResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "worker",
+          "checkpoint"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_worker_checkpoint"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerRecord"
+          },
+          "checkpoint": {
+            "$ref": "#/components/schemas/AdminSelfHostedWorkerCheckpoint"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerCheckpoint": {
+        "type": "object",
+        "required": [
+          "id",
+          "worker_id",
+          "session_id",
+          "run_id",
+          "checkpoint_name",
+          "size_bytes",
+          "trust_level"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "checkpoint_name": {
+            "type": "string"
           },
           "size_bytes": {
             "type": "integer",

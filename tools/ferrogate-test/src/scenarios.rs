@@ -404,6 +404,57 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    let self_hosted_worker_checkpoints_path =
+        format!("{self_hosted_worker_detail_path}/checkpoints");
+    case.expect_json(
+        "POST",
+        &self_hosted_worker_checkpoints_path,
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "checkpoint_id": "checkpoint-1",
+          "session_id": "session-1",
+          "run_id": "run-1",
+          "checkpoint_name": "resume-state",
+          "size_bytes": 256,
+          "created_at_unix": 890,
+          "checkpoint_json": "{\"sha256\":\"def\"}"
+        }"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_checkpoint");
+            assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["worker"]["checkpoint_count"], 1);
+            assert_eq!(body["worker"]["latest_checkpoint_at_unix"], 890);
+            assert_eq!(body["checkpoint"]["id"], "checkpoint-1");
+            assert_eq!(
+                body["checkpoint"]["worker_id"],
+                *self_hosted_worker_id.borrow()
+            );
+            assert_eq!(body["checkpoint"]["session_id"], "session-1");
+            assert_eq!(body["checkpoint"]["run_id"], "run-1");
+            assert_eq!(body["checkpoint"]["checkpoint_name"], "resume-state");
+            assert_eq!(body["checkpoint"]["size_bytes"], 256);
+            assert_eq!(
+                body["checkpoint"]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["checkpoint"]["created_at_unix"], 890);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        &self_hosted_worker_detail_path,
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["checkpoint_count"], 1);
+            assert_eq!(body["latest_checkpoint_at_unix"], 890);
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "GET",
         "/admin/v1/self-hosted-workers/missing-worker",
@@ -443,6 +494,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["data"][0]["latest_event_at_unix"], 456);
             assert_eq!(body["data"][0]["artifact_count"], 1);
             assert_eq!(body["data"][0]["latest_artifact_at_unix"], 789);
+            assert_eq!(body["data"][0]["checkpoint_count"], 1);
+            assert_eq!(body["data"][0]["latest_checkpoint_at_unix"], 890);
             Ok(())
         },
     )?;

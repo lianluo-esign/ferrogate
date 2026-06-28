@@ -327,6 +327,39 @@ pub(crate) struct AdminSelfHostedWorkerArtifactResponse {
     pub(crate) artifact: AdminSelfHostedWorkerArtifact,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerCheckpoint {
+    pub(crate) id: String,
+    pub(crate) worker_id: String,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) checkpoint_name: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) trust_level: String,
+    pub(crate) created_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminSelfHostedWorkerCheckpointRequest {
+    pub(crate) checkpoint_id: String,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) checkpoint_name: String,
+    pub(crate) size_bytes: u64,
+    #[serde(default)]
+    pub(crate) created_at_unix: Option<u64>,
+    #[serde(default)]
+    pub(crate) checkpoint_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerCheckpointResponse {
+    pub(crate) object: &'static str,
+    pub(crate) worker: AdminSelfHostedWorkerRecord,
+    pub(crate) checkpoint: AdminSelfHostedWorkerCheckpoint,
+}
+
 impl<T> AdminList<T> {
     pub(crate) fn new(data: Vec<T>) -> Self {
         Self {
