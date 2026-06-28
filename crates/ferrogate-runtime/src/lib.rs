@@ -86,7 +86,8 @@ pub use self_hosted_worker::{
     SelfHostedRunAckStatus, SelfHostedRunDispatch, SelfHostedRunLease, SelfHostedRunPollRequest,
     SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor, SelfHostedTelemetryKind,
     SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel, SelfHostedWorkerError,
-    SelfHostedWorkerHeartbeat, SelfHostedWorkerIdentity, SelfHostedWorkerRegistration,
+    SelfHostedWorkerHeartbeat, SelfHostedWorkerHttpTransportClient,
+    SelfHostedWorkerHttpTransportSecurity, SelfHostedWorkerIdentity, SelfHostedWorkerRegistration,
     SelfHostedWorkerRegistry, SelfHostedWorkerTransport,
 };
 

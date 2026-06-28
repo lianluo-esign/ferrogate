@@ -10,7 +10,17 @@
 //! identity envelopes and ingest reported telemetry, but those events are not
 //! proof that FerroGate enforced the local execution environment.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    io::{Read, Write},
+    net::{Shutdown, SocketAddr, TcpStream},
+};
+
+use serde::{Deserialize, Serialize};
+
+const SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedWorkerRegistration {
@@ -23,7 +33,7 @@ pub struct SelfHostedWorkerRegistration {
     pub capabilities: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedWorkerIdentity {
     pub tenant_id: String,
     pub workspace_id: String,
@@ -177,7 +187,7 @@ pub struct SelfHostedRunDispatch {
     pub queued_at_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunPollRequest {
     pub identity: SelfHostedWorkerIdentity,
     pub supported_capabilities: Vec<String>,
@@ -185,7 +195,7 @@ pub struct SelfHostedRunPollRequest {
     pub lease_duration_secs: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunLease {
     pub dispatch_id: String,
     pub lease_id: String,
@@ -202,7 +212,7 @@ pub struct SelfHostedRunLease {
     pub trust_level: SelfHostedTelemetryTrustLevel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunAckRequest {
     pub identity: SelfHostedWorkerIdentity,
     pub dispatch_id: String,
@@ -212,7 +222,8 @@ pub struct SelfHostedRunAckRequest {
     pub reported_at_unix: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SelfHostedRunAckStatus {
     Accepted,
     Completed,
@@ -220,7 +231,7 @@ pub enum SelfHostedRunAckStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfHostedRunAck {
     pub dispatch_id: String,
     pub lease_id: String,
@@ -231,6 +242,127 @@ pub struct SelfHostedRunAck {
     pub status: SelfHostedRunAckStatus,
     pub accepted_at_unix: u64,
     pub trust_level: SelfHostedTelemetryTrustLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfHostedWorkerHttpTransportSecurity {
+    MutualTls,
+    SymmetricAead,
+}
+
+impl SelfHostedWorkerHttpTransportSecurity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MutualTls => "mutual_tls",
+            Self::SymmetricAead => "symmetric_aead",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedWorkerHttpTransportClient {
+    endpoint: SocketAddr,
+    transport_security: SelfHostedWorkerHttpTransportSecurity,
+}
+
+impl SelfHostedWorkerHttpTransportClient {
+    pub fn new_mtls(endpoint: SocketAddr) -> Self {
+        Self {
+            endpoint,
+            transport_security: SelfHostedWorkerHttpTransportSecurity::MutualTls,
+        }
+    }
+
+    pub fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
+    pub fn transport_security(&self) -> SelfHostedWorkerHttpTransportSecurity {
+        self.transport_security
+    }
+
+    pub fn poll_run(
+        &self,
+        request: &SelfHostedRunPollRequest,
+    ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
+        validate_run_poll_request(request)?;
+        let body = serde_json::to_string(request).map_err(self_hosted_http_serialization_error)?;
+        let response = self.send_json_request("/v1/self-hosted-workers/runs/poll", &body)?;
+        if response.trim().is_empty() || response.trim() == "null" {
+            return Ok(None);
+        }
+        serde_json::from_str(response.trim())
+            .map(Some)
+            .map_err(|error| {
+                SelfHostedWorkerError::InvalidTransport(format!(
+                    "self-hosted worker HTTP poll response decode failed: {error}"
+                ))
+            })
+    }
+
+    pub fn ack_run(
+        &self,
+        request: &SelfHostedRunAckRequest,
+    ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
+        validate_run_ack_request(request)?;
+        let body = serde_json::to_string(request).map_err(self_hosted_http_serialization_error)?;
+        let response = self.send_json_request("/v1/self-hosted-workers/runs/ack", &body)?;
+        serde_json::from_str(response.trim()).map_err(|error| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker HTTP ack response decode failed: {error}"
+            ))
+        })
+    }
+
+    fn send_json_request(&self, path: &str, body: &str) -> Result<String, SelfHostedWorkerError> {
+        if body.len() > SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker HTTP request exceeds maximum message size".to_string(),
+            ));
+        }
+        let mut stream = TcpStream::connect(self.endpoint).map_err(|error| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker HTTP transport connect failed at {}: {error}",
+                self.endpoint
+            ))
+        })?;
+        let request = format!(
+            "POST {path} HTTP/1.1\r\n\
+             host: {}\r\n\
+             content-type: application/json\r\n\
+             x-ferrogate-transport-security: {}\r\n\
+             content-length: {}\r\n\
+             connection: close\r\n\
+             \r\n\
+             {}",
+            self.endpoint,
+            self.transport_security.as_str(),
+            body.len(),
+            body
+        );
+        stream.write_all(request.as_bytes()).map_err(|error| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker HTTP request write failed: {error}"
+            ))
+        })?;
+        stream.shutdown(Shutdown::Write).map_err(|error| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker HTTP request shutdown failed: {error}"
+            ))
+        })?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).map_err(|error| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker HTTP response read failed: {error}"
+            ))
+        })?;
+        if response.len() > SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker HTTP response exceeds maximum message size".to_string(),
+            ));
+        }
+        decode_self_hosted_http_body(&response)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,7 +590,8 @@ pub enum SelfHostedTelemetryKind {
     Usage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SelfHostedTelemetryTrustLevel {
     ReportedBySelfHostedWorker,
 }
@@ -910,6 +1043,52 @@ fn validate_checkpoint_fetch(
     Ok(())
 }
 
+fn self_hosted_http_serialization_error(error: serde_json::Error) -> SelfHostedWorkerError {
+    SelfHostedWorkerError::InvalidTransport(format!(
+        "self-hosted worker HTTP request serialization failed: {error}"
+    ))
+}
+
+fn decode_self_hosted_http_body(response: &[u8]) -> Result<String, SelfHostedWorkerError> {
+    let response = std::str::from_utf8(response).map_err(|_| {
+        SelfHostedWorkerError::InvalidTransport(
+            "self-hosted worker HTTP response is not valid UTF-8".to_string(),
+        )
+    })?;
+    let Some(header_end) = response.find("\r\n\r\n") else {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "self-hosted worker HTTP response missing header terminator".to_string(),
+        ));
+    };
+    let (headers, body) = response.split_at(header_end);
+    let status_code = parse_self_hosted_http_status(headers.lines().next().unwrap_or_default())?;
+    if status_code != 200 {
+        return Err(SelfHostedWorkerError::InvalidTransport(format!(
+            "self-hosted worker HTTP response returned status {status_code}"
+        )));
+    }
+    Ok(body[4..].to_string())
+}
+
+fn parse_self_hosted_http_status(status_line: &str) -> Result<u16, SelfHostedWorkerError> {
+    let mut parts = status_line.split_whitespace();
+    let version = parts.next().unwrap_or_default();
+    if !version.starts_with("HTTP/") {
+        return Err(SelfHostedWorkerError::InvalidTransport(format!(
+            "self-hosted worker HTTP response has invalid status line: {status_line}"
+        )));
+    }
+    parts
+        .next()
+        .unwrap_or_default()
+        .parse::<u16>()
+        .map_err(|_| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker HTTP response has invalid status code: {status_line}"
+            ))
+        })
+}
+
 fn normalized_capabilities(mut capabilities: Vec<String>) -> Vec<String> {
     capabilities.iter_mut().for_each(|item| {
         *item = item.trim().to_string();
@@ -968,6 +1147,10 @@ fn require_transport_non_empty(field: &str, value: &str) -> Result<(), SelfHoste
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        net::{TcpListener, TcpStream},
+        thread,
+    };
 
     #[test]
     fn registers_worker_and_normalizes_capabilities() {
@@ -1474,6 +1657,132 @@ mod tests {
         assert!(wrong_lease.to_string().contains("lease_id"));
     }
 
+    #[test]
+    fn http_transport_client_polls_and_acks_over_mtls_contract() {
+        let identity = registration_identity();
+        let lease = SelfHostedRunLease {
+            dispatch_id: "dispatch-1".to_string(),
+            lease_id: "dispatch-1:attempt-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            worker_id: "worker-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-1".to_string(),
+            framework_adapter: "codex".to_string(),
+            required_capabilities: vec!["logs".to_string()],
+            workload_ref: "queue://runs/run-1".to_string(),
+            attempt: 1,
+            lease_expires_at_unix: 1_725_000_040,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        };
+        let ack = SelfHostedRunAck {
+            dispatch_id: lease.dispatch_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            tenant_id: lease.tenant_id.clone(),
+            workspace_id: lease.workspace_id.clone(),
+            worker_id: lease.worker_id.clone(),
+            run_id: lease.run_id.clone(),
+            status: SelfHostedRunAckStatus::Accepted,
+            accepted_at_unix: 1_725_000_012,
+            trust_level: SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker,
+        };
+        let server = spawn_self_hosted_http_contract_server(vec![
+            (
+                "/v1/self-hosted-workers/runs/poll",
+                serde_json::to_string(&lease).unwrap(),
+                200,
+            ),
+            (
+                "/v1/self-hosted-workers/runs/ack",
+                serde_json::to_string(&ack).unwrap(),
+                200,
+            ),
+        ]);
+        let client = SelfHostedWorkerHttpTransportClient::new_mtls(server.endpoint);
+
+        let received_lease = client
+            .poll_run(&SelfHostedRunPollRequest {
+                identity: identity.clone(),
+                supported_capabilities: vec!["logs".to_string()],
+                now_unix: 1_725_000_010,
+                lease_duration_secs: 30,
+            })
+            .unwrap()
+            .unwrap();
+        let received_ack = client
+            .ack_run(&SelfHostedRunAckRequest {
+                identity,
+                dispatch_id: received_lease.dispatch_id.clone(),
+                lease_id: received_lease.lease_id.clone(),
+                run_id: received_lease.run_id.clone(),
+                status: SelfHostedRunAckStatus::Accepted,
+                reported_at_unix: 1_725_000_012,
+            })
+            .unwrap();
+        let requests = server.join();
+
+        assert_eq!(received_lease, lease);
+        assert_eq!(received_ack, ack);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /v1/self-hosted-workers/runs/poll HTTP/1.1\r\n"));
+        assert!(requests[0].contains("\r\nx-ferrogate-transport-security: mutual_tls\r\n"));
+        assert!(requests[0].contains("\r\ncontent-type: application/json\r\n"));
+        let poll_body: SelfHostedRunPollRequest =
+            serde_json::from_str(http_request_body(&requests[0])).unwrap();
+        assert_eq!(poll_body.identity.worker_id, "worker-1");
+        assert_eq!(poll_body.supported_capabilities, vec!["logs"]);
+        assert!(requests[1].starts_with("POST /v1/self-hosted-workers/runs/ack HTTP/1.1\r\n"));
+        let ack_body: SelfHostedRunAckRequest =
+            serde_json::from_str(http_request_body(&requests[1])).unwrap();
+        assert_eq!(ack_body.lease_id, "dispatch-1:attempt-1");
+        assert_eq!(ack_body.status, SelfHostedRunAckStatus::Accepted);
+    }
+
+    #[test]
+    fn http_transport_client_treats_empty_poll_body_as_no_work() {
+        let server = spawn_self_hosted_http_contract_server(vec![(
+            "/v1/self-hosted-workers/runs/poll",
+            "null".to_string(),
+            200,
+        )]);
+        let client = SelfHostedWorkerHttpTransportClient::new_mtls(server.endpoint);
+
+        let lease = client
+            .poll_run(&SelfHostedRunPollRequest {
+                identity: registration_identity(),
+                supported_capabilities: vec!["logs".to_string()],
+                now_unix: 1_725_000_010,
+                lease_duration_secs: 30,
+            })
+            .unwrap();
+        server.join();
+
+        assert!(lease.is_none());
+    }
+
+    #[test]
+    fn http_transport_client_fails_closed_on_non_success_status() {
+        let server = spawn_self_hosted_http_contract_server(vec![(
+            "/v1/self-hosted-workers/runs/poll",
+            r#"{"error":"denied"}"#.to_string(),
+            403,
+        )]);
+        let client = SelfHostedWorkerHttpTransportClient::new_mtls(server.endpoint);
+
+        let error = client
+            .poll_run(&SelfHostedRunPollRequest {
+                identity: registration_identity(),
+                supported_capabilities: vec!["logs".to_string()],
+                now_unix: 1_725_000_010,
+                lease_duration_secs: 30,
+            })
+            .unwrap_err();
+        server.join();
+
+        assert!(matches!(error, SelfHostedWorkerError::InvalidTransport(_)));
+        assert!(error.to_string().contains("status 403"));
+    }
+
     fn registered_registry() -> SelfHostedWorkerRegistry {
         let mut registry = SelfHostedWorkerRegistry::default();
         registry.register(registration()).unwrap();
@@ -1497,6 +1806,16 @@ mod tests {
         }
     }
 
+    fn registration_identity() -> SelfHostedWorkerIdentity {
+        SelfHostedWorkerIdentity {
+            tenant_id: "tenant-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            worker_id: "worker-1".to_string(),
+            token_id: "token-1".to_string(),
+            token_secret: "secret-1".to_string(),
+        }
+    }
+
     fn dispatch() -> SelfHostedRunDispatch {
         SelfHostedRunDispatch {
             dispatch_id: "dispatch-1".to_string(),
@@ -1509,5 +1828,71 @@ mod tests {
             workload_ref: "queue://runs/run-1".to_string(),
             queued_at_unix: 1_725_000_000,
         }
+    }
+
+    struct SelfHostedHttpContractServer {
+        endpoint: SocketAddr,
+        handle: thread::JoinHandle<Vec<String>>,
+    }
+
+    impl SelfHostedHttpContractServer {
+        fn join(self) -> Vec<String> {
+            self.handle.join().unwrap()
+        }
+    }
+
+    fn spawn_self_hosted_http_contract_server(
+        responses: Vec<(&'static str, String, u16)>,
+    ) -> SelfHostedHttpContractServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(responses.len());
+            for (expected_path, body, status_code) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                assert!(request.starts_with(&format!("POST {expected_path} HTTP/1.1\r\n")));
+                assert!(request.contains("\r\nx-ferrogate-transport-security: mutual_tls\r\n"));
+                let reason = match status_code {
+                    200 => "OK",
+                    403 => "Forbidden",
+                    _ => "Error",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status_code} {reason}\r\n\
+                     content-type: application/json\r\n\
+                     content-length: {}\r\n\
+                     connection: close\r\n\
+                     \r\n\
+                     {}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        SelfHostedHttpContractServer { endpoint, handle }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn http_request_body(request: &str) -> &str {
+        request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default()
     }
 }
