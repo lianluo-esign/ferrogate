@@ -16,9 +16,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ferrogate_runtime::{
     AgentWorkerFrameworkHandler, AgentWorkerManagementAction, AgentWorkerManagementEnvelope,
-    AgentWorkerManagementKey, AgentWorkerManagementSecurity, AgentWorkerManagementTransport,
-    AgentWorkerManagementVerifier, AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
-    InMemoryAgentWorkerManagementTransport, AGENT_WORKER_PROTOCOL_VERSION,
+    AgentWorkerManagementErrorCode, AgentWorkerManagementKey, AgentWorkerManagementResponse,
+    AgentWorkerManagementSecurity, AgentWorkerManagementTransport, AgentWorkerManagementVerifier,
+    AgentWorkerSecurityAlgorithm, AgentWorkerTransportSecurity,
+    InMemoryAgentWorkerManagementTransport, ManagedWorkerError, AGENT_WORKER_PROTOCOL_VERSION,
 };
 use serde_json::json;
 
@@ -211,7 +212,7 @@ fn accept_one_management_unix_connection(
     let mut input = String::new();
     stream.read_to_string(&mut input)?;
     let envelope: AgentWorkerManagementEnvelope = serde_json::from_str(&input)?;
-    let response = transport.accept_management_request(envelope, now_unix_millis);
+    let response = accept_management_envelope(transport, envelope, now_unix_millis);
     let response_json = serde_json::to_string(&response)?;
     stream.write_all(response_json.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -232,8 +233,36 @@ fn accept_management_json(
                 shared_secret: shared_secret.to_string(),
             },
         ])?);
-    let response = transport.accept_management_request(envelope, now_unix_millis);
+    let response = accept_management_envelope(&mut transport, envelope, now_unix_millis);
     Ok(serde_json::to_string(&response)?)
+}
+
+fn accept_management_envelope(
+    transport: &mut InMemoryAgentWorkerManagementTransport,
+    envelope: AgentWorkerManagementEnvelope,
+    now_unix_millis: u64,
+) -> AgentWorkerManagementResponse {
+    let response = transport.accept_management_request(envelope.clone(), now_unix_millis);
+    if !response.accepted {
+        return response;
+    }
+    if management_action_supported(envelope.action) {
+        return response;
+    }
+    AgentWorkerManagementResponse::rejected(
+        &envelope,
+        &ManagedWorkerError::management_protocol_error(
+            AgentWorkerManagementErrorCode::UnsupportedAction,
+            format!(
+                "agent-worker management action {} is not implemented by this worker process",
+                envelope.action.as_str()
+            ),
+        ),
+    )
+}
+
+fn management_action_supported(action: AgentWorkerManagementAction) -> bool {
+    matches!(action, AgentWorkerManagementAction::ProbeHandlers)
 }
 
 fn current_unix_millis() -> u64 {
@@ -455,6 +484,30 @@ mod tests {
 
         assert_eq!(response["accepted"], false);
         assert_eq!(response["error"]["code"], "transport_security_required");
+        assert_eq!(response["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn rejects_signed_lifecycle_action_until_worker_implements_handler() {
+        let mut envelope = smoke_envelope().unwrap();
+        envelope.action = AgentWorkerManagementAction::Provision;
+        envelope.request_id = "agent-worker-provision-request".to_string();
+        envelope.idempotency_key = "agent-worker-provision-idempotency".to_string();
+        envelope.security.nonce = "agent-worker-provision-nonce".to_string();
+        envelope.security.signature = envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let input = serde_json::to_string(&envelope).unwrap();
+
+        let response_json =
+            accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
+                .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+
+        assert_eq!(response["accepted"], false);
+        assert_eq!(response["request_id"], "agent-worker-provision-request");
+        assert_eq!(response["action"], "provision");
+        assert_eq!(response["error"]["code"], "unsupported_action");
         assert_eq!(response["error"]["retryable"], false);
     }
 

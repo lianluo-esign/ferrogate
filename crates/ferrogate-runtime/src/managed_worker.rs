@@ -185,8 +185,19 @@ impl AgentWorkerManagementAction {
 pub enum AgentWorkerManagementErrorCode {
     InvalidRequest,
     UnsupportedProtocolVersion,
+    UnsupportedAction,
     MissingRequiredField,
     TransportSecurityRequired,
+    PolicyDenied,
+    QuotaExceeded,
+    IncompatibleBackend,
+    HandlerUnavailable,
+    WorkerBusy,
+    ProvisionFailed,
+    RunFailed,
+    Timeout,
+    Cancelled,
+    CleanupFailed,
     InvalidDeadline,
     DeadlineExpired,
     ClockSkewExceeded,
@@ -203,8 +214,19 @@ impl AgentWorkerManagementErrorCode {
         match self {
             Self::InvalidRequest => "invalid_request",
             Self::UnsupportedProtocolVersion => "unsupported_protocol_version",
+            Self::UnsupportedAction => "unsupported_action",
             Self::MissingRequiredField => "missing_required_field",
             Self::TransportSecurityRequired => "transport_security_required",
+            Self::PolicyDenied => "policy_denied",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::IncompatibleBackend => "incompatible_backend",
+            Self::HandlerUnavailable => "handler_unavailable",
+            Self::WorkerBusy => "worker_busy",
+            Self::ProvisionFailed => "provision_failed",
+            Self::RunFailed => "run_failed",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::CleanupFailed => "cleanup_failed",
             Self::InvalidDeadline => "invalid_deadline",
             Self::DeadlineExpired => "deadline_expired",
             Self::ClockSkewExceeded => "clock_skew_exceeded",
@@ -218,7 +240,15 @@ impl AgentWorkerManagementErrorCode {
     }
 
     pub fn retryable(self) -> bool {
-        matches!(self, Self::DeadlineExpired | Self::ClockSkewExceeded)
+        matches!(
+            self,
+            Self::DeadlineExpired
+                | Self::ClockSkewExceeded
+                | Self::WorkerBusy
+                | Self::ProvisionFailed
+                | Self::Timeout
+                | Self::CleanupFailed
+        )
     }
 }
 
@@ -1935,6 +1965,75 @@ mod tests {
         assert_eq!(rejected_json["action"], "provision");
         assert_eq!(rejected_json["error"]["code"], "invalid_signature");
         assert_eq!(rejected_json["error"]["retryable"], false);
+
+        let unsupported_action = AgentWorkerManagementResponse::rejected(
+            &envelope,
+            &ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::UnsupportedAction,
+                "agent-worker management action provision is not implemented",
+            ),
+        );
+        let unsupported_json = serde_json::to_value(&unsupported_action).unwrap();
+        assert_eq!(unsupported_json["error"]["code"], "unsupported_action");
+        assert_eq!(unsupported_json["error"]["retryable"], false);
+
+        let standardized_codes = [
+            (
+                AgentWorkerManagementErrorCode::PolicyDenied,
+                "policy_denied",
+                false,
+            ),
+            (
+                AgentWorkerManagementErrorCode::QuotaExceeded,
+                "quota_exceeded",
+                false,
+            ),
+            (
+                AgentWorkerManagementErrorCode::IncompatibleBackend,
+                "incompatible_backend",
+                false,
+            ),
+            (
+                AgentWorkerManagementErrorCode::HandlerUnavailable,
+                "handler_unavailable",
+                false,
+            ),
+            (
+                AgentWorkerManagementErrorCode::WorkerBusy,
+                "worker_busy",
+                true,
+            ),
+            (
+                AgentWorkerManagementErrorCode::ProvisionFailed,
+                "provision_failed",
+                true,
+            ),
+            (
+                AgentWorkerManagementErrorCode::RunFailed,
+                "run_failed",
+                false,
+            ),
+            (AgentWorkerManagementErrorCode::Timeout, "timeout", true),
+            (
+                AgentWorkerManagementErrorCode::Cancelled,
+                "cancelled",
+                false,
+            ),
+            (
+                AgentWorkerManagementErrorCode::CleanupFailed,
+                "cleanup_failed",
+                true,
+            ),
+        ];
+        for (code, expected_wire_code, expected_retryable) in standardized_codes {
+            let rejected = AgentWorkerManagementResponse::rejected(
+                &envelope,
+                &ManagedWorkerError::management_protocol_error(code, "standardized failure"),
+            );
+            let rejected_json = serde_json::to_value(&rejected).unwrap();
+            assert_eq!(rejected_json["error"]["code"], expected_wire_code);
+            assert_eq!(rejected_json["error"]["retryable"], expected_retryable);
+        }
     }
 
     fn scheduler() -> ManagedWorkerScheduler {

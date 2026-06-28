@@ -94,6 +94,13 @@ gateway/control plane makes the scheduling decision, then calls the
 `agent-worker` management API. The gateway must not probe adapter binaries,
 spawn Codex, Claude Code, or Hermes, or manage Firecracker lifecycle details.
 
+This protocol is an internal API boundary, not an implementation shortcut. The
+gateway and `agent-worker` can be upgraded independently only if every request
+and response remains versioned, authenticated, replay-resistant, deadline-bound,
+idempotent, and encoded with stable wire values. Any new transport or lifecycle
+action must preserve this contract instead of adding side-channel arguments or
+transport-specific behavior.
+
 Every gateway-to-`agent-worker` management request uses a versioned JSON
 envelope with stable snake_case enum values. The envelope carries:
 
@@ -119,6 +126,16 @@ The initial standard actions are `probe_handlers`, `list_backends`,
 `provision`, `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and
 `collect_artifacts`.
 
+Every response uses the same envelope identity fields plus `accepted`,
+`duplicate_idempotency_key`, and an optional standardized error object. Stable
+error codes include `invalid_request`, `unsupported_protocol_version`,
+`unsupported_action`, `transport_security_required`, `policy_denied`,
+`quota_exceeded`, `incompatible_backend`, `handler_unavailable`, `worker_busy`,
+`provision_failed`, `run_failed`, `timeout`, `cancelled`, `cleanup_failed`,
+`invalid_signature`, `unknown_key`, `nonce_replay`, and
+`idempotency_conflict`. Callers must use the structured `retryable` flag instead
+of string-matching error messages.
+
 The management API fails closed:
 
 - unsupported protocol versions are rejected;
@@ -129,6 +146,8 @@ The management API fails closed:
 - replayed nonces are rejected;
 - reused idempotency keys are accepted only when they bind to the same
   lifecycle fingerprint.
+- authenticated but unimplemented lifecycle actions are rejected with
+  `unsupported_action`; authentication success never implies execution support.
 
 The supported MAC algorithms are `shared_secret_blake2b` and
 `mtls_bound_blake2b`. The MAC proves request authenticity and integrity. It
@@ -149,6 +168,20 @@ Network or cross-host management traffic must use `mutual_tls` or
 `symmetric_aead`; a shared-secret MAC alone is not payload encryption. Requests
 that do not present an accepted transport security mode fail closed with
 `transport_security_required`.
+
+`symmetric_aead` is a contract marker for authenticated payload encryption, not
+a boolean flag pretending encryption happened. A real network transport must
+define the AEAD algorithm, key derivation or key lookup by `key_id`, nonce
+construction, associated data, rotation window, maximum message size, and
+decryption failure mapping before it is accepted for cross-host traffic. Until
+that exists, cross-host deployments should use `mutual_tls` and keep the MAC as
+request-level authenticity evidence.
+
+Nonce replay and idempotency state must eventually be durable for long-running
+servers. In-memory state is acceptable only for deterministic local contract
+smokes; production worker management must survive process restarts well enough
+to avoid accepting replayed lifecycle requests inside the configured request
+validity window.
 
 The standalone worker binary exposes a local contract entrypoint for this
 wire format:
@@ -184,6 +217,12 @@ checks are not reset per connection. The envelope should use
 the `agent-worker` process can receive management requests over an explicit
 same-host process boundary. It is not the final long-running lifecycle server,
 does not provide cross-host encryption, and does not boot Firecracker.
+
+Until lifecycle handlers land, this server only accepts `probe_handlers`.
+Authenticated lifecycle requests such as `provision`, `exec_or_attach`, `stop`,
+and `cleanup` are rejected with `unsupported_action` instead of returning a
+false positive `accepted=true`. Adding a lifecycle action requires both the
+handler implementation and contract coverage for the reported response.
 
 The gateway/control-plane side uses the same wire contract through
 `AgentWorkerUnixManagementClient`. The client serializes an
