@@ -57,7 +57,8 @@ use ferrogate_providers::{
 use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
-    StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAuditEvent,
+    StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
+    StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
     StoredRequestLog, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
@@ -4569,6 +4570,185 @@ impl AppState {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn record_managed_worker_lifecycle(
+        &self,
+        record: &ferrogate_runtime::ManagedWorkerLifecycleRecord,
+    ) {
+        fn status(value: ferrogate_runtime::ManagedWorkerSessionStatus) -> &'static str {
+            match value {
+                ferrogate_runtime::ManagedWorkerSessionStatus::Running => "running",
+                ferrogate_runtime::ManagedWorkerSessionStatus::Completed => "completed",
+                ferrogate_runtime::ManagedWorkerSessionStatus::Cancelled => "cancelled",
+                ferrogate_runtime::ManagedWorkerSessionStatus::Failed => "failed",
+                ferrogate_runtime::ManagedWorkerSessionStatus::CleanedUp => "cleaned_up",
+            }
+        }
+
+        fn action(value: ferrogate_runtime::ManagedWorkerLifecycleAction) -> &'static str {
+            match value {
+                ferrogate_runtime::ManagedWorkerLifecycleAction::ExecOrAttach => "exec_or_attach",
+                ferrogate_runtime::ManagedWorkerLifecycleAction::Stop => "stop",
+                ferrogate_runtime::ManagedWorkerLifecycleAction::Cleanup => "cleanup",
+                ferrogate_runtime::ManagedWorkerLifecycleAction::Failure => "failure",
+            }
+        }
+
+        fn backend_kind(value: ferrogate_runtime::IsolationBackendKind) -> &'static str {
+            match value {
+                ferrogate_runtime::IsolationBackendKind::FirecrackerMicroVm => {
+                    "firecracker_microvm"
+                }
+                ferrogate_runtime::IsolationBackendKind::KataContainers => "kata_containers",
+                ferrogate_runtime::IsolationBackendKind::Gvisor => "gvisor",
+                ferrogate_runtime::IsolationBackendKind::RootlessDocker => "rootless_docker",
+                ferrogate_runtime::IsolationBackendKind::WasmSandbox => "wasm_sandbox",
+            }
+        }
+
+        fn started_at(
+            value: ferrogate_runtime::ManagedWorkerSessionStatus,
+            timestamp: Option<u64>,
+        ) -> Option<u64> {
+            match value {
+                ferrogate_runtime::ManagedWorkerSessionStatus::Running
+                | ferrogate_runtime::ManagedWorkerSessionStatus::Completed
+                | ferrogate_runtime::ManagedWorkerSessionStatus::Cancelled
+                | ferrogate_runtime::ManagedWorkerSessionStatus::CleanedUp => timestamp,
+                ferrogate_runtime::ManagedWorkerSessionStatus::Failed => None,
+            }
+        }
+
+        fn completed_at(
+            value: ferrogate_runtime::ManagedWorkerSessionStatus,
+            timestamp: Option<u64>,
+        ) -> Option<u64> {
+            match value {
+                ferrogate_runtime::ManagedWorkerSessionStatus::Completed
+                | ferrogate_runtime::ManagedWorkerSessionStatus::Cancelled
+                | ferrogate_runtime::ManagedWorkerSessionStatus::Failed
+                | ferrogate_runtime::ManagedWorkerSessionStatus::CleanedUp => timestamp,
+                ferrogate_runtime::ManagedWorkerSessionStatus::Running => None,
+            }
+        }
+
+        fn cleanup_completed_at(
+            value: ferrogate_runtime::ManagedWorkerSessionStatus,
+            timestamp: Option<u64>,
+        ) -> Option<u64> {
+            match value {
+                ferrogate_runtime::ManagedWorkerSessionStatus::CleanedUp => timestamp,
+                ferrogate_runtime::ManagedWorkerSessionStatus::Running
+                | ferrogate_runtime::ManagedWorkerSessionStatus::Completed
+                | ferrogate_runtime::ManagedWorkerSessionStatus::Cancelled
+                | ferrogate_runtime::ManagedWorkerSessionStatus::Failed => None,
+            }
+        }
+
+        #[derive(Serialize)]
+        struct EventIdInput<'a> {
+            session_id: &'a str,
+            run_id: &'a str,
+            action: &'a str,
+            outcome: &'a str,
+            agent_worker_id: &'a str,
+            isolation_instance_id: &'a Option<String>,
+        }
+
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some(record.tenant_id.clone()),
+            project_id: Some(record.workspace_id.clone()),
+            ..ferrogate_core::TenantContext::default()
+        };
+        let occurred_at_unix = now_unix_seconds();
+        let status = status(record.status);
+        let action = action(record.action);
+        let backend_kind = backend_kind(record.isolation_backend_kind.clone());
+        let event_id_bytes = serde_json::to_vec(&EventIdInput {
+            session_id: &record.session_id,
+            run_id: &record.run_id,
+            action,
+            outcome: &record.outcome,
+            agent_worker_id: &record.agent_worker_id,
+            isolation_instance_id: &record.isolation_instance_id,
+        })
+        .expect("managed worker lifecycle event id serialization should not fail");
+        let agent_worker = StoredAgentWorkerInstance {
+            id: record.agent_worker_id.clone(),
+            process_name: "agent-worker".to_string(),
+            host_id: None,
+            worker_version: None,
+            status: "observed".to_string(),
+            started_at_unix: None,
+            last_seen_at_unix: occurred_at_unix,
+            process_json: serde_json::json!({
+                "process_boundary": "external_process",
+                "host_lifecycle_owner": "agent-worker",
+                "transport_implemented": false,
+            })
+            .to_string(),
+        };
+        if let Err(error) = self.repositories.upsert_agent_worker_instance(agent_worker) {
+            warn!("failed to persist agent-worker instance record: {error}");
+            return;
+        }
+
+        let session = StoredManagedWorkerSession {
+            id: record.session_id.clone(),
+            run_id: record.run_id.clone(),
+            tenant: tenant.clone(),
+            workspace_id: record.workspace_id.clone(),
+            worker_template_id: record.worker_template_id.clone(),
+            agent_worker_instance_id: Some(record.agent_worker_id.clone()),
+            status: status.to_string(),
+            isolation_backend_kind: backend_kind.to_string(),
+            microvm_id: record.isolation_instance_id.clone(),
+            capability_envelope_id: record.capability_envelope_id.clone(),
+            requested_at_unix: occurred_at_unix,
+            started_at_unix: started_at(record.status, occurred_at_unix),
+            completed_at_unix: completed_at(record.status, occurred_at_unix),
+            cleanup_completed_at_unix: cleanup_completed_at(record.status, occurred_at_unix),
+            capability_envelope_json: serde_json::json!({
+                "id": record.capability_envelope_id,
+                "boundary": "gateway_mediated",
+            })
+            .to_string(),
+            resource_limits_json: "{}".to_string(),
+        };
+        if let Err(error) = self.repositories.upsert_managed_worker_session(session) {
+            warn!("failed to persist managed worker session record: {error}");
+            return;
+        }
+
+        let event = StoredManagedWorkerLifecycleEvent {
+            id: format!("mwl-{:016x}", fnv1a64(&event_id_bytes)),
+            session_id: record.session_id.clone(),
+            run_id: record.run_id.clone(),
+            tenant,
+            workspace_id: record.workspace_id.clone(),
+            agent_worker_instance_id: Some(record.agent_worker_id.clone()),
+            status: status.to_string(),
+            action: action.to_string(),
+            outcome: record.outcome.clone(),
+            occurred_at_unix,
+            evidence_json: serde_json::json!({
+                "agent_worker_id": record.agent_worker_id,
+                "host_lifecycle_owner": "agent-worker",
+                "isolation_backend_kind": backend_kind,
+                "isolation_instance_id": record.isolation_instance_id,
+                "capability_envelope_id": record.capability_envelope_id,
+                "failure_reason": record.failure_reason,
+            })
+            .to_string(),
+        };
+        if let Err(error) = self
+            .repositories
+            .append_managed_worker_lifecycle_event(event)
+        {
+            warn!("failed to persist managed worker lifecycle event record: {error}");
+        }
+    }
+
     pub(crate) fn tool_session_events(&self, session_id: &str) -> Vec<StoredAuditEvent> {
         let target = format!("tool_session:{session_id}");
         let target_prefix = format!("{target}/");
@@ -6770,6 +6950,84 @@ mod tests {
         assert_eq!(events[0].usage_source, BillingUsageSource::GatewayEstimate);
         assert_eq!(events[0].usage.total_tokens, 8);
         assert_eq!(state.api_key_total_tokens_used("key_dev"), 8);
+    }
+
+    #[test]
+    fn records_managed_worker_lifecycle_records_into_storage() {
+        let state = AppState::new(Config::default());
+        let record = ferrogate_runtime::ManagedWorkerLifecycleRecord {
+            session_id: "session-1".into(),
+            run_id: "run-1".into(),
+            tenant_id: "tenant-1".into(),
+            workspace_id: "workspace-1".into(),
+            worker_template_id: "template-codex".into(),
+            agent_worker_id: "agent-worker-1".into(),
+            isolation_backend_kind: ferrogate_runtime::IsolationBackendKind::FirecrackerMicroVm,
+            isolation_instance_id: Some("microvm-1".into()),
+            capability_envelope_id: "capability-1".into(),
+            status: ferrogate_runtime::ManagedWorkerSessionStatus::CleanedUp,
+            action: ferrogate_runtime::ManagedWorkerLifecycleAction::Cleanup,
+            outcome: "cleaned_up".into(),
+            failure_reason: None,
+        };
+
+        state.record_managed_worker_lifecycle(&record);
+
+        let agent_workers = state.repositories.agent_worker_instances();
+        assert_eq!(agent_workers.len(), 1);
+        assert_eq!(agent_workers[0].id, "agent-worker-1");
+        assert_eq!(agent_workers[0].process_name, "agent-worker");
+        assert_eq!(agent_workers[0].status, "observed");
+        assert!(agent_workers[0]
+            .process_json
+            .contains("\"process_boundary\":\"external_process\""));
+
+        let sessions = state.repositories.managed_worker_sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "session-1");
+        assert_eq!(sessions[0].run_id, "run-1");
+        assert_eq!(
+            sessions[0].tenant.organization_id.as_deref(),
+            Some("tenant-1")
+        );
+        assert_eq!(
+            sessions[0].tenant.project_id.as_deref(),
+            Some("workspace-1")
+        );
+        assert_eq!(sessions[0].workspace_id, "workspace-1");
+        assert_eq!(
+            sessions[0].agent_worker_instance_id.as_deref(),
+            Some("agent-worker-1")
+        );
+        assert_eq!(sessions[0].status, "cleaned_up");
+        assert_eq!(sessions[0].isolation_backend_kind, "firecracker_microvm");
+        assert_eq!(sessions[0].microvm_id.as_deref(), Some("microvm-1"));
+        assert_eq!(sessions[0].capability_envelope_id, "capability-1");
+        assert!(sessions[0].cleanup_completed_at_unix.is_some());
+
+        let events = state.repositories.managed_worker_lifecycle_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, "session-1");
+        assert_eq!(events[0].run_id, "run-1");
+        assert_eq!(
+            events[0].tenant.organization_id.as_deref(),
+            Some("tenant-1")
+        );
+        assert_eq!(events[0].workspace_id, "workspace-1");
+        assert_eq!(
+            events[0].agent_worker_instance_id.as_deref(),
+            Some("agent-worker-1")
+        );
+        assert_eq!(events[0].status, "cleaned_up");
+        assert_eq!(events[0].action, "cleanup");
+        assert_eq!(events[0].outcome, "cleaned_up");
+        assert!(events[0].id.starts_with("mwl-"));
+        assert!(events[0]
+            .evidence_json
+            .contains("\"host_lifecycle_owner\":\"agent-worker\""));
+        assert!(events[0]
+            .evidence_json
+            .contains("\"isolation_backend_kind\":\"firecracker_microvm\""));
     }
 
     #[test]
