@@ -1329,6 +1329,17 @@ mod tests {
     }
 
     #[test]
+    fn managed_external_action_transport_responses_match_golden_fixture() {
+        let actual = serde_json::to_value(managed_external_action_transport_responses()).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/managed_external_action_transport_responses.golden.json"
+        ))
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn external_action_response_rejects_malformed_accepted_evidence() {
         let response = ExternalActionAuthorizationResponse {
             accepted: true,
@@ -1640,5 +1651,108 @@ mod tests {
             }
         })
         .collect()
+    }
+
+    fn managed_external_action_transport_responses() -> Vec<GatewayExternalActionTransportResponse>
+    {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        [
+            managed_external_action_response_case(
+                ManagedExternalActionRequest {
+                    session: session.clone(),
+                    action: ManagedExternalAction::Tool(ManagedToolAction {
+                        tool_name: "native.echo".to_string(),
+                        arguments_policy: "redacted_json".to_string(),
+                    }),
+                    high_risk: false,
+                },
+                CapabilityPolicy {
+                    allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Tool]),
+                    ..CapabilityPolicy::default()
+                },
+            ),
+            managed_external_action_response_case(
+                ManagedExternalActionRequest {
+                    session: session.clone(),
+                    action: ManagedExternalAction::Rest(ManagedRestAction {
+                        method: "POST".to_string(),
+                        url: "https://api.third-party.test/v1/payments".to_string(),
+                        headers_policy: "strip_credentials".to_string(),
+                        body_policy: "redact_and_scan".to_string(),
+                        timeout_millis: 2_000,
+                        retry_limit: 0,
+                    }),
+                    high_risk: false,
+                },
+                CapabilityPolicy::default(),
+            ),
+            managed_external_action_response_case(
+                ManagedExternalActionRequest {
+                    session: session.clone(),
+                    action: ManagedExternalAction::Cli(ManagedCliAction {
+                        command: "bash".to_string(),
+                        args: vec!["-lc".to_string(), "cargo test".to_string()],
+                        working_dir: "/workspace".to_string(),
+                        env_policy: "gateway_injected_only".to_string(),
+                        timeout_millis: 30_000,
+                        stdout_limit_bytes: 65_536,
+                        stderr_limit_bytes: 65_536,
+                        artifact_capture: true,
+                    }),
+                    high_risk: true,
+                },
+                CapabilityPolicy {
+                    allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
+                    approval_required_actions: std::collections::BTreeSet::from([
+                        CapabilityAction::Cli,
+                    ]),
+                    ..CapabilityPolicy::default()
+                },
+            ),
+            {
+                let authorization = ExternalActionAuthorizationRequest::from_managed_request(
+                    ManagedExternalActionRequest {
+                        session,
+                        action: ManagedExternalAction::Browser(ManagedBrowserAction {
+                            operation: ManagedBrowserOperation::Navigate,
+                            url: "https://docs.example.test".to_string(),
+                            timeout_millis: 0,
+                        }),
+                        high_risk: false,
+                    },
+                );
+                let request_id = authorization.stable_request_id();
+                GatewayExternalActionTransportResponse {
+                    request_id,
+                    response: ExternalActionAuthorizationResponse::rejected(
+                        FrameworkAdapterError::InvalidRequest(
+                            "timeout_millis must be greater than zero".to_string(),
+                        ),
+                    ),
+                }
+            },
+        ]
+        .into()
+    }
+
+    fn managed_external_action_response_case(
+        managed: ManagedExternalActionRequest,
+        policy: CapabilityPolicy,
+    ) -> GatewayExternalActionTransportResponse {
+        let authorization = ExternalActionAuthorizationRequest::from_managed_request(managed);
+        let request_id = authorization.stable_request_id();
+        let managed = authorization.into_managed_request().unwrap();
+        let authorizer = SimpleCapabilityAuthorizer::new(policy);
+        let (evidence, event) = authorize_managed_external_action(&authorizer, managed).unwrap();
+        GatewayExternalActionTransportResponse {
+            request_id,
+            response: ExternalActionAuthorizationResponse::from_decision(
+                ManagedExternalActionDecision {
+                    decision: evidence.decision,
+                    event,
+                },
+            ),
+        }
     }
 }
