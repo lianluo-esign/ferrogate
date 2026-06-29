@@ -381,9 +381,11 @@ firecracker-guest-agent-preflight` emits a separate worker-owned JSON report
 without starting a microVM. It checks
 `AGENT_WORKER_FIRECRACKER_GUEST_AGENT` as an executable guest-agent command
 path, `AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE` as a prepared workspace
-directory, and `AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT` as the
-gateway authorizer endpoint the guest-side handler channel must use before
-tool/CLI/MCP/REST/file actions. The report intentionally sets
+directory that the `agent-worker` can write to and clean up from, and
+`AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT` as the gateway authorizer
+endpoint the guest-side handler channel must use before tool/CLI/MCP/REST/file
+actions. The report includes the workspace `writable` probe result and
+intentionally sets
 `proves_microvm_boot=false` and `proves_handler_execution=false`; passing this
 preflight only means the worker has enough configuration to attempt the future
 guest handler RPC path.

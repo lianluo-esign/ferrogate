@@ -504,6 +504,7 @@ struct FirecrackerPathCheck {
     version_output: Option<String>,
     char_device: Option<bool>,
     open_read_write: Option<bool>,
+    writable: Option<bool>,
     reason: Option<String>,
 }
 
@@ -576,6 +577,7 @@ fn configured_file_check(
                 version_output,
                 char_device: None,
                 open_read_write: None,
+                writable: None,
                 reason,
             }
         }
@@ -617,12 +619,21 @@ fn configured_directory_check(
     match fs::metadata(&path) {
         Ok(metadata) => {
             let directory = metadata.is_dir();
-            let reason = if directory {
-                None
+            let writable = if directory {
+                Some(directory_write_probe(&path))
             } else {
+                None
+            };
+            let reason = if !directory {
                 Some(format!(
                     "{env_var} does not point to a directory: {path_display}"
                 ))
+            } else if writable == Some(false) {
+                Some(format!(
+                    "{env_var} is not writable by agent-worker: {path_display}"
+                ))
+            } else {
+                None
             };
             FirecrackerPathCheck {
                 env_var: Some(env_var),
@@ -636,6 +647,7 @@ fn configured_directory_check(
                 version_output: None,
                 char_device: None,
                 open_read_write: None,
+                writable,
                 reason,
             }
         }
@@ -722,6 +734,7 @@ fn kvm_device_check() -> FirecrackerPathCheck {
                 version_output: None,
                 char_device: Some(char_device),
                 open_read_write: Some(open_read_write),
+                writable: None,
                 reason,
             }
         }
@@ -754,7 +767,28 @@ fn path_check_failure(
         version_output: None,
         char_device: None,
         open_read_write: None,
+        writable: None,
         reason: Some(reason),
+    }
+}
+
+fn directory_write_probe(path: &Path) -> bool {
+    let probe = path.join(format!(
+        ".ferrogate-agent-worker-write-probe-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    match OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(mut file) => {
+            let write_ok = file.write_all(b"ferrogate-agent-worker").is_ok();
+            drop(file);
+            let cleanup_ok = fs::remove_file(&probe).is_ok();
+            write_ok && cleanup_ok
+        }
+        Err(_) => false,
     }
 }
 
@@ -1703,9 +1737,36 @@ mod tests {
             preflight.workspace.path.as_deref(),
             Some(workspace.to_str().unwrap())
         );
+        assert_eq!(preflight.workspace.writable, Some(true));
         assert!(preflight
             .failure_summary()
             .contains("handler execution inside the microVM is still not proven"));
+    }
+
+    #[test]
+    fn firecracker_guest_agent_preflight_requires_workspace_directory() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace_file = temp.path().join("workspace-file");
+        write_executable_version_script(&guest_agent, "ferrogate guest agent v.test").unwrap();
+        std::fs::write(&workspace_file, b"not a directory").unwrap();
+        env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace_file);
+        env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+
+        let preflight = firecracker_guest_agent_preflight();
+
+        clear_firecracker_env();
+        assert!(!preflight.ready());
+        assert_eq!(preflight.workspace.writable, None);
+        assert!(preflight
+            .failure_summary()
+            .contains("does not point to a directory"));
+        assert!(!preflight.proves_handler_execution);
     }
 
     #[test]
