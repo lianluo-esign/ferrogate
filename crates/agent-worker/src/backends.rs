@@ -932,7 +932,7 @@ fn read_boot_evidence(
 ) -> Option<FirecrackerBootEvidence> {
     let serial = fs::read_to_string(&artifacts.serial_output).ok()?;
     let markers = serial_boot_markers(&serial);
-    if !markers.contains(&"linux_version") || !markers.contains(&"kvm_hypervisor") {
+    if !serial_has_microvm_userspace_evidence(&markers) {
         return None;
     }
     Some(FirecrackerBootEvidence {
@@ -973,7 +973,38 @@ fn serial_boot_markers(serial: &str) -> Vec<&'static str> {
     if serial.contains("console [ttyS0] enabled") {
         markers.push("serial_console");
     }
+    if serial.contains("VFS: Mounted root ") {
+        markers.push("rootfs_mounted");
+    }
+    if serial.contains(" as init process") {
+        markers.push("init_started");
+    }
+    if serial.contains("systemd[1]:") {
+        markers.push("systemd_started");
+    }
+    if serial.contains("Reached target")
+        && (serial.contains("multi-user.target") || serial.contains("basic.target"))
+    {
+        markers.push("userspace_target_reached");
+    }
+    if serial.contains(" login:") || serial.contains(" automatic login") {
+        markers.push("login_prompt");
+    }
+    if serial.contains("root@") && serial.contains(":~#") {
+        markers.push("root_shell_prompt");
+    }
     markers
+}
+
+fn serial_has_microvm_userspace_evidence(markers: &[&str]) -> bool {
+    markers.contains(&"linux_version")
+        && markers.contains(&"kvm_hypervisor")
+        && markers.contains(&"rootfs_mounted")
+        && markers.contains(&"init_started")
+        && (markers.contains(&"systemd_started")
+            || markers.contains(&"userspace_target_reached")
+            || markers.contains(&"login_prompt")
+            || markers.contains(&"root_shell_prompt"))
 }
 
 fn excerpt(text: &str, max_lines: usize) -> String {
@@ -1220,7 +1251,13 @@ mod tests {
             "[    0.000000] Linux version 6.1.174\n\
              [    0.000000] Hypervisor detected: KVM\n\
              [    0.000113] ACPI: RSDP 0x00000000000E0000 000024 (v02 FIRECK)\n\
-             [    0.054831] printk: console [ttyS0] enabled\n",
+             [    0.054831] printk: console [ttyS0] enabled\n\
+             [    0.673622] VFS: Mounted root (ext4 filesystem) on device 254:0.\n\
+             [    0.676346] Run /sbin/init as init process\n\
+             [    0.692980] systemd[1]: systemd 255.4 running in system mode\n\
+             [    1.000000] Reached target multi-user.target - Multi-User System.\n\
+             ubuntu-fc-uvm login: root (automatic login)\n\
+             root@ubuntu-fc-uvm:~# \n",
         );
 
         assert_eq!(
@@ -1229,13 +1266,29 @@ mod tests {
                 "linux_version",
                 "kvm_hypervisor",
                 "firecracker_platform",
-                "serial_console"
+                "serial_console",
+                "rootfs_mounted",
+                "init_started",
+                "systemd_started",
+                "userspace_target_reached",
+                "login_prompt",
+                "root_shell_prompt"
             ]
         );
+        assert!(serial_has_microvm_userspace_evidence(&markers));
         let process_only_markers = serial_boot_markers("Firecracker process started");
         assert_eq!(process_only_markers, vec!["firecracker_platform"]);
         assert!(!process_only_markers.contains(&"linux_version"));
         assert!(!process_only_markers.contains(&"kvm_hypervisor"));
+        assert!(!serial_has_microvm_userspace_evidence(
+            &process_only_markers
+        ));
+        assert!(!serial_has_microvm_userspace_evidence(&[
+            "linux_version",
+            "kvm_hypervisor",
+            "firecracker_platform",
+            "serial_console"
+        ]));
     }
 
     fn write_executable_version_script(path: &Path, version: &str) -> std::io::Result<()> {

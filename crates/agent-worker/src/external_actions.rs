@@ -3043,20 +3043,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let binary_path = temp.path().join("governed-cli-smoke");
         let marker_path = temp.path().join("executed-marker");
-        std::fs::write(
+        write_executable_script(
             &binary_path,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf 'executed %s\\n' \"$1\"\nprintf done > {}\n",
                 marker_path.display()
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            let mut permissions = std::fs::metadata(&binary_path).unwrap().permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&binary_path, permissions).unwrap();
-        }
+        );
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
@@ -3102,17 +3095,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let binary_path = temp.path().join("must-not-run");
         let marker_path = temp.path().join("executed-marker");
-        std::fs::write(
+        write_executable_script(
             &binary_path,
-            format!("#!/bin/sh\nprintf done > {}\n", marker_path.display()),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            let mut permissions = std::fs::metadata(&binary_path).unwrap().permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&binary_path, permissions).unwrap();
-        }
+            &format!("#!/bin/sh\nprintf done > {}\n", marker_path.display()),
+        );
         let gate =
             RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
 
@@ -3974,6 +3960,19 @@ mod tests {
             thread::sleep(Duration::from_millis(150));
         });
         HttpAuthorizerContractServer { endpoint, handle }
+    }
+
+    fn write_executable_script(path: &Path, contents: &str) {
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
     }
 
     fn http_request_body(request: &str) -> &str {
