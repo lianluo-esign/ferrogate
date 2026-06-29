@@ -364,6 +364,34 @@ pub(crate) struct AdminSelfHostedWorkerTelemetryEventResponse {
     pub(crate) event: AdminSelfHostedWorkerTelemetryEvent,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AdminSelfHostedRunEvent {
+    pub(crate) id: String,
+    pub(crate) worker_id: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) kind: String,
+    pub(crate) trust_level: String,
+    pub(crate) occurred_at_unix: Option<u64>,
+    pub(crate) ingested_at_unix: Option<u64>,
+    pub(crate) event_json: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AdminSelfHostedRunTimeline {
+    pub(crate) object: &'static str,
+    pub(crate) run_id: String,
+    pub(crate) session_ids: Vec<String>,
+    pub(crate) worker_ids: Vec<String>,
+    pub(crate) trust_level: &'static str,
+    pub(crate) reported_event_count: usize,
+    pub(crate) lifecycle_event_count: usize,
+    pub(crate) first_seen_unix: Option<u64>,
+    pub(crate) last_seen_unix: Option<u64>,
+    pub(crate) latest_lifecycle_state: Option<String>,
+    pub(crate) events: Vec<AdminSelfHostedRunEvent>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminSelfHostedWorkerArtifact {
     pub(crate) id: String,

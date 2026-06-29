@@ -3144,6 +3144,52 @@ impl FerroGateway {
         }
     }
 
+    pub(super) async fn handle_admin_self_hosted_runs(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        path: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let run_id = path.trim_start_matches("/admin/v1/self-hosted-runs/");
+                if run_id.is_empty() || run_id.contains('/') {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "self_hosted_run_endpoint_not_found",
+                        "self-hosted run endpoint not found",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                let Some(timeline) = state.self_hosted_run_timeline(run_id) else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "self_hosted_run_not_found",
+                        format!("self-hosted run {run_id} was not found"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                write_json_response(session, StatusCode::OK, &timeline, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn handle_admin_audit_events(
         &self,
         session: &mut Session,

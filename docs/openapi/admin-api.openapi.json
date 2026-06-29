@@ -1986,6 +1986,48 @@
         }
       }
     },
+    "/admin/v1/self-hosted-runs/{run_id}": {
+      "parameters": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Self-hosted run id reported by a customer-owned worker."
+        }
+      ],
+      "get": {
+        "operationId": "getAdminSelfHostedRunTimeline",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Inspect one self-hosted worker reported run timeline with explicit customer-reported trust marking.",
+        "responses": {
+          "200": {
+            "description": "Self-hosted worker reported run timeline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedRunTimeline"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/admin/v1/request-log-exports": {
       "get": {
         "operationId": "exportAdminRequestLogsJsonl",
@@ -10632,6 +10674,135 @@
               "null"
             ],
             "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedRunEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "worker_id",
+          "kind",
+          "trust_level",
+          "event_json"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "occurred_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "ingested_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "event_json": {
+            "type": "string",
+            "description": "Customer-reported telemetry event document encoded as JSON. This is reported evidence, not managed-worker enforcement proof."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedRunTimeline": {
+        "type": "object",
+        "required": [
+          "object",
+          "run_id",
+          "session_ids",
+          "worker_ids",
+          "trust_level",
+          "reported_event_count",
+          "lifecycle_event_count",
+          "events"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_run_timeline"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "worker_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "reported_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lifecycle_event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "first_seen_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "last_seen_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "latest_lifecycle_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSelfHostedRunEvent"
+            }
           }
         },
         "additionalProperties": false

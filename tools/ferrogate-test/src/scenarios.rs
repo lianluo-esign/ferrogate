@@ -853,6 +853,41 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/self-hosted-runs/run-transport",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_run_timeline");
+            assert_eq!(body["run_id"], "run-transport");
+            assert_eq!(body["session_ids"][0], "session-transport");
+            assert_eq!(body["worker_ids"][0], *self_hosted_worker_id.borrow());
+            assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
+            assert_eq!(body["reported_event_count"], 1);
+            assert_eq!(body["lifecycle_event_count"], 1);
+            assert_eq!(body["latest_lifecycle_state"], "running");
+            assert_eq!(body["events"][0]["kind"], "lifecycle");
+            assert_eq!(
+                body["events"][0]["trust_level"],
+                "reported_by_self_hosted_worker"
+            );
+            assert_eq!(body["events"][0]["event_json"], r#"{"state":"running"}"#);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/self-hosted-runs/missing-run",
+        &[ADMIN_AUTH],
+        "",
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], "self_hosted_run_not_found");
+            Ok(())
+        },
+    )?;
     let self_hosted_worker_events_path = format!("{self_hosted_worker_detail_path}/events");
     case.expect_json(
         "POST",
@@ -1940,7 +1975,7 @@ fn self_hosted_worker_event_body(
         identity_fingerprint,
         kind,
         occurred_at_unix,
-        r#"{"message":"worker transport event"}"#,
+        r#"{"state":"running"}"#,
     )
 }
 

@@ -183,6 +183,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path.starts_with("/admin/v1/self-hosted-runs/") {
+            let headers = req.headers.clone();
+            self.handle_admin_self_hosted_runs(session, ctx, &headers, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/request-log-exports" {
             let headers = req.headers.clone();
             let query = req.uri.query().map(str::to_string);

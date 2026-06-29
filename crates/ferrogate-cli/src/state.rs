@@ -2470,6 +2470,17 @@ fn validate_self_hosted_telemetry_event_request(
     Ok(())
 }
 
+fn self_hosted_lifecycle_state_from_json(event_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(event_json).ok()?;
+    value
+        .get("state")
+        .or_else(|| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn validate_self_hosted_artifact_request(
     request: &crate::responses::AdminSelfHostedWorkerArtifactRequest,
 ) -> Result<(), SelfHostedWorkerRecordError> {
@@ -5396,6 +5407,87 @@ impl AppState {
             .collect()
     }
 
+    pub(crate) fn self_hosted_run_timeline(
+        &self,
+        run_id: &str,
+    ) -> Option<crate::responses::AdminSelfHostedRunTimeline> {
+        if run_id.trim().is_empty() {
+            return None;
+        }
+        let mut events = self
+            .repositories
+            .self_hosted_worker_telemetry_events()
+            .into_iter()
+            .filter(|event| event.run_id.as_deref() == Some(run_id))
+            .collect::<Vec<_>>();
+        if events.is_empty() {
+            return None;
+        }
+        events.sort_by(|left, right| {
+            left.occurred_at_unix
+                .cmp(&right.occurred_at_unix)
+                .then_with(|| left.ingested_at_unix.cmp(&right.ingested_at_unix))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut session_ids = events
+            .iter()
+            .filter_map(|event| event.session_id.clone())
+            .collect::<Vec<_>>();
+        session_ids.sort();
+        session_ids.dedup();
+        let mut worker_ids = events
+            .iter()
+            .map(|event| event.worker_id.clone())
+            .collect::<Vec<_>>();
+        worker_ids.sort();
+        worker_ids.dedup();
+        let first_seen_unix = events
+            .iter()
+            .filter_map(|event| event.occurred_at_unix.or(event.ingested_at_unix))
+            .min();
+        let last_seen_unix = events
+            .iter()
+            .filter_map(|event| event.occurred_at_unix.or(event.ingested_at_unix))
+            .max();
+        let lifecycle_event_count = events
+            .iter()
+            .filter(|event| event.kind == "lifecycle")
+            .count();
+        let latest_lifecycle_state = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "lifecycle")
+            .and_then(|event| self_hosted_lifecycle_state_from_json(&event.event_json));
+        let reported_event_count = events.len();
+        let events = events
+            .into_iter()
+            .map(|event| crate::responses::AdminSelfHostedRunEvent {
+                id: event.id,
+                worker_id: event.worker_id,
+                session_id: event.session_id,
+                run_id: event.run_id,
+                kind: event.kind,
+                trust_level: event.trust_level,
+                occurred_at_unix: event.occurred_at_unix,
+                ingested_at_unix: event.ingested_at_unix,
+                event_json: event.event_json,
+            })
+            .collect();
+        Some(crate::responses::AdminSelfHostedRunTimeline {
+            object: "self_hosted_run_timeline",
+            run_id: run_id.to_string(),
+            session_ids,
+            worker_ids,
+            trust_level: "reported_by_self_hosted_worker",
+            reported_event_count,
+            lifecycle_event_count,
+            first_seen_unix,
+            last_seen_unix,
+            latest_lifecycle_state,
+            events,
+        })
+    }
+
     pub(crate) fn agent_run_timeline(
         &self,
         id: &str,
@@ -8155,6 +8247,72 @@ mod tests {
         );
 
         assert!(state.self_hosted_worker_record("missing-worker").is_none());
+    }
+
+    #[test]
+    fn self_hosted_run_timeline_reads_reported_lifecycle_events() {
+        let state = AppState::new(Config::default());
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        };
+        state
+            .repositories
+            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                id: "event-tool".into(),
+                worker_id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                session_id: Some("session-1".into()),
+                run_id: Some("run-1".into()),
+                kind: "tool_call".into(),
+                trust_level: "reported_by_self_hosted_worker".into(),
+                occurred_at_unix: Some(20),
+                ingested_at_unix: Some(21),
+                event_json: r#"{"tool":"shell"}"#.into(),
+            })
+            .unwrap();
+        state
+            .repositories
+            .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                id: "event-lifecycle".into(),
+                worker_id: "worker-1".into(),
+                tenant,
+                workspace_id: "workspace-1".into(),
+                session_id: Some("session-1".into()),
+                run_id: Some("run-1".into()),
+                kind: "lifecycle".into(),
+                trust_level: "reported_by_self_hosted_worker".into(),
+                occurred_at_unix: Some(30),
+                ingested_at_unix: Some(31),
+                event_json: r#"{"state":"completed"}"#.into(),
+            })
+            .unwrap();
+
+        let timeline = state
+            .self_hosted_run_timeline("run-1")
+            .expect("self-hosted run timeline should be visible");
+
+        assert_eq!(timeline.object, "self_hosted_run_timeline");
+        assert_eq!(timeline.run_id, "run-1");
+        assert_eq!(timeline.session_ids, vec!["session-1"]);
+        assert_eq!(timeline.worker_ids, vec!["worker-1"]);
+        assert_eq!(timeline.trust_level, "reported_by_self_hosted_worker");
+        assert_eq!(timeline.reported_event_count, 2);
+        assert_eq!(timeline.lifecycle_event_count, 1);
+        assert_eq!(timeline.first_seen_unix, Some(20));
+        assert_eq!(timeline.last_seen_unix, Some(30));
+        assert_eq!(
+            timeline.latest_lifecycle_state.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(timeline.events[0].id, "event-tool");
+        assert_eq!(timeline.events[1].id, "event-lifecycle");
+        assert_eq!(timeline.events[1].event_json, r#"{"state":"completed"}"#);
+        assert!(state.self_hosted_run_timeline("missing-run").is_none());
     }
 
     #[test]
