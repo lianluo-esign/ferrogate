@@ -580,6 +580,18 @@ enabled by policy, then opens a single loopback TCP connection and emits
 deterministic local socket; it is not unrestricted public egress, browser
 automation, REST execution, or Firecracker boot proof.
 
+The equivalent local browser action smoke is:
+
+```bash
+agent-worker governed-browser-execution-smoke
+```
+
+It requests a managed `browser` capability before executing a deterministic
+`navigate` action to `about:blank`, then emits `browser.requested` evidence.
+This proves the browser action gate and event vocabulary; it is not a real
+browser engine, screenshot/DOM automation, public network access, or
+Firecracker boot proof.
+
 The equivalent local REST execution smoke is:
 
 ```bash

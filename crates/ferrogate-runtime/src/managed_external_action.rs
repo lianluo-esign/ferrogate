@@ -1164,6 +1164,7 @@ fn parse_capability_event_kind(
         "filesystem.requested" => Ok(FrameworkAdapterEventKind::FilesystemRequested),
         "secret.requested" => Ok(FrameworkAdapterEventKind::SecretRequested),
         "network.egress.requested" => Ok(FrameworkAdapterEventKind::NetworkEgressRequested),
+        "browser.requested" => Ok(FrameworkAdapterEventKind::BrowserRequested),
         "memory.read" => Ok(FrameworkAdapterEventKind::MemoryRead),
         "memory.write" => Ok(FrameworkAdapterEventKind::MemoryWrite),
         _ => Err(FrameworkAdapterError::InvalidRequest(format!(

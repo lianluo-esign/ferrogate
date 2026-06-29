@@ -90,6 +90,8 @@ enum Command {
     GovernedSecretExecutionSmoke,
     /// Execute a local governed loopback network egress smoke after gateway authorization.
     GovernedNetworkEgressExecutionSmoke,
+    /// Execute a local governed browser action smoke after gateway authorization.
+    GovernedBrowserExecutionSmoke,
     /// Execute a local governed REST smoke after gateway authorization.
     GovernedRestExecutionSmoke,
     /// Execute a local governed filesystem read smoke after gateway authorization.
@@ -195,6 +197,9 @@ fn main() -> Result<()> {
         }
         Command::GovernedNetworkEgressExecutionSmoke => {
             external_actions::governed_network_egress_execution_smoke_command()
+        }
+        Command::GovernedBrowserExecutionSmoke => {
+            external_actions::governed_browser_execution_smoke_command()
         }
         Command::GovernedRestExecutionSmoke => {
             external_actions::governed_rest_execution_smoke_command()

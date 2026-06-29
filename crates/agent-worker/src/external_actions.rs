@@ -33,11 +33,11 @@ use ferrogate_runtime::{
     ExternalActionAuthorizationRequest, ExternalActionAuthorizationResponse, FrameworkAdapterError,
     FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterSession,
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
-    ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
-    ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
-    ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedNetworkEgressAction,
-    ManagedRestAction, ManagedSecretAction, ManagedSkillAction, ManagedToolAction,
-    NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
+    ManagedBrowserAction, ManagedBrowserOperation, ManagedCliAction, ManagedExternalAction,
+    ManagedExternalActionDecision, ManagedExternalActionRequest, ManagedFilesystemAccess,
+    ManagedFilesystemAction, ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction,
+    ManagedNetworkEgressAction, ManagedRestAction, ManagedSecretAction, ManagedSkillAction,
+    ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -424,6 +424,31 @@ pub(crate) fn governed_network_egress_execution_smoke_command() -> Result<()> {
         "received_payload": received_payload,
     });
     println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+pub(crate) fn governed_browser_execution_smoke_command() -> Result<()> {
+    let action = ManagedBrowserAction {
+        operation: ManagedBrowserOperation::Navigate,
+        url: "about:blank".to_string(),
+        timeout_millis: 2_000,
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Browser]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_browser_action(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
     Ok(())
 }
 
@@ -1115,6 +1140,42 @@ where
     ])
 }
 
+fn execute_governed_browser_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedBrowserAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Browser(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_browser_action(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::BrowserRequested,
+            message: Some(
+                "managed browser action executed after gateway authorization".to_string(),
+            ),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
 fn execute_governed_cli_action<A>(
     authorizer: &A,
     session: FrameworkAdapterSession,
@@ -1530,6 +1591,54 @@ fn run_authorized_network_egress_action(
     })?;
     Ok(GovernedNetworkEgressExecution {
         bytes_written: payload.len(),
+    })
+}
+
+struct GovernedBrowserExecution {
+    page_state: String,
+}
+
+impl GovernedBrowserExecution {
+    fn metadata(self, action: &ManagedBrowserAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "browser".to_string()),
+            (
+                "external_target".to_string(),
+                format!("browser:{}:{}", action.operation.as_str(), action.url),
+            ),
+            (
+                "browser_operation".to_string(),
+                action.operation.as_str().to_string(),
+            ),
+            ("url".to_string(), action.url.clone()),
+            (
+                "timeout_millis".to_string(),
+                action.timeout_millis.to_string(),
+            ),
+            ("page_state".to_string(), self.page_state),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_browser_action(
+    action: &ManagedBrowserAction,
+) -> Result<GovernedBrowserExecution, FrameworkAdapterError> {
+    if action.operation != ManagedBrowserOperation::Navigate {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed browser smoke currently supports navigate only".to_string(),
+        ));
+    }
+    if action.url != "about:blank" {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed browser smoke only supports about:blank".to_string(),
+        ));
+    }
+    Ok(GovernedBrowserExecution {
+        page_state: "navigated".to_string(),
     })
 }
 
@@ -2597,6 +2706,70 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("direct network egress"));
+    }
+
+    #[test]
+    fn governed_browser_execution_runs_only_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Browser]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_browser_action(
+            &gate,
+            session(),
+            ManagedBrowserAction {
+                operation: ManagedBrowserOperation::Navigate,
+                url: "about:blank".to_string(),
+                timeout_millis: 2_000,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "browser.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("browser_operation")
+                .map(String::as_str),
+            Some("navigate")
+        );
+        assert_eq!(
+            events[1].metadata.get("page_state").map(String::as_str),
+            Some("navigated")
+        );
+    }
+
+    #[test]
+    fn governed_browser_execution_denial_happens_before_browser_action() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_browser_action(
+            &gate,
+            session(),
+            ManagedBrowserAction {
+                operation: ManagedBrowserOperation::Navigate,
+                url: "https://example.invalid".to_string(),
+                timeout_millis: 2_000,
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!error.to_string().contains("only supports about:blank"));
     }
 
     #[test]
