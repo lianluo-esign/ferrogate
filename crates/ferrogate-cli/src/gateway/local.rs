@@ -9,7 +9,7 @@ use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
 use ferrogate_runtime::{
     SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedWorkerError,
-    SelfHostedWorkerTransportFrame, SelfHostedWorkerTransportIdentity,
+    SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame,
 };
 use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
@@ -4008,16 +4008,20 @@ impl FerroGateway {
         };
         match path {
             "/v1/self-hosted-workers/heartbeat" => {
-                self.handle_self_hosted_worker_heartbeat(session, ctx).await
+                self.handle_self_hosted_worker_heartbeat(session, ctx, transport_security)
+                    .await
             }
             "/v1/self-hosted-workers/events" => {
-                self.handle_self_hosted_worker_event(session, ctx).await
+                self.handle_self_hosted_worker_event(session, ctx, transport_security)
+                    .await
             }
             "/v1/self-hosted-workers/artifacts" => {
-                self.handle_self_hosted_worker_artifact(session, ctx).await
+                self.handle_self_hosted_worker_artifact(session, ctx, transport_security)
+                    .await
             }
             "/v1/self-hosted-workers/checkpoints" => {
-                self.handle_self_hosted_worker_checkpoint(session, ctx).await
+                self.handle_self_hosted_worker_checkpoint(session, ctx, transport_security)
+                    .await
             }
             "/v1/self-hosted-workers/runs/poll" => {
                 self.handle_self_hosted_worker_run_poll(session, ctx, transport_security)
@@ -4042,18 +4046,30 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
+        transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
-        let request = match read_self_hosted_transport_body::<
-            SelfHostedWorkerHeartbeatTransportRequest,
-        >(session)
-        .await?
-        {
-            Ok(request) => request,
-            Err(error) => {
-                return write_self_hosted_worker_transport_error(session, ctx, error).await;
-            }
-        };
         let state = self.state.current();
+        let request =
+            match read_self_hosted_transport_body::<SelfHostedWorkerHeartbeatTransportRequest>(
+                session,
+                transport_security,
+                |frame| {
+                    state.self_hosted_worker_transport_secret(
+                        &frame.tenant_id,
+                        &frame.workspace_id,
+                        &frame.worker_id,
+                        &frame.token_id,
+                    )
+                },
+                |request| &request.identity,
+            )
+            .await?
+            {
+                Ok(request) => request,
+                Err(error) => {
+                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
+                }
+            };
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
@@ -4109,18 +4125,30 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
+        transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
-        let request = match read_self_hosted_transport_body::<
-            SelfHostedWorkerCheckpointTransportRequest,
-        >(session)
-        .await?
-        {
-            Ok(request) => request,
-            Err(error) => {
-                return write_self_hosted_worker_transport_error(session, ctx, error).await;
-            }
-        };
         let state = self.state.current();
+        let request =
+            match read_self_hosted_transport_body::<SelfHostedWorkerCheckpointTransportRequest>(
+                session,
+                transport_security,
+                |frame| {
+                    state.self_hosted_worker_transport_secret(
+                        &frame.tenant_id,
+                        &frame.workspace_id,
+                        &frame.worker_id,
+                        &frame.token_id,
+                    )
+                },
+                |request| &request.identity,
+            )
+            .await?
+            {
+                Ok(request) => request,
+                Err(error) => {
+                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
+                }
+            };
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
@@ -4180,18 +4208,30 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
+        transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
-        let request = match read_self_hosted_transport_body::<
-            SelfHostedWorkerArtifactTransportRequest,
-        >(session)
-        .await?
-        {
-            Ok(request) => request,
-            Err(error) => {
-                return write_self_hosted_worker_transport_error(session, ctx, error).await;
-            }
-        };
         let state = self.state.current();
+        let request =
+            match read_self_hosted_transport_body::<SelfHostedWorkerArtifactTransportRequest>(
+                session,
+                transport_security,
+                |frame| {
+                    state.self_hosted_worker_transport_secret(
+                        &frame.tenant_id,
+                        &frame.workspace_id,
+                        &frame.worker_id,
+                        &frame.token_id,
+                    )
+                },
+                |request| &request.identity,
+            )
+            .await?
+            {
+                Ok(request) => request,
+                Err(error) => {
+                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
+                }
+            };
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
@@ -4252,10 +4292,24 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
+        transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
+        let state = self.state.current();
         let request = match read_self_hosted_transport_body::<
             SelfHostedWorkerTelemetryEventTransportRequest,
-        >(session)
+        >(
+            session,
+            transport_security,
+            |frame| {
+                state.self_hosted_worker_transport_secret(
+                    &frame.tenant_id,
+                    &frame.workspace_id,
+                    &frame.worker_id,
+                    &frame.token_id,
+                )
+            },
+            |request| &request.identity,
+        )
         .await?
         {
             Ok(request) => request,
@@ -4263,7 +4317,6 @@ impl FerroGateway {
                 return write_self_hosted_worker_transport_error(session, ctx, error).await;
             }
         };
-        let state = self.state.current();
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
@@ -4324,7 +4377,7 @@ impl FerroGateway {
         transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let request = match read_self_hosted_run_transport_body::<SelfHostedRunPollRequest>(
+        let request = match read_self_hosted_transport_body::<SelfHostedRunPollRequest>(
             session,
             transport_security,
             |frame| {
@@ -4335,6 +4388,7 @@ impl FerroGateway {
                     &frame.token_id,
                 )
             },
+            |request| &request.identity,
         )
         .await?
         {
@@ -4365,7 +4419,7 @@ impl FerroGateway {
         transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
         let state = self.state.current();
-        let request = match read_self_hosted_run_transport_body::<SelfHostedRunAckRequest>(
+        let request = match read_self_hosted_transport_body::<SelfHostedRunAckRequest>(
             session,
             transport_security,
             |frame| {
@@ -4376,6 +4430,7 @@ impl FerroGateway {
                     &frame.token_id,
                 )
             },
+            |request| &request.identity,
         )
         .await?
         {
@@ -8769,35 +8824,14 @@ fn self_hosted_transport_security_header(
 
 async fn read_self_hosted_transport_body<T>(
     session: &mut Session,
-) -> PingoraResult<Result<T, SelfHostedWorkerError>>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let body = match read_request_body(session, 1024 * 1024).await? {
-        Ok(body) => body,
-        Err(limit) => {
-            return Ok(Err(SelfHostedWorkerError::InvalidTransport(format!(
-                "self-hosted worker transport body exceeds maximum size of {} bytes",
-                limit.max_bytes
-            ))));
-        }
-    };
-    Ok(serde_json::from_slice::<T>(&body).map_err(|error| {
-        SelfHostedWorkerError::InvalidTransport(format!(
-            "invalid self-hosted worker transport JSON body: {error}"
-        ))
-    }))
-}
-
-async fn read_self_hosted_run_transport_body<T>(
-    session: &mut Session,
     transport_security: SelfHostedTransportSecurity,
     shared_secret_for_frame: impl Fn(
         &SelfHostedWorkerTransportFrame,
     ) -> Result<String, SelfHostedWorkerError>,
+    identity_from_request: impl Fn(&T) -> &SelfHostedWorkerIdentity,
 ) -> PingoraResult<Result<T, SelfHostedWorkerError>>
 where
-    T: serde::de::DeserializeOwned + SelfHostedWorkerTransportIdentity,
+    T: serde::de::DeserializeOwned,
 {
     let body = match read_request_body(session, 1024 * 1024).await? {
         Ok(body) => body,
@@ -8829,9 +8863,44 @@ where
                 Ok(shared_secret) => shared_secret,
                 Err(error) => return Ok(Err(error)),
             };
-            Ok(frame.decode_json::<T>(&shared_secret))
+            let plaintext_json = match frame.decrypt_json(&shared_secret) {
+                Ok(plaintext_json) => plaintext_json,
+                Err(error) => return Ok(Err(error)),
+            };
+            let request = match serde_json::from_str::<T>(&plaintext_json) {
+                Ok(request) => request,
+                Err(error) => {
+                    return Ok(Err(SelfHostedWorkerError::InvalidTransport(format!(
+                        "invalid self-hosted worker encrypted transport JSON body: {error}"
+                    ))));
+                }
+            };
+            if let Err(error) = validate_self_hosted_transport_frame_identity(
+                &frame,
+                identity_from_request(&request),
+            ) {
+                return Ok(Err(error));
+            }
+            Ok(Ok(request))
         }
     }
+}
+
+fn validate_self_hosted_transport_frame_identity(
+    frame: &SelfHostedWorkerTransportFrame,
+    identity: &SelfHostedWorkerIdentity,
+) -> Result<(), SelfHostedWorkerError> {
+    if frame.tenant_id != identity.tenant_id
+        || frame.workspace_id != identity.workspace_id
+        || frame.worker_id != identity.worker_id
+        || frame.token_id != identity.token_id
+    {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "self-hosted worker encrypted frame identity does not match enclosed request"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn write_self_hosted_worker_transport_error(

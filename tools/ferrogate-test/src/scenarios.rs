@@ -757,16 +757,22 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
-    case.expect_json(
-        "POST",
-        "/v1/self-hosted-workers/heartbeat",
-        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+    let encrypted_heartbeat_body = encrypted_self_hosted_transport_body(
+        &self_hosted_worker_id.borrow(),
+        "sha256:test-worker-rotated",
         &self_hosted_worker_heartbeat_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
             "online",
             125,
         ),
+        41,
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/heartbeat",
+        &[JSON_CONTENT, SELF_HOSTED_SYMMETRIC_AEAD_HEADER],
+        &encrypted_heartbeat_body,
         201,
         |body| {
             assert_eq!(body["object"], "self_hosted_worker_heartbeat");
@@ -881,16 +887,22 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
-    case.expect_json(
-        "POST",
-        "/v1/self-hosted-workers/events",
-        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+    let encrypted_event_body = encrypted_self_hosted_transport_body(
+        &self_hosted_worker_id.borrow(),
+        "sha256:test-worker-rotated",
         &self_hosted_worker_event_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
             "lifecycle",
             450,
         ),
+        42,
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/events",
+        &[JSON_CONTENT, SELF_HOSTED_SYMMETRIC_AEAD_HEADER],
+        &encrypted_event_body,
         201,
         |body| {
             assert_eq!(body["object"], "self_hosted_worker_event");
@@ -1106,10 +1118,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
-    case.expect_json(
-        "POST",
-        "/v1/self-hosted-workers/artifacts",
-        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+    let encrypted_artifact_body = encrypted_self_hosted_transport_body(
+        &self_hosted_worker_id.borrow(),
+        "sha256:test-worker-rotated",
         &self_hosted_worker_artifact_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
@@ -1118,6 +1129,13 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             64,
             787,
         ),
+        43,
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/artifacts",
+        &[JSON_CONTENT, SELF_HOSTED_SYMMETRIC_AEAD_HEADER],
+        &encrypted_artifact_body,
         201,
         |body| {
             assert_eq!(body["object"], "self_hosted_worker_artifact");
@@ -1268,10 +1286,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
-    case.expect_json(
-        "POST",
-        "/v1/self-hosted-workers/checkpoints",
-        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+    let encrypted_checkpoint_body = encrypted_self_hosted_transport_body(
+        &self_hosted_worker_id.borrow(),
+        "sha256:test-worker-rotated",
         &self_hosted_worker_checkpoint_body(
             &self_hosted_worker_id.borrow(),
             "sha256:test-worker-rotated",
@@ -1280,6 +1297,13 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             192,
             889,
         ),
+        44,
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/checkpoints",
+        &[JSON_CONTENT, SELF_HOSTED_SYMMETRIC_AEAD_HEADER],
+        &encrypted_checkpoint_body,
         201,
         |body| {
             assert_eq!(body["object"], "self_hosted_worker_checkpoint");
@@ -2073,7 +2097,7 @@ fn encrypted_self_hosted_transport_frame(
         tenant_id: "org_demo".to_string(),
         workspace_id: "workspace-1".to_string(),
         worker_id: worker_id.to_string(),
-        token_id: "sha256:test-worker".to_string(),
+        token_id: token_secret.to_string(),
         token_secret: token_secret.to_string(),
         observed_at_unix: None,
     };
