@@ -391,6 +391,19 @@ intentionally sets
 `proves_microvm_boot=false` and `proves_handler_execution=false`; passing this
 preflight only means the worker has enough configuration to attempt the future
 guest handler RPC path.
+For guest handler launch planning, `agent-worker
+firecracker-guest-launch-plan --adapter codex|claude-code|hermes|native-harness`
+emits the worker-owned launch contract that will be used after a retained
+microVM exists and the guest channel preflight passes. The plan records the
+target adapter, guest-agent preflight result, required gateway-mediated
+capabilities, guest network policy, filesystem policy, artifact/checkpoint
+evidence policy, and planned steps such as workspace staging, capability
+envelope construction, guest-agent invocation, guest RPC channel opening,
+framework handler launch inside the microVM, event streaming, and artifact
+collection. It deliberately reports
+`implementation_status=guest_handler_rpc_not_implemented`,
+`proves_microvm_boot=false`, and `proves_handler_execution=false`; it is a
+launch contract and debugging artifact, not execution evidence.
 Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 `stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
 worker-owned lifecycle or handler dispatch. Configured-bundle `provision` first

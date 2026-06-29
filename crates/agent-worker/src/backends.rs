@@ -71,6 +71,14 @@ pub(crate) fn firecracker_guest_agent_preflight_command() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn firecracker_guest_launch_plan_command(adapter: Option<&str>) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&firecracker_guest_launch_plan(adapter))?
+    );
+    Ok(())
+}
+
 pub(crate) fn firecracker_microvm_provision(
     timeout_millis: u64,
     vcpu_count: u8,
@@ -205,6 +213,41 @@ pub(crate) fn firecracker_guest_agent_preflight() -> FirecrackerGuestAgentPrefli
         failure_reasons,
         proves_microvm_boot: false,
         proves_handler_execution: false,
+    }
+}
+
+pub(crate) fn firecracker_guest_launch_plan(adapter: Option<&str>) -> FirecrackerGuestLaunchPlan {
+    let guest_agent = firecracker_guest_agent_preflight();
+    let adapter = normalize_guest_launch_adapter(adapter);
+    FirecrackerGuestLaunchPlan {
+        process: "agent-worker".to_string(),
+        backend_name: "firecracker".to_string(),
+        backend_kind: "firecracker_micro_vm".to_string(),
+        host_lifecycle_owner: "agent-worker".to_string(),
+        gateway_controls_firecracker: false,
+        adapter: adapter.to_string(),
+        ready: guest_agent.ready(),
+        guest_agent,
+        planned_steps: vec![
+            "verify_retained_microvm",
+            "stage_guest_workspace",
+            "build_gateway_capability_envelope",
+            "invoke_guest_agent_command",
+            "open_guest_handler_rpc_channel",
+            "start_framework_handler_inside_microvm",
+            "stream_normalized_framework_events",
+            "collect_guest_artifacts",
+            "return_lifecycle_evidence",
+        ],
+        required_gateway_capabilities: guest_launch_capabilities(adapter),
+        guest_network_policy: "gateway_control_channel_only_no_direct_public_egress".to_string(),
+        filesystem_policy: "prepared_workspace_only_with_read_only_runtime_bundle".to_string(),
+        artifact_policy: "guest_artifacts_must_return_as_artifact_created_events".to_string(),
+        checkpoint_policy:
+            "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence".to_string(),
+        proves_microvm_boot: false,
+        proves_handler_execution: false,
+        implementation_status: "guest_handler_rpc_not_implemented".to_string(),
     }
 }
 
@@ -492,6 +535,50 @@ impl FirecrackerGuestAgentPreflight {
                 self.failure_reasons.join("; ")
             )
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct FirecrackerGuestLaunchPlan {
+    process: String,
+    backend_name: String,
+    backend_kind: String,
+    host_lifecycle_owner: String,
+    gateway_controls_firecracker: bool,
+    adapter: String,
+    ready: bool,
+    guest_agent: FirecrackerGuestAgentPreflight,
+    planned_steps: Vec<&'static str>,
+    required_gateway_capabilities: Vec<&'static str>,
+    guest_network_policy: String,
+    filesystem_policy: String,
+    artifact_policy: String,
+    checkpoint_policy: String,
+    proves_microvm_boot: bool,
+    proves_handler_execution: bool,
+    implementation_status: String,
+}
+
+fn normalize_guest_launch_adapter(adapter: Option<&str>) -> &'static str {
+    match adapter.unwrap_or("native-harness") {
+        "codex" => "codex",
+        "claude-code" | "claude_code" => "claude-code",
+        "hermes" => "hermes",
+        _ => "native-harness",
+    }
+}
+
+fn guest_launch_capabilities(adapter: &str) -> Vec<&'static str> {
+    match adapter {
+        "codex" | "claude-code" => vec!["cli", "filesystem", "tools", "artifacts", "checkpoint"],
+        "hermes" => vec![
+            "memory.read",
+            "memory.write",
+            "subagents",
+            "artifacts",
+            "checkpoint",
+        ],
+        _ => vec!["tools", "artifacts", "checkpoint"],
     }
 }
 
@@ -1811,6 +1898,70 @@ mod tests {
             .failure_summary()
             .contains("does not point to a directory"));
         assert!(!preflight.proves_handler_execution);
+    }
+
+    #[test]
+    fn firecracker_guest_launch_plan_fails_closed_without_guest_channel() {
+        let _env_lock = lock_firecracker_env();
+        clear_firecracker_env();
+
+        let plan = firecracker_guest_launch_plan(Some("codex"));
+
+        assert!(!plan.ready);
+        assert_eq!(plan.adapter, "codex");
+        assert_eq!(plan.host_lifecycle_owner, "agent-worker");
+        assert!(!plan.gateway_controls_firecracker);
+        assert!(!plan.proves_microvm_boot);
+        assert!(!plan.proves_handler_execution);
+        assert_eq!(
+            plan.implementation_status,
+            "guest_handler_rpc_not_implemented"
+        );
+        assert!(plan.required_gateway_capabilities.contains(&"filesystem"));
+        assert!(plan
+            .guest_agent
+            .failure_summary()
+            .contains("Firecracker guest agent command path was not configured"));
+    }
+
+    #[test]
+    fn firecracker_guest_launch_plan_records_adapter_capabilities_without_claiming_execution() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace = temp.path().join("workspace");
+        write_executable_version_script(&guest_agent, "ferrogate guest agent v.test").unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
+        env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+
+        let codex = firecracker_guest_launch_plan(Some("codex"));
+        let hermes = firecracker_guest_launch_plan(Some("hermes"));
+
+        clear_firecracker_env();
+        assert!(codex.ready);
+        assert_eq!(codex.adapter, "codex");
+        assert!(codex.planned_steps.contains(&"invoke_guest_agent_command"));
+        assert!(codex
+            .planned_steps
+            .contains(&"start_framework_handler_inside_microvm"));
+        assert_eq!(
+            codex.guest_network_policy,
+            "gateway_control_channel_only_no_direct_public_egress"
+        );
+        assert!(codex.required_gateway_capabilities.contains(&"cli"));
+        assert!(codex.required_gateway_capabilities.contains(&"checkpoint"));
+        assert!(!codex.proves_microvm_boot);
+        assert!(!codex.proves_handler_execution);
+        assert_eq!(hermes.adapter, "hermes");
+        assert!(hermes
+            .required_gateway_capabilities
+            .contains(&"memory.read"));
+        assert!(hermes.required_gateway_capabilities.contains(&"subagents"));
     }
 
     #[test]

@@ -59,6 +59,12 @@ enum Command {
     FirecrackerHostPreflight,
     /// Emit worker-owned Firecracker guest-agent channel preflight without starting a microVM.
     FirecrackerGuestAgentPreflight,
+    /// Emit worker-owned Firecracker guest handler launch plan without starting a microVM.
+    FirecrackerGuestLaunchPlan {
+        /// Adapter the future guest handler launch should target.
+        #[arg(long)]
+        adapter: Option<String>,
+    },
     /// Boot a configured Firecracker microVM and require serial-console boot evidence.
     FirecrackerBootSmoke {
         /// Maximum time to wait for API readiness and guest serial boot evidence.
@@ -201,6 +207,9 @@ fn main() -> Result<()> {
         Command::FirecrackerHostPreflight => backends::firecracker_host_preflight_command(),
         Command::FirecrackerGuestAgentPreflight => {
             backends::firecracker_guest_agent_preflight_command()
+        }
+        Command::FirecrackerGuestLaunchPlan { adapter } => {
+            backends::firecracker_guest_launch_plan_command(adapter.as_deref())
         }
         Command::FirecrackerBootSmoke {
             timeout_millis,
