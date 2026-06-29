@@ -251,6 +251,116 @@ pub(crate) fn firecracker_guest_launch_plan(adapter: Option<&str>) -> Firecracke
     }
 }
 
+pub(crate) fn firecracker_guest_agent_launch_attempt(
+) -> Result<FirecrackerGuestAgentLaunchAttempt, FirecrackerGuestAgentLaunchAttemptError> {
+    let guest_agent = firecracker_guest_agent_preflight();
+    if !guest_agent.ready() {
+        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_agent_channel_unavailable",
+            guest_agent.failure_summary(),
+        ));
+    }
+    let command = guest_agent.command_channel.path.clone().ok_or_else(|| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_agent_channel_unavailable",
+            "Firecracker guest agent command path was not configured".to_string(),
+        )
+    })?;
+    let workspace = guest_agent.workspace.path.clone().ok_or_else(|| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_agent_channel_unavailable",
+            "Firecracker guest workspace was not configured".to_string(),
+        )
+    })?;
+    let gateway_endpoint =
+        env::var("AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT").map_err(|_| {
+            FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_agent_channel_unavailable",
+                "Firecracker guest gateway authorizer endpoint was not configured".to_string(),
+            )
+        })?;
+    if gateway_endpoint.trim().is_empty() {
+        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_agent_channel_unavailable",
+            "Firecracker guest gateway authorizer endpoint was not configured".to_string(),
+        ));
+    }
+    let timeout = parse_guest_agent_launch_timeout();
+    let mut child = Command::new(&command)
+        .arg("--ferrogate-guest-agent-probe")
+        .current_dir(&workspace)
+        .env_clear()
+        .env(
+            "FERROGATE_AGENT_WORKER_GUEST_GATEWAY_ENDPOINT",
+            &gateway_endpoint,
+        )
+        .env("FERROGATE_AGENT_WORKER_GUEST_WORKSPACE", &workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_agent_launch_failed",
+                format!("failed to start Firecracker guest agent command {command}: {error}"),
+            )
+        })?;
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let elapsed_millis = started_at.elapsed().as_millis();
+                if status.success() {
+                    return Ok(FirecrackerGuestAgentLaunchAttempt {
+                        command,
+                        workspace,
+                        gateway_endpoint,
+                        elapsed_millis,
+                        exit_status: status.to_string(),
+                        proves_microvm_boot: false,
+                        proves_handler_execution: false,
+                    });
+                }
+                return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                    "guest_agent_launch_failed",
+                    format!(
+                        "Firecracker guest agent command {command} exited before handler RPC channel was available: status={status}; elapsed_millis={elapsed_millis}"
+                    ),
+                ));
+            }
+            Ok(None) if started_at.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                    "guest_agent_launch_failed",
+                    format!(
+                        "Firecracker guest agent command {command} did not return a handler RPC channel before timeout_millis={}",
+                        timeout.as_millis()
+                    ),
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                    "guest_agent_launch_failed",
+                    format!("Firecracker guest agent command status check failed: {error}"),
+                ));
+            }
+        }
+    }
+}
+
+fn parse_guest_agent_launch_timeout() -> Duration {
+    let millis = env::var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT_TIMEOUT_MILLIS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1_000);
+    Duration::from_millis(millis)
+}
+
 fn firecracker_boot_smoke(options: FirecrackerBootSmokeOptions) -> FirecrackerBootSmokeReport {
     let preflight = firecracker_host_preflight();
     if !preflight.ready() {
@@ -557,6 +667,37 @@ pub(crate) struct FirecrackerGuestLaunchPlan {
     proves_microvm_boot: bool,
     proves_handler_execution: bool,
     implementation_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FirecrackerGuestAgentLaunchAttempt {
+    pub(crate) command: String,
+    pub(crate) workspace: String,
+    pub(crate) gateway_endpoint: String,
+    pub(crate) elapsed_millis: u128,
+    pub(crate) exit_status: String,
+    pub(crate) proves_microvm_boot: bool,
+    pub(crate) proves_handler_execution: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FirecrackerGuestAgentLaunchAttemptError {
+    outcome: &'static str,
+    reason: String,
+}
+
+impl FirecrackerGuestAgentLaunchAttemptError {
+    fn new(outcome: &'static str, reason: String) -> Self {
+        Self { outcome, reason }
+    }
+
+    pub(crate) fn outcome(&self) -> &'static str {
+        self.outcome
+    }
+
+    pub(crate) fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 fn normalize_guest_launch_adapter(adapter: Option<&str>) -> &'static str {

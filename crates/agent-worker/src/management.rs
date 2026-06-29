@@ -1855,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_or_attach_reports_guest_rpc_gap_when_guest_channel_preflight_passes() {
+    fn exec_or_attach_reports_guest_rpc_gap_after_guest_agent_launch_probe() {
         let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
         let guest_agent = temp.path().join("ferrogate-guest-agent");
@@ -1898,12 +1898,96 @@ mod tests {
             panic!("exec did not return lifecycle evidence");
         };
         assert_eq!(lifecycle.outcome, "guest_handler_rpc_not_implemented");
-        assert!(lifecycle
-            .message
-            .contains("guest agent channel preflight passed"));
+        assert!(lifecycle.message.contains("guest agent command launched"));
+        assert!(lifecycle.message.contains("proves_microvm_boot=false"));
+        assert!(lifecycle.message.contains("proves_handler_execution=false"));
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-exec-ready-instance")
+        );
+    }
+
+    #[test]
+    fn exec_or_attach_reports_guest_agent_launch_failure_without_stopping_microvm() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace = temp.path().join("workspace");
+        write_executable_script(
+            &guest_agent,
+            "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'ferrogate guest agent v.test'; exit 0; fi\nexit 42\n",
+        )
+        .unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
+        std::env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+        let exec_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::ExecOrAttach,
+            "agent-worker-firecracker-exec-launch-failed",
+        );
+        let mut status_envelope = exec_envelope.clone();
+        status_envelope.action = AgentWorkerManagementAction::StreamStatus;
+        status_envelope.request_id =
+            "agent-worker-firecracker-exec-launch-failed-status-request".to_string();
+        status_envelope.idempotency_key =
+            "agent-worker-firecracker-exec-launch-failed-status-idempotency".to_string();
+        status_envelope.security.nonce =
+            "agent-worker-firecracker-exec-launch-failed-status-nonce".to_string();
+        status_envelope.security.signature = status_envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let session_id = exec_envelope.session_id.clone().unwrap();
+        let run_id = exec_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-exec-launch-failed-instance", temp.path())
+                .unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let exec =
+            accept_management_envelope(&mut transport, &mut state, &runtime, exec_envelope, 1_000);
+        let status = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            status_envelope,
+            1_000,
+        );
+
+        clear_guest_agent_env();
+        assert!(exec.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = exec.result else {
+            panic!("exec did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "guest_agent_launch_failed");
+        assert!(lifecycle
+            .message
+            .contains("exited before handler RPC channel was available"));
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-exec-launch-failed-instance")
+        );
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = status.result else {
+            panic!("status did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "running");
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-exec-launch-failed-instance")
         );
     }
 
@@ -2033,12 +2117,16 @@ mod tests {
     }
 
     fn write_executable_version_script(path: &Path, version: &str) -> std::io::Result<()> {
-        std::fs::write(
+        write_executable_script(
             path,
-            format!(
+            &format!(
                 "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo '{version}'; exit 0; fi\nexit 0\n"
             ),
-        )?;
+        )
+    }
+
+    fn write_executable_script(path: &Path, content: &str) -> std::io::Result<()> {
+        std::fs::write(path, content)?;
         let mut permissions = std::fs::metadata(path)?.permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(path, permissions)

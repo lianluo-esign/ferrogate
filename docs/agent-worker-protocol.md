@@ -429,10 +429,16 @@ inside that microVM;
 when a retained microVM exists but the guest channel preflight is incomplete,
 it returns failed lifecycle evidence with the same `isolation_instance_id` and
 `outcome=guest_agent_channel_unavailable` without stopping the VM. If the
-guest-channel configuration preflight passes, `exec_or_attach` still fails
-closed with `outcome=guest_handler_rpc_not_implemented`; this is the explicit
-remaining boundary before Codex/Claude/Hermes handlers can launch inside the
-microVM. `snapshot_or_checkpoint` is now a first-class management action; before
+guest-channel configuration preflight passes, `exec_or_attach` performs a
+bounded worker-owned guest-agent command launch probe with a cleared ambient
+environment and only the configured gateway endpoint/workspace values injected.
+Probe spawn, timeout, or non-zero exit failures return
+`outcome=guest_agent_launch_failed` with the same `isolation_instance_id` and
+leave the retained VM available for later lifecycle actions. A successful probe
+still fails closed with `outcome=guest_handler_rpc_not_implemented`; this proves
+only that the configured guest-agent command can be launched by `agent-worker`,
+not that handler RPC or Codex/Claude/Hermes execution inside the microVM exists.
+`snapshot_or_checkpoint` is now a first-class management action; before
 provision it returns `outcome=not_started`, and with a retained running
 Firecracker microVM it calls the Firecracker API to pause the VM, create a full
 snapshot using `/snapshot/create`, resume the VM, and return snapshot state and
