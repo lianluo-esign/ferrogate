@@ -59,6 +59,14 @@ pub(crate) fn firecracker_host_preflight_command() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn firecracker_guest_agent_preflight_command() -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&firecracker_guest_agent_preflight())?
+    );
+    Ok(())
+}
+
 pub(crate) fn firecracker_microvm_provision(
     timeout_millis: u64,
     vcpu_count: u8,
@@ -151,6 +159,48 @@ pub(crate) fn firecracker_host_preflight() -> FirecrackerHostPreflight {
         ready: failure_reasons.is_empty(),
         failure_reasons,
         proves_microvm_boot: false,
+    }
+}
+
+pub(crate) fn firecracker_guest_agent_preflight() -> FirecrackerGuestAgentPreflight {
+    let command_channel = configured_file_check(
+        Some("AGENT_WORKER_FIRECRACKER_GUEST_AGENT"),
+        "Firecracker guest agent command path",
+        true,
+    );
+    let workspace = configured_directory_check(
+        Some("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE"),
+        "Firecracker guest workspace",
+    );
+    let gateway_endpoint = configured_non_empty_env_check(
+        "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+        "Firecracker guest gateway authorizer endpoint",
+    );
+    let mut failure_reasons = Vec::new();
+    for reason in [
+        command_channel.reason.as_ref(),
+        workspace.reason.as_ref(),
+        gateway_endpoint.reason.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        failure_reasons.push(reason.clone());
+    }
+    FirecrackerGuestAgentPreflight {
+        process: "agent-worker".to_string(),
+        backend_name: "firecracker".to_string(),
+        backend_kind: "firecracker_micro_vm".to_string(),
+        host_lifecycle_owner: "agent-worker".to_string(),
+        gateway_controls_firecracker: false,
+        channel_kind: "guest_agent_command".to_string(),
+        command_channel,
+        workspace,
+        gateway_endpoint,
+        ready: failure_reasons.is_empty(),
+        failure_reasons,
+        proves_microvm_boot: false,
+        proves_handler_execution: false,
     }
 }
 
@@ -408,6 +458,40 @@ struct FirecrackerHostCapabilityPreflight {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct FirecrackerGuestAgentPreflight {
+    process: String,
+    backend_name: String,
+    backend_kind: String,
+    host_lifecycle_owner: String,
+    gateway_controls_firecracker: bool,
+    channel_kind: String,
+    command_channel: FirecrackerPathCheck,
+    workspace: FirecrackerPathCheck,
+    gateway_endpoint: FirecrackerEnvCheck,
+    ready: bool,
+    failure_reasons: Vec<String>,
+    proves_microvm_boot: bool,
+    proves_handler_execution: bool,
+}
+
+impl FirecrackerGuestAgentPreflight {
+    pub(crate) fn ready(&self) -> bool {
+        self.ready
+    }
+
+    pub(crate) fn failure_summary(&self) -> String {
+        if self.failure_reasons.is_empty() {
+            "Firecracker guest agent preflight passed; handler execution inside the microVM is still not proven".to_string()
+        } else {
+            format!(
+                "Firecracker guest agent preflight failed: {}",
+                self.failure_reasons.join("; ")
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct FirecrackerPathCheck {
     env_var: Option<&'static str>,
     label: &'static str,
@@ -420,6 +504,15 @@ struct FirecrackerPathCheck {
     version_output: Option<String>,
     char_device: Option<bool>,
     open_read_write: Option<bool>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FirecrackerEnvCheck {
+    env_var: &'static str,
+    label: &'static str,
+    configured: bool,
+    value_present: bool,
     reason: Option<String>,
 }
 
@@ -493,6 +586,95 @@ fn configured_file_check(
             true,
             format!("{env_var} does not point to a file: {path_display}"),
         ),
+    }
+}
+
+fn configured_directory_check(
+    env_var: Option<&'static str>,
+    label: &'static str,
+) -> FirecrackerPathCheck {
+    let Some(env_var) = env_var else {
+        return path_check_failure(
+            None,
+            label,
+            None,
+            false,
+            "path was not configured".to_string(),
+        );
+    };
+    let path = env::var(env_var).unwrap_or_default();
+    if path.trim().is_empty() {
+        return path_check_failure(
+            Some(env_var),
+            label,
+            None,
+            false,
+            format!("{label} was not configured"),
+        );
+    }
+    let path = PathBuf::from(path.trim());
+    let path_display = path.display().to_string();
+    match fs::metadata(&path) {
+        Ok(metadata) => {
+            let directory = metadata.is_dir();
+            let reason = if directory {
+                None
+            } else {
+                Some(format!(
+                    "{env_var} does not point to a directory: {path_display}"
+                ))
+            };
+            FirecrackerPathCheck {
+                env_var: Some(env_var),
+                label,
+                path: Some(path_display),
+                configured: true,
+                exists: true,
+                file: metadata.is_file(),
+                size_bytes: None,
+                executable: None,
+                version_output: None,
+                char_device: None,
+                open_read_write: None,
+                reason,
+            }
+        }
+        Err(_) => path_check_failure(
+            Some(env_var),
+            label,
+            Some(path_display.clone()),
+            true,
+            format!("{env_var} does not point to a directory: {path_display}"),
+        ),
+    }
+}
+
+fn configured_non_empty_env_check(
+    env_var: &'static str,
+    label: &'static str,
+) -> FirecrackerEnvCheck {
+    match env::var(env_var) {
+        Ok(value) if !value.trim().is_empty() => FirecrackerEnvCheck {
+            env_var,
+            label,
+            configured: true,
+            value_present: true,
+            reason: None,
+        },
+        Ok(_) => FirecrackerEnvCheck {
+            env_var,
+            label,
+            configured: true,
+            value_present: false,
+            reason: Some(format!("{label} was not configured")),
+        },
+        Err(_) => FirecrackerEnvCheck {
+            env_var,
+            label,
+            configured: false,
+            value_present: false,
+            reason: Some(format!("{label} was not configured")),
+        },
     }
 }
 
@@ -1384,6 +1566,62 @@ mod tests {
     }
 
     #[test]
+    fn firecracker_guest_agent_preflight_fails_closed_without_channel_contract() {
+        let _env_lock = lock_firecracker_env();
+        clear_firecracker_env();
+
+        let preflight = firecracker_guest_agent_preflight();
+
+        assert!(!preflight.ready());
+        assert!(!preflight.proves_microvm_boot);
+        assert!(!preflight.proves_handler_execution);
+        assert_eq!(preflight.channel_kind, "guest_agent_command");
+        assert!(preflight
+            .failure_summary()
+            .contains("Firecracker guest agent command path was not configured"));
+        assert!(preflight
+            .failure_summary()
+            .contains("Firecracker guest workspace was not configured"));
+        assert!(preflight
+            .failure_summary()
+            .contains("Firecracker guest gateway authorizer endpoint was not configured"));
+    }
+
+    #[test]
+    fn firecracker_guest_agent_preflight_reports_ready_without_claiming_execution() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace = temp.path().join("workspace");
+        write_executable_version_script(&guest_agent, "ferrogate guest agent v.test").unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
+        env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+
+        let preflight = firecracker_guest_agent_preflight();
+
+        clear_firecracker_env();
+        assert!(preflight.ready());
+        assert!(!preflight.proves_microvm_boot);
+        assert!(!preflight.proves_handler_execution);
+        assert_eq!(
+            preflight.command_channel.path.as_deref(),
+            Some(guest_agent.to_str().unwrap())
+        );
+        assert_eq!(
+            preflight.workspace.path.as_deref(),
+            Some(workspace.to_str().unwrap())
+        );
+        assert!(preflight
+            .failure_summary()
+            .contains("handler execution inside the microVM is still not proven"));
+    }
+
+    #[test]
     fn firecracker_boot_smoke_fails_closed_when_preflight_fails() {
         let _env_lock = lock_firecracker_env();
         clear_firecracker_env();
@@ -1466,5 +1704,8 @@ mod tests {
         env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
         env::remove_var("AGENT_WORKER_FIRECRACKER_ROOTFS");
         env::remove_var("AGENT_WORKER_FIRECRACKER_KVM_DEVICE");
+        env::remove_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT");
+        env::remove_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE");
+        env::remove_var("AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT");
     }
 }

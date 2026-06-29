@@ -802,6 +802,7 @@ mod tests {
         test_support::lock_firecracker_env,
     };
     use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
+    use std::os::unix::fs::PermissionsExt;
     use std::thread;
     use std::{net::TcpStream, os::unix::net::UnixStream};
 
@@ -1606,7 +1607,9 @@ mod tests {
     }
 
     #[test]
-    fn exec_or_attach_reports_retained_microvm_attach_gap_without_stopping_it() {
+    fn exec_or_attach_reports_missing_guest_channel_without_stopping_microvm() {
+        let _env_lock = lock_firecracker_env();
+        clear_guest_agent_env();
         let temp = tempfile::tempdir().unwrap();
         let exec_envelope = lifecycle_envelope(
             AgentWorkerManagementAction::ExecOrAttach,
@@ -1656,7 +1659,10 @@ mod tests {
             lifecycle.status,
             ferrogate_runtime::ManagedWorkerSessionStatus::Failed
         );
-        assert_eq!(lifecycle.outcome, "handler_attach_not_implemented");
+        assert_eq!(lifecycle.outcome, "guest_agent_channel_unavailable");
+        assert!(lifecycle
+            .message
+            .contains("Firecracker guest agent command path was not configured"));
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-exec-instance")
@@ -1668,6 +1674,59 @@ mod tests {
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-exec-instance")
+        );
+    }
+
+    #[test]
+    fn exec_or_attach_reports_guest_rpc_gap_when_guest_channel_preflight_passes() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace = temp.path().join("workspace");
+        write_executable_version_script(&guest_agent, "ferrogate guest agent v.test").unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
+        std::env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+        let exec_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::ExecOrAttach,
+            "agent-worker-firecracker-exec-ready",
+        );
+        let session_id = exec_envelope.session_id.clone().unwrap();
+        let run_id = exec_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-exec-ready-instance", temp.path()).unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let exec =
+            accept_management_envelope(&mut transport, &mut state, &runtime, exec_envelope, 1_000);
+
+        clear_guest_agent_env();
+        assert!(exec.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = exec.result else {
+            panic!("exec did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "guest_handler_rpc_not_implemented");
+        assert!(lifecycle
+            .message
+            .contains("guest agent channel preflight passed"));
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-exec-ready-instance")
         );
     }
 
@@ -1760,6 +1819,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("unix socket was not created at {}", socket_path.display());
+    }
+
+    fn write_executable_version_script(path: &Path, version: &str) -> std::io::Result<()> {
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo '{version}'; exit 0; fi\nexit 0\n"
+            ),
+        )?;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions)
+    }
+
+    fn clear_guest_agent_env() {
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT");
     }
 
     fn send_http_management_request(

@@ -19,7 +19,10 @@ use ferrogate_runtime::{
 };
 
 use crate::{
-    backends::{firecracker_host_preflight, firecracker_microvm_provision, isolation_backends},
+    backends::{
+        firecracker_guest_agent_preflight, firecracker_host_preflight,
+        firecracker_microvm_provision, isolation_backends,
+    },
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
@@ -227,12 +230,27 @@ fn exec_or_attach(
     }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
+        let guest_agent = firecracker_guest_agent_preflight();
+        if !guest_agent.ready() {
+            let lifecycle = lifecycle_result_with_instance(
+                envelope,
+                ManagedWorkerSessionStatus::Failed,
+                "guest_agent_channel_unavailable",
+                &format!(
+                    "Firecracker microVM {} is provisioned with running={running}, but agent-worker cannot launch a guest handler until the guest agent channel is configured: {}",
+                    existing.instance_id,
+                    guest_agent.failure_summary()
+                ),
+                Some(existing.instance_id.clone()),
+            )?;
+            return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+        }
         let lifecycle = lifecycle_result_with_instance(
             envelope,
             ManagedWorkerSessionStatus::Failed,
-            "handler_attach_not_implemented",
+            "guest_handler_rpc_not_implemented",
             &format!(
-                "Firecracker microVM {} is provisioned with running={running}, but agent-worker handler execution inside the microVM is not implemented yet",
+                "Firecracker microVM {} is provisioned with running={running} and the guest agent channel preflight passed, but agent-worker guest handler RPC is not implemented yet",
                 existing.instance_id
             ),
             Some(existing.instance_id.clone()),

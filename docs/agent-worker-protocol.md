@@ -374,6 +374,17 @@ that the Firecracker and jailer paths are executable files, the kernel and
 rootfs paths are files, and the KVM path is a readable/writable character
 device. It reports `ready`, `failure_reasons`, and
 `proves_microvm_boot=false`; it still does not start Firecracker.
+For guest handler-channel readiness, `agent-worker
+firecracker-guest-agent-preflight` emits a separate worker-owned JSON report
+without starting a microVM. It checks
+`AGENT_WORKER_FIRECRACKER_GUEST_AGENT` as an executable guest-agent command
+path, `AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE` as a prepared workspace
+directory, and `AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT` as the
+gateway authorizer endpoint the guest-side handler channel must use before
+tool/CLI/MCP/REST/file actions. The report intentionally sets
+`proves_microvm_boot=false` and `proves_handler_execution=false`; passing this
+preflight only means the worker has enough configuration to attempt the future
+guest handler RPC path.
 Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 `stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
 worker-owned lifecycle or handler dispatch. Configured-bundle `provision` first
@@ -391,11 +402,15 @@ closed before provisioning.
 `stop` removes the retained microVM from worker state; a later `cleanup` for the
 same `session_id/run_id` is accepted as an idempotent no-op. The current
 `exec_or_attach` path still does not run framework handlers inside that microVM;
-when a retained microVM exists, it returns failed lifecycle evidence with the
-same `isolation_instance_id` and `outcome=handler_attach_not_implemented`
-without stopping the VM. Handler execution remains a separate worker-owned path
-that requires a `capability.allowed` decision from the configured gateway HTTP
-authorizer before continuing. The requested capability is framework-specific:
+when a retained microVM exists but the guest channel preflight is incomplete,
+it returns failed lifecycle evidence with the same `isolation_instance_id` and
+`outcome=guest_agent_channel_unavailable` without stopping the VM. If the
+guest-channel configuration preflight passes, `exec_or_attach` still fails
+closed with `outcome=guest_handler_rpc_not_implemented`; this is the explicit
+remaining boundary before Codex/Claude/Hermes handlers can launch inside the
+microVM. Handler execution remains a separate worker-owned path that requires a
+`capability.allowed` decision from the configured gateway HTTP authorizer
+before continuing. The requested capability is framework-specific:
 the native harness
 uses a managed tool dispatch capability, Codex and Claude Code use a managed
 CLI capability with gateway-controlled environment policy and output limits, and
