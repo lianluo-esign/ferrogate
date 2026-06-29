@@ -10,19 +10,26 @@
 //! API may ask for lifecycle actions, but framework handler execution and event
 //! normalization stay on the worker side.
 
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
-    AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
-    CapabilityAuthorizationDecision, FrameworkAdapter, FrameworkAdapterArtifact,
-    FrameworkAdapterArtifactRequest, FrameworkAdapterCapabilities, FrameworkAdapterEventKind,
-    FrameworkAdapterMode, FrameworkAdapterRunRequest, FrameworkAdapterSession,
-    FrameworkAdapterSessionRequest, ManagedCliAction, ManagedExternalAction, ManagedMemoryAccess,
-    ManagedMemoryAction, ManagedToolAction, ManagedWorkerError, NativeHarnessAdapter,
+    AgentWorkerManagementErrorCode, AgentWorkerManagementResult, FrameworkAdapter,
+    FrameworkAdapterArtifact, FrameworkAdapterSession, ManagedWorkerError, NativeHarnessAdapter,
     NormalizedFrameworkEvent, ProcessFrameworkAdapter,
 };
+#[cfg(test)]
+use ferrogate_runtime::{
+    AgentWorkerManagementEnvelope, CapabilityAuthorizationDecision,
+    FrameworkAdapterArtifactRequest, FrameworkAdapterCapabilities, FrameworkAdapterEventKind,
+    FrameworkAdapterMode, FrameworkAdapterRunRequest, FrameworkAdapterSessionRequest,
+    ManagedCliAction, ManagedExternalAction, ManagedMemoryAccess, ManagedMemoryAction,
+    ManagedToolAction,
+};
 
+#[cfg(test)]
 use crate::external_actions::{
     request_handler_external_action_decision, ExternalActionGateRequest,
     GatewayExternalActionAuthorizer,
@@ -36,6 +43,7 @@ pub(crate) struct HandlerRunState {
     pub(crate) closed: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn exec_or_attach_framework_handler_with_authorizer(
     envelope: &AgentWorkerManagementEnvelope,
     external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
@@ -204,6 +212,7 @@ fn artifact_result(artifact: FrameworkAdapterArtifact) -> AgentWorkerFrameworkAr
     }
 }
 
+#[cfg(test)]
 fn selected_adapter(
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<Box<dyn FrameworkAdapter>, ManagedWorkerError> {
@@ -236,6 +245,7 @@ fn adapter_for_name(adapter_name: &str) -> Result<Box<dyn FrameworkAdapter>, Man
     }
 }
 
+#[cfg(test)]
 fn required_capabilities(adapter: Option<&str>) -> FrameworkAdapterCapabilities {
     match adapter.unwrap_or("native-harness") {
         "hermes" => FrameworkAdapterCapabilities {
@@ -266,6 +276,7 @@ fn required_capabilities(adapter: Option<&str>) -> FrameworkAdapterCapabilities 
     }
 }
 
+#[cfg(test)]
 fn managed_action_for_session(session: &FrameworkAdapterSession) -> ManagedExternalAction {
     match session.adapter_name.as_str() {
         "codex" | "claude-code" => ManagedExternalAction::Cli(ManagedCliAction {
@@ -300,6 +311,7 @@ fn handler_runtime_error(error: ferrogate_runtime::FrameworkAdapterError) -> Man
     )
 }
 
+#[cfg(test)]
 fn process_handler_binary_event(
     session: &FrameworkAdapterSession,
 ) -> Result<Option<NormalizedFrameworkEvent>, ManagedWorkerError> {
@@ -355,6 +367,7 @@ fn process_handler_binary_event(
     }))
 }
 
+#[cfg(test)]
 fn process_handler_task_event(
     session: &FrameworkAdapterSession,
 ) -> Result<Option<NormalizedFrameworkEvent>, ManagedWorkerError> {
@@ -445,6 +458,7 @@ fn process_handler_task_event(
     }))
 }
 
+#[cfg(test)]
 fn lifecycle_session_id(
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<String, ManagedWorkerError> {
@@ -456,6 +470,7 @@ fn lifecycle_session_id(
     })
 }
 
+#[cfg(test)]
 fn lifecycle_run_id(
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<String, ManagedWorkerError> {

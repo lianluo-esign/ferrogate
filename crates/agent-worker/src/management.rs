@@ -701,22 +701,9 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::external_actions::{
-        accept_external_action_authorization_request, RuntimeGatewayExternalActionAuthorizer,
-    };
-    use crate::{
-        state::AgentWorkerStateStore,
-        test_support::{lock_firecracker_env, lock_handler_env},
-    };
-    use ferrogate_runtime::{
-        AgentWorkerManagementFrame, AgentWorkerUnixManagementClient, CapabilityAction,
-        CapabilityPolicy, GatewayExternalActionTransportRequest,
-        GatewayExternalActionTransportResponse, SimpleCapabilityAuthorizer,
-    };
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use crate::{state::AgentWorkerStateStore, test_support::lock_firecracker_env};
+    use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
     use std::thread;
-    use std::{collections::BTreeSet, env, fs};
     use std::{net::TcpStream, os::unix::net::UnixStream};
 
     #[test]
@@ -1002,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_or_attach_without_gateway_authorizer_fails_closed() {
+    fn exec_or_attach_without_microvm_provision_returns_lifecycle_evidence() {
         let envelope = lifecycle_envelope(
             AgentWorkerManagementAction::ExecOrAttach,
             "agent-worker-native-run",
@@ -1014,17 +1001,21 @@ mod tests {
                 .unwrap();
         let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
-        assert_eq!(response["accepted"], false);
+        assert_eq!(response["accepted"], true);
         assert_eq!(response["action"], "exec_or_attach");
-        assert_eq!(response["error"]["code"], "run_failed");
-        assert!(response["error"]["message"]
+        assert_eq!(response["error"], serde_json::Value::Null);
+        assert_eq!(response["result"]["kind"], "lifecycle");
+        assert_eq!(response["result"]["lifecycle"]["status"], "failed");
+        assert_eq!(response["result"]["lifecycle"]["outcome"], "not_started");
+        assert!(response["result"]["lifecycle"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("gateway authorization client")));
-        assert_eq!(response["result"], serde_json::Value::Null);
+            .is_some_and(
+                |message| message.contains("before Firecracker microVM provision succeeds")
+            ));
     }
 
     #[test]
-    fn unix_management_exec_or_attach_fails_closed_without_gateway_authorizer() {
+    fn unix_management_exec_or_attach_reports_not_started_before_microvm_provision() {
         let temp = tempfile::tempdir().unwrap();
         let socket_path = temp.path().join("agent-worker-management.sock");
         let socket_for_server = socket_path.clone();
@@ -1050,40 +1041,37 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(!exec.accepted);
+        assert!(exec.accepted);
+        assert_eq!(exec.error.as_ref().map(|error| error.code.as_str()), None);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = exec.result else {
+            panic!("exec did not return lifecycle evidence");
+        };
         assert_eq!(
-            exec.error.as_ref().map(|error| error.code.as_str()),
-            Some("run_failed")
+            lifecycle.status,
+            ferrogate_runtime::ManagedWorkerSessionStatus::Failed
         );
+        assert_eq!(lifecycle.outcome, "not_started");
 
         let server_responses = server.join().unwrap();
         assert_eq!(server_responses.len(), 1);
-        assert!(!server_responses[0].accepted);
+        assert!(server_responses[0].accepted);
         assert!(!socket_path.exists());
     }
 
     #[test]
-    fn http_management_exec_or_attach_calls_gateway_authorizer_before_selected_process_shim() {
-        let _env_lock = lock_handler_env();
-        let _binary = configured_fake_handler_binary(
-            "AGENT_WORKER_CODEX_BIN",
-            "codex-smoke",
-            "codex binary smoke",
-        );
+    fn http_management_exec_or_attach_does_not_run_process_shim_before_microvm_provision() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let authorizer = spawn_allowing_http_authorizer(1);
-        let authorizer_endpoint = authorizer.endpoint;
         let server = thread::spawn(move || {
             serve_management_http(
                 addr,
                 "agent-worker-smoke-key",
                 SMOKE_SHARED_SECRET,
                 Some(1_000),
-                3,
+                2,
                 None,
-                Some(authorizer_endpoint),
+                None,
             )
             .unwrap()
         });
@@ -1109,100 +1097,29 @@ mod tests {
             .unwrap(),
             "mutual_tls",
         );
-        let artifacts = send_http_management_request(
-            addr,
-            &serde_json::to_string(&shared_lifecycle_envelope(
-                AgentWorkerManagementAction::CollectArtifacts,
-                "agent-worker-native-http",
-                "artifacts",
-            ))
-            .unwrap(),
-            "mutual_tls",
-        );
 
         assert!(exec.accepted);
         assert!(status.accepted);
-        assert!(artifacts.accepted);
-        let Some(AgentWorkerManagementResult::HandlerEvents { events }) = exec.result else {
-            panic!("exec did not return handler events");
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = exec.result else {
+            panic!("exec did not return lifecycle evidence");
         };
-        let capability_position = events
-            .iter()
-            .position(|event| event.kind == "capability.allowed")
-            .expect("missing capability.allowed event");
-        let model_position = events
-            .iter()
-            .position(|event| event.kind == "model.requested")
-            .expect("missing model.requested event");
-        assert!(capability_position < model_position);
-        let capability = &events[capability_position];
         assert_eq!(
-            capability
-                .metadata
-                .get("external_action")
-                .map(String::as_str),
-            Some("cli")
+            lifecycle.status,
+            ferrogate_runtime::ManagedWorkerSessionStatus::Failed
         );
-        assert_eq!(
-            capability.metadata.get("command").map(String::as_str),
-            Some("codex")
-        );
-        assert_eq!(
-            capability.metadata.get("env_policy").map(String::as_str),
-            Some("gateway_injected_only")
-        );
-        let binary_position = events
-            .iter()
-            .position(|event| {
-                event.kind == "cli.requested"
-                    && event
-                        .metadata
-                        .get("real_binary_probe")
-                        .is_some_and(|value| value == "true")
-            })
-            .expect("missing real binary probe event");
-        assert!(capability_position < binary_position);
-        assert!(binary_position < model_position);
-        let binary_event = &events[binary_position];
-        assert_eq!(
-            binary_event
-                .metadata
-                .get("handler_owner")
-                .map(String::as_str),
-            Some("agent-worker")
-        );
-        assert_eq!(
-            binary_event.metadata.get("env_var").map(String::as_str),
-            Some("AGENT_WORKER_CODEX_BIN")
-        );
-        assert!(binary_event
-            .metadata
-            .get("stdout_excerpt")
-            .is_some_and(|value| value.contains("codex binary smoke --version")));
-        assert!(events
-            .iter()
-            .any(|event| event.adapter_name == "codex" && event.framework == "codex"));
-        assert!(events.iter().any(|event| event.kind == "model.requested"));
-        assert!(!events.iter().any(|event| event.kind == "tool.completed"));
-        let Some(AgentWorkerManagementResult::HandlerArtifacts {
-            artifacts: collected,
-            events,
-        }) = artifacts.result
-        else {
-            panic!("artifact collection did not return handler artifacts");
+        assert_eq!(lifecycle.outcome, "not_started");
+        assert_eq!(lifecycle.backend_name, "firecracker");
+        assert!(lifecycle
+            .message
+            .contains("before Firecracker microVM provision succeeds"));
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = status.result else {
+            panic!("status did not return lifecycle evidence");
         };
-        assert_eq!(collected[0].artifact_id, "codex-artifact");
-        assert!(events.iter().any(|event| event.kind == "artifact.created"));
+        assert_eq!(lifecycle.outcome, "not_started");
 
         let server_responses = server.join().unwrap();
-        assert_eq!(server_responses.len(), 3);
+        assert_eq!(server_responses.len(), 2);
         assert!(server_responses.iter().all(|response| response.accepted));
-        let authorizer_requests = authorizer.join();
-        assert_eq!(authorizer_requests.len(), 1);
-        assert!(matches!(
-            authorizer_requests[0].response.decision,
-            Some(ferrogate_runtime::ExternalActionDecision::Allowed)
-        ));
     }
 
     #[test]
@@ -1598,53 +1515,6 @@ mod tests {
         serde_json::from_str(body.trim()).unwrap()
     }
 
-    struct TestHttpAuthorizer {
-        endpoint: SocketAddr,
-        handle: thread::JoinHandle<Vec<GatewayExternalActionTransportResponse>>,
-    }
-
-    impl TestHttpAuthorizer {
-        fn join(self) -> Vec<GatewayExternalActionTransportResponse> {
-            self.handle.join().unwrap()
-        }
-    }
-
-    fn spawn_allowing_http_authorizer(max_requests: usize) -> TestHttpAuthorizer {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = listener.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let authorizer = RuntimeGatewayExternalActionAuthorizer::new(
-                SimpleCapabilityAuthorizer::new(CapabilityPolicy {
-                    allowed_actions: BTreeSet::from([
-                        CapabilityAction::Tool,
-                        CapabilityAction::Cli,
-                    ]),
-                    ..CapabilityPolicy::default()
-                }),
-            );
-            let mut responses = Vec::with_capacity(max_requests);
-            for _ in 0..max_requests {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = String::new();
-                stream.read_to_string(&mut request).unwrap();
-                let body = request.split_once("\r\n\r\n").unwrap().1;
-                let request: GatewayExternalActionTransportRequest =
-                    serde_json::from_str(body).unwrap();
-                let response = accept_external_action_authorization_request(request, &authorizer);
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    serde_json::to_string(&response).unwrap().len(),
-                    serde_json::to_string(&response).unwrap()
-                )
-                .unwrap();
-                responses.push(response);
-            }
-            responses
-        });
-        TestHttpAuthorizer { endpoint, handle }
-    }
-
     fn lifecycle_envelope(
         action: AgentWorkerManagementAction,
         prefix: &str,
@@ -1697,41 +1567,5 @@ mod tests {
             .shared_secret_signature(SMOKE_SHARED_SECRET)
             .unwrap();
         envelope
-    }
-
-    fn configured_fake_handler_binary(
-        env_var: &str,
-        filename: &str,
-        output_prefix: &str,
-    ) -> FakeHandlerBinary {
-        let temp = tempfile::tempdir().unwrap();
-        let binary_path = temp.path().join(filename);
-        fs::write(
-            &binary_path,
-            format!("#!/bin/sh\nprintf '{output_prefix} %s\\n' \"$1\"\n"),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
-            permissions.set_mode(0o700);
-            fs::set_permissions(&binary_path, permissions).unwrap();
-        }
-        env::set_var(env_var, &binary_path);
-        FakeHandlerBinary {
-            _temp: temp,
-            env_var: env_var.to_string(),
-        }
-    }
-
-    struct FakeHandlerBinary {
-        _temp: tempfile::TempDir,
-        env_var: String,
-    }
-
-    impl Drop for FakeHandlerBinary {
-        fn drop(&mut self) {
-            env::remove_var(&self.env_var);
-        }
     }
 }

@@ -21,7 +21,7 @@ use crate::{
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
-        exec_or_attach_framework_handler_with_authorizer, stream_native_harness_status,
+        stream_native_harness_status,
     },
     state::AgentWorkerStateStore,
 };
@@ -96,17 +96,20 @@ fn provision(
 fn exec_or_attach(
     state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
-    external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
+    _external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
     if let Some(existing) = state.get_handler_run_state(&session_id, &run_id) {
         return Ok(Some(stream_native_harness_status(&existing)));
     }
-    let (handler_state, result) =
-        exec_or_attach_framework_handler_with_authorizer(envelope, external_action_authorizer)?;
-    state.put_handler_run_state(handler_state);
-    Ok(Some(result))
+    let lifecycle = lifecycle_result(
+        envelope,
+        ManagedWorkerSessionStatus::Failed,
+        "not_started",
+        "agent-worker cannot exec_or_attach a managed handler before Firecracker microVM provision succeeds; local framework shims are test harness adapters, not managed microVM execution",
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
 }
 
 fn stream_status(
