@@ -221,6 +221,18 @@ pub(crate) fn smoke_handler_task(
         &target.task_args,
         timeout_millis,
     )?;
+    if let Some(expected_output) = expected_exact_output(prompt) {
+        let stdout_excerpt = output_excerpt(&output.stdout);
+        if !stdout_excerpt.contains(&expected_output) {
+            bail!(
+                "agent-worker {} handler task smoke did not produce expected output {:?}; stdout_excerpt={:?}; stderr_excerpt={:?}",
+                target.adapter_name,
+                expected_output,
+                stdout_excerpt,
+                output_excerpt(&output.stderr)
+            );
+        }
+    }
 
     Ok(HandlerTaskSmokeResult {
         adapter_name: target.adapter_name,
@@ -331,8 +343,6 @@ fn handler_binary_task_target(adapter_name: &str, prompt: &str) -> Result<Handle
                 "exec".to_string(),
                 "--sandbox".to_string(),
                 "read-only".to_string(),
-                "--ask-for-approval".to_string(),
-                "never".to_string(),
                 "--skip-git-repo-check".to_string(),
                 "--ignore-rules".to_string(),
                 "--ephemeral".to_string(),
@@ -366,12 +376,7 @@ fn handler_binary_task_target(adapter_name: &str, prompt: &str) -> Result<Handle
             })
         }
         "hermes" => {
-            let mut task_args = vec![
-                "--ignore-rules".to_string(),
-                "--max-turns".to_string(),
-                "1".to_string(),
-                "-z".to_string(),
-            ];
+            let mut task_args = vec!["--ignore-rules".to_string(), "-z".to_string()];
             let prompt_arg_index = task_args.len();
             task_args.push(prompt.to_string());
             Ok(HandlerBinaryTaskTarget {
@@ -446,6 +451,15 @@ fn output_excerpt(output: &[u8]) -> String {
     String::from_utf8_lossy(&output[..length])
         .trim()
         .to_string()
+}
+
+fn expected_exact_output(prompt: &str) -> Option<String> {
+    prompt
+        .trim()
+        .strip_prefix("Return exactly:")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn handlers_json(handlers: &[AgentWorkerFrameworkHandler]) -> String {
@@ -598,6 +612,10 @@ mod tests {
         assert_eq!(result.binary_path, binary_path);
         assert_eq!(result.task_args[0], "exec");
         assert!(result.task_args.iter().any(|arg| arg == "read-only"));
+        assert!(!result
+            .task_args
+            .iter()
+            .any(|arg| arg == "--ask-for-approval"));
         assert_eq!(
             result.task_args[result.prompt_arg_index],
             "Return exactly smoke-ok"
@@ -612,6 +630,66 @@ mod tests {
         let redacted = redacted_args(&result.task_args, result.prompt_arg_index);
         assert_eq!(redacted[result.prompt_arg_index], "<prompt>");
         assert!(!redacted.iter().any(|arg| arg == "Return exactly smoke-ok"));
+    }
+
+    #[test]
+    fn hermes_task_smoke_uses_global_oneshot_arguments() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join("hermes-task-smoke");
+        fs::write(
+            &binary_path,
+            "#!/bin/sh\nprintf 'hermes task args:'\nprintf ' [%s]' \"$@\"\nprintf '\\nReturn exactly smoke-ok\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&binary_path, permissions).unwrap();
+        env::set_var("AGENT_WORKER_HERMES_BIN", &binary_path);
+
+        let result = smoke_handler_task(
+            "hermes",
+            DEFAULT_HANDLER_SMOKE_TIMEOUT_MILLIS,
+            "Return exactly smoke-ok",
+        )
+        .unwrap();
+
+        env::remove_var("AGENT_WORKER_HERMES_BIN");
+        assert_eq!(
+            result.task_args,
+            vec!["--ignore-rules", "-z", "Return exactly smoke-ok"]
+        );
+        assert_eq!(result.prompt_arg_index, 2);
+        assert!(!result.task_args.iter().any(|arg| arg == "--max-turns"));
+        assert!(result.stdout_excerpt.contains("hermes task args:"));
+    }
+
+    #[test]
+    fn handler_task_smoke_rejects_zero_exit_without_expected_output() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join("hermes-task-smoke");
+        fs::write(
+            &binary_path,
+            "#!/bin/sh\nprintf 'API call failed after 3 retries: HTTP 402: Insufficient Balance\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&binary_path, permissions).unwrap();
+        env::set_var("AGENT_WORKER_HERMES_BIN", &binary_path);
+
+        let error = smoke_handler_task(
+            "hermes",
+            DEFAULT_HANDLER_SMOKE_TIMEOUT_MILLIS,
+            "Return exactly: ferrogate-agent-worker-task-smoke",
+        )
+        .unwrap_err()
+        .to_string();
+
+        env::remove_var("AGENT_WORKER_HERMES_BIN");
+        assert!(error.contains("did not produce expected output"));
+        assert!(error.contains("Insufficient Balance"));
     }
 
     #[test]
