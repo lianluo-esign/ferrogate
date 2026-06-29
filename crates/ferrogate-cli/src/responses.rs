@@ -168,6 +168,19 @@ pub(crate) struct AdminFrameworkAdapterRuntime {
     pub(crate) managed_capability_boundary: &'static str,
     pub(crate) self_hosted_trust_level: &'static str,
     pub(crate) public_api_exposes_framework_details: bool,
+    pub(crate) persistence: AdminFrameworkAdapterPersistence,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminFrameworkAdapterPersistence {
+    pub(crate) implemented: bool,
+    pub(crate) provider: &'static str,
+    pub(crate) session_table: &'static str,
+    pub(crate) lifecycle_event_table: &'static str,
+    pub(crate) normalized_event_table: &'static str,
+    pub(crate) session_records_implemented: bool,
+    pub(crate) lifecycle_event_records_implemented: bool,
+    pub(crate) normalized_event_records_implemented: bool,
 }
 
 #[derive(Debug, Serialize)]

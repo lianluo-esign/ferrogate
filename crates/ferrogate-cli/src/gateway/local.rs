@@ -7725,6 +7725,16 @@ fn framework_adapter_runtime(
         managed_capability_boundary: "gateway_mediated",
         self_hosted_trust_level: "reported_by_self_hosted_worker",
         public_api_exposes_framework_details: false,
+        persistence: crate::responses::AdminFrameworkAdapterPersistence {
+            implemented: true,
+            provider: "supabase_postgres",
+            session_table: "managed_worker_sessions",
+            lifecycle_event_table: "managed_worker_lifecycle_events",
+            normalized_event_table: "agent_run_events",
+            session_records_implemented: true,
+            lifecycle_event_records_implemented: true,
+            normalized_event_records_implemented: true,
+        },
     }
 }
 

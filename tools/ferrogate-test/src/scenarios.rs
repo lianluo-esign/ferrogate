@@ -168,10 +168,34 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 "reported_by_self_hosted_worker"
             );
             assert_eq!(native["public_api_exposes_framework_details"], false);
+            assert_eq!(native["persistence"]["implemented"], true);
+            assert_eq!(native["persistence"]["provider"], "supabase_postgres");
+            assert_eq!(
+                native["persistence"]["session_table"],
+                "managed_worker_sessions"
+            );
+            assert_eq!(
+                native["persistence"]["lifecycle_event_table"],
+                "managed_worker_lifecycle_events"
+            );
+            assert_eq!(
+                native["persistence"]["normalized_event_table"],
+                "agent_run_events"
+            );
+            assert_eq!(native["persistence"]["session_records_implemented"], true);
+            assert_eq!(
+                native["persistence"]["lifecycle_event_records_implemented"],
+                true
+            );
+            assert_eq!(
+                native["persistence"]["normalized_event_records_implemented"],
+                true
+            );
             let codex =
                 admin_list_item(&body, "id", "codex").context("codex adapter should be listed")?;
             assert_eq!(codex["integration_status"], "process_shim_contract_ready");
             assert_eq!(codex["enabled"], false);
+            assert_eq!(codex["persistence"]["implemented"], true);
             Ok(())
         },
     )?;

@@ -9936,7 +9936,8 @@
           "event_schema",
           "managed_capability_boundary",
           "self_hosted_trust_level",
-          "public_api_exposes_framework_details"
+          "public_api_exposes_framework_details",
+          "persistence"
         ],
         "properties": {
           "id": {
@@ -10014,6 +10015,57 @@
           "public_api_exposes_framework_details": {
             "type": "boolean",
             "const": false
+          },
+          "persistence": {
+            "$ref": "#/components/schemas/AdminFrameworkAdapterPersistence"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminFrameworkAdapterPersistence": {
+        "type": "object",
+        "required": [
+          "implemented",
+          "provider",
+          "session_table",
+          "lifecycle_event_table",
+          "normalized_event_table",
+          "session_records_implemented",
+          "lifecycle_event_records_implemented",
+          "normalized_event_records_implemented"
+        ],
+        "properties": {
+          "implemented": {
+            "type": "boolean",
+            "const": true
+          },
+          "provider": {
+            "type": "string",
+            "const": "supabase_postgres"
+          },
+          "session_table": {
+            "type": "string",
+            "const": "managed_worker_sessions"
+          },
+          "lifecycle_event_table": {
+            "type": "string",
+            "const": "managed_worker_lifecycle_events"
+          },
+          "normalized_event_table": {
+            "type": "string",
+            "const": "agent_run_events"
+          },
+          "session_records_implemented": {
+            "type": "boolean",
+            "const": true
+          },
+          "lifecycle_event_records_implemented": {
+            "type": "boolean",
+            "const": true
+          },
+          "normalized_event_records_implemented": {
+            "type": "boolean",
+            "const": true
           }
         },
         "additionalProperties": false
