@@ -19,7 +19,7 @@ use ferrogate_runtime::{
     AgentWorkerManagementResponse, AgentWorkerManagementResult, ManagedWorkerError,
 };
 
-use crate::handler_runtime::HandlerRunState;
+use crate::{backends::FirecrackerMicroVm, handler_runtime::HandlerRunState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredLifecycleEvent {
@@ -84,6 +84,25 @@ pub(crate) trait AgentWorkerStateStore {
 
     fn put_handler_run_state(&mut self, state: HandlerRunState);
 
+    fn get_firecracker_microvm_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut FirecrackerMicroVm>;
+
+    fn put_firecracker_microvm(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        vm: FirecrackerMicroVm,
+    );
+
+    fn remove_firecracker_microvm(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<FirecrackerMicroVm>;
+
     #[cfg(test)]
     fn lifecycle_events(&self) -> Vec<StoredLifecycleEvent>;
 }
@@ -93,6 +112,7 @@ pub(crate) struct InMemoryAgentWorkerStateStore {
     idempotent_responses: HashMap<String, AgentWorkerManagementResponse>,
     lifecycle_events: Vec<StoredLifecycleEvent>,
     handler_runs: HashMap<String, HandlerRunState>,
+    firecracker_vms: HashMap<String, FirecrackerMicroVm>,
 }
 
 impl InMemoryAgentWorkerStateStore {
@@ -141,6 +161,10 @@ impl InMemoryAgentWorkerStateStore {
     fn handler_run_key(session_id: &str, run_id: &str) -> String {
         [session_id, run_id].join("\n")
     }
+
+    fn microvm_key(session_id: &str, run_id: &str) -> String {
+        [session_id, run_id].join("\n")
+    }
 }
 
 impl AgentWorkerStateStore for InMemoryAgentWorkerStateStore {
@@ -183,6 +207,34 @@ impl AgentWorkerStateStore for InMemoryAgentWorkerStateStore {
             Self::handler_run_key(&state.session.session_id, &state.session.run_id),
             state,
         );
+    }
+
+    fn get_firecracker_microvm_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut FirecrackerMicroVm> {
+        self.firecracker_vms
+            .get_mut(&Self::microvm_key(session_id, run_id))
+    }
+
+    fn put_firecracker_microvm(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        vm: FirecrackerMicroVm,
+    ) {
+        self.firecracker_vms
+            .insert(Self::microvm_key(&session_id, &run_id), vm);
+    }
+
+    fn remove_firecracker_microvm(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<FirecrackerMicroVm> {
+        self.firecracker_vms
+            .remove(&Self::microvm_key(session_id, run_id))
     }
 
     #[cfg(test)]

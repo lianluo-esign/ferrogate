@@ -17,7 +17,7 @@ use ferrogate_runtime::{
 };
 
 use crate::{
-    backends::{firecracker_host_preflight, isolation_backends},
+    backends::{firecracker_host_preflight, firecracker_microvm_provision, isolation_backends},
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
@@ -32,7 +32,7 @@ pub(crate) fn dispatch_lifecycle_action(
     external_action_authorizer: Option<&dyn GatewayExternalActionAuthorizer>,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     match envelope.action {
-        AgentWorkerManagementAction::Provision => provision(envelope),
+        AgentWorkerManagementAction::Provision => provision(state, envelope),
         AgentWorkerManagementAction::ExecOrAttach => {
             exec_or_attach(state, envelope, external_action_authorizer)
         }
@@ -47,6 +47,7 @@ pub(crate) fn dispatch_lifecycle_action(
 }
 
 fn provision(
+    state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let Some(backend) = isolation_backends()
@@ -80,17 +81,55 @@ fn provision(
         return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
     }
 
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
+        let running = existing.is_running();
+        let lifecycle = lifecycle_result_with_instance(
+            envelope,
+            if running {
+                ManagedWorkerSessionStatus::Running
+            } else {
+                ManagedWorkerSessionStatus::Failed
+            },
+            if running { "already_running" } else { "exited" },
+            &format!(
+                "Firecracker microVM {} already exists; running={running}",
+                existing.instance_id
+            ),
+            Some(existing.instance_id.clone()),
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
+
+    let mut microvm = firecracker_microvm_provision(30_000, 1, 512).map_err(|error| {
+        ManagedWorkerError::management_protocol_error(
+            AgentWorkerManagementErrorCode::ProvisionFailed,
+            format!(
+                "agent-worker Firecracker provision failed: {}",
+                error.summary()
+            ),
+        )
+    })?;
+    let instance_id = microvm.instance_id.clone();
+    let markers = microvm.evidence.marker_summary();
+    let running = microvm.is_running();
+    state.put_firecracker_microvm(session_id, run_id, microvm);
     let message = format!(
-        "{}; Firecracker backend is configured, but microVM provision/start lifecycle is not implemented in agent-worker yet",
-        preflight.success_summary()
+        "Firecracker microVM provisioned by agent-worker; running={running}; markers={markers}"
     );
     let lifecycle = lifecycle_result(
         envelope,
-        ManagedWorkerSessionStatus::Failed,
-        "not_implemented",
+        ManagedWorkerSessionStatus::Running,
+        "provisioned",
         &message,
     )?;
-    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+    Ok(Some(AgentWorkerManagementResult::Lifecycle {
+        lifecycle: AgentWorkerLifecycleResult {
+            isolation_instance_id: Some(instance_id),
+            ..lifecycle
+        },
+    }))
 }
 
 fn exec_or_attach(
@@ -118,6 +157,24 @@ fn stream_status(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
+        let running = existing.is_running();
+        let lifecycle = lifecycle_result_with_instance(
+            envelope,
+            if running {
+                ManagedWorkerSessionStatus::Running
+            } else {
+                ManagedWorkerSessionStatus::Failed
+            },
+            if running { "running" } else { "exited" },
+            &format!(
+                "Firecracker microVM {} status checked by agent-worker; running={running}",
+                existing.instance_id
+            ),
+            Some(existing.instance_id.clone()),
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
     if let Some(existing) = state.get_handler_run_state(&session_id, &run_id) {
         return Ok(Some(stream_native_harness_status(&existing)));
     }
@@ -164,6 +221,20 @@ fn cleanup(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
+        let instance_id = existing.instance_id.clone();
+        let was_running = existing.stop();
+        let lifecycle = lifecycle_result_with_instance(
+            envelope,
+            ManagedWorkerSessionStatus::CleanedUp,
+            "cleaned_up",
+            &format!(
+                "Firecracker microVM {instance_id} cleaned up by agent-worker; was_running={was_running}"
+            ),
+            Some(instance_id),
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
     if let Some(mut existing) = state.get_handler_run_state(&session_id, &run_id) {
         let result = cleanup_native_harness(&mut existing)?;
         state.put_handler_run_state(existing);
@@ -223,6 +294,19 @@ fn lifecycle_result(
         isolation_instance_id: None,
         outcome: outcome.to_string(),
         message: message.to_string(),
+    })
+}
+
+fn lifecycle_result_with_instance(
+    envelope: &AgentWorkerManagementEnvelope,
+    status: ManagedWorkerSessionStatus,
+    outcome: &str,
+    message: &str,
+    isolation_instance_id: Option<String>,
+) -> Result<AgentWorkerLifecycleResult, ManagedWorkerError> {
+    Ok(AgentWorkerLifecycleResult {
+        isolation_instance_id,
+        ..lifecycle_result(envelope, status, outcome, message)?
     })
 }
 

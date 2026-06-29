@@ -59,6 +59,32 @@ pub(crate) fn firecracker_host_preflight_command() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn firecracker_microvm_provision(
+    timeout_millis: u64,
+    vcpu_count: u8,
+    mem_size_mib: u32,
+) -> Result<FirecrackerMicroVm, FirecrackerBootSmokeError> {
+    let preflight = firecracker_host_preflight();
+    if !preflight.ready() {
+        return Err(FirecrackerBootSmokeError::new(
+            "preflight_failed",
+            preflight.failure_summary(),
+        ));
+    }
+    let bundle = firecracker_prepare_plan()
+        .map_err(|error| FirecrackerBootSmokeError::new("bundle_unavailable", error.to_string()))?;
+    let options = FirecrackerBootSmokeOptions {
+        timeout: Duration::from_millis(timeout_millis),
+        vcpu_count,
+        mem_size_mib,
+    };
+    let artifacts = FirecrackerMicroVmArtifacts::new().map_err(|error| {
+        FirecrackerBootSmokeError::new("run_dir_create_failed", error.to_string())
+    })?;
+    let started = start_firecracker_microvm(&bundle, artifacts, &options)?;
+    Ok(started)
+}
+
 pub(crate) fn firecracker_boot_smoke_command(
     timeout_millis: u64,
     vcpu_count: u8,
@@ -148,55 +174,47 @@ fn firecracker_boot_smoke(options: FirecrackerBootSmokeOptions) -> FirecrackerBo
             preflight,
         );
     };
-    let run_dir = env::temp_dir().join(format!(
-        "ferrogate-agent-worker-firecracker-boot-smoke-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-    if let Err(error) = fs::create_dir_all(&run_dir) {
-        return FirecrackerBootSmokeReport::failed(
-            "run_dir_create_failed",
-            error.to_string(),
-            None,
-            None,
-            preflight,
-        );
-    }
-    let artifacts = FirecrackerBootSmokeArtifacts {
-        api_socket: run_dir.join("firecracker.sock"),
-        firecracker_log: run_dir.join("firecracker.log"),
-        serial_output: run_dir.join("serial.log"),
-        stdout: run_dir.join("firecracker.stdout"),
-        stderr: run_dir.join("firecracker.stderr"),
+    let artifacts = match FirecrackerMicroVmArtifacts::new() {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            return FirecrackerBootSmokeReport::failed(
+                "run_dir_create_failed",
+                error.to_string(),
+                None,
+                None,
+                preflight,
+            );
+        }
     };
-    let result = run_firecracker_boot_smoke(&bundle, &artifacts, &options);
-    let _ = fs::remove_file(&artifacts.api_socket);
+    let result = start_firecracker_microvm(&bundle, artifacts, &options);
     let mut report = match result {
-        Ok(evidence) => FirecrackerBootSmokeReport {
-            process: "agent-worker".to_string(),
-            backend_name: "firecracker".to_string(),
-            backend_kind: "firecracker_micro_vm".to_string(),
-            host_lifecycle_owner: "agent-worker".to_string(),
-            gateway_controls_firecracker: false,
-            ready: true,
-            boot_observed: true,
-            proves_microvm_boot: true,
-            vcpu_count: options.vcpu_count,
-            mem_size_mib: options.mem_size_mib,
-            evidence: Some(evidence),
-            failure_stage: None,
-            failure_reason: None,
-            artifacts: artifacts.to_report_paths(),
-            preflight,
-        },
+        Ok(mut microvm) => {
+            let evidence = microvm.evidence.clone();
+            let artifacts = microvm.artifacts.to_report_paths();
+            let _ = microvm.stop();
+            FirecrackerBootSmokeReport {
+                process: "agent-worker".to_string(),
+                backend_name: "firecracker".to_string(),
+                backend_kind: "firecracker_micro_vm".to_string(),
+                host_lifecycle_owner: "agent-worker".to_string(),
+                gateway_controls_firecracker: false,
+                ready: true,
+                boot_observed: true,
+                proves_microvm_boot: true,
+                vcpu_count: options.vcpu_count,
+                mem_size_mib: options.mem_size_mib,
+                evidence: Some(evidence),
+                failure_stage: None,
+                failure_reason: None,
+                artifacts,
+                preflight,
+            }
+        }
         Err(error) => FirecrackerBootSmokeReport::failed(
             error.stage,
             error.reason,
-            Some(artifacts.to_report_paths()),
-            error.evidence,
+            error.artifacts.map(|artifacts| *artifacts),
+            error.evidence.map(|evidence| *evidence),
             preflight,
         ),
     };
@@ -354,6 +372,7 @@ impl FirecrackerHostPreflight {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn success_summary(&self) -> String {
         let firecracker_version = self
             .bundle
@@ -628,14 +647,42 @@ impl FirecrackerBootSmokeReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct FirecrackerBootEvidence {
+pub(crate) struct FirecrackerBootEvidence {
     serial_boot_markers: Vec<&'static str>,
     serial_excerpt: String,
     firecracker_log_excerpt: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct FirecrackerMicroVm {
+    pub(crate) instance_id: String,
+    pub(crate) evidence: FirecrackerBootEvidence,
+    pub(crate) artifacts: FirecrackerMicroVmArtifacts,
+    child: Child,
+}
+
+impl FirecrackerMicroVm {
+    pub(crate) fn is_running(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_none()
+    }
+
+    pub(crate) fn stop(&mut self) -> bool {
+        let was_running = self.is_running();
+        stop_firecracker_child(&mut self.child);
+        let _ = fs::remove_file(&self.artifacts.api_socket);
+        was_running
+    }
+}
+
+impl Drop for FirecrackerMicroVm {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FirecrackerBootSmokeArtifacts {
+pub(crate) struct FirecrackerMicroVmArtifacts {
+    run_dir: PathBuf,
     api_socket: PathBuf,
     firecracker_log: PathBuf,
     serial_output: PathBuf,
@@ -643,7 +690,27 @@ struct FirecrackerBootSmokeArtifacts {
     stderr: PathBuf,
 }
 
-impl FirecrackerBootSmokeArtifacts {
+impl FirecrackerMicroVmArtifacts {
+    fn new() -> Result<Self, std::io::Error> {
+        let run_dir = env::temp_dir().join(format!(
+            "ferrogate-agent-worker-firecracker-microvm-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        fs::create_dir_all(&run_dir)?;
+        Ok(Self {
+            run_dir: run_dir.clone(),
+            api_socket: run_dir.join("firecracker.sock"),
+            firecracker_log: run_dir.join("firecracker.log"),
+            serial_output: run_dir.join("serial.log"),
+            stdout: run_dir.join("firecracker.stdout"),
+            stderr: run_dir.join("firecracker.stderr"),
+        })
+    }
+
     fn to_report_paths(&self) -> FirecrackerBootSmokeArtifactReport {
         FirecrackerBootSmokeArtifactReport {
             api_socket: Some(self.api_socket.display().to_string()),
@@ -665,10 +732,11 @@ struct FirecrackerBootSmokeArtifactReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FirecrackerBootSmokeError {
+pub(crate) struct FirecrackerBootSmokeError {
     stage: &'static str,
     reason: String,
-    evidence: Option<FirecrackerBootEvidence>,
+    evidence: Option<Box<FirecrackerBootEvidence>>,
+    artifacts: Option<Box<FirecrackerBootSmokeArtifactReport>>,
 }
 
 impl FirecrackerBootSmokeError {
@@ -677,6 +745,7 @@ impl FirecrackerBootSmokeError {
             stage,
             reason: reason.into(),
             evidence: None,
+            artifacts: None,
         }
     }
 
@@ -688,21 +757,39 @@ impl FirecrackerBootSmokeError {
         Self {
             stage,
             reason: reason.into(),
-            evidence: Some(evidence),
+            evidence: Some(Box::new(evidence)),
+            artifacts: None,
         }
+    }
+
+    fn with_artifacts(mut self, artifacts: &FirecrackerMicroVmArtifacts) -> Self {
+        self.artifacts = Some(Box::new(artifacts.to_report_paths()));
+        self
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        format!("{}: {}", self.stage, self.reason)
     }
 }
 
-fn run_firecracker_boot_smoke(
+impl FirecrackerBootEvidence {
+    pub(crate) fn marker_summary(&self) -> String {
+        self.serial_boot_markers.join(",")
+    }
+}
+
+fn start_firecracker_microvm(
     bundle: &FirecrackerPreparePlan,
-    artifacts: &FirecrackerBootSmokeArtifacts,
+    artifacts: FirecrackerMicroVmArtifacts,
     options: &FirecrackerBootSmokeOptions,
-) -> Result<FirecrackerBootEvidence, FirecrackerBootSmokeError> {
+) -> Result<FirecrackerMicroVm, FirecrackerBootSmokeError> {
     let stdout = File::create(&artifacts.stdout).map_err(|error| {
         FirecrackerBootSmokeError::new("open_stdout_artifact", error.to_string())
+            .with_artifacts(&artifacts)
     })?;
     let stderr = File::create(&artifacts.stderr).map_err(|error| {
         FirecrackerBootSmokeError::new("open_stderr_artifact", error.to_string())
+            .with_artifacts(&artifacts)
     })?;
     let mut child = Command::new(&bundle.firecracker_bin)
         .arg("--api-sock")
@@ -711,15 +798,32 @@ fn run_firecracker_boot_smoke(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|error| FirecrackerBootSmokeError::new("spawn_firecracker", error.to_string()))?;
-    let result = configure_and_start_firecracker(bundle, artifacts, options, &mut child);
-    stop_firecracker_child(&mut child);
-    result
+        .map_err(|error| {
+            FirecrackerBootSmokeError::new("spawn_firecracker", error.to_string())
+                .with_artifacts(&artifacts)
+        })?;
+    match configure_and_start_firecracker(bundle, &artifacts, options, &mut child) {
+        Ok(evidence) => Ok(FirecrackerMicroVm {
+            instance_id: artifacts
+                .run_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("firecracker-microvm")
+                .to_string(),
+            evidence,
+            artifacts,
+            child,
+        }),
+        Err(error) => {
+            stop_firecracker_child(&mut child);
+            Err(error.with_artifacts(&artifacts))
+        }
+    }
 }
 
 fn configure_and_start_firecracker(
     bundle: &FirecrackerPreparePlan,
-    artifacts: &FirecrackerBootSmokeArtifacts,
+    artifacts: &FirecrackerMicroVmArtifacts,
     options: &FirecrackerBootSmokeOptions,
     child: &mut Child,
 ) -> Result<FirecrackerBootEvidence, FirecrackerBootSmokeError> {
@@ -899,7 +1003,7 @@ fn read_firecracker_http_response(
 }
 
 fn wait_for_serial_boot_evidence(
-    artifacts: &FirecrackerBootSmokeArtifacts,
+    artifacts: &FirecrackerMicroVmArtifacts,
     deadline: Instant,
     child: &mut Child,
 ) -> Result<FirecrackerBootEvidence, FirecrackerBootSmokeError> {
@@ -927,9 +1031,7 @@ fn wait_for_serial_boot_evidence(
     ))
 }
 
-fn read_boot_evidence(
-    artifacts: &FirecrackerBootSmokeArtifacts,
-) -> Option<FirecrackerBootEvidence> {
+fn read_boot_evidence(artifacts: &FirecrackerMicroVmArtifacts) -> Option<FirecrackerBootEvidence> {
     let serial = fs::read_to_string(&artifacts.serial_output).ok()?;
     let markers = serial_boot_markers(&serial);
     if !serial_has_microvm_userspace_evidence(&markers) {
@@ -945,7 +1047,7 @@ fn read_boot_evidence(
     })
 }
 
-fn partial_boot_evidence(artifacts: &FirecrackerBootSmokeArtifacts) -> FirecrackerBootEvidence {
+fn partial_boot_evidence(artifacts: &FirecrackerMicroVmArtifacts) -> FirecrackerBootEvidence {
     let serial = fs::read_to_string(&artifacts.serial_output).unwrap_or_default();
     FirecrackerBootEvidence {
         serial_boot_markers: serial_boot_markers(&serial),

@@ -69,6 +69,8 @@ enum Command {
         #[arg(long, default_value_t = 256)]
         mem_size_mib: u32,
     },
+    /// Provision, status-check, and cleanup a real Firecracker microVM in one worker process.
+    FirecrackerLifecycleSmoke,
     /// Execute the configured framework handler binary smoke inside agent-worker ownership.
     SmokeHandlerBinary {
         /// Adapter to smoke: codex, claude-code, or hermes.
@@ -200,6 +202,7 @@ fn main() -> Result<()> {
             vcpu_count,
             mem_size_mib,
         } => backends::firecracker_boot_smoke_command(timeout_millis, vcpu_count, mem_size_mib),
+        Command::FirecrackerLifecycleSmoke => management::firecracker_lifecycle_smoke_command(),
         Command::SmokeHandlerBinary {
             adapter,
             timeout_millis,

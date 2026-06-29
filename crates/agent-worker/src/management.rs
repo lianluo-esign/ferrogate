@@ -83,6 +83,51 @@ pub(crate) fn protocol_smoke() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn firecracker_lifecycle_smoke_command() -> Result<()> {
+    let mut transport =
+        InMemoryAgentWorkerManagementTransport::new(AgentWorkerManagementVerifier::new(vec![
+            AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            },
+        ])?);
+    let mut state = InMemoryAgentWorkerStateStore::new();
+    let runtime = AgentWorkerRuntime::default();
+    let now = 1_000;
+    let provision = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        lifecycle_smoke_envelope(AgentWorkerManagementAction::Provision, "provision")?,
+        now,
+    );
+    let status = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        lifecycle_smoke_envelope(AgentWorkerManagementAction::StreamStatus, "status")?,
+        now,
+    );
+    let cleanup = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        lifecycle_smoke_envelope(AgentWorkerManagementAction::Cleanup, "cleanup")?,
+        now,
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "process": "agent-worker",
+            "smoke": "firecracker_lifecycle",
+            "provision": provision,
+            "status": status,
+            "cleanup": cleanup,
+        }))?
+    );
+    Ok(())
+}
+
 pub(crate) fn accept_management_json_command(
     key_id: &str,
     shared_secret: &str,
@@ -694,6 +739,22 @@ fn smoke_envelope() -> Result<AgentWorkerManagementEnvelope> {
             encrypted: true,
         },
     };
+    envelope.security.signature = envelope.shared_secret_signature(SMOKE_SHARED_SECRET)?;
+    Ok(envelope)
+}
+
+fn lifecycle_smoke_envelope(
+    action: AgentWorkerManagementAction,
+    suffix: &str,
+) -> Result<AgentWorkerManagementEnvelope> {
+    let mut envelope = smoke_envelope()?;
+    envelope.action = action;
+    envelope.request_id = format!("agent-worker-firecracker-lifecycle-{suffix}-request");
+    envelope.idempotency_key = format!("agent-worker-firecracker-lifecycle-{suffix}-idempotency");
+    envelope.session_id = Some("agent-worker-firecracker-lifecycle-session".to_string());
+    envelope.run_id = Some("agent-worker-firecracker-lifecycle-run".to_string());
+    envelope.framework_adapter = Some("native-harness".to_string());
+    envelope.security.nonce = format!("agent-worker-firecracker-lifecycle-{suffix}-nonce");
     envelope.security.signature = envelope.shared_secret_signature(SMOKE_SHARED_SECRET)?;
     Ok(envelope)
 }
