@@ -183,7 +183,9 @@ keeps the child process in worker state by `session_id/run_id`, and returns
 `isolation_instance_id`. `stream_status` reports that same retained instance as
 `running` or `exited`, `collect_artifacts` can return a Firecracker log,
 serial-output, stdout, and stderr artifact manifest for the retained instance,
-and `cleanup` terminates the microVM through the worker-owned lifecycle path.
+`stop` terminates and removes the retained microVM with
+`status=cancelled/outcome=stopped`, and `cleanup` terminates any remaining
+microVM or becomes a safe no-op after stop.
 `exec_or_attach`
 now has a worker-owned native harness execution smoke, but the worker must have
 a gateway external-action HTTP authorizer configured before the handler may
@@ -380,9 +382,11 @@ runs the host preflight and returns failed lifecycle evidence with
 Firecracker/jailer paths, bundle files, or read/write KVM access. If the host
 preflight passes, `provision` boots a real Firecracker microVM, retains the
 child process in the `agent-worker` state store, and exposes the same
-`isolation_instance_id` through status, artifact, and cleanup actions. The
-current `exec_or_attach` path still does not run framework handlers inside that
-microVM; handler execution remains a separate worker-owned path that requires a
+`isolation_instance_id` through status, artifact, stop, and cleanup actions.
+`stop` removes the retained microVM from worker state; a later `cleanup` for the
+same `session_id/run_id` is accepted as an idempotent no-op. The current
+`exec_or_attach` path still does not run framework handlers inside that microVM;
+handler execution remains a separate worker-owned path that requires a
 `capability.allowed` decision from the configured gateway HTTP authorizer before
 continuing. The requested capability is framework-specific: the native harness
 uses a managed tool dispatch capability, Codex and Claude Code use a managed

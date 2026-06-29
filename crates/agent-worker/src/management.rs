@@ -115,6 +115,23 @@ pub(crate) fn firecracker_lifecycle_smoke_command() -> Result<()> {
         lifecycle_smoke_envelope(AgentWorkerManagementAction::CollectArtifacts, "artifacts")?,
         now,
     );
+    let stop = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        lifecycle_smoke_envelope(AgentWorkerManagementAction::Stop, "stop")?,
+        now,
+    );
+    let status_after_stop = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        lifecycle_smoke_envelope(
+            AgentWorkerManagementAction::StreamStatus,
+            "status-after-stop",
+        )?,
+        now,
+    );
     let cleanup = accept_management_envelope(
         &mut transport,
         &mut state,
@@ -130,6 +147,8 @@ pub(crate) fn firecracker_lifecycle_smoke_command() -> Result<()> {
             "provision": provision,
             "status": status,
             "artifacts": artifacts,
+            "stop": stop,
+            "status_after_stop": status_after_stop,
             "cleanup": cleanup,
         }))?
     );
@@ -1513,6 +1532,69 @@ mod tests {
         assert!(artifacts
             .iter()
             .any(|artifact| artifact.name == "serial.log" && artifact.byte_len > 0));
+    }
+
+    #[test]
+    fn stop_removes_retained_firecracker_microvm_from_worker_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let stop_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::Stop,
+            "agent-worker-firecracker-stop",
+        );
+        let mut status_envelope = stop_envelope.clone();
+        status_envelope.action = AgentWorkerManagementAction::StreamStatus;
+        status_envelope.request_id = "agent-worker-firecracker-stop-status-request".to_string();
+        status_envelope.idempotency_key =
+            "agent-worker-firecracker-stop-status-idempotency".to_string();
+        status_envelope.security.nonce = "agent-worker-firecracker-stop-status-nonce".to_string();
+        status_envelope.security.signature = status_envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let session_id = stop_envelope.session_id.clone().unwrap();
+        let run_id = stop_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-stop-instance", temp.path()).unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let stop =
+            accept_management_envelope(&mut transport, &mut state, &runtime, stop_envelope, 1_000);
+        let status = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            status_envelope,
+            1_000,
+        );
+
+        assert!(stop.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = stop.result else {
+            panic!("stop did not return lifecycle evidence");
+        };
+        assert_eq!(
+            lifecycle.status,
+            ferrogate_runtime::ManagedWorkerSessionStatus::Cancelled
+        );
+        assert_eq!(lifecycle.outcome, "stopped");
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-stop-instance")
+        );
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = status.result else {
+            panic!("status did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "not_started");
+        assert_eq!(lifecycle.isolation_instance_id, None);
     }
 
     #[test]

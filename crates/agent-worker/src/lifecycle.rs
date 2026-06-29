@@ -209,6 +209,20 @@ fn stop(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
+        let instance_id = existing.instance_id.clone();
+        let was_running = existing.stop();
+        let lifecycle = lifecycle_result_with_instance(
+            envelope,
+            ManagedWorkerSessionStatus::Cancelled,
+            "stopped",
+            &format!(
+                "Firecracker microVM {instance_id} stopped by agent-worker; was_running={was_running}"
+            ),
+            Some(instance_id),
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
     let Some(mut existing) = state.get_handler_run_state(&session_id, &run_id) else {
         return lifecycle_not_started(
             envelope,
