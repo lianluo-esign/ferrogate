@@ -187,6 +187,12 @@ fn collect_artifacts(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
+        return Ok(Some(AgentWorkerManagementResult::HandlerArtifacts {
+            artifacts: existing.artifact_results(),
+            events: vec![],
+        }));
+    }
     let Some(existing) = state.get_handler_run_state(&session_id, &run_id) else {
         return lifecycle_not_started(
             envelope,

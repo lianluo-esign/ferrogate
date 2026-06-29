@@ -108,6 +108,13 @@ pub(crate) fn firecracker_lifecycle_smoke_command() -> Result<()> {
         lifecycle_smoke_envelope(AgentWorkerManagementAction::StreamStatus, "status")?,
         now,
     );
+    let artifacts = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        lifecycle_smoke_envelope(AgentWorkerManagementAction::CollectArtifacts, "artifacts")?,
+        now,
+    );
     let cleanup = accept_management_envelope(
         &mut transport,
         &mut state,
@@ -122,6 +129,7 @@ pub(crate) fn firecracker_lifecycle_smoke_command() -> Result<()> {
             "smoke": "firecracker_lifecycle",
             "provision": provision,
             "status": status,
+            "artifacts": artifacts,
             "cleanup": cleanup,
         }))?
     );
@@ -762,7 +770,10 @@ fn lifecycle_smoke_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{state::AgentWorkerStateStore, test_support::lock_firecracker_env};
+    use crate::{
+        backends::test_firecracker_microvm, state::AgentWorkerStateStore,
+        test_support::lock_firecracker_env,
+    };
     use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
     use std::thread;
     use std::{net::TcpStream, os::unix::net::UnixStream};
@@ -1453,6 +1464,55 @@ mod tests {
         );
         assert_eq!(event.outcome, "host_preflight_failed");
         assert_eq!(event.isolation_instance_id, None);
+    }
+
+    #[test]
+    fn collect_artifacts_returns_retained_firecracker_artifact_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::CollectArtifacts,
+            "agent-worker-firecracker-artifacts",
+        );
+        let session_id = envelope.session_id.clone().unwrap();
+        let run_id = envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-test-instance", temp.path()).unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let response =
+            accept_management_envelope(&mut transport, &mut state, &runtime, envelope, 1_000);
+
+        assert!(response.accepted);
+        assert_eq!(
+            response.action,
+            AgentWorkerManagementAction::CollectArtifacts
+        );
+        let Some(AgentWorkerManagementResult::HandlerArtifacts { artifacts, events }) =
+            response.result
+        else {
+            panic!("collect_artifacts did not return Firecracker artifact manifest");
+        };
+        assert!(events.is_empty());
+        assert_eq!(artifacts.len(), 4);
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.artifact_id == "firecracker-test-instance-firecracker-log"
+                && artifact.name == "firecracker.log"
+                && artifact.byte_len > 0
+        }));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.name == "serial.log" && artifact.byte_len > 0));
     }
 
     #[test]

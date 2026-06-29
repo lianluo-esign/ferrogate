@@ -176,10 +176,14 @@ Lifecycle dispatch now reaches worker-owned action branches for `provision`,
 configured. When the full Firecracker bundle is configured but the worker host
 fails the Firecracker executable, jailer executable, bundle-file, or KVM device
 checks, `provision` returns a typed `result.kind=lifecycle` record with
-`status=failed` and `outcome=host_preflight_failed`. When that preflight passes
-but the real microVM provision/start implementation is still absent,
-`provision` returns `status=failed` and `outcome=not_implemented` so callers can
-persist the failed lifecycle evidence.
+`status=failed` and `outcome=host_preflight_failed`. When that preflight passes,
+`provision` starts a real Firecracker microVM in the `agent-worker` process,
+keeps the child process in worker state by `session_id/run_id`, and returns
+`status=running`, `outcome=provisioned`, plus the retained
+`isolation_instance_id`. `stream_status` reports that same retained instance as
+`running` or `exited`, `collect_artifacts` can return a Firecracker log,
+serial-output, stdout, and stderr artifact manifest for the retained instance,
+and `cleanup` terminates the microVM through the worker-owned lifecycle path.
 `exec_or_attach`
 now has a worker-owned native harness execution smoke, but the worker must have
 a gateway external-action HTTP authorizer configured before the handler may
@@ -370,17 +374,17 @@ device. It reports `ready`, `failure_reasons`, and
 `proves_microvm_boot=false`; it still does not start Firecracker.
 Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 `stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
-worker-owned lifecycle or handler dispatch. The dispatch still does not boot
-Firecracker: configured-bundle `provision` first runs the host preflight and
-returns failed lifecycle evidence with `outcome=host_preflight_failed` when the
-worker host is missing executable Firecracker/jailer paths, bundle files, or
-read/write KVM access. If the host preflight passes, `provision` still returns
-failed lifecycle evidence with `outcome=not_implemented` until real microVM
-lifecycle code exists,
-while `exec_or_attach`, `stream_status`, and `collect_artifacts` can exercise
-the selected framework handler inside `agent-worker` only after the worker
-receives a `capability.allowed` decision from the configured gateway HTTP
-authorizer. The requested capability is framework-specific: the native harness
+worker-owned lifecycle or handler dispatch. Configured-bundle `provision` first
+runs the host preflight and returns failed lifecycle evidence with
+`outcome=host_preflight_failed` when the worker host is missing executable
+Firecracker/jailer paths, bundle files, or read/write KVM access. If the host
+preflight passes, `provision` boots a real Firecracker microVM, retains the
+child process in the `agent-worker` state store, and exposes the same
+`isolation_instance_id` through status, artifact, and cleanup actions. The
+current `exec_or_attach` path still does not run framework handlers inside that
+microVM; handler execution remains a separate worker-owned path that requires a
+`capability.allowed` decision from the configured gateway HTTP authorizer before
+continuing. The requested capability is framework-specific: the native harness
 uses a managed tool dispatch capability, Codex and Claude Code use a managed
 CLI capability with gateway-controlled environment policy and output limits, and
 Hermes uses managed memory-read capability for run context. The native harness

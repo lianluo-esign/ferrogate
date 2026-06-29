@@ -17,7 +17,7 @@ use std::{
 };
 
 use anyhow::{bail, Result};
-use ferrogate_runtime::AgentWorkerIsolationBackendReport;
+use ferrogate_runtime::{AgentWorkerFrameworkArtifactResult, AgentWorkerIsolationBackendReport};
 use serde::Serialize;
 use serde_json::json;
 
@@ -666,6 +666,10 @@ impl FirecrackerMicroVm {
         self.child.try_wait().ok().flatten().is_none()
     }
 
+    pub(crate) fn artifact_results(&self) -> Vec<AgentWorkerFrameworkArtifactResult> {
+        self.artifacts.to_artifact_results(&self.instance_id)
+    }
+
     pub(crate) fn stop(&mut self) -> bool {
         let was_running = self.is_running();
         stop_firecracker_child(&mut self.child);
@@ -720,6 +724,29 @@ impl FirecrackerMicroVmArtifacts {
             stderr: Some(self.stderr.display().to_string()),
         }
     }
+
+    fn to_artifact_results(&self, instance_id: &str) -> Vec<AgentWorkerFrameworkArtifactResult> {
+        [
+            ("firecracker-log", "firecracker.log", &self.firecracker_log),
+            ("serial-output", "serial.log", &self.serial_output),
+            ("firecracker-stdout", "firecracker.stdout", &self.stdout),
+            ("firecracker-stderr", "firecracker.stderr", &self.stderr),
+        ]
+        .into_iter()
+        .map(|(suffix, name, path)| AgentWorkerFrameworkArtifactResult {
+            artifact_id: format!("{instance_id}-{suffix}"),
+            name: name.to_string(),
+            media_type: "text/plain".to_string(),
+            byte_len: file_len(path),
+        })
+        .collect()
+    }
+}
+
+fn file_len(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -776,6 +803,36 @@ impl FirecrackerBootEvidence {
     pub(crate) fn marker_summary(&self) -> String {
         self.serial_boot_markers.join(",")
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_firecracker_microvm(
+    instance_id: &str,
+    run_dir: &Path,
+) -> std::io::Result<FirecrackerMicroVm> {
+    fs::create_dir_all(run_dir)?;
+    let artifacts = FirecrackerMicroVmArtifacts {
+        run_dir: run_dir.to_path_buf(),
+        api_socket: run_dir.join("firecracker.sock"),
+        firecracker_log: run_dir.join("firecracker.log"),
+        serial_output: run_dir.join("serial.log"),
+        stdout: run_dir.join("firecracker.stdout"),
+        stderr: run_dir.join("firecracker.stderr"),
+    };
+    fs::write(&artifacts.firecracker_log, b"firecracker log\n")?;
+    fs::write(&artifacts.serial_output, b"serial boot log\n")?;
+    fs::write(&artifacts.stdout, b"stdout\n")?;
+    fs::write(&artifacts.stderr, b"stderr\n")?;
+    Ok(FirecrackerMicroVm {
+        instance_id: instance_id.to_string(),
+        evidence: FirecrackerBootEvidence {
+            serial_boot_markers: vec!["linux_version", "rootfs_mounted", "systemd_started"],
+            serial_excerpt: "serial boot log".to_string(),
+            firecracker_log_excerpt: "firecracker log".to_string(),
+        },
+        artifacts,
+        child: Command::new("sleep").arg("60").spawn()?,
+    })
 }
 
 fn start_firecracker_microvm(
