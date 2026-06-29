@@ -285,8 +285,16 @@ impl FerroGateway {
         {
             let headers = req.headers.clone();
             let method = req.method.clone();
-            self.handle_admin_self_hosted_workers(session, ctx, &headers, &method, &path)
-                .await?;
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_self_hosted_workers(
+                session,
+                ctx,
+                &headers,
+                &method,
+                &path,
+                query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
 

@@ -365,6 +365,18 @@ pub(crate) struct AdminSelfHostedWorkerTelemetryEventResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct AdminSelfHostedWorkerEventStream {
+    pub(crate) object: &'static str,
+    pub(crate) worker_id: String,
+    pub(crate) trust_level: &'static str,
+    pub(crate) data: Vec<AdminSelfHostedRunEvent>,
+    pub(crate) total: usize,
+    pub(crate) limit: usize,
+    pub(crate) after_event_id: Option<String>,
+    pub(crate) next_after_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct AdminSelfHostedRunEvent {
     pub(crate) id: String,
     pub(crate) worker_id: String,

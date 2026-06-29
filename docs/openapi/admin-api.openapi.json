@@ -511,6 +511,64 @@
       }
     },
     "/admin/v1/self-hosted-workers/{id}/events": {
+      "get": {
+        "operationId": "listAdminSelfHostedWorkerTelemetryEvents",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Read a self-hosted worker telemetry event stream page with optional event-id cursor replay.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "after_event_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Return events after this event id. Unknown cursors replay from the beginning."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Self-hosted worker telemetry event stream page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSelfHostedWorkerEventStream"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
       "post": {
         "operationId": "recordAdminSelfHostedWorkerTelemetryEvent",
         "tags": [
@@ -10730,6 +10788,60 @@
           "event_json": {
             "type": "string",
             "description": "Customer-reported telemetry event document encoded as JSON. This is reported evidence, not managed-worker enforcement proof."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminSelfHostedWorkerEventStream": {
+        "type": "object",
+        "required": [
+          "object",
+          "worker_id",
+          "trust_level",
+          "data",
+          "total",
+          "limit",
+          "after_event_id",
+          "next_after_event_id"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "self_hosted_worker_event_stream"
+          },
+          "worker_id": {
+            "type": "string"
+          },
+          "trust_level": {
+            "type": "string",
+            "const": "reported_by_self_hosted_worker"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminSelfHostedRunEvent"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "after_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_after_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Use this value as after_event_id to request the next page. Null means this page is empty."
           }
         },
         "additionalProperties": false

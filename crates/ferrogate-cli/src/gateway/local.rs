@@ -4371,6 +4371,7 @@ impl FerroGateway {
         headers: &http::HeaderMap,
         method: &Method,
         path: &str,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let path_worker_id = path
             .strip_prefix("/admin/v1/self-hosted-workers/")
@@ -4683,7 +4684,9 @@ impl FerroGateway {
                         .await;
                     }
                     return self
-                        .handle_admin_self_hosted_worker_event(session, ctx, headers, worker_id)
+                        .handle_admin_self_hosted_worker_event(
+                            session, ctx, headers, method, worker_id, query,
+                        )
                         .await;
                 }
                 if let Some(worker_id) = rest.strip_suffix("/artifacts") {
@@ -4731,6 +4734,33 @@ impl FerroGateway {
                     }
                     return self
                         .handle_admin_self_hosted_worker_rotate(session, ctx, headers, worker_id)
+                        .await;
+                }
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "self-hosted worker detail endpoint supports GET",
+                    &ctx.request_id,
+                )
+                .await
+            }
+            (&Method::GET, Some(rest)) => {
+                if let Some(worker_id) = rest.strip_suffix("/events") {
+                    if worker_id.is_empty() || worker_id.contains('/') {
+                        return write_json_error(
+                            session,
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "method_not_allowed",
+                            "self-hosted worker events endpoint expects one worker id",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    return self
+                        .handle_admin_self_hosted_worker_event(
+                            session, ctx, headers, method, worker_id, query,
+                        )
                         .await;
                 }
                 write_json_error(
@@ -5056,9 +5086,51 @@ impl FerroGateway {
         session: &mut Session,
         ctx: &ProxyContext,
         headers: &http::HeaderMap,
+        method: &Method,
         worker_id: &str,
+        query: Option<&str>,
     ) -> PingoraResult<()> {
         let state = self.state.current();
+        if method == Method::GET {
+            return match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Ok(_) => {
+                    let Some(stream) = state.self_hosted_worker_event_stream(
+                        worker_id,
+                        state.self_hosted_worker_event_stream_query(query),
+                    ) else {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "self_hosted_worker_not_found",
+                            format!("self-hosted worker {worker_id} was not found"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    };
+                    write_json_response(session, StatusCode::OK, &stream, &ctx.request_id).await
+                }
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            };
+        }
+        if method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "self-hosted worker event endpoint supports GET and POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
         let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
             Ok(auth) => auth,
             Err(error) => {

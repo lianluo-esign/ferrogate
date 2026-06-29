@@ -22,6 +22,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let self_hosted_worker_id = RefCell::new(String::new());
     let expired_self_hosted_worker_id = RefCell::new(String::new());
     let self_hosted_lease_id = RefCell::new(String::new());
+    let self_hosted_event_cursor = RefCell::new(String::new());
 
     case.expect_json("GET", "/healthz", &[], "", 200, |body| {
         assert_eq!(body["status"], "ok");
@@ -936,6 +937,60 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             );
             assert_eq!(body["event"]["occurred_at_unix"], 456);
             assert!(body["event"]["ingested_at_unix"].as_u64().is_some());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        &format!("{self_hosted_worker_events_path}?limit=1"),
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_event_stream");
+            assert_eq!(body["worker_id"], *self_hosted_worker_id.borrow());
+            assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
+            assert_eq!(body["total"], 2);
+            assert_eq!(body["limit"], 1);
+            assert!(body["after_event_id"].is_null());
+            assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+            assert_eq!(body["data"][0]["kind"], "lifecycle");
+            assert_eq!(body["data"][0]["event_json"], r#"{"state":"running"}"#);
+            let cursor = body["next_after_event_id"]
+                .as_str()
+                .context("self-hosted event stream cursor should be present")?;
+            assert!(cursor.starts_with("self-hosted-event-"));
+            self_hosted_event_cursor.replace(cursor.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        &format!(
+            "{self_hosted_worker_events_path}?after_event_id={}&limit=10",
+            self_hosted_event_cursor.borrow()
+        ),
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker_event_stream");
+            assert_eq!(body["after_event_id"], *self_hosted_event_cursor.borrow());
+            assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+            assert_eq!(body["data"][0]["kind"], "tool_call");
+            assert_eq!(body["data"][0]["run_id"], "run-1");
+            assert_eq!(body["next_after_event_id"], body["data"][0]["id"]);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/self-hosted-workers/missing-worker/events",
+        &[ADMIN_AUTH],
+        "",
+        404,
+        |body| {
+            assert_eq!(body["error"]["code"], "self_hosted_worker_not_found");
             Ok(())
         },
     )?;

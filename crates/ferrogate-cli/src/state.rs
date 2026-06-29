@@ -1757,6 +1757,12 @@ pub(crate) struct AdminPagination {
     pub(crate) limit: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelfHostedWorkerEventStreamQuery {
+    pub(crate) after_event_id: Option<String>,
+    pub(crate) limit: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdminPage<T> {
     pub(crate) data: Vec<T>,
@@ -2104,6 +2110,34 @@ impl AdminPagination {
         limit = limit.min(max_limit);
 
         Self { offset, limit }
+    }
+}
+
+impl SelfHostedWorkerEventStreamQuery {
+    fn from_query(query: Option<&str>, default_limit: usize, max_limit: usize) -> Self {
+        let mut after_event_id = None;
+        let mut limit = default_limit;
+        if let Some(query) = query {
+            for (name, value) in query.split('&').filter_map(|part| part.split_once('=')) {
+                match name {
+                    "after_event_id" if !value.trim().is_empty() => {
+                        after_event_id = Some(value.trim().to_string());
+                    }
+                    "limit" => {
+                        limit = value.parse().unwrap_or(limit);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if limit == 0 {
+            limit = default_limit;
+        }
+        limit = limit.min(max_limit);
+        Self {
+            after_event_id,
+            limit,
+        }
     }
 }
 
@@ -5339,6 +5373,78 @@ impl AppState {
             .find(|record| record.id == id)
     }
 
+    pub(crate) fn self_hosted_worker_event_stream(
+        &self,
+        worker_id: &str,
+        query: SelfHostedWorkerEventStreamQuery,
+    ) -> Option<crate::responses::AdminSelfHostedWorkerEventStream> {
+        let worker_exists = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .iter()
+            .any(|registration| registration.id == worker_id);
+        if !worker_exists {
+            return None;
+        }
+        let mut events = self
+            .repositories
+            .self_hosted_worker_telemetry_events()
+            .into_iter()
+            .filter(|event| event.worker_id == worker_id)
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| {
+            left.occurred_at_unix
+                .cmp(&right.occurred_at_unix)
+                .then_with(|| left.ingested_at_unix.cmp(&right.ingested_at_unix))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let total = events.len();
+        let start_index = query
+            .after_event_id
+            .as_deref()
+            .and_then(|cursor| events.iter().position(|event| event.id == cursor))
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let data = events
+            .into_iter()
+            .skip(start_index)
+            .take(query.limit)
+            .map(|event| crate::responses::AdminSelfHostedRunEvent {
+                id: event.id,
+                worker_id: event.worker_id,
+                session_id: event.session_id,
+                run_id: event.run_id,
+                kind: event.kind,
+                trust_level: event.trust_level,
+                occurred_at_unix: event.occurred_at_unix,
+                ingested_at_unix: event.ingested_at_unix,
+                event_json: event.event_json,
+            })
+            .collect::<Vec<_>>();
+        let next_after_event_id = data.last().map(|event| event.id.clone());
+        Some(crate::responses::AdminSelfHostedWorkerEventStream {
+            object: "self_hosted_worker_event_stream",
+            worker_id: worker_id.to_string(),
+            trust_level: "reported_by_self_hosted_worker",
+            data,
+            total,
+            limit: query.limit,
+            after_event_id: query.after_event_id,
+            next_after_event_id,
+        })
+    }
+
+    pub(crate) fn self_hosted_worker_event_stream_query(
+        &self,
+        query: Option<&str>,
+    ) -> SelfHostedWorkerEventStreamQuery {
+        SelfHostedWorkerEventStreamQuery::from_query(
+            query,
+            self.config.storage.admin_list_default_limit,
+            self.config.storage.admin_list_max_limit,
+        )
+    }
+
     fn self_hosted_worker_records(&self) -> Vec<crate::responses::AdminSelfHostedWorkerRecord> {
         let heartbeats = self.repositories.self_hosted_worker_heartbeats();
         let telemetry_events = self.repositories.self_hosted_worker_telemetry_events();
@@ -8313,6 +8419,100 @@ mod tests {
         assert_eq!(timeline.events[1].id, "event-lifecycle");
         assert_eq!(timeline.events[1].event_json, r#"{"state":"completed"}"#);
         assert!(state.self_hosted_run_timeline("missing-run").is_none());
+    }
+
+    #[test]
+    fn self_hosted_worker_event_stream_pages_after_event_id() {
+        let mut config = Config::default();
+        config.storage.admin_list_default_limit = 1;
+        config.storage.admin_list_max_limit = 2;
+        let state = AppState::new(config);
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("org".into()),
+            team_id: None,
+            project_id: Some("project".into()),
+            user_id: None,
+            api_key_id: Some("key".into()),
+        };
+        state
+            .repositories
+            .upsert_self_hosted_worker_registration(StoredSelfHostedWorkerRegistration {
+                id: "worker-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                worker_name: "customer-worker".into(),
+                status: "online".into(),
+                identity_fingerprint: "sha256:worker".into(),
+                identity_expires_at_unix: None,
+                orchestration_enabled: true,
+                registered_at_unix: Some(10),
+                last_seen_at_unix: Some(20),
+                trust_level: "reported_by_self_hosted_worker".into(),
+                capability_envelope_json: "{}".into(),
+            })
+            .unwrap();
+        for (id, occurred_at_unix, kind) in [
+            ("event-1", 10, "lifecycle"),
+            ("event-2", 11, "tool_call"),
+            ("event-3", 12, "log"),
+        ] {
+            state
+                .repositories
+                .append_self_hosted_worker_telemetry_event(StoredSelfHostedWorkerTelemetryEvent {
+                    id: id.into(),
+                    worker_id: "worker-1".into(),
+                    tenant: tenant.clone(),
+                    workspace_id: "workspace-1".into(),
+                    session_id: Some("session-1".into()),
+                    run_id: Some("run-1".into()),
+                    kind: kind.into(),
+                    trust_level: "reported_by_self_hosted_worker".into(),
+                    occurred_at_unix: Some(occurred_at_unix),
+                    ingested_at_unix: Some(occurred_at_unix + 100),
+                    event_json: "{}".into(),
+                })
+                .unwrap();
+        }
+
+        let first = state
+            .self_hosted_worker_event_stream(
+                "worker-1",
+                state.self_hosted_worker_event_stream_query(None),
+            )
+            .expect("worker event stream should be visible");
+        assert_eq!(first.object, "self_hosted_worker_event_stream");
+        assert_eq!(first.worker_id, "worker-1");
+        assert_eq!(first.trust_level, "reported_by_self_hosted_worker");
+        assert_eq!(first.total, 3);
+        assert_eq!(first.limit, 1);
+        assert_eq!(first.after_event_id, None);
+        assert_eq!(first.data.len(), 1);
+        assert_eq!(first.data[0].id, "event-1");
+        assert_eq!(first.next_after_event_id.as_deref(), Some("event-1"));
+
+        let second = state
+            .self_hosted_worker_event_stream(
+                "worker-1",
+                state.self_hosted_worker_event_stream_query(Some("after_event_id=event-1&limit=2")),
+            )
+            .expect("second event stream page should be visible");
+        assert_eq!(second.limit, 2);
+        assert_eq!(second.after_event_id.as_deref(), Some("event-1"));
+        assert_eq!(
+            second
+                .data
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-2", "event-3"]
+        );
+        assert_eq!(second.next_after_event_id.as_deref(), Some("event-3"));
+        assert!(state
+            .self_hosted_worker_event_stream(
+                "missing-worker",
+                state.self_hosted_worker_event_stream_query(None)
+            )
+            .is_none());
     }
 
     #[test]
