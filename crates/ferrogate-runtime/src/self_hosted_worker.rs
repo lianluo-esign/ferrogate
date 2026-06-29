@@ -407,12 +407,68 @@ struct QueuedSelfHostedRun {
     acknowledged_at_unix: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfHostedRunQueueRecord {
+    pub dispatch: SelfHostedRunDispatch,
+    pub assigned_worker_id: Option<String>,
+    pub lease_id: Option<String>,
+    pub lease_expires_at_unix: Option<u64>,
+    pub attempt: u32,
+    pub acknowledged_status: Option<SelfHostedRunAckStatus>,
+    pub acknowledged_at_unix: Option<u64>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct InMemorySelfHostedRunQueue {
     runs: BTreeMap<String, QueuedSelfHostedRun>,
 }
 
 impl InMemorySelfHostedRunQueue {
+    pub fn restore_runs(
+        &mut self,
+        records: Vec<SelfHostedRunQueueRecord>,
+    ) -> Result<(), SelfHostedWorkerError> {
+        let mut restored = BTreeMap::new();
+        for record in records {
+            validate_run_dispatch(&record.dispatch)?;
+            if restored.contains_key(&record.dispatch.dispatch_id) {
+                return Err(SelfHostedWorkerError::InvalidTransport(format!(
+                    "dispatch {} already exists",
+                    record.dispatch.dispatch_id
+                )));
+            }
+            restored.insert(
+                record.dispatch.dispatch_id.clone(),
+                QueuedSelfHostedRun {
+                    dispatch: record.dispatch,
+                    assigned_worker_id: record.assigned_worker_id,
+                    lease_id: record.lease_id,
+                    lease_expires_at_unix: record.lease_expires_at_unix,
+                    attempt: record.attempt,
+                    acknowledged_status: record.acknowledged_status,
+                    acknowledged_at_unix: record.acknowledged_at_unix,
+                },
+            );
+        }
+        self.runs = restored;
+        Ok(())
+    }
+
+    pub fn run_records(&self) -> Vec<SelfHostedRunQueueRecord> {
+        self.runs
+            .values()
+            .map(|queued| SelfHostedRunQueueRecord {
+                dispatch: queued.dispatch.clone(),
+                assigned_worker_id: queued.assigned_worker_id.clone(),
+                lease_id: queued.lease_id.clone(),
+                lease_expires_at_unix: queued.lease_expires_at_unix,
+                attempt: queued.attempt,
+                acknowledged_status: queued.acknowledged_status,
+                acknowledged_at_unix: queued.acknowledged_at_unix,
+            })
+            .collect()
+    }
+
     pub fn enqueue_run(
         &mut self,
         dispatch: SelfHostedRunDispatch,

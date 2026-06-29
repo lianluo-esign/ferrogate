@@ -274,6 +274,42 @@ CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_checkpoints_run
 CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_checkpoints_worker_time
     ON self_hosted_worker_checkpoints(worker_id, created_at_unix DESC);
 
+CREATE TABLE IF NOT EXISTS self_hosted_run_dispatches (
+    dispatch_id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    framework_adapter TEXT NOT NULL,
+    workload_ref TEXT NOT NULL,
+    queued_at_unix BIGINT NOT NULL,
+    assigned_worker_id TEXT REFERENCES self_hosted_worker_registrations(id) ON DELETE SET NULL,
+    lease_id TEXT,
+    lease_expires_at_unix BIGINT,
+    attempt BIGINT NOT NULL DEFAULT 0,
+    acknowledged_status TEXT,
+    acknowledged_at_unix BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS self_hosted_run_dispatch_capabilities (
+    dispatch_id TEXT NOT NULL REFERENCES self_hosted_run_dispatches(dispatch_id) ON DELETE CASCADE,
+    capability TEXT NOT NULL,
+    PRIMARY KEY (dispatch_id, capability)
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_run_dispatches_tenant_queue
+    ON self_hosted_run_dispatches(tenant, acknowledged_status, queued_at_unix ASC);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_run_dispatches_worker_lease
+    ON self_hosted_run_dispatches(assigned_worker_id, lease_expires_at_unix);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_run_dispatches_run
+    ON self_hosted_run_dispatches(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_run_dispatch_capabilities_capability
+    ON self_hosted_run_dispatch_capabilities(capability, dispatch_id);
+
 CREATE TABLE IF NOT EXISTS request_logs (
     request_id TEXT PRIMARY KEY,
     trace_id TEXT,
@@ -509,5 +545,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (6, '006_self_hosted_worker_identity_expiry')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (7, '007_self_hosted_run_dispatch_state')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

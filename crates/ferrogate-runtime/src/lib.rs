@@ -84,11 +84,12 @@ pub use self_hosted_worker::{
     SelfHostedArtifactUpload, SelfHostedArtifactUploadRequest, SelfHostedCheckpointFetchRequest,
     SelfHostedCheckpointReference, SelfHostedRunAck, SelfHostedRunAckRequest,
     SelfHostedRunAckStatus, SelfHostedRunAction, SelfHostedRunDispatch, SelfHostedRunLease,
-    SelfHostedRunPollRequest, SelfHostedTelemetryEvent, SelfHostedTelemetryIngestor,
-    SelfHostedTelemetryKind, SelfHostedTelemetryRequest, SelfHostedTelemetryTrustLevel,
-    SelfHostedWorkerError, SelfHostedWorkerHeartbeat, SelfHostedWorkerHttpTransportClient,
-    SelfHostedWorkerHttpTransportSecurity, SelfHostedWorkerIdentity, SelfHostedWorkerRegistration,
-    SelfHostedWorkerRegistry, SelfHostedWorkerTransport, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+    SelfHostedRunPollRequest, SelfHostedRunQueueRecord, SelfHostedTelemetryEvent,
+    SelfHostedTelemetryIngestor, SelfHostedTelemetryKind, SelfHostedTelemetryRequest,
+    SelfHostedTelemetryTrustLevel, SelfHostedWorkerError, SelfHostedWorkerHeartbeat,
+    SelfHostedWorkerHttpTransportClient, SelfHostedWorkerHttpTransportSecurity,
+    SelfHostedWorkerIdentity, SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
+    SelfHostedWorkerTransport, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
 };
 
 /// Runtime lifecycle commands exposed by the CLI and future control plane.

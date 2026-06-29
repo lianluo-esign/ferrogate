@@ -166,6 +166,7 @@ pub struct StorageMigrationSnapshot {
     pub self_hosted_worker_telemetry_events: Vec<StoredSelfHostedWorkerTelemetryEvent>,
     pub self_hosted_worker_artifacts: Vec<StoredSelfHostedWorkerArtifact>,
     pub self_hosted_worker_checkpoints: Vec<StoredSelfHostedWorkerCheckpoint>,
+    pub self_hosted_run_dispatches: Vec<StoredSelfHostedRunDispatch>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +197,7 @@ pub struct StorageMigrationCounts {
     pub self_hosted_worker_telemetry_events: usize,
     pub self_hosted_worker_artifacts: usize,
     pub self_hosted_worker_checkpoints: usize,
+    pub self_hosted_run_dispatches: usize,
 }
 
 impl StorageMigrationSnapshot {
@@ -227,6 +229,7 @@ impl StorageMigrationSnapshot {
             self_hosted_worker_telemetry_events: self.self_hosted_worker_telemetry_events.len(),
             self_hosted_worker_artifacts: self.self_hosted_worker_artifacts.len(),
             self_hosted_worker_checkpoints: self.self_hosted_worker_checkpoints.len(),
+            self_hosted_run_dispatches: self.self_hosted_run_dispatches.len(),
         }
     }
 }
@@ -298,8 +301,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 6;
-const POSTGRES_SCHEMA_NAME: &str = "006_self_hosted_worker_identity_expiry";
+const POSTGRES_SCHEMA_VERSION: u64 = 7;
+const POSTGRES_SCHEMA_NAME: &str = "007_self_hosted_run_dispatch_state";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -458,6 +461,8 @@ pub trait SelfHostedWorkerCheckpointRepository:
     Repository<StoredSelfHostedWorkerCheckpoint>
 {
 }
+
+pub trait SelfHostedRunDispatchRepository: Repository<StoredSelfHostedRunDispatch> {}
 
 pub trait AppendRepository<T> {
     fn append(&mut self, record: T);
@@ -646,6 +651,26 @@ pub struct StoredSelfHostedWorkerCheckpoint {
     pub trust_level: String,
     pub created_at_unix: Option<u64>,
     pub checkpoint_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSelfHostedRunDispatch {
+    pub dispatch_id: String,
+    pub action: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub framework_adapter: String,
+    pub required_capabilities: Vec<String>,
+    pub workload_ref: String,
+    pub queued_at_unix: Option<u64>,
+    pub assigned_worker_id: Option<String>,
+    pub lease_id: Option<String>,
+    pub lease_expires_at_unix: Option<u64>,
+    pub attempt: u32,
+    pub acknowledged_status: Option<String>,
+    pub acknowledged_at_unix: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1856,6 +1881,116 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    fn upsert_self_hosted_run_dispatch(
+        &self,
+        dispatch: &StoredSelfHostedRunDispatch,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = dispatch.tenant_id.clone();
+        let queued_at_unix =
+            saturating_i64(dispatch.queued_at_unix.unwrap_or_else(now_unix_seconds));
+        let lease_expires_at_unix = dispatch.lease_expires_at_unix.map(saturating_i64);
+        let acknowledged_at_unix = dispatch.acknowledged_at_unix.map(saturating_i64);
+        let attempt = saturating_i64(u64::from(dispatch.attempt));
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(postgres_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO self_hosted_run_dispatches \
+                     (dispatch_id, action, tenant, workspace_id, session_id, run_id, \
+                      framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
+                      lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
+                      acknowledged_at_unix) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+                     ON CONFLICT (dispatch_id) DO UPDATE SET \
+                     action = EXCLUDED.action, \
+                     tenant = EXCLUDED.tenant, \
+                     workspace_id = EXCLUDED.workspace_id, \
+                     session_id = EXCLUDED.session_id, \
+                     run_id = EXCLUDED.run_id, \
+                     framework_adapter = EXCLUDED.framework_adapter, \
+                     workload_ref = EXCLUDED.workload_ref, \
+                     queued_at_unix = EXCLUDED.queued_at_unix, \
+                     assigned_worker_id = EXCLUDED.assigned_worker_id, \
+                     lease_id = EXCLUDED.lease_id, \
+                     lease_expires_at_unix = EXCLUDED.lease_expires_at_unix, \
+                     attempt = EXCLUDED.attempt, \
+                     acknowledged_status = EXCLUDED.acknowledged_status, \
+                     acknowledged_at_unix = EXCLUDED.acknowledged_at_unix",
+                    &[
+                        &dispatch.dispatch_id,
+                        &dispatch.action,
+                        &tenant_context_id,
+                        &dispatch.workspace_id,
+                        &dispatch.session_id,
+                        &dispatch.run_id,
+                        &dispatch.framework_adapter,
+                        &dispatch.workload_ref,
+                        &queued_at_unix,
+                        &dispatch.assigned_worker_id,
+                        &dispatch.lease_id,
+                        &lease_expires_at_unix,
+                        &attempt,
+                        &dispatch.acknowledged_status,
+                        &acknowledged_at_unix,
+                    ],
+                )
+                .map_err(postgres_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM self_hosted_run_dispatch_capabilities WHERE dispatch_id = $1",
+                    &[&dispatch.dispatch_id],
+                )
+                .map_err(postgres_error)?;
+            for capability in &dispatch.required_capabilities {
+                transaction
+                    .execute(
+                        "INSERT INTO self_hosted_run_dispatch_capabilities \
+                         (dispatch_id, capability) VALUES ($1, $2) \
+                         ON CONFLICT (dispatch_id, capability) DO NOTHING",
+                        &[&dispatch.dispatch_id, capability],
+                    )
+                    .map_err(postgres_error)?;
+            }
+            transaction.commit().map_err(postgres_error)?;
+            Ok(())
+        })
+    }
+
+    fn self_hosted_run_dispatches(&self) -> Result<Vec<StoredSelfHostedRunDispatch>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT dispatch_id, action, tenant, workspace_id, session_id, run_id, \
+                        framework_adapter, workload_ref, queued_at_unix, assigned_worker_id, \
+                        lease_id, lease_expires_at_unix, attempt, acknowledged_status, \
+                        acknowledged_at_unix \
+                     FROM self_hosted_run_dispatches \
+                     ORDER BY queued_at_unix ASC, dispatch_id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            let capability_rows = client
+                .query(
+                    "SELECT dispatch_id, capability \
+                     FROM self_hosted_run_dispatch_capabilities \
+                     ORDER BY dispatch_id ASC, capability ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            let mut capabilities = HashMap::<String, Vec<String>>::new();
+            for row in capability_rows {
+                capabilities
+                    .entry(row.get::<_, String>(0))
+                    .or_default()
+                    .push(row.get(1));
+            }
+            Ok(rows
+                .into_iter()
+                .map(|row| self_hosted_run_dispatch_from_row(row, &capabilities))
+                .collect())
+        })
+    }
+
     fn billing_events_page(
         &self,
         offset: usize,
@@ -2430,6 +2565,8 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "self_hosted_worker_telemetry_events",
         "self_hosted_worker_artifacts",
         "self_hosted_worker_checkpoints",
+        "self_hosted_run_dispatches",
+        "self_hosted_run_dispatch_capabilities",
         "request_logs",
         "audit_events",
         "billing_metering_events",
@@ -2526,6 +2663,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_self_hosted_worker_telemetry_worker_time",
         "idx_self_hosted_worker_artifacts_run",
         "idx_self_hosted_worker_checkpoints_run",
+        "idx_self_hosted_run_dispatches_tenant_queue",
+        "idx_self_hosted_run_dispatches_worker_lease",
+        "idx_self_hosted_run_dispatch_capabilities_capability",
         "idx_request_logs_model_provider_started",
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
@@ -2588,6 +2728,10 @@ fn saturating_i64(value: u64) -> i64 {
 
 fn nonnegative_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
+}
+
+fn nonnegative_u32(value: i64) -> u32 {
+    u32::try_from(value).unwrap_or_default()
 }
 
 fn serialize_storage_document<T: Serialize>(value: &T) -> Result<String, StorageError> {
@@ -2944,6 +3088,31 @@ fn self_hosted_worker_checkpoint_from_row(row: PostgresRow) -> StoredSelfHostedW
         trust_level: row.get(8),
         created_at_unix: Some(nonnegative_u64(row.get(9))),
         checkpoint_json: row.get(10),
+    }
+}
+
+fn self_hosted_run_dispatch_from_row(
+    row: PostgresRow,
+    capabilities: &HashMap<String, Vec<String>>,
+) -> StoredSelfHostedRunDispatch {
+    let dispatch_id = row.get::<_, String>(0);
+    StoredSelfHostedRunDispatch {
+        required_capabilities: capabilities.get(&dispatch_id).cloned().unwrap_or_default(),
+        dispatch_id,
+        action: row.get(1),
+        tenant_id: row.get::<_, Option<String>>(2).unwrap_or_default(),
+        workspace_id: row.get(3),
+        session_id: row.get(4),
+        run_id: row.get(5),
+        framework_adapter: row.get(6),
+        workload_ref: row.get(7),
+        queued_at_unix: Some(nonnegative_u64(row.get(8))),
+        assigned_worker_id: row.get(9),
+        lease_id: row.get(10),
+        lease_expires_at_unix: row.get::<_, Option<i64>>(11).map(nonnegative_u64),
+        attempt: nonnegative_u32(row.get(12)),
+        acknowledged_status: row.get(13),
+        acknowledged_at_unix: row.get::<_, Option<i64>>(14).map(nonnegative_u64),
     }
 }
 
@@ -3578,6 +3747,8 @@ impl SelfHostedWorkerArtifactRepository for InMemoryRepository<StoredSelfHostedW
 
 impl SelfHostedWorkerCheckpointRepository for InMemoryRepository<StoredSelfHostedWorkerCheckpoint> {}
 
+impl SelfHostedRunDispatchRepository for InMemoryRepository<StoredSelfHostedRunDispatch> {}
+
 #[derive(Debug)]
 pub struct RuntimeStorageRepositories {
     backend: RuntimeStorageBackend,
@@ -3598,6 +3769,7 @@ pub struct RuntimeStorageRepositories {
         Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerTelemetryEvent>>,
     self_hosted_worker_artifacts: Mutex<InMemoryRepository<StoredSelfHostedWorkerArtifact>>,
     self_hosted_worker_checkpoints: Mutex<InMemoryRepository<StoredSelfHostedWorkerCheckpoint>>,
+    self_hosted_run_dispatches: Mutex<InMemoryRepository<StoredSelfHostedRunDispatch>>,
 }
 
 struct RuntimeStorageRepositorySets {
@@ -3617,6 +3789,7 @@ struct RuntimeStorageRepositorySets {
         Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerTelemetryEvent>>,
     self_hosted_worker_artifacts: Mutex<InMemoryRepository<StoredSelfHostedWorkerArtifact>>,
     self_hosted_worker_checkpoints: Mutex<InMemoryRepository<StoredSelfHostedWorkerCheckpoint>>,
+    self_hosted_run_dispatches: Mutex<InMemoryRepository<StoredSelfHostedRunDispatch>>,
 }
 
 impl RuntimeStorageRepositorySets {
@@ -3640,6 +3813,7 @@ impl RuntimeStorageRepositorySets {
             self_hosted_worker_telemetry_events: Mutex::new(InMemoryAppendRepository::new()),
             self_hosted_worker_artifacts: Mutex::new(InMemoryRepository::new()),
             self_hosted_worker_checkpoints: Mutex::new(InMemoryRepository::new()),
+            self_hosted_run_dispatches: Mutex::new(InMemoryRepository::new()),
         }
     }
 }
@@ -3672,6 +3846,7 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
+            self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
         }
     }
 
@@ -3748,6 +3923,7 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
+            self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
         })
     }
 
@@ -3814,6 +3990,7 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
+            self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
         })
     }
 
@@ -3856,6 +4033,7 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
+            self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
         })
     }
 
@@ -3902,6 +4080,7 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
             self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
             self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
+            self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
         })
     }
 
@@ -4004,6 +4183,7 @@ impl RuntimeStorageRepositories {
             self_hosted_worker_telemetry_events: self.self_hosted_worker_telemetry_events(),
             self_hosted_worker_artifacts: self.self_hosted_worker_artifacts(),
             self_hosted_worker_checkpoints: self.self_hosted_worker_checkpoints(),
+            self_hosted_run_dispatches: self.self_hosted_run_dispatches(),
         })
     }
 
@@ -4059,6 +4239,9 @@ impl RuntimeStorageRepositories {
         }
         for checkpoint in snapshot.self_hosted_worker_checkpoints {
             self.upsert_self_hosted_worker_checkpoint(checkpoint)?;
+        }
+        for dispatch in snapshot.self_hosted_run_dispatches {
+            self.upsert_self_hosted_run_dispatch(dispatch)?;
         }
         Ok(())
     }
@@ -5101,6 +5284,45 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
         }
     }
+
+    pub fn upsert_self_hosted_run_dispatch(
+        &self,
+        dispatch: StoredSelfHostedRunDispatch,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut dispatches) = self.self_hosted_run_dispatches.lock() {
+                    dispatches.insert(dispatch.dispatch_id.clone(), dispatch);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_self_hosted_run_dispatch(&dispatch)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "self_hosted_run_dispatch",
+                dispatch.dispatch_id.clone(),
+                serialize_storage_record(&dispatch)?,
+            ),
+        }
+    }
+
+    pub fn self_hosted_run_dispatches(&self) -> Vec<StoredSelfHostedRunDispatch> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .self_hosted_run_dispatches
+                .lock()
+                .map(|dispatches| dispatches.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .self_hosted_run_dispatches()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("self_hosted_run_dispatch")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
 }
 
 fn serialize_storage_record<T: Serialize>(record: &T) -> Result<String, StorageError> {
@@ -5786,6 +6008,26 @@ mod tests {
                 checkpoint_json: r#"{"version":1}"#.into(),
             })
             .unwrap();
+        repositories
+            .upsert_self_hosted_run_dispatch(StoredSelfHostedRunDispatch {
+                dispatch_id: "dispatch-1".into(),
+                action: "start_run".into(),
+                tenant_id: "org".into(),
+                workspace_id: "workspace-1".into(),
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                framework_adapter: "codex".into(),
+                required_capabilities: vec!["shell".into()],
+                workload_ref: "self-hosted-workload://self-hosted-worker-1".into(),
+                queued_at_unix: Some(28),
+                assigned_worker_id: Some("self-hosted-worker-1".into()),
+                lease_id: Some("dispatch-1:attempt-1".into()),
+                lease_expires_at_unix: Some(58),
+                attempt: 1,
+                acknowledged_status: Some("accepted".into()),
+                acknowledged_at_unix: Some(29),
+            })
+            .unwrap();
     }
 
     #[test]
@@ -5817,6 +6059,12 @@ mod tests {
             repositories.self_hosted_worker_checkpoints()[0].checkpoint_name,
             "resume-state"
         );
+        assert_eq!(
+            repositories.self_hosted_run_dispatches()[0]
+                .lease_id
+                .as_deref(),
+            Some("dispatch-1:attempt-1")
+        );
     }
 
     #[test]
@@ -5832,6 +6080,7 @@ mod tests {
         assert_eq!(counts.self_hosted_worker_telemetry_events, 1);
         assert_eq!(counts.self_hosted_worker_artifacts, 1);
         assert_eq!(counts.self_hosted_worker_checkpoints, 1);
+        assert_eq!(counts.self_hosted_run_dispatches, 1);
 
         let target =
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
@@ -5842,6 +6091,11 @@ mod tests {
         assert_eq!(target.self_hosted_worker_telemetry_events().len(), 1);
         assert_eq!(target.self_hosted_worker_artifacts().len(), 1);
         assert_eq!(target.self_hosted_worker_checkpoints().len(), 1);
+        assert_eq!(target.self_hosted_run_dispatches().len(), 1);
+        assert_eq!(
+            target.self_hosted_run_dispatches()[0].required_capabilities,
+            vec!["shell".to_string()]
+        );
     }
 
     #[test]

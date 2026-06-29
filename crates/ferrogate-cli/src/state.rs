@@ -55,18 +55,19 @@ use ferrogate_providers::{
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
 };
 use ferrogate_runtime::{
-    InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunAction,
-    SelfHostedRunDispatch, SelfHostedRunLease, SelfHostedRunPollRequest, SelfHostedWorkerError,
-    SelfHostedWorkerIdentity, SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
+    InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunAckStatus,
+    SelfHostedRunAction, SelfHostedRunDispatch, SelfHostedRunLease, SelfHostedRunPollRequest,
+    SelfHostedRunQueueRecord, SelfHostedWorkerError, SelfHostedWorkerIdentity,
+    SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
     StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
-    StoredRequestLog, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
-    StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
-    StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
+    StoredRequestLog, StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact,
+    StoredSelfHostedWorkerCheckpoint, StoredSelfHostedWorkerHeartbeat,
+    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -2663,13 +2664,28 @@ impl SelfHostedWorkerDispatchRuntime {
     fn rebuild_registries(
         &mut self,
         registrations: Vec<StoredSelfHostedWorkerRegistration>,
+        dispatches: Vec<StoredSelfHostedRunDispatch>,
     ) -> Result<(), SelfHostedWorkerError> {
         let mut next = Self::default();
+        next.queue.restore_runs(
+            dispatches
+                .into_iter()
+                .map(self_hosted_queue_record_from_storage)
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
         for registration in registrations {
             next.register_worker(&registration)?;
         }
         *self = next;
         Ok(())
+    }
+
+    fn storage_records(&self) -> Vec<StoredSelfHostedRunDispatch> {
+        self.queue
+            .run_records()
+            .into_iter()
+            .map(self_hosted_queue_record_to_storage)
+            .collect()
     }
 
     fn poll_run(
@@ -2810,6 +2826,119 @@ fn self_hosted_capabilities_from_envelope(envelope: &str) -> Vec<String> {
     capabilities
 }
 
+fn self_hosted_queue_record_to_storage(
+    record: SelfHostedRunQueueRecord,
+) -> StoredSelfHostedRunDispatch {
+    StoredSelfHostedRunDispatch {
+        dispatch_id: record.dispatch.dispatch_id,
+        action: self_hosted_run_action_as_str(record.dispatch.action).to_string(),
+        tenant_id: record.dispatch.tenant_id,
+        workspace_id: record.dispatch.workspace_id,
+        session_id: record.dispatch.session_id,
+        run_id: record.dispatch.run_id,
+        framework_adapter: record.dispatch.framework_adapter,
+        required_capabilities: record.dispatch.required_capabilities,
+        workload_ref: record.dispatch.workload_ref,
+        queued_at_unix: Some(record.dispatch.queued_at_unix),
+        assigned_worker_id: record.assigned_worker_id,
+        lease_id: record.lease_id,
+        lease_expires_at_unix: record.lease_expires_at_unix,
+        attempt: record.attempt,
+        acknowledged_status: record
+            .acknowledged_status
+            .map(self_hosted_run_ack_status_as_str)
+            .map(str::to_string),
+        acknowledged_at_unix: record.acknowledged_at_unix,
+    }
+}
+
+fn self_hosted_queue_record_from_storage(
+    record: StoredSelfHostedRunDispatch,
+) -> Result<SelfHostedRunQueueRecord, SelfHostedWorkerError> {
+    Ok(SelfHostedRunQueueRecord {
+        dispatch: SelfHostedRunDispatch {
+            dispatch_id: record.dispatch_id,
+            action: self_hosted_run_action_from_str(&record.action)?,
+            tenant_id: record.tenant_id,
+            workspace_id: record.workspace_id,
+            session_id: record.session_id,
+            run_id: record.run_id,
+            framework_adapter: record.framework_adapter,
+            required_capabilities: record.required_capabilities,
+            workload_ref: record.workload_ref,
+            queued_at_unix: record.queued_at_unix.unwrap_or_default(),
+        },
+        assigned_worker_id: record.assigned_worker_id,
+        lease_id: record.lease_id,
+        lease_expires_at_unix: record.lease_expires_at_unix,
+        attempt: record.attempt,
+        acknowledged_status: record
+            .acknowledged_status
+            .as_deref()
+            .map(self_hosted_run_ack_status_from_str)
+            .transpose()?,
+        acknowledged_at_unix: record.acknowledged_at_unix,
+    })
+}
+
+fn self_hosted_run_action_as_str(action: SelfHostedRunAction) -> &'static str {
+    match action {
+        SelfHostedRunAction::StartRun => "start_run",
+        SelfHostedRunAction::CancelRun => "cancel_run",
+        SelfHostedRunAction::ResumeRun => "resume_run",
+        SelfHostedRunAction::CloseSession => "close_session",
+    }
+}
+
+fn self_hosted_run_action_from_str(
+    value: &str,
+) -> Result<SelfHostedRunAction, SelfHostedWorkerError> {
+    match value {
+        "start_run" => Ok(SelfHostedRunAction::StartRun),
+        "cancel_run" => Ok(SelfHostedRunAction::CancelRun),
+        "resume_run" => Ok(SelfHostedRunAction::ResumeRun),
+        "close_session" => Ok(SelfHostedRunAction::CloseSession),
+        _ => Err(SelfHostedWorkerError::InvalidTransport(format!(
+            "unknown self-hosted dispatch action {value}"
+        ))),
+    }
+}
+
+fn self_hosted_run_ack_status_as_str(status: SelfHostedRunAckStatus) -> &'static str {
+    match status {
+        SelfHostedRunAckStatus::Accepted => "accepted",
+        SelfHostedRunAckStatus::Completed => "completed",
+        SelfHostedRunAckStatus::Failed => "failed",
+        SelfHostedRunAckStatus::Cancelled => "cancelled",
+    }
+}
+
+fn self_hosted_run_ack_status_from_str(
+    value: &str,
+) -> Result<SelfHostedRunAckStatus, SelfHostedWorkerError> {
+    match value {
+        "accepted" => Ok(SelfHostedRunAckStatus::Accepted),
+        "completed" => Ok(SelfHostedRunAckStatus::Completed),
+        "failed" => Ok(SelfHostedRunAckStatus::Failed),
+        "cancelled" => Ok(SelfHostedRunAckStatus::Cancelled),
+        _ => Err(SelfHostedWorkerError::InvalidTransport(format!(
+            "unknown self-hosted dispatch ack status {value}"
+        ))),
+    }
+}
+
+fn persist_self_hosted_dispatch_records(
+    repositories: &RuntimeStorageRepositories,
+    records: Vec<StoredSelfHostedRunDispatch>,
+) -> Result<(), SelfHostedWorkerError> {
+    for record in records {
+        repositories
+            .upsert_self_hosted_run_dispatch(record)
+            .map_err(|error| SelfHostedWorkerError::InvalidTransport(error.to_string()))?;
+    }
+    Ok(())
+}
+
 impl AppState {
     #[cfg(test)]
     pub(crate) fn new(config: Config) -> Self {
@@ -2913,12 +3042,20 @@ impl AppState {
         let self_hosted_dispatch = Arc::new(Mutex::new(SelfHostedWorkerDispatchRuntime::default()));
         {
             let registrations = repositories.self_hosted_worker_registrations();
-            match self_hosted_dispatch.lock() {
-                Ok(mut dispatch) => dispatch.rebuild_registries(registrations),
-                Err(poisoned) => poisoned.into_inner().rebuild_registries(registrations),
-            }
-            .map_err(|error| {
-                anyhow::anyhow!("failed to initialize self-hosted worker dispatch runtime: {error}")
+            let dispatches = repositories.self_hosted_run_dispatches();
+            let records = match self_hosted_dispatch.lock() {
+                Ok(mut dispatch) => {
+                    dispatch.rebuild_registries(registrations, dispatches)?;
+                    dispatch.storage_records()
+                }
+                Err(poisoned) => {
+                    let mut dispatch = poisoned.into_inner();
+                    dispatch.rebuild_registries(registrations, dispatches)?;
+                    dispatch.storage_records()
+                }
+            };
+            persist_self_hosted_dispatch_records(&repositories, records).map_err(|error| {
+                anyhow::anyhow!("failed to persist self-hosted worker dispatch state: {error}")
             })?;
         }
 
@@ -5081,11 +5218,24 @@ impl AppState {
         &self,
     ) -> Result<(), SelfHostedWorkerRecordError> {
         let registrations = self.repositories.self_hosted_worker_registrations();
-        match self.self_hosted_dispatch.lock() {
-            Ok(mut dispatch) => dispatch.rebuild_registries(registrations),
-            Err(poisoned) => poisoned.into_inner().rebuild_registries(registrations),
-        }
-        .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))
+        let dispatches = self.repositories.self_hosted_run_dispatches();
+        let records = match self.self_hosted_dispatch.lock() {
+            Ok(mut dispatch) => {
+                dispatch
+                    .rebuild_registries(registrations, dispatches)
+                    .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+                dispatch.storage_records()
+            }
+            Err(poisoned) => {
+                let mut dispatch = poisoned.into_inner();
+                dispatch
+                    .rebuild_registries(registrations, dispatches)
+                    .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))?;
+                dispatch.storage_records()
+            }
+        };
+        persist_self_hosted_dispatch_records(&self.repositories, records)
+            .map_err(|error| SelfHostedWorkerRecordError::Storage(error.to_string()))
     }
 
     pub(crate) fn poll_self_hosted_worker_run(
@@ -5095,10 +5245,31 @@ impl AppState {
         if request.identity.observed_at_unix.is_none() {
             request.identity.observed_at_unix = Some(request.now_unix);
         }
-        match self.self_hosted_dispatch.lock() {
-            Ok(mut dispatch) => dispatch.poll_run(request),
-            Err(poisoned) => poisoned.into_inner().poll_run(request),
+        let (result, records) = match self.self_hosted_dispatch.lock() {
+            Ok(mut dispatch) => {
+                let result = dispatch.poll_run(request);
+                let records = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|lease| lease.as_ref())
+                    .map(|_| dispatch.storage_records());
+                (result, records)
+            }
+            Err(poisoned) => {
+                let mut dispatch = poisoned.into_inner();
+                let result = dispatch.poll_run(request);
+                let records = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|lease| lease.as_ref())
+                    .map(|_| dispatch.storage_records());
+                (result, records)
+            }
+        };
+        if let Some(records) = records {
+            persist_self_hosted_dispatch_records(&self.repositories, records)?;
         }
+        result
     }
 
     pub(crate) fn ack_self_hosted_worker_run(
@@ -5108,10 +5279,23 @@ impl AppState {
         if request.identity.observed_at_unix.is_none() {
             request.identity.observed_at_unix = Some(request.reported_at_unix);
         }
-        match self.self_hosted_dispatch.lock() {
-            Ok(mut dispatch) => dispatch.ack_run(request),
-            Err(poisoned) => poisoned.into_inner().ack_run(request),
+        let (result, records) = match self.self_hosted_dispatch.lock() {
+            Ok(mut dispatch) => {
+                let result = dispatch.ack_run(request);
+                let records = result.as_ref().ok().map(|_| dispatch.storage_records());
+                (result, records)
+            }
+            Err(poisoned) => {
+                let mut dispatch = poisoned.into_inner();
+                let result = dispatch.ack_run(request);
+                let records = result.as_ref().ok().map(|_| dispatch.storage_records());
+                (result, records)
+            }
+        };
+        if let Some(records) = records {
+            persist_self_hosted_dispatch_records(&self.repositories, records)?;
         }
+        result
     }
 
     pub(crate) fn validate_self_hosted_worker_identity(
@@ -8582,6 +8766,78 @@ mod tests {
             records[0].capability_envelope_json,
             r#"{"frameworks":["codex"]}"#
         );
+
+        let dispatches = state.repositories.self_hosted_run_dispatches();
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(
+            dispatches[0].dispatch_id,
+            format!("self-hosted-dispatch-{}", worker.id)
+        );
+        assert_eq!(dispatches[0].action, "start_run");
+        assert_eq!(dispatches[0].tenant_id, "org");
+        assert_eq!(dispatches[0].workspace_id, "workspace-1");
+        assert_eq!(dispatches[0].framework_adapter, "codex");
+        assert_eq!(
+            dispatches[0].required_capabilities,
+            vec!["shell".to_string()]
+        );
+
+        let lease = state
+            .poll_self_hosted_worker_run(SelfHostedRunPollRequest {
+                protocol_version: 1,
+                identity: SelfHostedWorkerIdentity {
+                    tenant_id: "org".into(),
+                    workspace_id: "workspace-1".into(),
+                    worker_id: worker.id.clone(),
+                    token_id: "sha256:worker".into(),
+                    token_secret: "sha256:worker".into(),
+                    observed_at_unix: None,
+                },
+                supported_capabilities: vec!["shell".into()],
+                now_unix: 100,
+                lease_duration_secs: 30,
+            })
+            .expect("poll should be accepted")
+            .expect("seed dispatch should be leased");
+        assert_eq!(lease.attempt, 1);
+
+        let dispatches = state.repositories.self_hosted_run_dispatches();
+        assert_eq!(
+            dispatches[0].assigned_worker_id.as_deref(),
+            Some(worker.id.as_str())
+        );
+        assert_eq!(
+            dispatches[0].lease_id.as_deref(),
+            Some(lease.lease_id.as_str())
+        );
+        assert_eq!(dispatches[0].lease_expires_at_unix, Some(130));
+        assert_eq!(dispatches[0].attempt, 1);
+
+        state
+            .ack_self_hosted_worker_run(SelfHostedRunAckRequest {
+                protocol_version: 1,
+                identity: SelfHostedWorkerIdentity {
+                    tenant_id: "org".into(),
+                    workspace_id: "workspace-1".into(),
+                    worker_id: worker.id,
+                    token_id: "sha256:worker".into(),
+                    token_secret: "sha256:worker".into(),
+                    observed_at_unix: None,
+                },
+                dispatch_id: lease.dispatch_id,
+                action: lease.action,
+                lease_id: lease.lease_id,
+                run_id: lease.run_id,
+                status: SelfHostedRunAckStatus::Accepted,
+                reported_at_unix: 101,
+            })
+            .expect("ack should be accepted");
+        let dispatches = state.repositories.self_hosted_run_dispatches();
+        assert_eq!(
+            dispatches[0].acknowledged_status.as_deref(),
+            Some("accepted")
+        );
+        assert_eq!(dispatches[0].acknowledged_at_unix, Some(101));
     }
 
     #[test]
