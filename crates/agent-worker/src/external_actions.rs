@@ -13,14 +13,16 @@
 //! capability boundary.
 
 use std::{
+    collections::BTreeMap,
     collections::BTreeSet,
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
+    process::{Command, Stdio},
     sync::Arc,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -28,8 +30,9 @@ use ferrogate_runtime::{
     authorize_managed_external_action, managed_external_action_transport_failure_event,
     CapabilityAction, CapabilityAuthorizationDecision, CapabilityAuthorizer, CapabilityPolicy,
     ExternalActionAuthorizationRequest, ExternalActionAuthorizationResponse, FrameworkAdapterError,
-    FrameworkAdapterMode, FrameworkAdapterSession, GatewayExternalActionTransportRequest,
-    GatewayExternalActionTransportResponse, ManagedExternalAction, ManagedExternalActionDecision,
+    FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterSession,
+    GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
+    ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
     ManagedExternalActionRequest, ManagedToolAction, NormalizedFrameworkEvent,
     SimpleCapabilityAuthorizer, SupportedFramework,
 };
@@ -211,6 +214,39 @@ pub(crate) fn external_action_http_transport_smoke_command(endpoint: SocketAddr)
         },
     )?;
     println!("{}", decision.event.canonical_json());
+    Ok(())
+}
+
+pub(crate) fn governed_cli_execution_smoke_command() -> Result<()> {
+    let action = ManagedCliAction {
+        command: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'ferrogate governed cli smoke\\n'".to_string(),
+        ],
+        working_dir: std::env::current_dir()?.display().to_string(),
+        env_policy: "deny_all".to_string(),
+        timeout_millis: 2_000,
+        stdout_limit_bytes: 4096,
+        stderr_limit_bytes: 4096,
+        artifact_capture: false,
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_cli_action(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
     Ok(())
 }
 
@@ -618,6 +654,152 @@ fn external_action_smoke() -> Result<ExternalActionGateDecision> {
     .map_err(Into::into)
 }
 
+fn execute_governed_cli_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedCliAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Cli(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_cli_action(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::CliRequested,
+            message: Some("managed CLI action executed after gateway authorization".to_string()),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
+struct GovernedCliExecution {
+    status_code: Option<i32>,
+    stdout_excerpt: String,
+    stderr_excerpt: String,
+}
+
+impl GovernedCliExecution {
+    fn metadata(self, action: &ManagedCliAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "cli".to_string()),
+            ("external_target".to_string(), action.command.clone()),
+            ("command".to_string(), action.command.clone()),
+            ("args".to_string(), action.args.join("\n")),
+            ("working_dir".to_string(), action.working_dir.clone()),
+            ("env_policy".to_string(), action.env_policy.clone()),
+            (
+                "timeout_millis".to_string(),
+                action.timeout_millis.to_string(),
+            ),
+            (
+                "stdout_limit_bytes".to_string(),
+                action.stdout_limit_bytes.to_string(),
+            ),
+            (
+                "stderr_limit_bytes".to_string(),
+                action.stderr_limit_bytes.to_string(),
+            ),
+            (
+                "artifact_capture".to_string(),
+                action.artifact_capture.to_string(),
+            ),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+            (
+                "status_code".to_string(),
+                self.status_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_default(),
+            ),
+            ("stdout_excerpt".to_string(), self.stdout_excerpt),
+            ("stderr_excerpt".to_string(), self.stderr_excerpt),
+        ])
+    }
+}
+
+fn run_authorized_cli_action(
+    action: &ManagedCliAction,
+) -> Result<GovernedCliExecution, FrameworkAdapterError> {
+    let mut command = Command::new(&action.command);
+    command
+        .args(&action.args)
+        .current_dir(&action.working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if action.env_policy == "deny_all" {
+        command.env_clear();
+    }
+    let mut child = command.spawn().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed CLI action spawn failed after gateway authorization: {error}"
+        ))
+    })?;
+    let started_at = Instant::now();
+    let timeout = Duration::from_millis(action.timeout_millis.max(1));
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| {
+                FrameworkAdapterError::CapabilityDenied(format!(
+                    "managed CLI action status check failed: {error}"
+                ))
+            })?
+            .is_some()
+        {
+            break;
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                "managed CLI action timed out after {}ms",
+                timeout.as_millis()
+            )));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed CLI action output collection failed: {error}"
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(FrameworkAdapterError::CapabilityDenied(format!(
+            "managed CLI action exited with status {:?}",
+            output.status.code()
+        )));
+    }
+    Ok(GovernedCliExecution {
+        status_code: output.status.code(),
+        stdout_excerpt: bounded_utf8_excerpt(&output.stdout, action.stdout_limit_bytes),
+        stderr_excerpt: bounded_utf8_excerpt(&output.stderr, action.stderr_limit_bytes),
+    })
+}
+
+fn bounded_utf8_excerpt(bytes: &[u8], limit: u64) -> String {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]).to_string()
+}
+
 fn smoke_session() -> FrameworkAdapterSession {
     FrameworkAdapterSession {
         session_id: "agent-worker-external-action-smoke-session".to_string(),
@@ -678,6 +860,8 @@ mod tests {
         ExternalActionSession, ExternalActionSpec, ManagedCliAction, ManagedMcpToolAction,
         ManagedRestAction,
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn managed_tool_action_must_pass_gateway_authorization_before_execution() {
@@ -805,6 +989,105 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("not allowed"));
+    }
+
+    #[test]
+    fn governed_cli_execution_runs_only_after_gateway_authorization() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join("governed-cli-smoke");
+        let marker_path = temp.path().join("executed-marker");
+        std::fs::write(
+            &binary_path,
+            format!(
+                "#!/bin/sh\nprintf 'executed %s\\n' \"$1\"\nprintf done > {}\n",
+                marker_path.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(&binary_path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&binary_path, permissions).unwrap();
+        }
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_cli_action(
+            &gate,
+            session(),
+            ManagedCliAction {
+                command: binary_path.display().to_string(),
+                args: vec!["ok".to_string()],
+                working_dir: temp.path().display().to_string(),
+                env_policy: "deny_all".to_string(),
+                timeout_millis: 1_000,
+                stdout_limit_bytes: 128,
+                stderr_limit_bytes: 128,
+                artifact_capture: false,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "cli.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(events[1]
+            .metadata
+            .get("stdout_excerpt")
+            .is_some_and(|stdout| stdout.contains("executed ok")));
+        assert!(marker_path.exists());
+    }
+
+    #[test]
+    fn governed_cli_execution_denial_happens_before_process_spawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join("must-not-run");
+        let marker_path = temp.path().join("executed-marker");
+        std::fs::write(
+            &binary_path,
+            format!("#!/bin/sh\nprintf done > {}\n", marker_path.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(&binary_path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&binary_path, permissions).unwrap();
+        }
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_cli_action(
+            &gate,
+            session(),
+            ManagedCliAction {
+                command: binary_path.display().to_string(),
+                args: vec!["blocked".to_string()],
+                working_dir: temp.path().display().to_string(),
+                env_policy: "deny_all".to_string(),
+                timeout_millis: 1_000,
+                stdout_limit_bytes: 128,
+                stderr_limit_bytes: 128,
+                artifact_capture: false,
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!marker_path.exists());
     }
 
     #[test]

@@ -504,6 +504,20 @@ agent-worker external-action-http-transport-smoke \
 It calls the gateway HTTP authorizer, requires a `capability.allowed` response,
 prints the normalized event JSON, and still does not execute the requested tool.
 
+For a local execution smoke that proves the CLI action is not spawned until
+after gateway authorization, `agent-worker` also provides:
+
+```bash
+agent-worker governed-cli-execution-smoke
+```
+
+The smoke uses a built-in allow-only CLI policy, requests a managed `cli`
+capability, executes a bounded `/bin/sh -c` command only after
+`capability.allowed`, and prints both the authorization event and the resulting
+`cli.requested` execution evidence. This is a deterministic local CLI smoke; it
+is not a general-purpose shell runner, not Codex/Claude/Hermes task execution,
+and not Firecracker boot proof.
+
 The gateway/control-plane side can serve this HTTP authorizer when
 managed runtime is enabled with:
 

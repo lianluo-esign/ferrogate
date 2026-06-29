@@ -76,6 +76,8 @@ enum Command {
         #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_HTTP_ENDPOINT")]
         gateway_authorizer_http_endpoint: SocketAddr,
     },
+    /// Execute a local governed CLI smoke after gateway authorization.
+    GovernedCliExecutionSmoke,
     /// Accept one signed management envelope as JSON on stdin and emit a JSON response.
     AcceptManagementJson {
         /// Management key id expected in the signed envelope.
@@ -157,6 +159,9 @@ fn main() -> Result<()> {
         } => external_actions::external_action_http_transport_smoke_command(
             gateway_authorizer_http_endpoint,
         ),
+        Command::GovernedCliExecutionSmoke => {
+            external_actions::governed_cli_execution_smoke_command()
+        }
         Command::AcceptManagementJson {
             key_id,
             shared_secret,
