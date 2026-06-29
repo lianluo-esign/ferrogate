@@ -82,7 +82,21 @@ pub(crate) fn exec_or_attach_framework_handler_with_authorizer(
         events.push(binary_event);
     }
     if let Some(task_event) = process_handler_task_event(&session)? {
+        let task_failed = task_event.kind == FrameworkAdapterEventKind::RunFailed;
         events.push(task_event);
+        if task_failed {
+            return Ok((
+                HandlerRunState {
+                    session,
+                    events: events.clone(),
+                    artifacts: vec![],
+                    closed: false,
+                },
+                AgentWorkerManagementResult::HandlerEvents {
+                    events: events.into_iter().map(event_result).collect(),
+                },
+            ));
+        }
     }
     events.extend(
         adapter
@@ -360,16 +374,37 @@ fn process_handler_task_event(
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(30_000);
-    let smoke = crate::handlers::smoke_handler_task(&session.adapter_name, timeout_millis, &prompt)
-        .map_err(|error| {
-            ManagedWorkerError::management_protocol_error(
-                AgentWorkerManagementErrorCode::RunFailed,
-                format!(
-                    "agent-worker failed to execute configured {} handler task smoke: {error}",
-                    session.adapter_name
-                ),
-            )
-        })?;
+    let smoke =
+        match crate::handlers::smoke_handler_task(&session.adapter_name, timeout_millis, &prompt) {
+            Ok(smoke) => smoke,
+            Err(error) => {
+                return Ok(Some(NormalizedFrameworkEvent {
+                    session_id: session.session_id.clone(),
+                    run_id: session.run_id.clone(),
+                    adapter_name: session.adapter_name.clone(),
+                    adapter_version: session.adapter_version.clone(),
+                    framework: session.framework,
+                    mode: session.mode,
+                    kind: FrameworkAdapterEventKind::RunFailed,
+                    message: Some(format!(
+                        "{} configured handler task failed after gateway authorization",
+                        session.adapter_name
+                    )),
+                    metadata: BTreeMap::from([
+                        ("handler_owner".to_string(), "agent-worker".to_string()),
+                        ("gateway_handler_probe".to_string(), "false".to_string()),
+                        ("real_binary_task_smoke".to_string(), "true".to_string()),
+                        ("failed_after_authorization".to_string(), "true".to_string()),
+                        ("adapter_name".to_string(), session.adapter_name.clone()),
+                        (
+                            "prompt_chars".to_string(),
+                            prompt.chars().count().to_string(),
+                        ),
+                        ("failure_reason".to_string(), error.to_string()),
+                    ]),
+                }));
+            }
+        };
     Ok(Some(NormalizedFrameworkEvent {
         session_id: session.session_id.clone(),
         run_id: session.run_id.clone(),
@@ -622,6 +657,55 @@ mod tests {
     }
 
     #[test]
+    fn explicit_task_smoke_failure_is_returned_as_timeline_evidence() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let _binary = configured_fake_handler_binary_with_exit(
+            "AGENT_WORKER_CODEX_BIN",
+            "codex-task-failure",
+            "codex task failed",
+            42,
+        );
+        env::set_var("AGENT_WORKER_HANDLER_TASK_SMOKE", "1");
+        env::set_var(
+            "AGENT_WORKER_HANDLER_TASK_SMOKE_PROMPT",
+            "Return exactly smoke-ok",
+        );
+        let mut envelope = envelope();
+        envelope.framework_adapter = Some("codex".to_string());
+        let authorizer = authorizer();
+
+        let (state, result) =
+            exec_or_attach_framework_handler_with_authorizer(&envelope, Some(&authorizer)).unwrap();
+
+        env::remove_var("AGENT_WORKER_HANDLER_TASK_SMOKE");
+        env::remove_var("AGENT_WORKER_HANDLER_TASK_SMOKE_PROMPT");
+        let AgentWorkerManagementResult::HandlerEvents { events } = result else {
+            panic!("expected handler events");
+        };
+        assert!(!state.closed);
+        assert!(state.artifacts.is_empty());
+        let failed = events
+            .iter()
+            .find(|event| event.kind == "run.failed")
+            .expect("expected task smoke failure evidence");
+        assert!(failed
+            .metadata
+            .get("real_binary_task_smoke")
+            .is_some_and(|value| value == "true"));
+        assert!(failed
+            .metadata
+            .get("failed_after_authorization")
+            .is_some_and(|value| value == "true"));
+        assert!(failed
+            .metadata
+            .get("failure_reason")
+            .is_some_and(|value| value.contains("exited with status Some(42)")));
+        assert!(!events.iter().any(|event| event.kind == "model.requested"));
+        assert!(!events.iter().any(|event| event.kind == "artifact.created"));
+        assert!(!events.iter().any(|event| event.kind == "session.closed"));
+    }
+
+    #[test]
     fn approval_required_framework_capability_is_returned_without_handler_execution() {
         let mut envelope = envelope();
         envelope.framework_adapter = Some("codex".to_string());
@@ -704,11 +788,22 @@ mod tests {
         filename: &str,
         output_prefix: &str,
     ) -> FakeHandlerBinary {
+        configured_fake_handler_binary_with_exit(env_var, filename, output_prefix, 0)
+    }
+
+    fn configured_fake_handler_binary_with_exit(
+        env_var: &str,
+        filename: &str,
+        output_prefix: &str,
+        exit_code: i32,
+    ) -> FakeHandlerBinary {
         let temp = tempfile::tempdir().unwrap();
         let binary_path = temp.path().join(filename);
         fs::write(
             &binary_path,
-            format!("#!/bin/sh\nprintf '{output_prefix}'\nprintf ' %s' \"$@\"\nprintf '\\n'\n"),
+            format!(
+                "#!/bin/sh\nprintf '{output_prefix}'\nprintf ' %s' \"$@\"\nprintf '\\n'\nif [ \"${{1:-}}\" = \"--version\" ]; then exit 0; fi\nexit {exit_code}\n"
+            ),
         )
         .unwrap();
         #[cfg(unix)]
