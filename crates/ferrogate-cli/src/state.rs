@@ -5311,6 +5311,36 @@ impl AppState {
         .map(|_| ())
     }
 
+    pub(crate) fn self_hosted_worker_transport_secret(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        worker_id: &str,
+        token_id: &str,
+    ) -> Result<String, SelfHostedWorkerError> {
+        let registration = self
+            .repositories
+            .self_hosted_worker_registrations()
+            .into_iter()
+            .find(|registration| {
+                registration.id == worker_id
+                    && registration.workspace_id == workspace_id
+                    && self_hosted_tenant_id(&registration.tenant) == tenant_id
+            })
+            .ok_or_else(|| {
+                SelfHostedWorkerError::InvalidIdentity(format!(
+                    "self-hosted worker {worker_id} was not found for encrypted transport"
+                ))
+            })?;
+        if registration.identity_fingerprint != token_id {
+            return Err(SelfHostedWorkerError::InvalidIdentity(
+                "self-hosted worker encrypted transport token_id does not match registration"
+                    .to_string(),
+            ));
+        }
+        Ok(registration.identity_fingerprint)
+    }
+
     pub(crate) fn record_self_hosted_worker_heartbeat(
         &self,
         worker_id: &str,

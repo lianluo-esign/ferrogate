@@ -9,12 +9,15 @@ use crate::{
     cli::{AuthArgs, LocalArgs},
     constants::{
         ADMIN_AUTH, AUTH_TEST_CLIENT_2, CLIENT_AUTH, JSON_CONTENT, OBSERVER_AUTH,
-        SELF_HOSTED_MTLS_HEADER, SUPPORT_SKILL_HEADER,
+        SELF_HOSTED_MTLS_HEADER, SELF_HOSTED_SYMMETRIC_AEAD_HEADER, SUPPORT_SKILL_HEADER,
     },
     local::{AuthHarness, LocalHarness},
     mocks::spawn_mock_third_party_auth_server,
 };
 use anyhow::{Context, Result};
+use ferrogate_runtime::{
+    SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+};
 use std::{cell::RefCell, thread, time::Duration};
 
 pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
@@ -526,11 +529,38 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    let tampered_encrypted_poll_body = tampered_encrypted_self_hosted_worker_poll_body(
+        &self_hosted_worker_id.borrow(),
+        "sha256:test-worker",
+        31,
+    )?;
     case.expect_json(
         "POST",
         "/v1/self-hosted-workers/runs/poll",
-        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
-        &self_hosted_worker_poll_body(&self_hosted_worker_id.borrow(), "sha256:test-worker"),
+        &[JSON_CONTENT, SELF_HOSTED_SYMMETRIC_AEAD_HEADER],
+        &tampered_encrypted_poll_body,
+        400,
+        |body| {
+            assert_eq!(
+                body["error"]["code"],
+                "invalid_self_hosted_worker_transport"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("failed authentication")));
+            Ok(())
+        },
+    )?;
+    let encrypted_poll_body = encrypted_self_hosted_worker_poll_body(
+        &self_hosted_worker_id.borrow(),
+        "sha256:test-worker",
+        32,
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_SYMMETRIC_AEAD_HEADER],
+        &encrypted_poll_body,
         200,
         |body| {
             assert_eq!(body["object"], "self_hosted_run_lease");
@@ -551,6 +581,12 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             self_hosted_lease_id.replace(lease_id.to_string());
             Ok(())
         },
+    )?;
+    let encrypted_ack_body = encrypted_self_hosted_worker_ack_body(
+        &self_hosted_worker_id.borrow(),
+        "sha256:test-worker",
+        &self_hosted_lease_id.borrow(),
+        33,
     )?;
     case.expect_json(
         "POST",
@@ -600,12 +636,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     case.expect_json(
         "POST",
         "/v1/self-hosted-workers/runs/ack",
-        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
-        &self_hosted_worker_ack_body(
-            &self_hosted_worker_id.borrow(),
-            "sha256:test-worker",
-            &self_hosted_lease_id.borrow(),
-        ),
+        &[JSON_CONTENT, SELF_HOSTED_SYMMETRIC_AEAD_HEADER],
+        &encrypted_ack_body,
         200,
         |body| {
             assert_eq!(body["object"], "self_hosted_run_ack");
@@ -1915,6 +1947,34 @@ fn self_hosted_worker_poll_body(worker_id: &str, token_secret: &str) -> String {
     self_hosted_worker_poll_body_with_protocol(worker_id, token_secret, 1)
 }
 
+fn encrypted_self_hosted_worker_poll_body(
+    worker_id: &str,
+    token_secret: &str,
+    nonce_byte: u8,
+) -> Result<String> {
+    encrypted_self_hosted_transport_body(
+        worker_id,
+        token_secret,
+        &self_hosted_worker_poll_body(worker_id, token_secret),
+        nonce_byte,
+    )
+}
+
+fn tampered_encrypted_self_hosted_worker_poll_body(
+    worker_id: &str,
+    token_secret: &str,
+    nonce_byte: u8,
+) -> Result<String> {
+    let mut frame = encrypted_self_hosted_transport_frame(
+        worker_id,
+        token_secret,
+        &self_hosted_worker_poll_body(worker_id, token_secret),
+        nonce_byte,
+    )?;
+    frame.protocol_version = frame.protocol_version.saturating_add(1);
+    serde_json::to_string(&frame).context("serialize tampered self-hosted encrypted poll frame")
+}
+
 fn self_hosted_worker_poll_body_with_protocol(
     worker_id: &str,
     token_secret: &str,
@@ -1976,6 +2036,55 @@ fn self_hosted_worker_ack_body(worker_id: &str, token_secret: &str, lease_id: &s
         token_secret,
         lease_id,
     )
+}
+
+fn encrypted_self_hosted_worker_ack_body(
+    worker_id: &str,
+    token_secret: &str,
+    lease_id: &str,
+    nonce_byte: u8,
+) -> Result<String> {
+    encrypted_self_hosted_transport_body(
+        worker_id,
+        token_secret,
+        &self_hosted_worker_ack_body(worker_id, token_secret, lease_id),
+        nonce_byte,
+    )
+}
+
+fn encrypted_self_hosted_transport_body(
+    worker_id: &str,
+    token_secret: &str,
+    plaintext_json: &str,
+    nonce_byte: u8,
+) -> Result<String> {
+    let frame =
+        encrypted_self_hosted_transport_frame(worker_id, token_secret, plaintext_json, nonce_byte)?;
+    serde_json::to_string(&frame).context("serialize self-hosted encrypted transport frame")
+}
+
+fn encrypted_self_hosted_transport_frame(
+    worker_id: &str,
+    token_secret: &str,
+    plaintext_json: &str,
+    nonce_byte: u8,
+) -> Result<SelfHostedWorkerTransportFrame> {
+    let identity = SelfHostedWorkerIdentity {
+        tenant_id: "org_demo".to_string(),
+        workspace_id: "workspace-1".to_string(),
+        worker_id: worker_id.to_string(),
+        token_id: "sha256:test-worker".to_string(),
+        token_secret: token_secret.to_string(),
+        observed_at_unix: None,
+    };
+    SelfHostedWorkerTransportFrame::encrypt_json(
+        SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+        &identity,
+        plaintext_json,
+        token_secret,
+        [nonce_byte; 24],
+    )
+    .context("encrypt self-hosted worker transport frame")
 }
 
 fn self_hosted_worker_ack_body_for_scope(

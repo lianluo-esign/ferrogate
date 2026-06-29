@@ -7,7 +7,10 @@
 use crate::dashboard::ADMIN_DASHBOARD_HTML;
 use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
-use ferrogate_runtime::{SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedWorkerError};
+use ferrogate_runtime::{
+    SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedWorkerError,
+    SelfHostedWorkerTransportFrame, SelfHostedWorkerTransportIdentity,
+};
 use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use std::collections::BTreeMap;
@@ -71,6 +74,7 @@ const SKILL_PACKAGE_HEADER: &str = "x-ferrogate-skill-package";
 const SKILL_PACKAGE_VERSION_HEADER: &str = "x-ferrogate-skill-package-version";
 const SELF_HOSTED_TRANSPORT_SECURITY_HEADER: &str = "x-ferrogate-transport-security";
 const SELF_HOSTED_TRANSPORT_SECURITY_MTLS: &str = "mutual_tls";
+const SELF_HOSTED_TRANSPORT_SECURITY_SYMMETRIC_AEAD: &str = "symmetric_aead";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolExecuteBackend {
@@ -3992,16 +3996,16 @@ impl FerroGateway {
             )
             .await;
         }
-        if !self_hosted_transport_security_header_valid(headers) {
+        let Some(transport_security) = self_hosted_transport_security_header(headers) else {
             return write_json_error(
                 session,
                 StatusCode::UNAUTHORIZED,
                 "invalid_self_hosted_worker_transport_security",
-                "self-hosted worker transport requires x-ferrogate-transport-security: mutual_tls",
+                "self-hosted worker transport requires x-ferrogate-transport-security: mutual_tls or symmetric_aead",
                 &ctx.request_id,
             )
             .await;
-        }
+        };
         match path {
             "/v1/self-hosted-workers/heartbeat" => {
                 self.handle_self_hosted_worker_heartbeat(session, ctx).await
@@ -4016,10 +4020,12 @@ impl FerroGateway {
                 self.handle_self_hosted_worker_checkpoint(session, ctx).await
             }
             "/v1/self-hosted-workers/runs/poll" => {
-                self.handle_self_hosted_worker_run_poll(session, ctx).await
+                self.handle_self_hosted_worker_run_poll(session, ctx, transport_security)
+                    .await
             }
             "/v1/self-hosted-workers/runs/ack" => {
-                self.handle_self_hosted_worker_run_ack(session, ctx).await
+                self.handle_self_hosted_worker_run_ack(session, ctx, transport_security)
+                    .await
             }
             _ => write_json_error(
                 session,
@@ -4315,15 +4321,28 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
+        transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
-        let request =
-            match read_self_hosted_transport_body::<SelfHostedRunPollRequest>(session).await? {
-                Ok(request) => request,
-                Err(error) => {
-                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
-                }
-            };
         let state = self.state.current();
+        let request = match read_self_hosted_run_transport_body::<SelfHostedRunPollRequest>(
+            session,
+            transport_security,
+            |frame| {
+                state.self_hosted_worker_transport_secret(
+                    &frame.tenant_id,
+                    &frame.workspace_id,
+                    &frame.worker_id,
+                    &frame.token_id,
+                )
+            },
+        )
+        .await?
+        {
+            Ok(request) => request,
+            Err(error) => {
+                return write_self_hosted_worker_transport_error(session, ctx, error).await;
+            }
+        };
         match state.poll_self_hosted_worker_run(request) {
             Ok(Some(lease)) => {
                 let body = SelfHostedWorkerRunLeaseResponse {
@@ -4343,15 +4362,28 @@ impl FerroGateway {
         &self,
         session: &mut Session,
         ctx: &ProxyContext,
+        transport_security: SelfHostedTransportSecurity,
     ) -> PingoraResult<()> {
-        let request =
-            match read_self_hosted_transport_body::<SelfHostedRunAckRequest>(session).await? {
-                Ok(request) => request,
-                Err(error) => {
-                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
-                }
-            };
         let state = self.state.current();
+        let request = match read_self_hosted_run_transport_body::<SelfHostedRunAckRequest>(
+            session,
+            transport_security,
+            |frame| {
+                state.self_hosted_worker_transport_secret(
+                    &frame.tenant_id,
+                    &frame.workspace_id,
+                    &frame.worker_id,
+                    &frame.token_id,
+                )
+            },
+        )
+        .await?
+        {
+            Ok(request) => request,
+            Err(error) => {
+                return write_self_hosted_worker_transport_error(session, ctx, error).await;
+            }
+        };
         match state.ack_self_hosted_worker_run(request) {
             Ok(ack) => {
                 let body = SelfHostedWorkerRunAckResponse {
@@ -8714,11 +8746,25 @@ fn config_from_admin_payload(
     )
 }
 
-fn self_hosted_transport_security_header_valid(headers: &http::HeaderMap) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfHostedTransportSecurity {
+    MutualTls,
+    SymmetricAead,
+}
+
+fn self_hosted_transport_security_header(
+    headers: &http::HeaderMap,
+) -> Option<SelfHostedTransportSecurity> {
     headers
         .get(SELF_HOSTED_TRANSPORT_SECURITY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.trim() == SELF_HOSTED_TRANSPORT_SECURITY_MTLS)
+        .and_then(|value| match value.trim() {
+            SELF_HOSTED_TRANSPORT_SECURITY_MTLS => Some(SelfHostedTransportSecurity::MutualTls),
+            SELF_HOSTED_TRANSPORT_SECURITY_SYMMETRIC_AEAD => {
+                Some(SelfHostedTransportSecurity::SymmetricAead)
+            }
+            _ => None,
+        })
 }
 
 async fn read_self_hosted_transport_body<T>(
@@ -8741,6 +8787,51 @@ where
             "invalid self-hosted worker transport JSON body: {error}"
         ))
     }))
+}
+
+async fn read_self_hosted_run_transport_body<T>(
+    session: &mut Session,
+    transport_security: SelfHostedTransportSecurity,
+    shared_secret_for_frame: impl Fn(
+        &SelfHostedWorkerTransportFrame,
+    ) -> Result<String, SelfHostedWorkerError>,
+) -> PingoraResult<Result<T, SelfHostedWorkerError>>
+where
+    T: serde::de::DeserializeOwned + SelfHostedWorkerTransportIdentity,
+{
+    let body = match read_request_body(session, 1024 * 1024).await? {
+        Ok(body) => body,
+        Err(limit) => {
+            return Ok(Err(SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker transport body exceeds maximum size of {} bytes",
+                limit.max_bytes
+            ))));
+        }
+    };
+    match transport_security {
+        SelfHostedTransportSecurity::MutualTls => {
+            Ok(serde_json::from_slice::<T>(&body).map_err(|error| {
+                SelfHostedWorkerError::InvalidTransport(format!(
+                    "invalid self-hosted worker transport JSON body: {error}"
+                ))
+            }))
+        }
+        SelfHostedTransportSecurity::SymmetricAead => {
+            let frame = match serde_json::from_slice::<SelfHostedWorkerTransportFrame>(&body) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return Ok(Err(SelfHostedWorkerError::InvalidTransport(format!(
+                        "invalid self-hosted worker encrypted transport frame: {error}"
+                    ))));
+                }
+            };
+            let shared_secret = match shared_secret_for_frame(&frame) {
+                Ok(shared_secret) => shared_secret,
+                Err(error) => return Ok(Err(error)),
+            };
+            Ok(frame.decode_json::<T>(&shared_secret))
+        }
+    }
 }
 
 async fn write_self_hosted_worker_transport_error(

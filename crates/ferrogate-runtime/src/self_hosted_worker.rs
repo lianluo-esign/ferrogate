@@ -16,11 +16,20 @@ use std::{
     fmt,
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    KeyInit, XChaCha20Poly1305,
+};
 use serde::{Deserialize, Serialize};
 
 const SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const SELF_HOSTED_WORKER_SYMMETRIC_AEAD_ALGORITHM: &str = "xchacha20poly1305";
+static SELF_HOSTED_TRANSPORT_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub const SELF_HOSTED_WORKER_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +299,209 @@ impl SelfHostedWorkerHttpTransportSecurity {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfHostedWorkerTransportFrame {
+    pub protocol_version: u32,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub worker_id: String,
+    pub token_id: String,
+    pub encoding: SelfHostedWorkerTransportFrameEncoding,
+    pub encrypted_payload: SelfHostedWorkerEncryptedPayload,
+}
+
+impl SelfHostedWorkerTransportFrame {
+    pub fn encrypt_json(
+        protocol_version: u32,
+        identity: &SelfHostedWorkerIdentity,
+        plaintext_json: &str,
+        shared_secret: &str,
+        nonce: [u8; 24],
+    ) -> Result<Self, SelfHostedWorkerError> {
+        validate_self_hosted_transport_shared_secret(shared_secret)?;
+        if plaintext_json.len() > SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker encrypted transport plaintext exceeds maximum size".to_string(),
+            ));
+        }
+        let frame = Self {
+            protocol_version,
+            tenant_id: identity.tenant_id.clone(),
+            workspace_id: identity.workspace_id.clone(),
+            worker_id: identity.worker_id.clone(),
+            token_id: identity.token_id.clone(),
+            encoding: SelfHostedWorkerTransportFrameEncoding::EncryptedJson,
+            encrypted_payload: SelfHostedWorkerEncryptedPayload {
+                algorithm: SELF_HOSTED_WORKER_SYMMETRIC_AEAD_ALGORITHM.to_string(),
+                nonce: BASE64_STANDARD.encode(nonce),
+                ciphertext: String::new(),
+            },
+        };
+        let aad = frame.associated_data();
+        let ciphertext = self_hosted_transport_aead_cipher(shared_secret)?
+            .encrypt(
+                (&nonce).into(),
+                Payload {
+                    msg: plaintext_json.as_bytes(),
+                    aad: aad.as_bytes(),
+                },
+            )
+            .map_err(|_| {
+                SelfHostedWorkerError::InvalidTransport(
+                    "self-hosted worker encrypted transport frame encryption failed".to_string(),
+                )
+            })?;
+        Ok(Self {
+            encrypted_payload: SelfHostedWorkerEncryptedPayload {
+                algorithm: SELF_HOSTED_WORKER_SYMMETRIC_AEAD_ALGORITHM.to_string(),
+                nonce: BASE64_STANDARD.encode(nonce),
+                ciphertext: BASE64_STANDARD.encode(ciphertext),
+            },
+            ..frame
+        })
+    }
+
+    pub fn decode_json<T>(&self, shared_secret: &str) -> Result<T, SelfHostedWorkerError>
+    where
+        T: for<'de> Deserialize<'de> + SelfHostedWorkerTransportIdentity,
+    {
+        let plaintext_json = self.decrypt_json(shared_secret)?;
+        let request: T = serde_json::from_str(&plaintext_json).map_err(|error| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "invalid self-hosted worker encrypted transport JSON body: {error}"
+            ))
+        })?;
+        self.validate_identity(request.transport_identity())?;
+        Ok(request)
+    }
+
+    pub fn decrypt_json(&self, shared_secret: &str) -> Result<String, SelfHostedWorkerError> {
+        validate_self_hosted_transport_shared_secret(shared_secret)?;
+        if self.encoding != SelfHostedWorkerTransportFrameEncoding::EncryptedJson {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker symmetric AEAD transport requires encrypted_json frame"
+                    .to_string(),
+            ));
+        }
+        if self.encrypted_payload.algorithm != SELF_HOSTED_WORKER_SYMMETRIC_AEAD_ALGORITHM {
+            return Err(SelfHostedWorkerError::InvalidTransport(format!(
+                "unsupported self-hosted worker AEAD algorithm {}",
+                self.encrypted_payload.algorithm
+            )));
+        }
+        let nonce = BASE64_STANDARD
+            .decode(&self.encrypted_payload.nonce)
+            .map_err(|_| {
+                SelfHostedWorkerError::InvalidTransport(
+                    "self-hosted worker encrypted frame nonce is not valid base64".to_string(),
+                )
+            })?;
+        if nonce.len() != 24 {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker encrypted frame nonce must be 24 bytes".to_string(),
+            ));
+        }
+        let nonce: [u8; 24] = nonce.try_into().map_err(|_| {
+            SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker encrypted frame nonce must be 24 bytes".to_string(),
+            )
+        })?;
+        let ciphertext = BASE64_STANDARD
+            .decode(&self.encrypted_payload.ciphertext)
+            .map_err(|_| {
+                SelfHostedWorkerError::InvalidTransport(
+                    "self-hosted worker encrypted frame ciphertext is not valid base64".to_string(),
+                )
+            })?;
+        if ciphertext.len() > SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker encrypted frame exceeds maximum size".to_string(),
+            ));
+        }
+        let plaintext = self_hosted_transport_aead_cipher(shared_secret)?
+            .decrypt(
+                (&nonce).into(),
+                Payload {
+                    msg: &ciphertext,
+                    aad: self.associated_data().as_bytes(),
+                },
+            )
+            .map_err(|_| {
+                SelfHostedWorkerError::InvalidTransport(
+                    "self-hosted worker encrypted transport frame failed authentication"
+                        .to_string(),
+                )
+            })?;
+        if plaintext.len() > SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker decrypted frame exceeds maximum size".to_string(),
+            ));
+        }
+        String::from_utf8(plaintext).map_err(|error| {
+            SelfHostedWorkerError::InvalidTransport(format!(
+                "self-hosted worker decrypted frame is not UTF-8 JSON: {error}"
+            ))
+        })
+    }
+
+    fn associated_data(&self) -> String {
+        [
+            self.protocol_version.to_string(),
+            self.tenant_id.clone(),
+            self.workspace_id.clone(),
+            self.worker_id.clone(),
+            self.token_id.clone(),
+        ]
+        .join("\n")
+    }
+
+    fn validate_identity(
+        &self,
+        identity: &SelfHostedWorkerIdentity,
+    ) -> Result<(), SelfHostedWorkerError> {
+        if self.tenant_id != identity.tenant_id
+            || self.workspace_id != identity.workspace_id
+            || self.worker_id != identity.worker_id
+            || self.token_id != identity.token_id
+        {
+            return Err(SelfHostedWorkerError::InvalidTransport(
+                "self-hosted worker encrypted frame identity does not match enclosed request"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfHostedWorkerTransportFrameEncoding {
+    EncryptedJson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfHostedWorkerEncryptedPayload {
+    pub algorithm: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+pub trait SelfHostedWorkerTransportIdentity {
+    fn transport_identity(&self) -> &SelfHostedWorkerIdentity;
+}
+
+impl SelfHostedWorkerTransportIdentity for SelfHostedRunPollRequest {
+    fn transport_identity(&self) -> &SelfHostedWorkerIdentity {
+        &self.identity
+    }
+}
+
+impl SelfHostedWorkerTransportIdentity for SelfHostedRunAckRequest {
+    fn transport_identity(&self) -> &SelfHostedWorkerIdentity {
+        &self.identity
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfHostedWorkerHttpTransportClient {
     endpoint: SocketAddr,
@@ -301,6 +513,13 @@ impl SelfHostedWorkerHttpTransportClient {
         Self {
             endpoint,
             transport_security: SelfHostedWorkerHttpTransportSecurity::MutualTls,
+        }
+    }
+
+    pub fn new_symmetric_aead(endpoint: SocketAddr) -> Self {
+        Self {
+            endpoint,
+            transport_security: SelfHostedWorkerHttpTransportSecurity::SymmetricAead,
         }
     }
 
@@ -317,7 +536,11 @@ impl SelfHostedWorkerHttpTransportClient {
         request: &SelfHostedRunPollRequest,
     ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
         validate_run_poll_request(request)?;
-        let body = serde_json::to_string(request).map_err(self_hosted_http_serialization_error)?;
+        let body = self.encode_request_body(
+            SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+            &request.identity,
+            request,
+        )?;
         let response = self.send_json_request("/v1/self-hosted-workers/runs/poll", &body)?;
         if response.trim().is_empty() || response.trim() == "null" {
             return Ok(None);
@@ -336,13 +559,43 @@ impl SelfHostedWorkerHttpTransportClient {
         request: &SelfHostedRunAckRequest,
     ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
         validate_run_ack_request(request)?;
-        let body = serde_json::to_string(request).map_err(self_hosted_http_serialization_error)?;
+        let body = self.encode_request_body(
+            SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+            &request.identity,
+            request,
+        )?;
         let response = self.send_json_request("/v1/self-hosted-workers/runs/ack", &body)?;
         serde_json::from_str(response.trim()).map_err(|error| {
             SelfHostedWorkerError::InvalidTransport(format!(
                 "self-hosted worker HTTP ack response decode failed: {error}"
             ))
         })
+    }
+
+    fn encode_request_body<T>(
+        &self,
+        protocol_version: u32,
+        identity: &SelfHostedWorkerIdentity,
+        request: &T,
+    ) -> Result<String, SelfHostedWorkerError>
+    where
+        T: Serialize,
+    {
+        let plaintext_json =
+            serde_json::to_string(request).map_err(self_hosted_http_serialization_error)?;
+        match self.transport_security {
+            SelfHostedWorkerHttpTransportSecurity::MutualTls => Ok(plaintext_json),
+            SelfHostedWorkerHttpTransportSecurity::SymmetricAead => {
+                let frame = SelfHostedWorkerTransportFrame::encrypt_json(
+                    protocol_version,
+                    identity,
+                    &plaintext_json,
+                    &identity.token_secret,
+                    next_self_hosted_transport_nonce(),
+                )?;
+                serde_json::to_string(&frame).map_err(self_hosted_http_serialization_error)
+            }
+        }
     }
 
     fn send_json_request(&self, path: &str, body: &str) -> Result<String, SelfHostedWorkerError> {
@@ -1190,6 +1443,42 @@ fn decode_self_hosted_http_body(response: &[u8]) -> Result<String, SelfHostedWor
         )));
     }
     Ok(body[4..].to_string())
+}
+
+fn validate_self_hosted_transport_shared_secret(
+    shared_secret: &str,
+) -> Result<(), SelfHostedWorkerError> {
+    if shared_secret.trim().is_empty() {
+        return Err(SelfHostedWorkerError::InvalidTransport(
+            "self-hosted worker symmetric AEAD transport requires a non-empty shared secret"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn self_hosted_transport_aead_cipher(
+    shared_secret: &str,
+) -> Result<XChaCha20Poly1305, SelfHostedWorkerError> {
+    validate_self_hosted_transport_shared_secret(shared_secret)?;
+    let mut key = [0_u8; 32];
+    let secret = shared_secret.as_bytes();
+    let copy_len = secret.len().min(key.len());
+    key[..copy_len].copy_from_slice(&secret[..copy_len]);
+    Ok(XChaCha20Poly1305::new((&key).into()))
+}
+
+fn next_self_hosted_transport_nonce() -> [u8; 24] {
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let counter = SELF_HOSTED_TRANSPORT_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut nonce = [0_u8; 24];
+    nonce[..16].copy_from_slice(&now_nanos.to_le_bytes());
+    nonce[16..24].copy_from_slice(&(counter ^ u64::from(pid)).to_le_bytes());
+    nonce
 }
 
 fn parse_self_hosted_http_status(status_line: &str) -> Result<u16, SelfHostedWorkerError> {
@@ -2176,6 +2465,72 @@ mod tests {
         server.join();
 
         assert!(lease.is_none());
+    }
+
+    #[test]
+    fn self_hosted_transport_frame_encrypts_request_with_context_bound_aead() {
+        let identity = registration_identity();
+        let request = SelfHostedRunPollRequest {
+            protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+            identity: identity.clone(),
+            supported_capabilities: vec!["logs".to_string()],
+            now_unix: 1_725_000_010,
+            lease_duration_secs: 30,
+        };
+        let plaintext_json = serde_json::to_string(&request).unwrap();
+        let frame = SelfHostedWorkerTransportFrame::encrypt_json(
+            SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+            &identity,
+            &plaintext_json,
+            "secret-1",
+            [3_u8; 24],
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame.encoding,
+            SelfHostedWorkerTransportFrameEncoding::EncryptedJson
+        );
+        assert_eq!(frame.tenant_id, "tenant-1");
+        assert_eq!(frame.token_id, "token-1");
+
+        let decoded: SelfHostedRunPollRequest = frame.decode_json("secret-1").unwrap();
+
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn self_hosted_transport_frame_rejects_wrong_secret_or_tampered_identity() {
+        let identity = registration_identity();
+        let request = SelfHostedRunAckRequest {
+            protocol_version: SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+            identity: identity.clone(),
+            dispatch_id: "dispatch-1".to_string(),
+            action: SelfHostedRunAction::StartRun,
+            lease_id: "dispatch-1:attempt-1".to_string(),
+            run_id: "run-1".to_string(),
+            status: SelfHostedRunAckStatus::Accepted,
+            reported_at_unix: 1_725_000_011,
+        };
+        let plaintext_json = serde_json::to_string(&request).unwrap();
+        let mut frame = SelfHostedWorkerTransportFrame::encrypt_json(
+            SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+            &identity,
+            &plaintext_json,
+            "secret-1",
+            [4_u8; 24],
+        )
+        .unwrap();
+
+        assert!(frame
+            .decode_json::<SelfHostedRunAckRequest>("wrong-secret")
+            .is_err());
+
+        frame.worker_id = "other-worker".to_string();
+
+        assert!(frame
+            .decode_json::<SelfHostedRunAckRequest>("secret-1")
+            .is_err());
     }
 
     #[test]
