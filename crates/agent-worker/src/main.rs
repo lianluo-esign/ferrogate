@@ -57,6 +57,18 @@ enum Command {
     FirecrackerPreparePlan,
     /// Emit worker-owned Firecracker host readiness preflight without starting a microVM.
     FirecrackerHostPreflight,
+    /// Boot a configured Firecracker microVM and require serial-console boot evidence.
+    FirecrackerBootSmoke {
+        /// Maximum time to wait for API readiness and guest serial boot evidence.
+        #[arg(long, default_value_t = 15_000)]
+        timeout_millis: u64,
+        /// vCPU count for the local smoke microVM.
+        #[arg(long, default_value_t = 1)]
+        vcpu_count: u8,
+        /// Guest memory in MiB for the local smoke microVM.
+        #[arg(long, default_value_t = 256)]
+        mem_size_mib: u32,
+    },
     /// Execute the configured framework handler binary smoke inside agent-worker ownership.
     SmokeHandlerBinary {
         /// Adapter to smoke: codex, claude-code, or hermes.
@@ -183,6 +195,11 @@ fn main() -> Result<()> {
         Command::ProbeHandlers => handlers::probe_handlers_command(),
         Command::FirecrackerPreparePlan => backends::firecracker_prepare_plan_command(),
         Command::FirecrackerHostPreflight => backends::firecracker_host_preflight_command(),
+        Command::FirecrackerBootSmoke {
+            timeout_millis,
+            vcpu_count,
+            mem_size_mib,
+        } => backends::firecracker_boot_smoke_command(timeout_millis, vcpu_count, mem_size_mib),
         Command::SmokeHandlerBinary {
             adapter,
             timeout_millis,
