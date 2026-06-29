@@ -169,6 +169,7 @@ pub enum AgentWorkerManagementAction {
     Provision,
     ExecOrAttach,
     Stop,
+    SnapshotOrCheckpoint,
     Cleanup,
     StreamStatus,
     CollectArtifacts,
@@ -182,6 +183,7 @@ impl AgentWorkerManagementAction {
             Self::Provision => "provision",
             Self::ExecOrAttach => "exec_or_attach",
             Self::Stop => "stop",
+            Self::SnapshotOrCheckpoint => "snapshot_or_checkpoint",
             Self::Cleanup => "cleanup",
             Self::StreamStatus => "stream_status",
             Self::CollectArtifacts => "collect_artifacts",
@@ -194,6 +196,7 @@ impl AgentWorkerManagementAction {
             Self::Provision
                 | Self::ExecOrAttach
                 | Self::Stop
+                | Self::SnapshotOrCheckpoint
                 | Self::Cleanup
                 | Self::StreamStatus
                 | Self::CollectArtifacts

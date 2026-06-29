@@ -122,6 +122,16 @@ pub(crate) fn firecracker_lifecycle_smoke_command() -> Result<()> {
         lifecycle_smoke_envelope(AgentWorkerManagementAction::ExecOrAttach, "exec")?,
         now,
     );
+    let snapshot = accept_management_envelope(
+        &mut transport,
+        &mut state,
+        &runtime,
+        lifecycle_smoke_envelope(
+            AgentWorkerManagementAction::SnapshotOrCheckpoint,
+            "snapshot",
+        )?,
+        now,
+    );
     let stop = accept_management_envelope(
         &mut transport,
         &mut state,
@@ -155,6 +165,7 @@ pub(crate) fn firecracker_lifecycle_smoke_command() -> Result<()> {
             "status": status,
             "artifacts": artifacts,
             "exec": exec,
+            "snapshot": snapshot,
             "stop": stop,
             "status_after_stop": status_after_stop,
             "cleanup": cleanup,
@@ -757,6 +768,7 @@ fn dispatch_management_action(
         AgentWorkerManagementAction::Provision
         | AgentWorkerManagementAction::ExecOrAttach
         | AgentWorkerManagementAction::Stop
+        | AgentWorkerManagementAction::SnapshotOrCheckpoint
         | AgentWorkerManagementAction::Cleanup
         | AgentWorkerManagementAction::StreamStatus
         | AgentWorkerManagementAction::CollectArtifacts => {
@@ -1721,6 +1733,109 @@ mod tests {
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-exec-instance")
+        );
+    }
+
+    #[test]
+    fn snapshot_or_checkpoint_without_microvm_provision_returns_lifecycle_evidence() {
+        let envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::SnapshotOrCheckpoint,
+            "agent-worker-firecracker-snapshot-not-started",
+        );
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        let runtime = AgentWorkerRuntime::default();
+
+        let response =
+            accept_management_envelope(&mut transport, &mut state, &runtime, envelope, 1_000);
+
+        assert!(response.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = response.result else {
+            panic!("snapshot did not return lifecycle evidence");
+        };
+        assert_eq!(
+            lifecycle.action,
+            AgentWorkerManagementAction::SnapshotOrCheckpoint
+        );
+        assert_eq!(
+            lifecycle.status,
+            ferrogate_runtime::ManagedWorkerSessionStatus::Failed
+        );
+        assert_eq!(lifecycle.outcome, "not_started");
+        assert_eq!(lifecycle.isolation_instance_id, None);
+    }
+
+    #[test]
+    fn snapshot_or_checkpoint_reports_config_gap_without_stopping_microvm() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::SnapshotOrCheckpoint,
+            "agent-worker-firecracker-snapshot",
+        );
+        let mut status_envelope = snapshot_envelope.clone();
+        status_envelope.action = AgentWorkerManagementAction::StreamStatus;
+        status_envelope.request_id = "agent-worker-firecracker-snapshot-status-request".to_string();
+        status_envelope.idempotency_key =
+            "agent-worker-firecracker-snapshot-status-idempotency".to_string();
+        status_envelope.security.nonce =
+            "agent-worker-firecracker-snapshot-status-nonce".to_string();
+        status_envelope.security.signature = status_envelope
+            .shared_secret_signature(SMOKE_SHARED_SECRET)
+            .unwrap();
+        let session_id = snapshot_envelope.session_id.clone().unwrap();
+        let run_id = snapshot_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-snapshot-instance", temp.path()).unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let snapshot = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            snapshot_envelope,
+            1_000,
+        );
+        let status = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            status_envelope,
+            1_000,
+        );
+
+        assert!(snapshot.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = snapshot.result else {
+            panic!("snapshot did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "snapshot_not_configured");
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-snapshot-instance")
+        );
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = status.result else {
+            panic!("status did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "running");
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-snapshot-instance")
         );
     }
 

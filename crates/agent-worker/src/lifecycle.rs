@@ -42,6 +42,9 @@ pub(crate) fn dispatch_lifecycle_action(
             exec_or_attach(state, envelope, external_action_authorizer)
         }
         AgentWorkerManagementAction::Stop => stop(state, envelope),
+        AgentWorkerManagementAction::SnapshotOrCheckpoint => {
+            snapshot_or_checkpoint(state, envelope)
+        }
         AgentWorkerManagementAction::Cleanup => cleanup(state, envelope),
         AgentWorkerManagementAction::StreamStatus => stream_status(state, envelope),
         AgentWorkerManagementAction::CollectArtifacts => collect_artifacts(state, envelope),
@@ -349,6 +352,35 @@ fn stop(
     let result = cancel_native_harness(&mut existing)?;
     state.put_handler_run_state(existing);
     Ok(Some(result))
+}
+
+fn snapshot_or_checkpoint(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
+        let running = existing.is_running();
+        let lifecycle = lifecycle_result_with_instance(
+            envelope,
+            ManagedWorkerSessionStatus::Failed,
+            "snapshot_not_configured",
+            &format!(
+                "Firecracker microVM {} is provisioned with running={running}, but agent-worker snapshot/checkpoint support is not configured yet",
+                existing.instance_id
+            ),
+            Some(existing.instance_id.clone()),
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
+    let lifecycle = lifecycle_result(
+        envelope,
+        ManagedWorkerSessionStatus::Failed,
+        "not_started",
+        "agent-worker cannot snapshot_or_checkpoint before Firecracker microVM provision succeeds",
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
 }
 
 fn cleanup(

@@ -140,20 +140,21 @@ The signed envelope uses stable snake_case enum values and carries:
 - `security.transport_security`
 - `security.encrypted`
 
-Lifecycle actions (`provision`, `exec_or_attach`, `stop`, `cleanup`,
-`stream_status`, and `collect_artifacts`) must include both `session_id` and
-`run_id`. Discovery actions (`probe_handlers` and `list_backends`) may omit
-them. This prevents a lifecycle command from being detached from the durable run
-record the gateway will audit and bill. `framework_adapter` is optional for
-backward-compatible discovery and native-harness smokes, but lifecycle requests
-from the scheduler should set it to the selected adapter, such as
-`native-harness`, `codex`, `claude-code`, or `hermes`. The field is part of the
-signed envelope and encrypted-frame associated data so a request cannot be
-retargeted to a different handler after authorization.
+Lifecycle actions (`provision`, `exec_or_attach`, `stop`,
+`snapshot_or_checkpoint`, `cleanup`, `stream_status`, and `collect_artifacts`)
+must include both `session_id` and `run_id`. Discovery actions
+(`probe_handlers` and `list_backends`) may omit them. This prevents a lifecycle
+command from being detached from the durable run record the gateway will audit
+and bill. `framework_adapter` is optional for backward-compatible discovery and
+native-harness smokes, but lifecycle requests from the scheduler should set it
+to the selected adapter, such as `native-harness`, `codex`, `claude-code`, or
+`hermes`. The field is part of the signed envelope and encrypted-frame
+associated data so a request cannot be retargeted to a different handler after
+authorization.
 
 The initial standard actions are `probe_handlers`, `list_backends`,
-`provision`, `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and
-`collect_artifacts`.
+`provision`, `exec_or_attach`, `stop`, `snapshot_or_checkpoint`, `cleanup`,
+`stream_status`, and `collect_artifacts`.
 
 Every response uses the same envelope identity fields (`request_id`,
 `idempotency_key`, `action`, `tenant_id`, `workspace_id`, `worker_id`,
@@ -171,13 +172,14 @@ initial registry reports the Firecracker backend as ready only when
 point to configured local files; the worker does not scan `PATH` or execute the
 binary during readiness reporting.
 Lifecycle dispatch now reaches worker-owned action branches for `provision`,
-`exec_or_attach`, `stop`, `cleanup`, `stream_status`, and `collect_artifacts`.
-`provision` fails closed with `incompatible_backend` when Firecracker is not
-configured. When the full Firecracker bundle is configured but the worker host
-fails the Firecracker executable, jailer executable, bundle-file, or KVM device
-checks, `provision` returns a typed `result.kind=lifecycle` record with
-`status=failed` and `outcome=host_preflight_failed`. When that preflight passes,
-`provision` starts a real Firecracker microVM in the `agent-worker` process,
+`exec_or_attach`, `stop`, `snapshot_or_checkpoint`, `cleanup`,
+`stream_status`, and `collect_artifacts`. `provision` fails closed with
+`incompatible_backend` when Firecracker is not configured. When the full
+Firecracker bundle is configured but the worker host fails the Firecracker
+executable, jailer executable, bundle-file, or KVM device checks, `provision`
+returns a typed `result.kind=lifecycle` record with `status=failed` and
+`outcome=host_preflight_failed`. When that preflight passes, `provision` starts
+a real Firecracker microVM in the `agent-worker` process,
 keeps the child process in worker state by `session_id/run_id`, and returns
 `status=running`, `outcome=provisioned`, plus the retained
 `isolation_instance_id`. `stream_status` reports that same retained instance as
@@ -413,7 +415,11 @@ it returns failed lifecycle evidence with the same `isolation_instance_id` and
 guest-channel configuration preflight passes, `exec_or_attach` still fails
 closed with `outcome=guest_handler_rpc_not_implemented`; this is the explicit
 remaining boundary before Codex/Claude/Hermes handlers can launch inside the
-microVM. Handler execution remains a separate worker-owned path that requires a
+microVM. `snapshot_or_checkpoint` is now a first-class management action; before
+provision it returns `outcome=not_started`, and with a retained Firecracker
+microVM it currently returns `outcome=snapshot_not_configured` with the same
+`isolation_instance_id` without stopping the VM. Handler execution remains a
+separate worker-owned path that requires a
 `capability.allowed` decision from the configured gateway HTTP authorizer
 before continuing. The requested capability is framework-specific:
 the native harness
