@@ -326,13 +326,14 @@ fn stop(
     let run_id = lifecycle_run_id(envelope)?;
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();
-        let was_running = existing.stop();
+        let report = existing.stop();
         let lifecycle = lifecycle_result_with_instance(
             envelope,
             ManagedWorkerSessionStatus::Cancelled,
             "stopped",
             &format!(
-                "Firecracker microVM {instance_id} stopped by agent-worker; was_running={was_running}"
+                "Firecracker microVM {instance_id} stopped by agent-worker; {}",
+                report.summary()
             ),
             Some(instance_id),
         )?;
@@ -358,13 +359,19 @@ fn cleanup(
     let run_id = lifecycle_run_id(envelope)?;
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();
-        let was_running = existing.stop();
+        let report = existing.cleanup();
+        let (status, outcome) = if report.cleanup_succeeded() {
+            (ManagedWorkerSessionStatus::CleanedUp, "cleaned_up")
+        } else {
+            (ManagedWorkerSessionStatus::Failed, "cleanup_failed")
+        };
         let lifecycle = lifecycle_result_with_instance(
             envelope,
-            ManagedWorkerSessionStatus::CleanedUp,
-            "cleaned_up",
+            status,
+            outcome,
             &format!(
-                "Firecracker microVM {instance_id} cleaned up by agent-worker; was_running={was_running}"
+                "Firecracker microVM {instance_id} cleanup handled by agent-worker; {}",
+                report.summary()
             ),
             Some(instance_id),
         )?;

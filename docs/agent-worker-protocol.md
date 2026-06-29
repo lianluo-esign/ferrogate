@@ -399,9 +399,14 @@ The current worker-side Firecracker resource policy is read from
 `AGENT_WORKER_FIRECRACKER_VCPU_COUNT` (default `1`), and
 `AGENT_WORKER_FIRECRACKER_MEM_SIZE_MIB` (default `512`); invalid values fail
 closed before provisioning.
-`stop` removes the retained microVM from worker state; a later `cleanup` for the
-same `session_id/run_id` is accepted as an idempotent no-op. The current
-`exec_or_attach` path still does not run framework handlers inside that microVM;
+`stop` removes the retained microVM from worker state and returns lifecycle
+evidence that distinguishes whether the process was already exited or killed,
+plus whether the Firecracker API socket was removed. `cleanup` uses the same
+host-resource cleanup path but reports `outcome=cleanup_failed` if the retained
+microVM's host resources cannot be removed; a later `cleanup` for the same
+`session_id/run_id` is accepted as an idempotent no-op after a successful
+`stop`. The current `exec_or_attach` path still does not run framework handlers
+inside that microVM;
 when a retained microVM exists but the guest channel preflight is incomplete,
 it returns failed lifecycle evidence with the same `isolation_instance_id` and
 `outcome=guest_agent_channel_unavailable` without stopping the VM. If the

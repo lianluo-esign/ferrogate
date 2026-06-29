@@ -852,11 +852,18 @@ impl FirecrackerMicroVm {
         self.artifacts.to_artifact_results(&self.instance_id)
     }
 
-    pub(crate) fn stop(&mut self) -> bool {
-        let was_running = self.is_running();
-        stop_firecracker_child(&mut self.child);
-        let _ = fs::remove_file(&self.artifacts.api_socket);
-        was_running
+    pub(crate) fn stop(&mut self) -> FirecrackerStopReport {
+        let process = stop_firecracker_child(&mut self.child);
+        let api_socket_removed = remove_firecracker_api_socket(&self.artifacts.api_socket);
+        FirecrackerStopReport {
+            was_running: process.was_running,
+            process_outcome: process.outcome,
+            api_socket_removed,
+        }
+    }
+
+    pub(crate) fn cleanup(&mut self) -> FirecrackerStopReport {
+        self.stop()
     }
 }
 
@@ -874,6 +881,51 @@ pub(crate) struct FirecrackerMicroVmArtifacts {
     serial_output: PathBuf,
     stdout: PathBuf,
     stderr: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FirecrackerStopReport {
+    pub(crate) was_running: bool,
+    pub(crate) process_outcome: FirecrackerProcessStopOutcome,
+    pub(crate) api_socket_removed: Result<bool, String>,
+}
+
+impl FirecrackerStopReport {
+    pub(crate) fn cleanup_succeeded(&self) -> bool {
+        self.api_socket_removed.is_ok()
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let socket = match &self.api_socket_removed {
+            Ok(true) => "api_socket_removed=true".to_string(),
+            Ok(false) => "api_socket_removed=false".to_string(),
+            Err(error) => format!("api_socket_remove_error={error}"),
+        };
+        format!(
+            "was_running={}; process_outcome={}; {socket}",
+            self.was_running,
+            self.process_outcome.as_str()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FirecrackerProcessStopOutcome {
+    AlreadyExited(String),
+    Killed(String),
+    KillFailed(String),
+    WaitFailed(String),
+}
+
+impl FirecrackerProcessStopOutcome {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyExited(_) => "already_exited",
+            Self::Killed(_) => "killed",
+            Self::KillFailed(_) => "kill_failed",
+            Self::WaitFailed(_) => "wait_failed",
+        }
+    }
 }
 
 impl FirecrackerMicroVmArtifacts {
@@ -1359,11 +1411,46 @@ fn first_non_empty_line(text: &str) -> String {
         .to_string()
 }
 
-fn stop_firecracker_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
+struct FirecrackerChildStopReport {
+    was_running: bool,
+    outcome: FirecrackerProcessStopOutcome,
+}
+
+fn stop_firecracker_child(child: &mut Child) -> FirecrackerChildStopReport {
+    match child.try_wait() {
+        Ok(Some(status)) => FirecrackerChildStopReport {
+            was_running: false,
+            outcome: FirecrackerProcessStopOutcome::AlreadyExited(status.to_string()),
+        },
+        Ok(None) => match child.kill() {
+            Ok(()) => match child.wait() {
+                Ok(status) => FirecrackerChildStopReport {
+                    was_running: true,
+                    outcome: FirecrackerProcessStopOutcome::Killed(status.to_string()),
+                },
+                Err(error) => FirecrackerChildStopReport {
+                    was_running: true,
+                    outcome: FirecrackerProcessStopOutcome::WaitFailed(error.to_string()),
+                },
+            },
+            Err(error) => FirecrackerChildStopReport {
+                was_running: true,
+                outcome: FirecrackerProcessStopOutcome::KillFailed(error.to_string()),
+            },
+        },
+        Err(error) => FirecrackerChildStopReport {
+            was_running: false,
+            outcome: FirecrackerProcessStopOutcome::WaitFailed(error.to_string()),
+        },
     }
-    let _ = child.wait();
+}
+
+fn remove_firecracker_api_socket(socket_path: &Path) -> Result<bool, String> {
+    match fs::remove_file(socket_path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("{}: {error}", socket_path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -1640,6 +1727,18 @@ mod tests {
             .failure_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("Firecracker binary path was not configured")));
+    }
+
+    #[test]
+    fn firecracker_api_socket_cleanup_reports_host_resource_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("firecracker.sock");
+        std::fs::create_dir(&socket_path).unwrap();
+
+        let result = remove_firecracker_api_socket(&socket_path);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(socket_path.to_str().unwrap()));
     }
 
     #[test]

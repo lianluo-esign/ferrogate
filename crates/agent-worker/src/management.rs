@@ -253,6 +253,29 @@ fn serve_management_http(
         anyhow::bail!("max_requests must be greater than zero");
     }
     let listener = TcpListener::bind(listen)?;
+    serve_management_http_listener(
+        listener,
+        key_id,
+        shared_secret,
+        now_unix_millis,
+        max_requests,
+        idle_timeout_millis,
+        external_action_authorizer_http_endpoint,
+    )
+}
+
+fn serve_management_http_listener(
+    listener: TcpListener,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: Option<u64>,
+    max_requests: usize,
+    idle_timeout_millis: Option<u64>,
+    external_action_authorizer_http_endpoint: Option<SocketAddr>,
+) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
+    if max_requests == 0 {
+        anyhow::bail!("max_requests must be greater than zero");
+    }
     let transport = Arc::new(Mutex::new(InMemoryAgentWorkerManagementTransport::new(
         AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
             key_id: key_id.to_string(),
@@ -803,6 +826,7 @@ mod tests {
     };
     use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
     use std::thread;
     use std::{net::TcpStream, os::unix::net::UnixStream};
 
@@ -915,21 +939,7 @@ mod tests {
 
     #[test]
     fn accepts_encrypted_management_frame_over_http_contract() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let server = thread::spawn(move || {
-            serve_management_http(
-                addr,
-                "agent-worker-smoke-key",
-                SMOKE_SHARED_SECRET,
-                Some(1_000),
-                1,
-                None,
-                None,
-            )
-            .unwrap()
-        });
+        let (addr, server) = spawn_http_management_server(1);
 
         let mut envelope = smoke_envelope().unwrap();
         envelope.action = AgentWorkerManagementAction::ListBackends;
@@ -1160,21 +1170,7 @@ mod tests {
 
     #[test]
     fn http_management_exec_or_attach_does_not_run_process_shim_before_microvm_provision() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let server = thread::spawn(move || {
-            serve_management_http(
-                addr,
-                "agent-worker-smoke-key",
-                SMOKE_SHARED_SECRET,
-                Some(1_000),
-                2,
-                None,
-                None,
-            )
-            .unwrap()
-        });
+        let (addr, server) = spawn_http_management_server(2);
 
         let exec = send_http_management_request(
             addr,
@@ -1595,6 +1591,7 @@ mod tests {
             ferrogate_runtime::ManagedWorkerSessionStatus::Cancelled
         );
         assert_eq!(lifecycle.outcome, "stopped");
+        assert!(lifecycle.message.contains("process_outcome=killed"));
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-stop-instance")
@@ -1604,6 +1601,56 @@ mod tests {
         };
         assert_eq!(lifecycle.outcome, "not_started");
         assert_eq!(lifecycle.isolation_instance_id, None);
+    }
+
+    #[test]
+    fn cleanup_reports_failed_lifecycle_when_firecracker_host_resource_cleanup_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let cleanup_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::Cleanup,
+            "agent-worker-firecracker-cleanup-failed",
+        );
+        let session_id = cleanup_envelope.session_id.clone().unwrap();
+        let run_id = cleanup_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-cleanup-failed-instance", temp.path()).unwrap(),
+        );
+        std::fs::create_dir(temp.path().join("firecracker.sock")).unwrap();
+        let runtime = AgentWorkerRuntime::default();
+
+        let cleanup = accept_management_envelope(
+            &mut transport,
+            &mut state,
+            &runtime,
+            cleanup_envelope,
+            1_000,
+        );
+
+        assert!(cleanup.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = cleanup.result else {
+            panic!("cleanup did not return lifecycle evidence");
+        };
+        assert_eq!(
+            lifecycle.status,
+            ferrogate_runtime::ManagedWorkerSessionStatus::Failed
+        );
+        assert_eq!(lifecycle.outcome, "cleanup_failed");
+        assert!(lifecycle.message.contains("process_outcome=killed"));
+        assert!(lifecycle.message.contains("api_socket_remove_error="));
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-cleanup-failed-instance")
+        );
     }
 
     #[test]
@@ -1819,6 +1866,40 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("unix socket was not created at {}", socket_path.display());
+    }
+
+    fn spawn_http_management_server(
+        max_requests: usize,
+    ) -> (
+        SocketAddr,
+        thread::JoinHandle<Vec<ferrogate_runtime::AgentWorkerManagementResponse>>,
+    ) {
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_management_http_bound_to_ephemeral_port(max_requests, addr_tx).unwrap()
+        });
+        let addr = addr_rx.recv().unwrap();
+        (addr, server)
+    }
+
+    fn serve_management_http_bound_to_ephemeral_port(
+        max_requests: usize,
+        addr_tx: mpsc::Sender<SocketAddr>,
+    ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
+        if max_requests == 0 {
+            anyhow::bail!("max_requests must be greater than zero");
+        }
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        addr_tx.send(listener.local_addr()?)?;
+        serve_management_http_listener(
+            listener,
+            "agent-worker-smoke-key",
+            SMOKE_SHARED_SECRET,
+            Some(1_000),
+            max_requests,
+            None,
+            None,
+        )
     }
 
     fn write_executable_version_script(path: &Path, version: &str) -> std::io::Result<()> {
