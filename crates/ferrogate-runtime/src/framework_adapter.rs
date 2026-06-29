@@ -1718,6 +1718,49 @@ mod tests {
     }
 
     #[test]
+    fn self_hosted_adapter_telemetry_events_match_golden_fixture() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter
+            .start_session(FrameworkAdapterSessionRequest {
+                mode: FrameworkAdapterMode::SelfHosted,
+                ..session_request()
+            })
+            .unwrap();
+        let events = [
+            (CapabilityAction::Tool, "native.echo"),
+            (CapabilityAction::McpTool, "mcp://filesystem/read"),
+            (CapabilityAction::Cli, "local-shell"),
+            (CapabilityAction::Skill, "skill://repo/format"),
+            (CapabilityAction::Rest, "https://api.example.test/v1"),
+        ]
+        .into_iter()
+        .map(|(action, target)| {
+            self_hosted_framework_capability_report(FrameworkCapabilityRequest {
+                session: session.clone(),
+                action,
+                target: target.to_string(),
+                high_risk: true,
+            })
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+        let actual = serde_json::to_value(
+            events
+                .iter()
+                .map(NormalizedFrameworkEvent::canonical_json)
+                .collect::<Vec<serde_json::Value>>(),
+        )
+        .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/self_hosted_adapter_telemetry_events.golden.json"
+        ))
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn managed_capability_event_projects_to_timeline_record() {
         let mut adapter = NativeHarnessAdapter::default();
         let (session, _) = adapter.start_session(session_request()).unwrap();
