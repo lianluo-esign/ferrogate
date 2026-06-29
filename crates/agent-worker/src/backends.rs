@@ -255,6 +255,26 @@ impl FirecrackerHostPreflight {
             )
         }
     }
+
+    pub(crate) fn success_summary(&self) -> String {
+        let firecracker_version = self
+            .bundle
+            .firecracker_bin
+            .version_output
+            .as_deref()
+            .unwrap_or("unknown-firecracker-version");
+        let jailer_version = self
+            .bundle
+            .jailer_bin
+            .version_output
+            .as_deref()
+            .unwrap_or("unknown-jailer-version");
+        let kernel_size = self.bundle.kernel_image.size_bytes.unwrap_or_default();
+        let rootfs_size = self.bundle.rootfs_image.size_bytes.unwrap_or_default();
+        format!(
+            "Firecracker host preflight passed with {firecracker_version}, {jailer_version}, kernel_size_bytes={kernel_size}, rootfs_size_bytes={rootfs_size}; microVM boot is still not proven"
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -645,6 +665,13 @@ mod tests {
         assert_eq!(preflight.bundle.kernel_image.size_bytes, Some(12));
         assert_eq!(preflight.bundle.rootfs_image.size_bytes, Some(12));
         assert!(!preflight.proves_microvm_boot);
+        assert!(preflight.success_summary().contains("Firecracker v.test"));
+        assert!(preflight.success_summary().contains("Jailer v.test"));
+        assert!(preflight.success_summary().contains("kernel_size_bytes=12"));
+        assert!(preflight.success_summary().contains("rootfs_size_bytes=12"));
+        assert!(preflight
+            .success_summary()
+            .contains("microVM boot is still not proven"));
     }
 
     fn write_executable_version_script(path: &Path, version: &str) -> std::io::Result<()> {

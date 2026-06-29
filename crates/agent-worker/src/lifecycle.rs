@@ -80,11 +80,15 @@ fn provision(
         return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
     }
 
+    let message = format!(
+        "{}; Firecracker backend is configured, but microVM provision/start lifecycle is not implemented in agent-worker yet",
+        preflight.success_summary()
+    );
     let lifecycle = lifecycle_result(
         envelope,
         ManagedWorkerSessionStatus::Failed,
         "not_implemented",
-        "Firecracker backend is configured, but microVM provision/start lifecycle is not implemented in agent-worker yet",
+        &message,
     )?;
     Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
 }
