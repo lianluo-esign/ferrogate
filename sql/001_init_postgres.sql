@@ -163,6 +163,63 @@ CREATE INDEX IF NOT EXISTS idx_managed_worker_lifecycle_session_time
 CREATE INDEX IF NOT EXISTS idx_managed_worker_lifecycle_tenant_time
     ON managed_worker_lifecycle_events(tenant, occurred_at_unix DESC);
 
+CREATE TABLE IF NOT EXISTS managed_worker_isolation_selections (
+    session_id TEXT PRIMARY KEY REFERENCES managed_worker_sessions(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    agent_worker_instance_id TEXT REFERENCES agent_worker_instances(id),
+    backend_name TEXT NOT NULL,
+    backend_version TEXT NOT NULL,
+    backend_kind TEXT NOT NULL,
+    host_lifecycle_owner TEXT NOT NULL,
+    gateway_controls_backend BOOLEAN NOT NULL,
+    capability_envelope_id TEXT NOT NULL,
+    selected_at_unix BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_isolation_selection_backend
+    ON managed_worker_isolation_selections(backend_kind, selected_at_unix DESC);
+
+CREATE TABLE IF NOT EXISTS managed_worker_isolation_policies (
+    session_id TEXT PRIMARY KEY REFERENCES managed_worker_sessions(id) ON DELETE CASCADE,
+    cpu_count INTEGER NOT NULL,
+    memory_mib INTEGER NOT NULL,
+    disk_mib INTEGER NOT NULL,
+    max_runtime_millis BIGINT,
+    direct_public_egress BOOLEAN NOT NULL,
+    gateway_control_channel BOOLEAN NOT NULL,
+    governed_egress BOOLEAN NOT NULL,
+    read_only_rootfs BOOLEAN NOT NULL,
+    writable_workspace BOOLEAN NOT NULL,
+    host_path_mounts BOOLEAN NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_isolation_policy_egress
+    ON managed_worker_isolation_policies(direct_public_egress, governed_egress);
+
+CREATE TABLE IF NOT EXISTS managed_worker_isolation_evidence (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES managed_worker_sessions(id) ON DELETE CASCADE,
+    lifecycle_event_id TEXT NOT NULL REFERENCES managed_worker_lifecycle_events(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    tenant TEXT,
+    workspace_id TEXT NOT NULL,
+    agent_worker_instance_id TEXT REFERENCES agent_worker_instances(id),
+    isolation_instance_id TEXT,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    failure_reason TEXT,
+    occurred_at_unix BIGINT NOT NULL,
+    evidence_json JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_isolation_evidence_session_time
+    ON managed_worker_isolation_evidence(session_id, occurred_at_unix ASC);
+
+CREATE INDEX IF NOT EXISTS idx_managed_worker_isolation_evidence_outcome
+    ON managed_worker_isolation_evidence(outcome, occurred_at_unix DESC);
+
 CREATE TABLE IF NOT EXISTS self_hosted_worker_registrations (
     id TEXT PRIMARY KEY,
     tenant TEXT,
@@ -550,5 +607,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (7, '007_self_hosted_run_dispatch_state')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (8, '008_managed_worker_isolation_evidence')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

@@ -64,10 +64,12 @@ use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
-    StoredAuditEvent, StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession,
-    StoredRequestLog, StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact,
-    StoredSelfHostedWorkerCheckpoint, StoredSelfHostedWorkerHeartbeat,
-    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
+    StoredAuditEvent, StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
+    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
+    StoredManagedWorkerSession, StoredRequestLog, StoredSelfHostedRunDispatch,
+    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
+    StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -6079,8 +6081,54 @@ impl AppState {
             return;
         }
 
+        let isolation_policy = ferrogate_runtime::IsolationPolicy::default();
+        let isolation_selection = StoredManagedWorkerIsolationSelection {
+            session_id: record.session_id.clone(),
+            run_id: record.run_id.clone(),
+            tenant: tenant.clone(),
+            workspace_id: record.workspace_id.clone(),
+            agent_worker_instance_id: Some(record.agent_worker_id.clone()),
+            backend_name: backend_kind.to_string(),
+            backend_version: "unknown".to_string(),
+            backend_kind: backend_kind.to_string(),
+            host_lifecycle_owner: "agent-worker".to_string(),
+            gateway_controls_backend: false,
+            capability_envelope_id: record.capability_envelope_id.clone(),
+            selected_at_unix: occurred_at_unix,
+        };
+        if let Err(error) = self
+            .repositories
+            .upsert_managed_worker_isolation_selection(isolation_selection)
+        {
+            warn!("failed to persist managed worker isolation selection record: {error}");
+        }
+
+        let resource_limits = isolation_policy.resource_limits;
+        let network_policy = isolation_policy.network_policy;
+        let filesystem_policy = isolation_policy.filesystem_policy;
+        let isolation_policy_record = StoredManagedWorkerIsolationPolicy {
+            session_id: record.session_id.clone(),
+            cpu_count: resource_limits.cpu_count,
+            memory_mib: resource_limits.memory_mib,
+            disk_mib: resource_limits.disk_mib,
+            max_runtime_millis: resource_limits.max_runtime_millis,
+            direct_public_egress: network_policy.direct_public_egress,
+            gateway_control_channel: network_policy.gateway_control_channel,
+            governed_egress: network_policy.governed_egress,
+            read_only_rootfs: filesystem_policy.read_only_rootfs,
+            writable_workspace: filesystem_policy.writable_workspace,
+            host_path_mounts: filesystem_policy.host_path_mounts,
+        };
+        if let Err(error) = self
+            .repositories
+            .upsert_managed_worker_isolation_policy(isolation_policy_record)
+        {
+            warn!("failed to persist managed worker isolation policy record: {error}");
+        }
+
+        let lifecycle_event_id = format!("mwl-{:016x}", fnv1a64(&event_id_bytes));
         let event = StoredManagedWorkerLifecycleEvent {
-            id: format!("mwl-{:016x}", fnv1a64(&event_id_bytes)),
+            id: lifecycle_event_id.clone(),
             session_id: record.session_id.clone(),
             run_id: record.run_id.clone(),
             tenant,
@@ -6105,6 +6153,58 @@ impl AppState {
             .append_managed_worker_lifecycle_event(event)
         {
             warn!("failed to persist managed worker lifecycle event record: {error}");
+            return;
+        }
+
+        let evidence = StoredManagedWorkerIsolationEvidence {
+            id: format!("mwie-{:016x}", fnv1a64(&event_id_bytes)),
+            session_id: record.session_id.clone(),
+            lifecycle_event_id,
+            run_id: record.run_id.clone(),
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some(record.tenant_id.clone()),
+                project_id: Some(record.workspace_id.clone()),
+                ..ferrogate_core::TenantContext::default()
+            },
+            workspace_id: record.workspace_id.clone(),
+            agent_worker_instance_id: Some(record.agent_worker_id.clone()),
+            isolation_instance_id: record.isolation_instance_id.clone(),
+            action: action.to_string(),
+            outcome: record.outcome.clone(),
+            failure_reason: record.failure_reason.clone(),
+            occurred_at_unix,
+            evidence_json: serde_json::json!({
+                "agent_worker_id": record.agent_worker_id,
+                "host_lifecycle_owner": "agent-worker",
+                "gateway_controls_backend": false,
+                "isolation_backend_kind": backend_kind,
+                "isolation_instance_id": record.isolation_instance_id,
+                "capability_envelope_id": record.capability_envelope_id,
+                "resource_limits": {
+                    "cpu_count": resource_limits.cpu_count,
+                    "memory_mib": resource_limits.memory_mib,
+                    "disk_mib": resource_limits.disk_mib,
+                    "max_runtime_millis": resource_limits.max_runtime_millis,
+                },
+                "network_policy": {
+                    "direct_public_egress": network_policy.direct_public_egress,
+                    "gateway_control_channel": network_policy.gateway_control_channel,
+                    "governed_egress": network_policy.governed_egress,
+                },
+                "filesystem_policy": {
+                    "read_only_rootfs": filesystem_policy.read_only_rootfs,
+                    "writable_workspace": filesystem_policy.writable_workspace,
+                    "host_path_mounts": filesystem_policy.host_path_mounts,
+                },
+                "failure_reason": record.failure_reason,
+            })
+            .to_string(),
+        };
+        if let Err(error) = self
+            .repositories
+            .upsert_managed_worker_isolation_evidence(evidence)
+        {
+            warn!("failed to persist managed worker isolation evidence record: {error}");
         }
     }
 
@@ -8387,6 +8487,39 @@ mod tests {
         assert!(events[0]
             .evidence_json
             .contains("\"isolation_backend_kind\":\"firecracker_microvm\""));
+
+        let selections = state.repositories.managed_worker_isolation_selections();
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].session_id, "session-1");
+        assert_eq!(selections[0].backend_kind, "firecracker_microvm");
+        assert_eq!(selections[0].host_lifecycle_owner, "agent-worker");
+        assert!(!selections[0].gateway_controls_backend);
+        assert_eq!(
+            selections[0].agent_worker_instance_id.as_deref(),
+            Some("agent-worker-1")
+        );
+
+        let policies = state.repositories.managed_worker_isolation_policies();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].session_id, "session-1");
+        assert!(!policies[0].direct_public_egress);
+        assert!(policies[0].gateway_control_channel);
+        assert!(policies[0].governed_egress);
+        assert!(policies[0].read_only_rootfs);
+        assert!(!policies[0].host_path_mounts);
+
+        let isolation_evidence = state.repositories.managed_worker_isolation_evidence();
+        assert_eq!(isolation_evidence.len(), 1);
+        assert_eq!(isolation_evidence[0].session_id, "session-1");
+        assert_eq!(isolation_evidence[0].lifecycle_event_id, events[0].id);
+        assert_eq!(
+            isolation_evidence[0].isolation_instance_id.as_deref(),
+            Some("microvm-1")
+        );
+        assert_eq!(isolation_evidence[0].outcome, "cleaned_up");
+        assert!(isolation_evidence[0]
+            .evidence_json
+            .contains("\"gateway_controls_backend\":false"));
     }
 
     #[test]

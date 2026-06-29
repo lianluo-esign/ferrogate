@@ -161,6 +161,9 @@ pub struct StorageMigrationSnapshot {
     pub agent_worker_instances: Vec<StoredAgentWorkerInstance>,
     pub managed_worker_sessions: Vec<StoredManagedWorkerSession>,
     pub managed_worker_lifecycle_events: Vec<StoredManagedWorkerLifecycleEvent>,
+    pub managed_worker_isolation_selections: Vec<StoredManagedWorkerIsolationSelection>,
+    pub managed_worker_isolation_policies: Vec<StoredManagedWorkerIsolationPolicy>,
+    pub managed_worker_isolation_evidence: Vec<StoredManagedWorkerIsolationEvidence>,
     pub self_hosted_worker_registrations: Vec<StoredSelfHostedWorkerRegistration>,
     pub self_hosted_worker_heartbeats: Vec<StoredSelfHostedWorkerHeartbeat>,
     pub self_hosted_worker_telemetry_events: Vec<StoredSelfHostedWorkerTelemetryEvent>,
@@ -192,6 +195,9 @@ pub struct StorageMigrationCounts {
     pub agent_worker_instances: usize,
     pub managed_worker_sessions: usize,
     pub managed_worker_lifecycle_events: usize,
+    pub managed_worker_isolation_selections: usize,
+    pub managed_worker_isolation_policies: usize,
+    pub managed_worker_isolation_evidence: usize,
     pub self_hosted_worker_registrations: usize,
     pub self_hosted_worker_heartbeats: usize,
     pub self_hosted_worker_telemetry_events: usize,
@@ -224,6 +230,9 @@ impl StorageMigrationSnapshot {
             agent_worker_instances: self.agent_worker_instances.len(),
             managed_worker_sessions: self.managed_worker_sessions.len(),
             managed_worker_lifecycle_events: self.managed_worker_lifecycle_events.len(),
+            managed_worker_isolation_selections: self.managed_worker_isolation_selections.len(),
+            managed_worker_isolation_policies: self.managed_worker_isolation_policies.len(),
+            managed_worker_isolation_evidence: self.managed_worker_isolation_evidence.len(),
             self_hosted_worker_registrations: self.self_hosted_worker_registrations.len(),
             self_hosted_worker_heartbeats: self.self_hosted_worker_heartbeats.len(),
             self_hosted_worker_telemetry_events: self.self_hosted_worker_telemetry_events.len(),
@@ -301,8 +310,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 7;
-const POSTGRES_SCHEMA_NAME: &str = "007_self_hosted_run_dispatch_state";
+const POSTGRES_SCHEMA_VERSION: u64 = 8;
+const POSTGRES_SCHEMA_NAME: &str = "008_managed_worker_isolation_evidence";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -575,6 +584,54 @@ pub struct StoredManagedWorkerLifecycleEvent {
     pub status: String,
     pub action: String,
     pub outcome: String,
+    pub occurred_at_unix: Option<u64>,
+    pub evidence_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredManagedWorkerIsolationSelection {
+    pub session_id: String,
+    pub run_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub agent_worker_instance_id: Option<String>,
+    pub backend_name: String,
+    pub backend_version: String,
+    pub backend_kind: String,
+    pub host_lifecycle_owner: String,
+    pub gateway_controls_backend: bool,
+    pub capability_envelope_id: String,
+    pub selected_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredManagedWorkerIsolationPolicy {
+    pub session_id: String,
+    pub cpu_count: u16,
+    pub memory_mib: u32,
+    pub disk_mib: u32,
+    pub max_runtime_millis: Option<u64>,
+    pub direct_public_egress: bool,
+    pub gateway_control_channel: bool,
+    pub governed_egress: bool,
+    pub read_only_rootfs: bool,
+    pub writable_workspace: bool,
+    pub host_path_mounts: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredManagedWorkerIsolationEvidence {
+    pub id: String,
+    pub session_id: String,
+    pub lifecycle_event_id: String,
+    pub run_id: String,
+    pub tenant: TenantContext,
+    pub workspace_id: String,
+    pub agent_worker_instance_id: Option<String>,
+    pub isolation_instance_id: Option<String>,
+    pub action: String,
+    pub outcome: String,
+    pub failure_reason: Option<String>,
     pub occurred_at_unix: Option<u64>,
     pub evidence_json: String,
 }
@@ -1578,6 +1635,205 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    fn upsert_managed_worker_isolation_selection(
+        &self,
+        selection: &StoredManagedWorkerIsolationSelection,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&selection.tenant);
+        let selected_at_unix =
+            saturating_i64(selection.selected_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO managed_worker_isolation_selections \
+                 (session_id, run_id, tenant, workspace_id, agent_worker_instance_id, \
+                  backend_name, backend_version, backend_kind, host_lifecycle_owner, \
+                  gateway_controls_backend, capability_envelope_id, selected_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                 ON CONFLICT (session_id) DO UPDATE SET \
+                 run_id = EXCLUDED.run_id, \
+                 tenant = EXCLUDED.tenant, \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 agent_worker_instance_id = EXCLUDED.agent_worker_instance_id, \
+                 backend_name = EXCLUDED.backend_name, \
+                 backend_version = EXCLUDED.backend_version, \
+                 backend_kind = EXCLUDED.backend_kind, \
+                 host_lifecycle_owner = EXCLUDED.host_lifecycle_owner, \
+                 gateway_controls_backend = EXCLUDED.gateway_controls_backend, \
+                 capability_envelope_id = EXCLUDED.capability_envelope_id, \
+                 selected_at_unix = EXCLUDED.selected_at_unix",
+                &[
+                    &selection.session_id,
+                    &selection.run_id,
+                    &tenant_context_id,
+                    &selection.workspace_id,
+                    &selection.agent_worker_instance_id,
+                    &selection.backend_name,
+                    &selection.backend_version,
+                    &selection.backend_kind,
+                    &selection.host_lifecycle_owner,
+                    &selection.gateway_controls_backend,
+                    &selection.capability_envelope_id,
+                    &selected_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn managed_worker_isolation_selections(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerIsolationSelection>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT session_id, run_id, tenant, workspace_id, agent_worker_instance_id, \
+                        backend_name, backend_version, backend_kind, host_lifecycle_owner, \
+                        gateway_controls_backend, capability_envelope_id, selected_at_unix \
+                     FROM managed_worker_isolation_selections \
+                     ORDER BY selected_at_unix ASC, session_id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(managed_worker_isolation_selection_from_row)
+                .collect())
+        })
+    }
+
+    fn upsert_managed_worker_isolation_policy(
+        &self,
+        policy: &StoredManagedWorkerIsolationPolicy,
+    ) -> Result<(), StorageError> {
+        let cpu_count = i32::from(policy.cpu_count);
+        let memory_mib = saturating_i32(u64::from(policy.memory_mib));
+        let disk_mib = saturating_i32(u64::from(policy.disk_mib));
+        let max_runtime_millis = policy.max_runtime_millis.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO managed_worker_isolation_policies \
+                 (session_id, cpu_count, memory_mib, disk_mib, max_runtime_millis, \
+                  direct_public_egress, gateway_control_channel, governed_egress, \
+                  read_only_rootfs, writable_workspace, host_path_mounts) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+                 ON CONFLICT (session_id) DO UPDATE SET \
+                 cpu_count = EXCLUDED.cpu_count, \
+                 memory_mib = EXCLUDED.memory_mib, \
+                 disk_mib = EXCLUDED.disk_mib, \
+                 max_runtime_millis = EXCLUDED.max_runtime_millis, \
+                 direct_public_egress = EXCLUDED.direct_public_egress, \
+                 gateway_control_channel = EXCLUDED.gateway_control_channel, \
+                 governed_egress = EXCLUDED.governed_egress, \
+                 read_only_rootfs = EXCLUDED.read_only_rootfs, \
+                 writable_workspace = EXCLUDED.writable_workspace, \
+                 host_path_mounts = EXCLUDED.host_path_mounts",
+                &[
+                    &policy.session_id,
+                    &cpu_count,
+                    &memory_mib,
+                    &disk_mib,
+                    &max_runtime_millis,
+                    &policy.direct_public_egress,
+                    &policy.gateway_control_channel,
+                    &policy.governed_egress,
+                    &policy.read_only_rootfs,
+                    &policy.writable_workspace,
+                    &policy.host_path_mounts,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn managed_worker_isolation_policies(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerIsolationPolicy>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT session_id, cpu_count, memory_mib, disk_mib, max_runtime_millis, \
+                        direct_public_egress, gateway_control_channel, governed_egress, \
+                        read_only_rootfs, writable_workspace, host_path_mounts \
+                     FROM managed_worker_isolation_policies \
+                     ORDER BY session_id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(managed_worker_isolation_policy_from_row)
+                .collect())
+        })
+    }
+
+    fn upsert_managed_worker_isolation_evidence(
+        &self,
+        evidence: &StoredManagedWorkerIsolationEvidence,
+    ) -> Result<(), StorageError> {
+        let tenant_context_id = tenant_storage_key(&evidence.tenant);
+        let occurred_at_unix =
+            saturating_i64(evidence.occurred_at_unix.unwrap_or_else(now_unix_seconds));
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO managed_worker_isolation_evidence \
+                 (id, session_id, lifecycle_event_id, run_id, tenant, workspace_id, \
+                  agent_worker_instance_id, isolation_instance_id, action, outcome, \
+                  failure_reason, occurred_at_unix, evidence_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::jsonb) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 session_id = EXCLUDED.session_id, \
+                 lifecycle_event_id = EXCLUDED.lifecycle_event_id, \
+                 run_id = EXCLUDED.run_id, \
+                 tenant = EXCLUDED.tenant, \
+                 workspace_id = EXCLUDED.workspace_id, \
+                 agent_worker_instance_id = EXCLUDED.agent_worker_instance_id, \
+                 isolation_instance_id = EXCLUDED.isolation_instance_id, \
+                 action = EXCLUDED.action, \
+                 outcome = EXCLUDED.outcome, \
+                 failure_reason = EXCLUDED.failure_reason, \
+                 occurred_at_unix = EXCLUDED.occurred_at_unix, \
+                 evidence_json = EXCLUDED.evidence_json",
+                &[
+                    &evidence.id,
+                    &evidence.session_id,
+                    &evidence.lifecycle_event_id,
+                    &evidence.run_id,
+                    &tenant_context_id,
+                    &evidence.workspace_id,
+                    &evidence.agent_worker_instance_id,
+                    &evidence.isolation_instance_id,
+                    &evidence.action,
+                    &evidence.outcome,
+                    &evidence.failure_reason,
+                    &occurred_at_unix,
+                    &evidence.evidence_json,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn managed_worker_isolation_evidence(
+        &self,
+    ) -> Result<Vec<StoredManagedWorkerIsolationEvidence>, StorageError> {
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, session_id, lifecycle_event_id, run_id, tenant, workspace_id, \
+                        agent_worker_instance_id, isolation_instance_id, action, outcome, \
+                        failure_reason, occurred_at_unix, evidence_json::text \
+                     FROM managed_worker_isolation_evidence \
+                     ORDER BY occurred_at_unix ASC, id ASC",
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            Ok(rows
+                .into_iter()
+                .map(managed_worker_isolation_evidence_from_row)
+                .collect())
+        })
+    }
+
     fn upsert_self_hosted_worker_registration(
         &self,
         registration: &StoredSelfHostedWorkerRegistration,
@@ -2560,6 +2816,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "agent_worker_instances",
         "managed_worker_sessions",
         "managed_worker_lifecycle_events",
+        "managed_worker_isolation_selections",
+        "managed_worker_isolation_policies",
+        "managed_worker_isolation_evidence",
         "self_hosted_worker_registrations",
         "self_hosted_worker_heartbeats",
         "self_hosted_worker_telemetry_events",
@@ -2598,6 +2857,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         ("managed_worker_sessions", "capability_envelope_json"),
         ("managed_worker_sessions", "resource_limits_json"),
         ("managed_worker_lifecycle_events", "evidence_json"),
+        ("managed_worker_isolation_evidence", "evidence_json"),
         (
             "self_hosted_worker_registrations",
             "capability_envelope_json",
@@ -2657,6 +2917,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_agent_worker_instances_status_seen",
         "idx_managed_worker_sessions_tenant_status",
         "idx_managed_worker_lifecycle_session_time",
+        "idx_managed_worker_isolation_selection_backend",
+        "idx_managed_worker_isolation_policy_egress",
+        "idx_managed_worker_isolation_evidence_session_time",
         "idx_self_hosted_worker_registrations_tenant_status",
         "idx_self_hosted_worker_registrations_identity_expiry",
         "idx_self_hosted_worker_heartbeats_worker_time",
@@ -2724,6 +2987,10 @@ fn now_unix_seconds() -> u64 {
 
 fn saturating_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn saturating_i32(value: u64) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 fn nonnegative_u64(value: i64) -> u64 {
@@ -3005,6 +3272,63 @@ fn managed_worker_lifecycle_event_from_row(row: PostgresRow) -> StoredManagedWor
         outcome: row.get(8),
         occurred_at_unix: Some(nonnegative_u64(row.get(9))),
         evidence_json: row.get(10),
+    }
+}
+
+fn managed_worker_isolation_selection_from_row(
+    row: PostgresRow,
+) -> StoredManagedWorkerIsolationSelection {
+    StoredManagedWorkerIsolationSelection {
+        session_id: row.get(0),
+        run_id: row.get(1),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(2).as_deref()),
+        workspace_id: row.get(3),
+        agent_worker_instance_id: row.get(4),
+        backend_name: row.get(5),
+        backend_version: row.get(6),
+        backend_kind: row.get(7),
+        host_lifecycle_owner: row.get(8),
+        gateway_controls_backend: row.get(9),
+        capability_envelope_id: row.get(10),
+        selected_at_unix: Some(nonnegative_u64(row.get(11))),
+    }
+}
+
+fn managed_worker_isolation_policy_from_row(
+    row: PostgresRow,
+) -> StoredManagedWorkerIsolationPolicy {
+    StoredManagedWorkerIsolationPolicy {
+        session_id: row.get(0),
+        cpu_count: u16::try_from(row.get::<_, i32>(1)).unwrap_or_default(),
+        memory_mib: u32::try_from(row.get::<_, i32>(2)).unwrap_or_default(),
+        disk_mib: u32::try_from(row.get::<_, i32>(3)).unwrap_or_default(),
+        max_runtime_millis: row.get::<_, Option<i64>>(4).map(nonnegative_u64),
+        direct_public_egress: row.get(5),
+        gateway_control_channel: row.get(6),
+        governed_egress: row.get(7),
+        read_only_rootfs: row.get(8),
+        writable_workspace: row.get(9),
+        host_path_mounts: row.get(10),
+    }
+}
+
+fn managed_worker_isolation_evidence_from_row(
+    row: PostgresRow,
+) -> StoredManagedWorkerIsolationEvidence {
+    StoredManagedWorkerIsolationEvidence {
+        id: row.get(0),
+        session_id: row.get(1),
+        lifecycle_event_id: row.get(2),
+        run_id: row.get(3),
+        tenant: tenant_from_storage_key(row.get::<_, Option<String>>(4).as_deref()),
+        workspace_id: row.get(5),
+        agent_worker_instance_id: row.get(6),
+        isolation_instance_id: row.get(7),
+        action: row.get(8),
+        outcome: row.get(9),
+        failure_reason: row.get(10),
+        occurred_at_unix: Some(nonnegative_u64(row.get(11))),
+        evidence_json: row.get(12),
     }
 }
 
@@ -3763,6 +4087,12 @@ pub struct RuntimeStorageRepositories {
     managed_worker_sessions: Mutex<InMemoryRepository<StoredManagedWorkerSession>>,
     managed_worker_lifecycle_events:
         Mutex<InMemoryAppendRepository<StoredManagedWorkerLifecycleEvent>>,
+    managed_worker_isolation_selections:
+        Mutex<InMemoryRepository<StoredManagedWorkerIsolationSelection>>,
+    managed_worker_isolation_policies:
+        Mutex<InMemoryRepository<StoredManagedWorkerIsolationPolicy>>,
+    managed_worker_isolation_evidence:
+        Mutex<InMemoryRepository<StoredManagedWorkerIsolationEvidence>>,
     self_hosted_worker_registrations: Mutex<InMemoryRepository<StoredSelfHostedWorkerRegistration>>,
     self_hosted_worker_heartbeats: Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerHeartbeat>>,
     self_hosted_worker_telemetry_events:
@@ -3783,6 +4113,12 @@ struct RuntimeStorageRepositorySets {
     managed_worker_sessions: Mutex<InMemoryRepository<StoredManagedWorkerSession>>,
     managed_worker_lifecycle_events:
         Mutex<InMemoryAppendRepository<StoredManagedWorkerLifecycleEvent>>,
+    managed_worker_isolation_selections:
+        Mutex<InMemoryRepository<StoredManagedWorkerIsolationSelection>>,
+    managed_worker_isolation_policies:
+        Mutex<InMemoryRepository<StoredManagedWorkerIsolationPolicy>>,
+    managed_worker_isolation_evidence:
+        Mutex<InMemoryRepository<StoredManagedWorkerIsolationEvidence>>,
     self_hosted_worker_registrations: Mutex<InMemoryRepository<StoredSelfHostedWorkerRegistration>>,
     self_hosted_worker_heartbeats: Mutex<InMemoryAppendRepository<StoredSelfHostedWorkerHeartbeat>>,
     self_hosted_worker_telemetry_events:
@@ -3808,6 +4144,9 @@ impl RuntimeStorageRepositorySets {
             agent_worker_instances: Mutex::new(InMemoryRepository::new()),
             managed_worker_sessions: Mutex::new(InMemoryRepository::new()),
             managed_worker_lifecycle_events: Mutex::new(InMemoryAppendRepository::new()),
+            managed_worker_isolation_selections: Mutex::new(InMemoryRepository::new()),
+            managed_worker_isolation_policies: Mutex::new(InMemoryRepository::new()),
+            managed_worker_isolation_evidence: Mutex::new(InMemoryRepository::new()),
             self_hosted_worker_registrations: Mutex::new(InMemoryRepository::new()),
             self_hosted_worker_heartbeats: Mutex::new(InMemoryAppendRepository::new()),
             self_hosted_worker_telemetry_events: Mutex::new(InMemoryAppendRepository::new()),
@@ -3841,6 +4180,9 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: repositories.agent_worker_instances,
             managed_worker_sessions: repositories.managed_worker_sessions,
             managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            managed_worker_isolation_selections: repositories.managed_worker_isolation_selections,
+            managed_worker_isolation_policies: repositories.managed_worker_isolation_policies,
+            managed_worker_isolation_evidence: repositories.managed_worker_isolation_evidence,
             self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
             self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
@@ -3918,6 +4260,9 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: repositories.agent_worker_instances,
             managed_worker_sessions: repositories.managed_worker_sessions,
             managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            managed_worker_isolation_selections: repositories.managed_worker_isolation_selections,
+            managed_worker_isolation_policies: repositories.managed_worker_isolation_policies,
+            managed_worker_isolation_evidence: repositories.managed_worker_isolation_evidence,
             self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
             self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
@@ -3985,6 +4330,9 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: repositories.agent_worker_instances,
             managed_worker_sessions: repositories.managed_worker_sessions,
             managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            managed_worker_isolation_selections: repositories.managed_worker_isolation_selections,
+            managed_worker_isolation_policies: repositories.managed_worker_isolation_policies,
+            managed_worker_isolation_evidence: repositories.managed_worker_isolation_evidence,
             self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
             self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
@@ -4028,6 +4376,9 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: repositories.agent_worker_instances,
             managed_worker_sessions: repositories.managed_worker_sessions,
             managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            managed_worker_isolation_selections: repositories.managed_worker_isolation_selections,
+            managed_worker_isolation_policies: repositories.managed_worker_isolation_policies,
+            managed_worker_isolation_evidence: repositories.managed_worker_isolation_evidence,
             self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
             self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
@@ -4075,6 +4426,9 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: repositories.agent_worker_instances,
             managed_worker_sessions: repositories.managed_worker_sessions,
             managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
+            managed_worker_isolation_selections: repositories.managed_worker_isolation_selections,
+            managed_worker_isolation_policies: repositories.managed_worker_isolation_policies,
+            managed_worker_isolation_evidence: repositories.managed_worker_isolation_evidence,
             self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
             self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
             self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
@@ -4178,6 +4532,9 @@ impl RuntimeStorageRepositories {
             agent_worker_instances: self.agent_worker_instances(),
             managed_worker_sessions: self.managed_worker_sessions(),
             managed_worker_lifecycle_events: self.managed_worker_lifecycle_events(),
+            managed_worker_isolation_selections: self.managed_worker_isolation_selections(),
+            managed_worker_isolation_policies: self.managed_worker_isolation_policies(),
+            managed_worker_isolation_evidence: self.managed_worker_isolation_evidence(),
             self_hosted_worker_registrations: self.self_hosted_worker_registrations(),
             self_hosted_worker_heartbeats: self.self_hosted_worker_heartbeats(),
             self_hosted_worker_telemetry_events: self.self_hosted_worker_telemetry_events(),
@@ -4224,6 +4581,15 @@ impl RuntimeStorageRepositories {
         }
         for event in snapshot.managed_worker_lifecycle_events {
             self.append_managed_worker_lifecycle_event(event)?;
+        }
+        for selection in snapshot.managed_worker_isolation_selections {
+            self.upsert_managed_worker_isolation_selection(selection)?;
+        }
+        for policy in snapshot.managed_worker_isolation_policies {
+            self.upsert_managed_worker_isolation_policy(policy)?;
+        }
+        for evidence in snapshot.managed_worker_isolation_evidence {
+            self.upsert_managed_worker_isolation_evidence(evidence)?;
         }
         for registration in snapshot.self_hosted_worker_registrations {
             self.upsert_self_hosted_worker_registration(registration)?;
@@ -5090,6 +5456,125 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    pub fn upsert_managed_worker_isolation_selection(
+        &self,
+        selection: StoredManagedWorkerIsolationSelection,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut selections) = self.managed_worker_isolation_selections.lock() {
+                    selections.insert(selection.session_id.clone(), selection);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_managed_worker_isolation_selection(&selection)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "managed_worker_isolation_selection",
+                selection.session_id.clone(),
+                serialize_storage_record(&selection)?,
+            ),
+        }
+    }
+
+    pub fn managed_worker_isolation_selections(
+        &self,
+    ) -> Vec<StoredManagedWorkerIsolationSelection> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .managed_worker_isolation_selections
+                .lock()
+                .map(|selections| selections.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .managed_worker_isolation_selections()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("managed_worker_isolation_selection")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn upsert_managed_worker_isolation_policy(
+        &self,
+        policy: StoredManagedWorkerIsolationPolicy,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut policies) = self.managed_worker_isolation_policies.lock() {
+                    policies.insert(policy.session_id.clone(), policy);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_managed_worker_isolation_policy(&policy)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "managed_worker_isolation_policy",
+                policy.session_id.clone(),
+                serialize_storage_record(&policy)?,
+            ),
+        }
+    }
+
+    pub fn managed_worker_isolation_policies(&self) -> Vec<StoredManagedWorkerIsolationPolicy> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .managed_worker_isolation_policies
+                .lock()
+                .map(|policies| policies.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .managed_worker_isolation_policies()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("managed_worker_isolation_policy")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn upsert_managed_worker_isolation_evidence(
+        &self,
+        evidence: StoredManagedWorkerIsolationEvidence,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => {
+                if let Ok(mut records) = self.managed_worker_isolation_evidence.lock() {
+                    records.insert(evidence.id.clone(), evidence);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_managed_worker_isolation_evidence(&evidence)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
+                "managed_worker_isolation_evidence",
+                evidence.id.clone(),
+                serialize_storage_record(&evidence)?,
+            ),
+        }
+    }
+
+    pub fn managed_worker_isolation_evidence(&self) -> Vec<StoredManagedWorkerIsolationEvidence> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => self
+                .managed_worker_isolation_evidence
+                .lock()
+                .map(|records| records.list())
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .managed_worker_isolation_evidence()
+                .unwrap_or_default(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
+                .list_documents("managed_worker_isolation_evidence")
+                .map(deserialize_storage_records)
+                .unwrap_or_default(),
+        }
+    }
+
     pub fn upsert_self_hosted_worker_registration(
         &self,
         registration: StoredSelfHostedWorkerRegistration,
@@ -5802,12 +6287,60 @@ mod tests {
                 id: "lifecycle-1".into(),
                 session_id: "session-1".into(),
                 run_id: "run-1".into(),
-                tenant,
+                tenant: tenant.clone(),
                 workspace_id: "workspace-1".into(),
                 agent_worker_instance_id: Some("agent-worker-1".into()),
                 status: "running".into(),
                 action: "start".into(),
                 outcome: "succeeded".into(),
+                occurred_at_unix: Some(16),
+                evidence_json: r#"{"microvm_id":"fc-vm-1"}"#.into(),
+            })
+            .unwrap();
+        repositories
+            .upsert_managed_worker_isolation_selection(StoredManagedWorkerIsolationSelection {
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                backend_name: "firecracker".into(),
+                backend_version: "1.8.0".into(),
+                backend_kind: "firecracker_micro_vm".into(),
+                host_lifecycle_owner: "agent-worker".into(),
+                gateway_controls_backend: false,
+                capability_envelope_id: "capability-envelope-1".into(),
+                selected_at_unix: Some(16),
+            })
+            .unwrap();
+        repositories
+            .upsert_managed_worker_isolation_policy(StoredManagedWorkerIsolationPolicy {
+                session_id: "session-1".into(),
+                cpu_count: 2,
+                memory_mib: 1024,
+                disk_mib: 4096,
+                max_runtime_millis: Some(30_000),
+                direct_public_egress: false,
+                gateway_control_channel: true,
+                governed_egress: true,
+                read_only_rootfs: true,
+                writable_workspace: true,
+                host_path_mounts: false,
+            })
+            .unwrap();
+        repositories
+            .upsert_managed_worker_isolation_evidence(StoredManagedWorkerIsolationEvidence {
+                id: "isolation-evidence-1".into(),
+                session_id: "session-1".into(),
+                lifecycle_event_id: "lifecycle-1".into(),
+                run_id: "run-1".into(),
+                tenant,
+                workspace_id: "workspace-1".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                isolation_instance_id: Some("fc-vm-1".into()),
+                action: "cleanup".into(),
+                outcome: "succeeded".into(),
+                failure_reason: None,
                 occurred_at_unix: Some(16),
                 evidence_json: r#"{"microvm_id":"fc-vm-1"}"#.into(),
             })
@@ -5830,6 +6363,18 @@ mod tests {
         assert_eq!(
             repositories.managed_worker_lifecycle_events()[0].action,
             "start"
+        );
+        assert_eq!(
+            repositories.managed_worker_isolation_selections()[0].host_lifecycle_owner,
+            "agent-worker"
+        );
+        assert!(!repositories.managed_worker_isolation_selections()[0].gateway_controls_backend);
+        assert!(!repositories.managed_worker_isolation_policies()[0].direct_public_egress);
+        assert_eq!(
+            repositories.managed_worker_isolation_evidence()[0]
+                .isolation_instance_id
+                .as_deref(),
+            Some("fc-vm-1")
         );
     }
 
@@ -5894,12 +6439,60 @@ mod tests {
                 id: "lifecycle-1".into(),
                 session_id: "session-1".into(),
                 run_id: "run-1".into(),
-                tenant,
+                tenant: tenant.clone(),
                 workspace_id: "workspace-1".into(),
                 agent_worker_instance_id: Some("agent-worker-1".into()),
                 status: "cleaned_up".into(),
                 action: "cleanup".into(),
                 outcome: "succeeded".into(),
+                occurred_at_unix: Some(9),
+                evidence_json: "{}".into(),
+            })
+            .unwrap();
+        source
+            .upsert_managed_worker_isolation_selection(StoredManagedWorkerIsolationSelection {
+                session_id: "session-1".into(),
+                run_id: "run-1".into(),
+                tenant: tenant.clone(),
+                workspace_id: "workspace-1".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                backend_name: "firecracker".into(),
+                backend_version: "1.8.0".into(),
+                backend_kind: "firecracker_micro_vm".into(),
+                host_lifecycle_owner: "agent-worker".into(),
+                gateway_controls_backend: false,
+                capability_envelope_id: "capability-envelope-1".into(),
+                selected_at_unix: Some(5),
+            })
+            .unwrap();
+        source
+            .upsert_managed_worker_isolation_policy(StoredManagedWorkerIsolationPolicy {
+                session_id: "session-1".into(),
+                cpu_count: 1,
+                memory_mib: 512,
+                disk_mib: 1024,
+                max_runtime_millis: Some(30_000),
+                direct_public_egress: false,
+                gateway_control_channel: true,
+                governed_egress: true,
+                read_only_rootfs: true,
+                writable_workspace: true,
+                host_path_mounts: false,
+            })
+            .unwrap();
+        source
+            .upsert_managed_worker_isolation_evidence(StoredManagedWorkerIsolationEvidence {
+                id: "isolation-evidence-1".into(),
+                session_id: "session-1".into(),
+                lifecycle_event_id: "lifecycle-1".into(),
+                run_id: "run-1".into(),
+                tenant,
+                workspace_id: "workspace-1".into(),
+                agent_worker_instance_id: Some("agent-worker-1".into()),
+                isolation_instance_id: Some("fc-vm-1".into()),
+                action: "cleanup".into(),
+                outcome: "succeeded".into(),
+                failure_reason: None,
                 occurred_at_unix: Some(9),
                 evidence_json: "{}".into(),
             })
@@ -5911,6 +6504,9 @@ mod tests {
         assert_eq!(counts.agent_worker_instances, 1);
         assert_eq!(counts.managed_worker_sessions, 1);
         assert_eq!(counts.managed_worker_lifecycle_events, 1);
+        assert_eq!(counts.managed_worker_isolation_selections, 1);
+        assert_eq!(counts.managed_worker_isolation_policies, 1);
+        assert_eq!(counts.managed_worker_isolation_evidence, 1);
 
         let target =
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
@@ -5920,6 +6516,9 @@ mod tests {
         assert_eq!(target.agent_worker_instances().len(), 1);
         assert_eq!(target.managed_worker_sessions().len(), 1);
         assert_eq!(target.managed_worker_lifecycle_events().len(), 1);
+        assert_eq!(target.managed_worker_isolation_selections().len(), 1);
+        assert_eq!(target.managed_worker_isolation_policies().len(), 1);
+        assert_eq!(target.managed_worker_isolation_evidence().len(), 1);
     }
 
     fn self_hosted_tenant() -> TenantContext {

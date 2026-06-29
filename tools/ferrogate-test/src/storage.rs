@@ -1139,6 +1139,9 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "agent_worker_instances",
         "managed_worker_sessions",
         "managed_worker_lifecycle_events",
+        "managed_worker_isolation_selections",
+        "managed_worker_isolation_policies",
+        "managed_worker_isolation_evidence",
         "self_hosted_worker_registrations",
         "self_hosted_worker_heartbeats",
         "self_hosted_worker_telemetry_events",
@@ -1177,6 +1180,7 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         ("managed_worker_sessions", "capability_envelope_json"),
         ("managed_worker_sessions", "resource_limits_json"),
         ("managed_worker_lifecycle_events", "evidence_json"),
+        ("managed_worker_isolation_evidence", "evidence_json"),
         (
             "self_hosted_worker_registrations",
             "capability_envelope_json",
@@ -1226,6 +1230,9 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_agent_worker_instances_status_seen",
         "idx_managed_worker_sessions_tenant_status",
         "idx_managed_worker_lifecycle_session_time",
+        "idx_managed_worker_isolation_selection_backend",
+        "idx_managed_worker_isolation_policy_egress",
+        "idx_managed_worker_isolation_evidence_session_time",
         "idx_self_hosted_worker_registrations_tenant_status",
         "idx_self_hosted_worker_registrations_identity_expiry",
         "idx_self_hosted_worker_heartbeats_worker_time",
@@ -1259,11 +1266,11 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
     let migration_versions = postgres_scalar(&format!(
         "SELECT string_agg(version::text || ':' || name, ',' ORDER BY version) \
          FROM {}.storage_schema_migrations \
-         WHERE version IN (1, 2, 3, 4, 5, 6, 7)",
+         WHERE version IN (1, 2, 3, 4, 5, 6, 7, 8)",
         quote_ident(schema)
     ))?;
     if migration_versions.trim()
-        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence,3:003_supabase_structured_metering_usage,4:004_supabase_managed_worker_lifecycle,5:005_supabase_self_hosted_worker_lifecycle,6:006_self_hosted_worker_identity_expiry,7:007_self_hosted_run_dispatch_state"
+        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence,3:003_supabase_structured_metering_usage,4:004_supabase_managed_worker_lifecycle,5:005_supabase_self_hosted_worker_lifecycle,6:006_self_hosted_worker_identity_expiry,7:007_self_hosted_run_dispatch_state,8:008_managed_worker_isolation_evidence"
     {
         bail!("unexpected Supabase migration versions: {migration_versions}");
     }
@@ -1947,10 +1954,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][2], "mysql");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 7);
+                assert_eq!(body["storage"]["schema"]["version"], 8);
                 assert_eq!(
                     body["storage"]["schema"]["name"],
-                    "007_self_hosted_run_dispatch_state"
+                    "008_managed_worker_isolation_evidence"
                 );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]
