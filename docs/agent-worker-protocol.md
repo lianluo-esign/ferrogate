@@ -166,13 +166,17 @@ the response envelope. The current executable `probe_handlers` action returns
 `list_backends` returns `result.kind=isolation_backends` with
 `registry_implemented=true` and worker-side backend readiness records. The
 initial registry reports the Firecracker backend as ready only when
-`AGENT_WORKER_FIRECRACKER_BIN` points to a configured local file; the worker
-does not scan `PATH` or execute the binary during readiness reporting.
+`AGENT_WORKER_FIRECRACKER_BIN`, `AGENT_WORKER_FIRECRACKER_KERNEL`, and
+`AGENT_WORKER_FIRECRACKER_ROOTFS` all point to configured local files; the
+worker does not scan `PATH` or execute the binary during readiness reporting.
 Lifecycle dispatch now reaches worker-owned action branches for `provision`,
 `exec_or_attach`, `stop`, `cleanup`, `stream_status`, and `collect_artifacts`.
 `provision` fails closed with `incompatible_backend` when Firecracker is not
-configured and with `provision_failed` when the binary is configured but the
-real microVM provision/start implementation is still absent. `exec_or_attach`
+configured. When the full Firecracker bundle is configured but the real microVM
+provision/start implementation is still absent, `provision` returns a typed
+`result.kind=lifecycle` record with `status=failed` and
+`outcome=not_implemented` so callers can persist the failed lifecycle evidence.
+`exec_or_attach`
 now has a worker-owned native harness execution smoke, but the worker must have
 a gateway external-action HTTP authorizer configured before the handler may
 continue. Without that gateway authorization client, `exec_or_attach` fails
@@ -354,7 +358,8 @@ not a provision success signal.
 Lifecycle, status, and artifact actions such as `provision`, `exec_or_attach`,
 `stop`, `cleanup`, `stream_status`, and `collect_artifacts` now reach
 worker-owned lifecycle or handler dispatch. The dispatch still does not boot
-Firecracker: `provision` fails closed until real microVM lifecycle code exists,
+Firecracker: configured-bundle `provision` returns failed lifecycle evidence
+with `outcome=not_implemented` until real microVM lifecycle code exists,
 while `exec_or_attach`, `stream_status`, and `collect_artifacts` can exercise
 the selected framework handler inside `agent-worker` only after the worker
 receives a `capability.allowed` decision from the configured gateway HTTP

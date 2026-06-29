@@ -1367,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn provision_still_fails_closed_when_firecracker_bundle_is_configured() {
+    fn provision_records_failed_lifecycle_when_firecracker_bundle_is_configured() {
         let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
         let firecracker_path = temp.path().join("firecracker");
@@ -1393,13 +1393,67 @@ mod tests {
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_ROOTFS");
         let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
-        assert_eq!(response["accepted"], false);
+        assert_eq!(response["accepted"], true);
         assert_eq!(response["action"], "provision");
-        assert_eq!(response["error"]["code"], "provision_failed");
-        assert!(response["error"]["message"]
+        assert_eq!(response["result"]["kind"], "lifecycle");
+        assert_eq!(response["result"]["lifecycle"]["status"], "failed");
+        assert_eq!(
+            response["result"]["lifecycle"]["outcome"],
+            "not_implemented"
+        );
+        assert_eq!(
+            response["result"]["lifecycle"]["backend_name"],
+            "firecracker"
+        );
+        assert!(response["result"]["lifecycle"]["message"]
             .as_str()
             .is_some_and(|message| message.contains("not implemented")));
-        assert_eq!(response["result"], serde_json::Value::Null);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn provision_failed_lifecycle_is_recorded_for_persistence_bridge() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let firecracker_path = temp.path().join("firecracker");
+        let kernel_path = temp.path().join("vmlinux");
+        let rootfs_path = temp.path().join("rootfs.ext4");
+        std::fs::write(&firecracker_path, b"not executed").unwrap();
+        std::fs::write(&kernel_path, b"not executed").unwrap();
+        std::fs::write(&rootfs_path, b"not executed").unwrap();
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_KERNEL", &kernel_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_ROOTFS", &rootfs_path);
+        let envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::Provision,
+            "agent-worker-recorded-provision",
+        );
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        let runtime = AgentWorkerRuntime::default();
+
+        let response =
+            accept_management_envelope(&mut transport, &mut state, &runtime, envelope, 1_000);
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_ROOTFS");
+
+        assert!(response.accepted);
+        assert_eq!(state.lifecycle_events().len(), 1);
+        let event = &state.lifecycle_events()[0];
+        assert_eq!(event.action, AgentWorkerManagementAction::Provision);
+        assert_eq!(
+            event.status,
+            ferrogate_runtime::ManagedWorkerSessionStatus::Failed
+        );
+        assert_eq!(event.outcome, "not_implemented");
+        assert_eq!(event.isolation_instance_id, None);
     }
 
     #[test]

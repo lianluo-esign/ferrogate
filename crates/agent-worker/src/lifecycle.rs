@@ -47,7 +47,7 @@ pub(crate) fn dispatch_lifecycle_action(
 }
 
 fn provision(
-    _envelope: &AgentWorkerManagementEnvelope,
+    envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let Some(backend) = isolation_backends()
         .into_iter()
@@ -68,10 +68,13 @@ fn provision(
         ));
     }
 
-    Err(ManagedWorkerError::management_protocol_error(
-        AgentWorkerManagementErrorCode::ProvisionFailed,
+    let lifecycle = lifecycle_result(
+        envelope,
+        ManagedWorkerSessionStatus::Failed,
+        "not_implemented",
         "Firecracker backend is configured, but microVM provision/start lifecycle is not implemented in agent-worker yet",
-    ))
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
 }
 
 fn exec_or_attach(
