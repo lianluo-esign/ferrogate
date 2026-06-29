@@ -533,6 +533,18 @@ authorization and emits `mcp.tool.requested` evidence. These are deterministic
 local contract smokes; they are not a general plugin runner, not a live MCP
 server connection, and not Firecracker boot proof.
 
+The equivalent local skill invocation smoke is:
+
+```bash
+agent-worker governed-skill-execution-smoke
+```
+
+It requests a managed `skill` capability, then invokes the built-in
+`builtin.skill.echo` smoke handler only after `capability.allowed` and emits
+`skill.requested` evidence with declared capabilities. This is deterministic
+local skill contract coverage; it is not an external skill package runtime,
+not ambient host skill execution, and not Firecracker boot proof.
+
 The equivalent local REST execution smoke is:
 
 ```bash

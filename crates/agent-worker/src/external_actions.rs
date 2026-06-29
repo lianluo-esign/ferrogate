@@ -35,8 +35,8 @@ use ferrogate_runtime::{
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
     ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
     ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
-    ManagedMcpToolAction, ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent,
-    SimpleCapabilityAuthorizer, SupportedFramework,
+    ManagedMcpToolAction, ManagedRestAction, ManagedSkillAction, ManagedToolAction,
+    NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -289,6 +289,30 @@ pub(crate) fn governed_mcp_tool_execution_smoke_command() -> Result<()> {
         },
     ));
     let events = execute_governed_mcp_tool_action(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn governed_skill_execution_smoke_command() -> Result<()> {
+    let action = ManagedSkillAction {
+        skill_id: "builtin.skill.echo".to_string(),
+        declared_capabilities: vec!["tools".to_string(), "memory.read".to_string()],
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Skill]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_skill_action(&gate, smoke_session(), action, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -846,6 +870,40 @@ where
     ])
 }
 
+fn execute_governed_skill_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedSkillAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Skill(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_skill_action(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::SkillRequested,
+            message: Some("managed skill action executed after gateway authorization".to_string()),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
 fn execute_governed_cli_action<A>(
     authorizer: &A,
     session: FrameworkAdapterSession,
@@ -1043,6 +1101,49 @@ fn smoke_literal_argument(policy: &str) -> Result<&str, FrameworkAdapterError> {
                 "managed smoke requires arguments_policy=smoke_literal:<message>".to_string(),
             )
         })
+}
+
+struct GovernedSkillExecution {
+    output_excerpt: String,
+}
+
+impl GovernedSkillExecution {
+    fn metadata(self, action: &ManagedSkillAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "skill".to_string()),
+            (
+                "external_target".to_string(),
+                format!("skill:{}", action.skill_id),
+            ),
+            ("skill_id".to_string(), action.skill_id.clone()),
+            (
+                "declared_capabilities".to_string(),
+                action.declared_capabilities.join(","),
+            ),
+            ("output_excerpt".to_string(), self.output_excerpt),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_skill_action(
+    action: &ManagedSkillAction,
+) -> Result<GovernedSkillExecution, FrameworkAdapterError> {
+    if action.skill_id != "builtin.skill.echo" {
+        return Err(FrameworkAdapterError::InvalidRequest(format!(
+            "managed skill smoke does not support skill {}",
+            action.skill_id
+        )));
+    }
+    Ok(GovernedSkillExecution {
+        output_excerpt: bounded_utf8_excerpt(
+            action.declared_capabilities.join(",").as_bytes(),
+            512,
+        ),
+    })
 }
 
 struct GovernedFilesystemExecution {
@@ -1714,6 +1815,72 @@ mod tests {
 
         assert!(error.to_string().contains("not allowed"));
         assert!(!error.to_string().contains("does not support"));
+    }
+
+    #[test]
+    fn governed_skill_execution_runs_only_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Skill]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_skill_action(
+            &gate,
+            session(),
+            ManagedSkillAction {
+                skill_id: "builtin.skill.echo".to_string(),
+                declared_capabilities: vec!["tools".to_string(), "memory.read".to_string()],
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "skill.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("skill_id").map(String::as_str),
+            Some("builtin.skill.echo")
+        );
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("declared_capabilities")
+                .map(String::as_str),
+            Some("tools,memory.read")
+        );
+        assert_eq!(
+            events[1].metadata.get("output_excerpt").map(String::as_str),
+            Some("tools,memory.read")
+        );
+    }
+
+    #[test]
+    fn governed_skill_execution_denial_happens_before_skill_invoke() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_skill_action(
+            &gate,
+            session(),
+            ManagedSkillAction {
+                skill_id: "external.skill.must-not-run".to_string(),
+                declared_capabilities: vec!["filesystem".to_string()],
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!error.to_string().contains("does not support skill"));
     }
 
     #[test]

@@ -288,6 +288,7 @@ pub enum FrameworkAdapterEventKind {
     ToolDenied,
     ToolCompleted,
     McpToolRequested,
+    SkillRequested,
     CliRequested,
     RestRequested,
     FilesystemRequested,
@@ -315,6 +316,7 @@ impl FrameworkAdapterEventKind {
             Self::ToolDenied => "tool.denied",
             Self::ToolCompleted => "tool.completed",
             Self::McpToolRequested => "mcp.tool.requested",
+            Self::SkillRequested => "skill.requested",
             Self::CliRequested => "cli.requested",
             Self::RestRequested => "rest.requested",
             Self::FilesystemRequested => "filesystem.requested",
@@ -428,6 +430,7 @@ impl NormalizedFrameworkEvent {
             | FrameworkAdapterEventKind::ModelRequested
             | FrameworkAdapterEventKind::ToolRequested
             | FrameworkAdapterEventKind::McpToolRequested
+            | FrameworkAdapterEventKind::SkillRequested
             | FrameworkAdapterEventKind::CliRequested
             | FrameworkAdapterEventKind::RestRequested
             | FrameworkAdapterEventKind::FilesystemRequested => "requested",
