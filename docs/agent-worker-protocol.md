@@ -518,6 +518,18 @@ capability, executes a bounded `/bin/sh -c` command only after
 is not a general-purpose shell runner, not Codex/Claude/Hermes task execution,
 and not Firecracker boot proof.
 
+The equivalent local REST execution smoke is:
+
+```bash
+agent-worker governed-rest-execution-smoke
+```
+
+It starts a one-shot loopback HTTP server, requests a managed `rest`
+capability, sends a bounded GET request only after `capability.allowed`, and
+prints the `rest.requested` execution evidence plus the served request line.
+This proves the managed REST execution gate and local evidence path; it is not
+unrestricted public egress, browser automation, or Firecracker boot proof.
+
 The gateway/control-plane side can serve this HTTP authorizer when
 managed runtime is enabled with:
 

@@ -16,6 +16,7 @@ use std::{
     collections::BTreeMap,
     collections::BTreeSet,
     io::{self, Read, Write},
+    net::TcpListener,
     net::{Shutdown, SocketAddr, TcpStream},
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
@@ -33,7 +34,7 @@ use ferrogate_runtime::{
     FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterSession,
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
     ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
-    ManagedExternalActionRequest, ManagedToolAction, NormalizedFrameworkEvent,
+    ManagedExternalActionRequest, ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent,
     SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
@@ -247,6 +248,35 @@ pub(crate) fn governed_cli_execution_smoke_command() -> Result<()> {
                 .collect::<Vec<_>>()
         )?
     );
+    Ok(())
+}
+
+pub(crate) fn governed_rest_execution_smoke_command() -> Result<()> {
+    let server = spawn_one_shot_rest_smoke_server();
+    let action = ManagedRestAction {
+        method: "GET".to_string(),
+        url: format!("http://{}/governed-rest-smoke", server.endpoint),
+        headers_policy: "deny_credentials".to_string(),
+        body_policy: "empty_body".to_string(),
+        timeout_millis: 2_000,
+        retry_limit: 0,
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Rest]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_rest_action(&gate, smoke_session(), action, false)?;
+    let served_request = server.join()?;
+    let output = serde_json::json!({
+        "events": events
+            .into_iter()
+            .map(|event| event.canonical_json())
+            .collect::<Vec<_>>(),
+        "served_request": served_request,
+    });
+    println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
 
@@ -688,6 +718,40 @@ where
     ])
 }
 
+fn execute_governed_rest_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedRestAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Rest(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_rest_action(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::RestRequested,
+            message: Some("managed REST action executed after gateway authorization".to_string()),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
 struct GovernedCliExecution {
     status_code: Option<i32>,
     stdout_excerpt: String,
@@ -798,6 +862,176 @@ fn run_authorized_cli_action(
 fn bounded_utf8_excerpt(bytes: &[u8], limit: u64) -> String {
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]).to_string()
+}
+
+struct GovernedRestExecution {
+    status_code: u16,
+    response_excerpt: String,
+}
+
+impl GovernedRestExecution {
+    fn metadata(self, action: &ManagedRestAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "rest".to_string()),
+            (
+                "external_target".to_string(),
+                format!("{} {}", action.method, action.url),
+            ),
+            ("method".to_string(), action.method.clone()),
+            ("url".to_string(), action.url.clone()),
+            ("headers_policy".to_string(), action.headers_policy.clone()),
+            ("body_policy".to_string(), action.body_policy.clone()),
+            (
+                "timeout_millis".to_string(),
+                action.timeout_millis.to_string(),
+            ),
+            ("retry_limit".to_string(), action.retry_limit.to_string()),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+            ("status_code".to_string(), self.status_code.to_string()),
+            ("response_excerpt".to_string(), self.response_excerpt),
+        ])
+    }
+}
+
+fn run_authorized_rest_action(
+    action: &ManagedRestAction,
+) -> Result<GovernedRestExecution, FrameworkAdapterError> {
+    if action.method != "GET" {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed REST smoke currently supports GET only".to_string(),
+        ));
+    }
+    let target = parse_local_http_url(&action.url)?;
+    let timeout = Duration::from_millis(action.timeout_millis.max(1));
+    let mut stream = TcpStream::connect_timeout(&target.endpoint, timeout).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action transport failed after gateway authorization: {error}"
+        ))
+    })?;
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action read timeout setup failed: {error}"
+        ))
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action write timeout setup failed: {error}"
+        ))
+    })?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\n\r\n",
+        target.path, target.endpoint
+    );
+    stream.write_all(request.as_bytes()).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action request write failed: {error}"
+        ))
+    })?;
+    stream.shutdown(Shutdown::Write).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action request shutdown failed: {error}"
+        ))
+    })?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action response read failed: {error}"
+        ))
+    })?;
+    let response = String::from_utf8_lossy(&response);
+    let status_code = parse_smoke_http_status(response.lines().next().unwrap_or_default())?;
+    if !(200..300).contains(&status_code) {
+        return Err(FrameworkAdapterError::CapabilityDenied(format!(
+            "managed REST action returned status {status_code}"
+        )));
+    }
+    Ok(GovernedRestExecution {
+        status_code,
+        response_excerpt: response.chars().take(512).collect(),
+    })
+}
+
+struct LocalHttpTarget {
+    endpoint: SocketAddr,
+    path: String,
+}
+
+fn parse_local_http_url(raw: &str) -> Result<LocalHttpTarget, FrameworkAdapterError> {
+    let Some(rest) = raw.strip_prefix("http://") else {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed REST smoke only supports http:// local URLs".to_string(),
+        ));
+    };
+    let (authority, path) = rest
+        .split_once('/')
+        .map(|(authority, path)| (authority, format!("/{path}")))
+        .unwrap_or((rest, "/".to_string()));
+    let endpoint = authority.parse::<SocketAddr>().map_err(|error| {
+        FrameworkAdapterError::InvalidRequest(format!(
+            "managed REST smoke URL endpoint is invalid: {error}"
+        ))
+    })?;
+    if !endpoint.ip().is_loopback() {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed REST smoke only supports loopback endpoints".to_string(),
+        ));
+    }
+    Ok(LocalHttpTarget { endpoint, path })
+}
+
+fn parse_smoke_http_status(status_line: &str) -> Result<u16, FrameworkAdapterError> {
+    let mut parts = status_line.split_whitespace();
+    let version = parts.next().unwrap_or_default();
+    if !version.starts_with("HTTP/") {
+        return Err(FrameworkAdapterError::InvalidRequest(format!(
+            "managed REST action response has invalid status line: {status_line}"
+        )));
+    }
+    parts
+        .next()
+        .unwrap_or_default()
+        .parse::<u16>()
+        .map_err(|_| {
+            FrameworkAdapterError::InvalidRequest(format!(
+                "managed REST action response has invalid status code: {status_line}"
+            ))
+        })
+}
+
+struct RestSmokeServer {
+    endpoint: SocketAddr,
+    handle: thread::JoinHandle<Result<String>>,
+}
+
+impl RestSmokeServer {
+    fn join(self) -> Result<String> {
+        self.handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("REST smoke server thread panicked"))?
+    }
+}
+
+fn spawn_one_shot_rest_smoke_server() -> RestSmokeServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let mut buffer = [0_u8; 1024];
+        let read = stream.read(&mut buffer)?;
+        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+        let body = "ferrogate governed rest smoke\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )?;
+        Ok(request.lines().next().unwrap_or_default().to_string())
+    });
+    RestSmokeServer { endpoint, handle }
 }
 
 fn smoke_session() -> FrameworkAdapterSession {
@@ -1088,6 +1322,85 @@ mod tests {
 
         assert!(error.to_string().contains("not allowed"));
         assert!(!marker_path.exists());
+    }
+
+    #[test]
+    fn governed_rest_execution_runs_only_after_gateway_authorization() {
+        let server = spawn_one_shot_rest_smoke_server();
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Rest]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_rest_action(
+            &gate,
+            session(),
+            ManagedRestAction {
+                method: "GET".to_string(),
+                url: format!("http://{}/authorized", server.endpoint),
+                headers_policy: "deny_credentials".to_string(),
+                body_policy: "empty_body".to_string(),
+                timeout_millis: 1_000,
+                retry_limit: 0,
+            },
+            false,
+        )
+        .unwrap();
+        let served_request = server.join().unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "rest.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("status_code").map(String::as_str),
+            Some("200")
+        );
+        assert!(events[1]
+            .metadata
+            .get("response_excerpt")
+            .is_some_and(|body| body.contains("ferrogate governed rest smoke")));
+        assert_eq!(served_request, "GET /authorized HTTP/1.1");
+    }
+
+    #[test]
+    fn governed_rest_execution_denial_happens_before_http_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_nonblocking(true)
+            .expect("set test listener nonblocking");
+        let endpoint = listener.local_addr().unwrap();
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_rest_action(
+            &gate,
+            session(),
+            ManagedRestAction {
+                method: "GET".to_string(),
+                url: format!("http://{endpoint}/blocked"),
+                headers_policy: "deny_credentials".to_string(),
+                body_policy: "empty_body".to_string(),
+                timeout_millis: 1_000,
+                retry_limit: 0,
+            },
+            false,
+        )
+        .unwrap_err();
+        let accepted = listener.accept();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(matches!(
+            accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 
     #[test]
