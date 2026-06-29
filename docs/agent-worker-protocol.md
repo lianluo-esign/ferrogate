@@ -383,6 +383,11 @@ Firecracker/jailer paths, bundle files, or read/write KVM access. If the host
 preflight passes, `provision` boots a real Firecracker microVM, retains the
 child process in the `agent-worker` state store, and exposes the same
 `isolation_instance_id` through status, artifact, stop, and cleanup actions.
+The current worker-side Firecracker resource policy is read from
+`AGENT_WORKER_FIRECRACKER_PROVISION_TIMEOUT_MILLIS` (default `30000`),
+`AGENT_WORKER_FIRECRACKER_VCPU_COUNT` (default `1`), and
+`AGENT_WORKER_FIRECRACKER_MEM_SIZE_MIB` (default `512`); invalid values fail
+closed before provisioning.
 `stop` removes the retained microVM from worker state; a later `cleanup` for the
 same `session_id/run_id` is accepted as an idempotent no-op. The current
 `exec_or_attach` path still does not run framework handlers inside that microVM;

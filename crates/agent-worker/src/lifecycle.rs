@@ -10,6 +10,8 @@
 //! Gateway code may call the management API, but it must not own Firecracker
 //! lifecycle operations or framework handler execution.
 
+use std::env;
+
 use ferrogate_runtime::{
     AgentWorkerLifecycleResult, AgentWorkerManagementAction, AgentWorkerManagementEnvelope,
     AgentWorkerManagementErrorCode, AgentWorkerManagementResult, ManagedWorkerError,
@@ -102,7 +104,13 @@ fn provision(
         return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
     }
 
-    let mut microvm = firecracker_microvm_provision(30_000, 1, 512).map_err(|error| {
+    let resources = firecracker_lifecycle_resources()?;
+    let mut microvm = firecracker_microvm_provision(
+        resources.provision_timeout_millis,
+        resources.vcpu_count,
+        resources.mem_size_mib,
+    )
+    .map_err(|error| {
         ManagedWorkerError::management_protocol_error(
             AgentWorkerManagementErrorCode::ProvisionFailed,
             format!(
@@ -130,6 +138,81 @@ fn provision(
             ..lifecycle
         },
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FirecrackerLifecycleResources {
+    provision_timeout_millis: u64,
+    vcpu_count: u8,
+    mem_size_mib: u32,
+}
+
+fn firecracker_lifecycle_resources() -> Result<FirecrackerLifecycleResources, ManagedWorkerError> {
+    Ok(FirecrackerLifecycleResources {
+        provision_timeout_millis: parse_env_u64(
+            "AGENT_WORKER_FIRECRACKER_PROVISION_TIMEOUT_MILLIS",
+            30_000,
+        )?,
+        vcpu_count: parse_env_u8("AGENT_WORKER_FIRECRACKER_VCPU_COUNT", 1)?,
+        mem_size_mib: parse_env_u32("AGENT_WORKER_FIRECRACKER_MEM_SIZE_MIB", 512)?,
+    })
+}
+
+fn parse_env_u64(name: &'static str, default: u64) -> Result<u64, ManagedWorkerError> {
+    match env::var(name) {
+        Ok(value) => parse_positive_u64(name, &value),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(resource_config_error(name, error.to_string())),
+    }
+}
+
+fn parse_env_u8(name: &'static str, default: u8) -> Result<u8, ManagedWorkerError> {
+    match env::var(name) {
+        Ok(value) => {
+            let parsed = parse_positive_u64(name, &value)?;
+            u8::try_from(parsed).map_err(|_| {
+                resource_config_error(name, format!("{name} must be less than or equal to 255"))
+            })
+        }
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(resource_config_error(name, error.to_string())),
+    }
+}
+
+fn parse_env_u32(name: &'static str, default: u32) -> Result<u32, ManagedWorkerError> {
+    match env::var(name) {
+        Ok(value) => {
+            let parsed = parse_positive_u64(name, &value)?;
+            u32::try_from(parsed).map_err(|_| {
+                resource_config_error(
+                    name,
+                    format!("{name} must be less than or equal to {}", u32::MAX),
+                )
+            })
+        }
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(resource_config_error(name, error.to_string())),
+    }
+}
+
+fn parse_positive_u64(name: &'static str, value: &str) -> Result<u64, ManagedWorkerError> {
+    let parsed = value.trim().parse::<u64>().map_err(|error| {
+        resource_config_error(name, format!("{name} must be a positive integer: {error}"))
+    })?;
+    if parsed == 0 {
+        return Err(resource_config_error(
+            name,
+            format!("{name} must be greater than zero"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn resource_config_error(name: &'static str, reason: String) -> ManagedWorkerError {
+    ManagedWorkerError::management_protocol_error(
+        AgentWorkerManagementErrorCode::ProvisionFailed,
+        format!("invalid Firecracker resource config {name}: {reason}"),
+    )
 }
 
 fn exec_or_attach(
@@ -350,4 +433,77 @@ fn lifecycle_run_id(
             "run_id is required for lifecycle dispatch",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RESOURCE_ENV: [&str; 3] = [
+        "AGENT_WORKER_FIRECRACKER_PROVISION_TIMEOUT_MILLIS",
+        "AGENT_WORKER_FIRECRACKER_VCPU_COUNT",
+        "AGENT_WORKER_FIRECRACKER_MEM_SIZE_MIB",
+    ];
+
+    #[test]
+    fn firecracker_lifecycle_resources_default_to_current_smoke_values() {
+        let _env_lock = crate::test_support::lock_firecracker_env();
+        clear_resource_env();
+
+        let resources = firecracker_lifecycle_resources().unwrap();
+
+        assert_eq!(
+            resources,
+            FirecrackerLifecycleResources {
+                provision_timeout_millis: 30_000,
+                vcpu_count: 1,
+                mem_size_mib: 512,
+            }
+        );
+    }
+
+    #[test]
+    fn firecracker_lifecycle_resources_accept_worker_env_overrides() {
+        let _env_lock = crate::test_support::lock_firecracker_env();
+        clear_resource_env();
+        env::set_var("AGENT_WORKER_FIRECRACKER_PROVISION_TIMEOUT_MILLIS", "45000");
+        env::set_var("AGENT_WORKER_FIRECRACKER_VCPU_COUNT", "2");
+        env::set_var("AGENT_WORKER_FIRECRACKER_MEM_SIZE_MIB", "1024");
+
+        let resources = firecracker_lifecycle_resources().unwrap();
+
+        clear_resource_env();
+        assert_eq!(
+            resources,
+            FirecrackerLifecycleResources {
+                provision_timeout_millis: 45_000,
+                vcpu_count: 2,
+                mem_size_mib: 1024,
+            }
+        );
+    }
+
+    #[test]
+    fn firecracker_lifecycle_resources_reject_invalid_values_before_provision() {
+        let _env_lock = crate::test_support::lock_firecracker_env();
+        clear_resource_env();
+        env::set_var("AGENT_WORKER_FIRECRACKER_VCPU_COUNT", "0");
+
+        let error = firecracker_lifecycle_resources().unwrap_err();
+
+        clear_resource_env();
+        assert_eq!(
+            error.management_error().code,
+            AgentWorkerManagementErrorCode::ProvisionFailed
+        );
+        assert!(error
+            .to_string()
+            .contains("AGENT_WORKER_FIRECRACKER_VCPU_COUNT"));
+    }
+
+    fn clear_resource_env() {
+        for name in RESOURCE_ENV {
+            env::remove_var(name);
+        }
+    }
 }
