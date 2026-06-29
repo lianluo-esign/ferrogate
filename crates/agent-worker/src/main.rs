@@ -55,6 +55,8 @@ enum Command {
     ProbeHandlers,
     /// Emit the worker-owned Firecracker prepare plan without starting a microVM.
     FirecrackerPreparePlan,
+    /// Emit worker-owned Firecracker host readiness preflight without starting a microVM.
+    FirecrackerHostPreflight,
     /// Execute the configured framework handler binary smoke inside agent-worker ownership.
     SmokeHandlerBinary {
         /// Adapter to smoke: codex, claude-code, or hermes.
@@ -161,6 +163,7 @@ fn main() -> Result<()> {
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
         Command::FirecrackerPreparePlan => backends::firecracker_prepare_plan_command(),
+        Command::FirecrackerHostPreflight => backends::firecracker_host_preflight_command(),
         Command::SmokeHandlerBinary {
             adapter,
             timeout_millis,

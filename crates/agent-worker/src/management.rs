@@ -877,6 +877,10 @@ mod tests {
     fn routes_signed_provision_to_firecracker_lifecycle_branch_fail_closed() {
         let _env_lock = lock_firecracker_env();
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_JAILER");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_ROOTFS");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_KVM_DEVICE");
         let envelope = lifecycle_envelope(
             AgentWorkerManagementAction::Provision,
             "agent-worker-provision",
@@ -1371,14 +1375,20 @@ mod tests {
         let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
         let firecracker_path = temp.path().join("firecracker");
+        let jailer_path = temp.path().join("jailer");
         let kernel_path = temp.path().join("vmlinux");
         let rootfs_path = temp.path().join("rootfs.ext4");
+        let kvm_path = temp.path().join("not-kvm");
         std::fs::write(&firecracker_path, b"not executed").unwrap();
+        std::fs::write(&jailer_path, b"not executed").unwrap();
         std::fs::write(&kernel_path, b"not executed").unwrap();
         std::fs::write(&rootfs_path, b"not executed").unwrap();
+        std::fs::write(&kvm_path, b"not kvm").unwrap();
         std::env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_JAILER", &jailer_path);
         std::env::set_var("AGENT_WORKER_FIRECRACKER_KERNEL", &kernel_path);
         std::env::set_var("AGENT_WORKER_FIRECRACKER_ROOTFS", &rootfs_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_KVM_DEVICE", &kvm_path);
         let envelope = lifecycle_envelope(
             AgentWorkerManagementAction::Provision,
             "agent-worker-configured-provision",
@@ -1389,8 +1399,10 @@ mod tests {
             accept_management_json(&input, "agent-worker-smoke-key", SMOKE_SHARED_SECRET, 1_000)
                 .unwrap();
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_JAILER");
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_ROOTFS");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_KVM_DEVICE");
         let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
 
         assert_eq!(response["accepted"], true);
@@ -1399,7 +1411,7 @@ mod tests {
         assert_eq!(response["result"]["lifecycle"]["status"], "failed");
         assert_eq!(
             response["result"]["lifecycle"]["outcome"],
-            "not_implemented"
+            "host_preflight_failed"
         );
         assert_eq!(
             response["result"]["lifecycle"]["backend_name"],
@@ -1407,7 +1419,8 @@ mod tests {
         );
         assert!(response["result"]["lifecycle"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("not implemented")));
+            .is_some_and(|message| message.contains("host preflight failed")
+                && message.contains("not a character device")));
         assert_eq!(response["error"], serde_json::Value::Null);
     }
 
@@ -1416,14 +1429,20 @@ mod tests {
         let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
         let firecracker_path = temp.path().join("firecracker");
+        let jailer_path = temp.path().join("jailer");
         let kernel_path = temp.path().join("vmlinux");
         let rootfs_path = temp.path().join("rootfs.ext4");
+        let kvm_path = temp.path().join("not-kvm");
         std::fs::write(&firecracker_path, b"not executed").unwrap();
+        std::fs::write(&jailer_path, b"not executed").unwrap();
         std::fs::write(&kernel_path, b"not executed").unwrap();
         std::fs::write(&rootfs_path, b"not executed").unwrap();
+        std::fs::write(&kvm_path, b"not kvm").unwrap();
         std::env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_JAILER", &jailer_path);
         std::env::set_var("AGENT_WORKER_FIRECRACKER_KERNEL", &kernel_path);
         std::env::set_var("AGENT_WORKER_FIRECRACKER_ROOTFS", &rootfs_path);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_KVM_DEVICE", &kvm_path);
         let envelope = lifecycle_envelope(
             AgentWorkerManagementAction::Provision,
             "agent-worker-recorded-provision",
@@ -1441,8 +1460,10 @@ mod tests {
         let response =
             accept_management_envelope(&mut transport, &mut state, &runtime, envelope, 1_000);
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_BIN");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_JAILER");
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
         std::env::remove_var("AGENT_WORKER_FIRECRACKER_ROOTFS");
+        std::env::remove_var("AGENT_WORKER_FIRECRACKER_KVM_DEVICE");
 
         assert!(response.accepted);
         assert_eq!(state.lifecycle_events().len(), 1);
@@ -1452,7 +1473,7 @@ mod tests {
             event.status,
             ferrogate_runtime::ManagedWorkerSessionStatus::Failed
         );
-        assert_eq!(event.outcome, "not_implemented");
+        assert_eq!(event.outcome, "host_preflight_failed");
         assert_eq!(event.isolation_instance_id, None);
     }
 

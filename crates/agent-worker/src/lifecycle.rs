@@ -17,7 +17,7 @@ use ferrogate_runtime::{
 };
 
 use crate::{
-    backends::isolation_backends,
+    backends::{firecracker_host_preflight, isolation_backends},
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
@@ -66,6 +66,18 @@ fn provision(
                 .readiness_reason
                 .unwrap_or_else(|| "Firecracker backend is not ready".to_string()),
         ));
+    }
+
+    let preflight = firecracker_host_preflight();
+    if !preflight.ready() {
+        let message = preflight.failure_summary();
+        let lifecycle = lifecycle_result(
+            envelope,
+            ManagedWorkerSessionStatus::Failed,
+            "host_preflight_failed",
+            &message,
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
     }
 
     let lifecycle = lifecycle_result(
