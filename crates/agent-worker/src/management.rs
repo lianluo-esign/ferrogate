@@ -704,14 +704,19 @@ mod tests {
     use crate::external_actions::{
         accept_external_action_authorization_request, RuntimeGatewayExternalActionAuthorizer,
     };
-    use crate::{state::AgentWorkerStateStore, test_support::lock_firecracker_env};
+    use crate::{
+        state::AgentWorkerStateStore,
+        test_support::{lock_firecracker_env, lock_handler_env},
+    };
     use ferrogate_runtime::{
         AgentWorkerManagementFrame, AgentWorkerUnixManagementClient, CapabilityAction,
         CapabilityPolicy, GatewayExternalActionTransportRequest,
         GatewayExternalActionTransportResponse, SimpleCapabilityAuthorizer,
     };
-    use std::collections::BTreeSet;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::thread;
+    use std::{collections::BTreeSet, env, fs};
     use std::{net::TcpStream, os::unix::net::UnixStream};
 
     #[test]
@@ -1055,6 +1060,12 @@ mod tests {
 
     #[test]
     fn http_management_exec_or_attach_calls_gateway_authorizer_before_selected_process_shim() {
+        let _env_lock = lock_handler_env();
+        let _binary = configured_fake_handler_binary(
+            "AGENT_WORKER_CODEX_BIN",
+            "codex-smoke",
+            "codex binary smoke",
+        );
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -1136,6 +1147,34 @@ mod tests {
             capability.metadata.get("env_policy").map(String::as_str),
             Some("gateway_injected_only")
         );
+        let binary_position = events
+            .iter()
+            .position(|event| {
+                event.kind == "cli.requested"
+                    && event
+                        .metadata
+                        .get("real_binary_probe")
+                        .is_some_and(|value| value == "true")
+            })
+            .expect("missing real binary probe event");
+        assert!(capability_position < binary_position);
+        assert!(binary_position < model_position);
+        let binary_event = &events[binary_position];
+        assert_eq!(
+            binary_event
+                .metadata
+                .get("handler_owner")
+                .map(String::as_str),
+            Some("agent-worker")
+        );
+        assert_eq!(
+            binary_event.metadata.get("env_var").map(String::as_str),
+            Some("AGENT_WORKER_CODEX_BIN")
+        );
+        assert!(binary_event
+            .metadata
+            .get("stdout_excerpt")
+            .is_some_and(|value| value.contains("codex binary smoke --version")));
         assert!(events
             .iter()
             .any(|event| event.adapter_name == "codex" && event.framework == "codex"));
@@ -1583,5 +1622,41 @@ mod tests {
             .shared_secret_signature(SMOKE_SHARED_SECRET)
             .unwrap();
         envelope
+    }
+
+    fn configured_fake_handler_binary(
+        env_var: &str,
+        filename: &str,
+        output_prefix: &str,
+    ) -> FakeHandlerBinary {
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join(filename);
+        fs::write(
+            &binary_path,
+            format!("#!/bin/sh\nprintf '{output_prefix} %s\\n' \"$1\"\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(&binary_path, permissions).unwrap();
+        }
+        env::set_var(env_var, &binary_path);
+        FakeHandlerBinary {
+            _temp: temp,
+            env_var: env_var.to_string(),
+        }
+    }
+
+    struct FakeHandlerBinary {
+        _temp: tempfile::TempDir,
+        env_var: String,
+    }
+
+    impl Drop for FakeHandlerBinary {
+        fn drop(&mut self) {
+            env::remove_var(&self.env_var);
+        }
     }
 }

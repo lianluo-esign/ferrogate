@@ -362,14 +362,19 @@ authorizer. The requested capability is framework-specific: the native harness
 uses a managed tool dispatch capability, Codex and Claude Code use a managed
 CLI capability with gateway-controlled environment policy and output limits, and
 Hermes uses managed memory-read capability for run context. The native harness
-can complete deterministically; Codex, Claude Code, and Hermes currently use
-process-shim contract adapters that emit prepared run/model/artifact events
-without launching real binaries. The recorded handler events therefore prove
-the managed action gate was crossed and the selected adapter contract was used;
-they still do not prove real tool execution or microVM boot. Adding real
-lifecycle success requires the Firecracker handler implementation, HTTP/mTLS
-production transport, and contract coverage for Codex/Claude/Hermes binary or
-SDK launch.
+can complete deterministically. Codex, Claude Code, and Hermes first run a
+bounded worker-owned configured binary smoke after the gateway returns
+`capability.allowed`, then continue through process-shim contract adapters that
+emit prepared run/model/artifact events. The binary smoke records a normalized
+`cli.requested` event with `handler_owner=agent-worker`,
+`gateway_handler_probe=false`, `real_binary_probe=true`, the configured env var,
+binary path, probe args, status code, and output excerpts. The recorded handler
+events therefore prove the managed action gate was crossed, `agent-worker`
+started the configured adapter binary, and the selected adapter contract was
+used; they still do not prove real agent task execution or microVM boot. Adding
+real lifecycle success requires the Firecracker handler implementation,
+HTTP/mTLS production transport, and contract coverage for Codex/Claude/Hermes
+binary or SDK task launch.
 
 When an adapter dependency is available on the worker host, `agent-worker` can
 run a bounded binary smoke with `agent-worker smoke-handler-binary --adapter

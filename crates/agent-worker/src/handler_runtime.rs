@@ -10,17 +10,17 @@
 //! API may ask for lifecycle actions, but framework handler execution and event
 //! normalization stay on the worker side.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
     AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
     CapabilityAuthorizationDecision, FrameworkAdapter, FrameworkAdapterArtifact,
-    FrameworkAdapterArtifactRequest, FrameworkAdapterCapabilities, FrameworkAdapterMode,
-    FrameworkAdapterRunRequest, FrameworkAdapterSession, FrameworkAdapterSessionRequest,
-    ManagedCliAction, ManagedExternalAction, ManagedMemoryAccess, ManagedMemoryAction,
-    ManagedToolAction, ManagedWorkerError, NativeHarnessAdapter, NormalizedFrameworkEvent,
-    ProcessFrameworkAdapter,
+    FrameworkAdapterArtifactRequest, FrameworkAdapterCapabilities, FrameworkAdapterEventKind,
+    FrameworkAdapterMode, FrameworkAdapterRunRequest, FrameworkAdapterSession,
+    FrameworkAdapterSessionRequest, ManagedCliAction, ManagedExternalAction, ManagedMemoryAccess,
+    ManagedMemoryAction, ManagedToolAction, ManagedWorkerError, NativeHarnessAdapter,
+    NormalizedFrameworkEvent, ProcessFrameworkAdapter,
 };
 
 use crate::external_actions::{
@@ -77,6 +77,9 @@ pub(crate) fn exec_or_attach_framework_handler_with_authorizer(
                 events: events.into_iter().map(event_result).collect(),
             },
         ));
+    }
+    if let Some(binary_event) = process_handler_binary_event(&session)? {
+        events.push(binary_event);
     }
     events.extend(
         adapter
@@ -280,6 +283,61 @@ fn handler_runtime_error(error: ferrogate_runtime::FrameworkAdapterError) -> Man
     )
 }
 
+fn process_handler_binary_event(
+    session: &FrameworkAdapterSession,
+) -> Result<Option<NormalizedFrameworkEvent>, ManagedWorkerError> {
+    if !matches!(
+        session.adapter_name.as_str(),
+        "codex" | "claude-code" | "hermes"
+    ) {
+        return Ok(None);
+    }
+    let smoke =
+        crate::handlers::smoke_handler_binary(&session.adapter_name, 5_000).map_err(|error| {
+            ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::RunFailed,
+                format!(
+                    "agent-worker failed to execute configured {} handler binary smoke: {error}",
+                    session.adapter_name
+                ),
+            )
+        })?;
+    Ok(Some(NormalizedFrameworkEvent {
+        session_id: session.session_id.clone(),
+        run_id: session.run_id.clone(),
+        adapter_name: session.adapter_name.clone(),
+        adapter_version: session.adapter_version.clone(),
+        framework: session.framework,
+        mode: session.mode,
+        kind: FrameworkAdapterEventKind::CliRequested,
+        message: Some(format!(
+            "{} configured handler binary executed by agent-worker",
+            session.adapter_name
+        )),
+        metadata: BTreeMap::from([
+            ("handler_owner".to_string(), "agent-worker".to_string()),
+            ("gateway_handler_probe".to_string(), "false".to_string()),
+            ("real_binary_probe".to_string(), "true".to_string()),
+            ("adapter_name".to_string(), smoke.adapter_name.to_string()),
+            ("env_var".to_string(), smoke.env_var.to_string()),
+            (
+                "binary_path".to_string(),
+                smoke.binary_path.display().to_string(),
+            ),
+            ("probe_args".to_string(), smoke.probe_args.join(" ")),
+            (
+                "status_code".to_string(),
+                smoke
+                    .status_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_default(),
+            ),
+            ("stdout_excerpt".to_string(), smoke.stdout_excerpt),
+            ("stderr_excerpt".to_string(), smoke.stderr_excerpt),
+        ]),
+    }))
+}
+
 fn lifecycle_session_id(
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<String, ManagedWorkerError> {
@@ -310,7 +368,9 @@ mod tests {
         AgentWorkerTransportSecurity, CapabilityAction, CapabilityPolicy,
         SimpleCapabilityAuthorizer, AGENT_WORKER_PROTOCOL_VERSION,
     };
-    use std::collections::BTreeSet;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::{collections::BTreeSet, env, fs};
 
     #[test]
     fn native_harness_execution_returns_normalized_worker_events_after_authorization() {
@@ -364,6 +424,12 @@ mod tests {
 
     #[test]
     fn codex_process_shim_uses_same_worker_event_contract_after_authorization() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let _binary = configured_fake_handler_binary(
+            "AGENT_WORKER_CODEX_BIN",
+            "codex-smoke",
+            "codex binary smoke",
+        );
         let mut envelope = envelope();
         envelope.framework_adapter = Some("codex".to_string());
         let authorizer = authorizer();
@@ -392,6 +458,21 @@ mod tests {
                     .metadata
                     .get("env_policy")
                     .is_some_and(|policy| policy == "gateway_injected_only")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "cli.requested"
+                && event
+                    .metadata
+                    .get("real_binary_probe")
+                    .is_some_and(|value| value == "true")
+                && event
+                    .metadata
+                    .get("handler_owner")
+                    .is_some_and(|value| value == "agent-worker")
+                && event
+                    .metadata
+                    .get("stdout_excerpt")
+                    .is_some_and(|value| value.contains("codex binary smoke --version"))
         }));
         assert!(events.iter().any(|event| event.kind == "model.requested"));
         assert!(!events.iter().any(|event| event.kind == "tool.completed"));
@@ -439,6 +520,12 @@ mod tests {
 
     #[test]
     fn hermes_process_shim_requests_memory_capability_before_execution() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let _binary = configured_fake_handler_binary(
+            "AGENT_WORKER_HERMES_BIN",
+            "hermes-smoke",
+            "hermes binary smoke",
+        );
         let mut envelope = envelope();
         envelope.framework_adapter = Some("hermes".to_string());
         let authorizer = authorizer();
@@ -464,6 +551,49 @@ mod tests {
                     .get("namespace")
                     .is_some_and(|namespace| namespace == "tenant:tenant-1/workspace:workspace-1")
         }));
+        assert!(events.iter().any(|event| {
+            event.kind == "cli.requested"
+                && event
+                    .metadata
+                    .get("stdout_excerpt")
+                    .is_some_and(|value| value.contains("hermes binary smoke --version"))
+        }));
+    }
+
+    fn configured_fake_handler_binary(
+        env_var: &str,
+        filename: &str,
+        output_prefix: &str,
+    ) -> FakeHandlerBinary {
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join(filename);
+        fs::write(
+            &binary_path,
+            format!("#!/bin/sh\nprintf '{output_prefix} %s\\n' \"$1\"\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(&binary_path, permissions).unwrap();
+        }
+        env::set_var(env_var, &binary_path);
+        FakeHandlerBinary {
+            _temp: temp,
+            env_var: env_var.to_string(),
+        }
+    }
+
+    struct FakeHandlerBinary {
+        _temp: tempfile::TempDir,
+        env_var: String,
+    }
+
+    impl Drop for FakeHandlerBinary {
+        fn drop(&mut self) {
+            env::remove_var(&self.env_var);
+        }
     }
 
     fn authorizer(

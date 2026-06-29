@@ -130,17 +130,17 @@ fn capability_names(capabilities: FrameworkAdapterCapabilities) -> Vec<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HandlerBinarySmokeResult {
-    adapter_name: &'static str,
-    env_var: &'static str,
-    binary_path: PathBuf,
-    probe_args: Vec<&'static str>,
-    status_code: Option<i32>,
-    stdout_excerpt: String,
-    stderr_excerpt: String,
+pub(crate) struct HandlerBinarySmokeResult {
+    pub(crate) adapter_name: &'static str,
+    pub(crate) env_var: &'static str,
+    pub(crate) binary_path: PathBuf,
+    pub(crate) probe_args: Vec<&'static str>,
+    pub(crate) status_code: Option<i32>,
+    pub(crate) stdout_excerpt: String,
+    pub(crate) stderr_excerpt: String,
 }
 
-fn smoke_handler_binary(
+pub(crate) fn smoke_handler_binary(
     adapter_name: &str,
     timeout_millis: u64,
 ) -> Result<HandlerBinarySmokeResult> {
