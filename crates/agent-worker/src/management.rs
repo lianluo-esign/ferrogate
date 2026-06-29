@@ -1785,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_or_checkpoint_reports_config_gap_without_stopping_microvm() {
+    fn snapshot_or_checkpoint_reports_firecracker_api_failure_without_stopping_microvm() {
         let temp = tempfile::tempdir().unwrap();
         let snapshot_envelope = lifecycle_envelope(
             AgentWorkerManagementAction::SnapshotOrCheckpoint,
@@ -1837,11 +1837,13 @@ mod tests {
         let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = snapshot.result else {
             panic!("snapshot did not return lifecycle evidence");
         };
-        assert_eq!(lifecycle.outcome, "snapshot_not_configured");
+        assert_eq!(lifecycle.outcome, "snapshot_failed");
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-snapshot-instance")
         );
+        assert!(lifecycle.message.contains("failure_stage=pause_vm"));
+        assert!(lifecycle.message.contains("firecracker_api_connect"));
         let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = status.result else {
             panic!("status did not return lifecycle evidence");
         };

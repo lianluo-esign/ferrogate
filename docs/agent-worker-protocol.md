@@ -433,10 +433,14 @@ guest-channel configuration preflight passes, `exec_or_attach` still fails
 closed with `outcome=guest_handler_rpc_not_implemented`; this is the explicit
 remaining boundary before Codex/Claude/Hermes handlers can launch inside the
 microVM. `snapshot_or_checkpoint` is now a first-class management action; before
-provision it returns `outcome=not_started`, and with a retained Firecracker
-microVM it currently returns `outcome=snapshot_not_configured` with the same
-`isolation_instance_id` without stopping the VM. Handler execution remains a
-separate worker-owned path that requires a
+provision it returns `outcome=not_started`, and with a retained running
+Firecracker microVM it calls the Firecracker API to pause the VM, create a full
+snapshot using `/snapshot/create`, resume the VM, and return snapshot state and
+memory artifacts with matching `artifact.created` events. If the Firecracker
+snapshot API fails, the worker returns `outcome=snapshot_failed` with the same
+`isolation_instance_id` and keeps the retained VM available for later status,
+artifact, stop, or cleanup actions. Handler execution remains a separate
+worker-owned path that requires a
 `capability.allowed` decision from the configured gateway HTTP authorizer
 before continuing. The requested capability is framework-specific:
 the native harness

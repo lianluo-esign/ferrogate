@@ -362,15 +362,36 @@ fn snapshot_or_checkpoint(
     let run_id = lifecycle_run_id(envelope)?;
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
+        if !running {
+            let lifecycle = lifecycle_result_with_instance(
+                envelope,
+                ManagedWorkerSessionStatus::Failed,
+                "exited",
+                &format!(
+                    "Firecracker microVM {} cannot be snapshotted because it is not running",
+                    existing.instance_id
+                ),
+                Some(existing.instance_id.clone()),
+            )?;
+            return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+        }
+        let instance_id = existing.instance_id.clone();
+        let snapshot = existing.snapshot_or_checkpoint();
+        if snapshot.succeeded() {
+            return Ok(Some(AgentWorkerManagementResult::HandlerArtifacts {
+                artifacts: snapshot.artifact_results(&instance_id),
+                events: snapshot.artifact_events(&session_id, &run_id, &instance_id),
+            }));
+        }
         let lifecycle = lifecycle_result_with_instance(
             envelope,
             ManagedWorkerSessionStatus::Failed,
-            "snapshot_not_configured",
+            &snapshot.outcome,
             &format!(
-                "Firecracker microVM {} is provisioned with running={running}, but agent-worker snapshot/checkpoint support is not configured yet",
-                existing.instance_id
+                "Firecracker microVM {instance_id} snapshot/checkpoint failed in agent-worker; {}",
+                snapshot.summary()
             ),
-            Some(existing.instance_id.clone()),
+            Some(instance_id),
         )?;
         return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
     }

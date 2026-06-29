@@ -1003,6 +1003,79 @@ impl FirecrackerMicroVm {
     pub(crate) fn cleanup(&mut self) -> FirecrackerStopReport {
         self.stop()
     }
+
+    pub(crate) fn snapshot_or_checkpoint(&mut self) -> FirecrackerSnapshotReport {
+        let snapshot = self.artifacts.snapshot_path();
+        let memory = self.artifacts.snapshot_memory_path();
+        let mut steps = Vec::new();
+        let result = (|| {
+            firecracker_patch_json(
+                &self.artifacts.api_socket,
+                "/vm",
+                json!({ "state": "Paused" }),
+                Duration::from_secs(10),
+            )
+            .map_err(|error| {
+                FirecrackerSnapshotError::new("pause_vm", error.summary(), &snapshot, &memory)
+            })?;
+            steps.push("paused");
+            firecracker_put_json_with_timeout(
+                &self.artifacts.api_socket,
+                "/snapshot/create",
+                json!({
+                    "snapshot_type": "Full",
+                    "snapshot_path": snapshot.display().to_string(),
+                    "mem_file_path": memory.display().to_string(),
+                }),
+                Duration::from_secs(30),
+            )
+            .map_err(|error| {
+                FirecrackerSnapshotError::new(
+                    "create_snapshot",
+                    error.summary(),
+                    &snapshot,
+                    &memory,
+                )
+            })?;
+            steps.push("snapshot_created");
+            Ok(())
+        })();
+        let resume = firecracker_patch_json(
+            &self.artifacts.api_socket,
+            "/vm",
+            json!({ "state": "Resumed" }),
+            Duration::from_secs(10),
+        );
+        match resume {
+            Ok(()) => steps.push("resumed"),
+            Err(error) => {
+                if result.is_ok() {
+                    return FirecrackerSnapshotReport::failed(
+                        FirecrackerSnapshotError::new(
+                            "resume_vm",
+                            error.summary(),
+                            &snapshot,
+                            &memory,
+                        ),
+                        steps,
+                    );
+                }
+            }
+        }
+        match result {
+            Ok(()) => FirecrackerSnapshotReport {
+                outcome: "snapshot_created".to_string(),
+                snapshot_path: snapshot,
+                memory_path: memory,
+                snapshot_bytes: file_len(&self.artifacts.snapshot_path()),
+                memory_bytes: file_len(&self.artifacts.snapshot_memory_path()),
+                steps,
+                failure_stage: None,
+                failure_reason: None,
+            },
+            Err(error) => FirecrackerSnapshotReport::failed(error, steps),
+        }
+    }
 }
 
 impl Drop for FirecrackerMicroVm {
@@ -1124,6 +1197,14 @@ impl FirecrackerMicroVmArtifacts {
         }
     }
 
+    fn snapshot_path(&self) -> PathBuf {
+        self.run_dir.join("firecracker.snapshot")
+    }
+
+    fn snapshot_memory_path(&self) -> PathBuf {
+        self.run_dir.join("firecracker.mem")
+    }
+
     fn to_artifact_results(&self, instance_id: &str) -> Vec<AgentWorkerFrameworkArtifactResult> {
         [
             ("firecracker-log", "firecracker.log", &self.firecracker_log),
@@ -1139,6 +1220,111 @@ impl FirecrackerMicroVmArtifacts {
             byte_len: file_len(path),
         })
         .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FirecrackerSnapshotReport {
+    pub(crate) outcome: String,
+    pub(crate) snapshot_path: PathBuf,
+    pub(crate) memory_path: PathBuf,
+    pub(crate) snapshot_bytes: u64,
+    pub(crate) memory_bytes: u64,
+    pub(crate) steps: Vec<&'static str>,
+    pub(crate) failure_stage: Option<&'static str>,
+    pub(crate) failure_reason: Option<String>,
+}
+
+impl FirecrackerSnapshotReport {
+    fn failed(error: FirecrackerSnapshotError, steps: Vec<&'static str>) -> Self {
+        Self {
+            outcome: "snapshot_failed".to_string(),
+            snapshot_path: error.snapshot_path,
+            memory_path: error.memory_path,
+            snapshot_bytes: 0,
+            memory_bytes: 0,
+            steps,
+            failure_stage: Some(error.stage),
+            failure_reason: Some(error.reason),
+        }
+    }
+
+    pub(crate) fn succeeded(&self) -> bool {
+        self.failure_stage.is_none() && self.snapshot_bytes > 0 && self.memory_bytes > 0
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let mut parts = vec![
+            format!("outcome={}", self.outcome),
+            format!("snapshot_path={}", self.snapshot_path.display()),
+            format!("snapshot_bytes={}", self.snapshot_bytes),
+            format!("memory_path={}", self.memory_path.display()),
+            format!("memory_bytes={}", self.memory_bytes),
+            format!("steps={}", self.steps.join(",")),
+        ];
+        if let Some(stage) = self.failure_stage {
+            parts.push(format!("failure_stage={stage}"));
+        }
+        if let Some(reason) = &self.failure_reason {
+            parts.push(format!("failure_reason={reason}"));
+        }
+        parts.join("; ")
+    }
+
+    pub(crate) fn artifact_results(
+        &self,
+        instance_id: &str,
+    ) -> Vec<AgentWorkerFrameworkArtifactResult> {
+        vec![
+            AgentWorkerFrameworkArtifactResult {
+                artifact_id: format!("{instance_id}-snapshot-state"),
+                name: "firecracker.snapshot".to_string(),
+                media_type: "application/octet-stream".to_string(),
+                byte_len: self.snapshot_bytes,
+            },
+            AgentWorkerFrameworkArtifactResult {
+                artifact_id: format!("{instance_id}-snapshot-memory"),
+                name: "firecracker.mem".to_string(),
+                media_type: "application/octet-stream".to_string(),
+                byte_len: self.memory_bytes,
+            },
+        ]
+    }
+
+    pub(crate) fn artifact_events(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        instance_id: &str,
+    ) -> Vec<AgentWorkerFrameworkEventResult> {
+        self.artifact_results(instance_id)
+            .into_iter()
+            .map(|artifact| firecracker_artifact_event(session_id, run_id, instance_id, artifact))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FirecrackerSnapshotError {
+    stage: &'static str,
+    reason: String,
+    snapshot_path: PathBuf,
+    memory_path: PathBuf,
+}
+
+impl FirecrackerSnapshotError {
+    fn new(
+        stage: &'static str,
+        reason: impl Into<String>,
+        snapshot_path: &Path,
+        memory_path: &Path,
+    ) -> Self {
+        Self {
+            stage,
+            reason: reason.into(),
+            snapshot_path: snapshot_path.to_path_buf(),
+            memory_path: memory_path.to_path_buf(),
+        }
     }
 }
 
@@ -1376,15 +1562,43 @@ fn firecracker_put_json(
     body: serde_json::Value,
     deadline: Instant,
 ) -> Result<(), FirecrackerBootSmokeError> {
+    firecracker_json("PUT", socket_path, path, body, deadline)
+}
+
+fn firecracker_put_json_with_timeout(
+    socket_path: &Path,
+    path: &str,
+    body: serde_json::Value,
+    timeout: Duration,
+) -> Result<(), FirecrackerBootSmokeError> {
+    firecracker_json("PUT", socket_path, path, body, Instant::now() + timeout)
+}
+
+fn firecracker_patch_json(
+    socket_path: &Path,
+    path: &str,
+    body: serde_json::Value,
+    timeout: Duration,
+) -> Result<(), FirecrackerBootSmokeError> {
+    firecracker_json("PATCH", socket_path, path, body, Instant::now() + timeout)
+}
+
+fn firecracker_json(
+    method: &str,
+    socket_path: &Path,
+    path: &str,
+    body: serde_json::Value,
+    deadline: Instant,
+) -> Result<(), FirecrackerBootSmokeError> {
     if Instant::now() >= deadline {
         return Err(FirecrackerBootSmokeError::new(
             "firecracker_api",
-            format!("deadline exceeded before PUT {path}"),
+            format!("deadline exceeded before {method} {path}"),
         ));
     }
     let body = body.to_string();
     let request = format!(
-        "PUT {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let mut stream = UnixStream::connect(socket_path).map_err(|error| {
@@ -1407,21 +1621,25 @@ fn firecracker_put_json(
             FirecrackerBootSmokeError::new("firecracker_api_timeout", error.to_string())
         })?;
     stream.write_all(request.as_bytes()).map_err(|error| {
-        FirecrackerBootSmokeError::new("firecracker_api_write", format!("PUT {path}: {error}"))
+        FirecrackerBootSmokeError::new("firecracker_api_write", format!("{method} {path}: {error}"))
     })?;
-    let response = read_firecracker_http_response(&mut stream, path)?;
+    let response = read_firecracker_http_response(&mut stream, method, path)?;
     let status = response.lines().next().unwrap_or_default();
     if status.contains(" 204 ") || status.ends_with(" 204 No Content") {
         return Ok(());
     }
     Err(FirecrackerBootSmokeError::new(
         "firecracker_api_status",
-        format!("PUT {path} failed: {}", first_non_empty_line(&response)),
+        format!(
+            "{method} {path} failed: {}",
+            first_non_empty_line(&response)
+        ),
     ))
 }
 
 fn read_firecracker_http_response(
     stream: &mut UnixStream,
+    method: &str,
     path: &str,
 ) -> Result<String, FirecrackerBootSmokeError> {
     let mut response = Vec::new();
@@ -1444,13 +1662,13 @@ fn read_firecracker_http_response(
                 }
                 return Err(FirecrackerBootSmokeError::new(
                     "firecracker_api_read",
-                    format!("PUT {path}: {error}"),
+                    format!("{method} {path}: {error}"),
                 ));
             }
             Err(error) => {
                 return Err(FirecrackerBootSmokeError::new(
                     "firecracker_api_read",
-                    format!("PUT {path}: {error}"),
+                    format!("{method} {path}: {error}"),
                 ));
             }
         }
@@ -1995,6 +2213,50 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(socket_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn firecracker_snapshot_report_projects_snapshot_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot_path = temp.path().join("firecracker.snapshot");
+        let memory_path = temp.path().join("firecracker.mem");
+        std::fs::write(&snapshot_path, b"snapshot-state").unwrap();
+        std::fs::write(&memory_path, b"snapshot-memory").unwrap();
+        let report = FirecrackerSnapshotReport {
+            outcome: "snapshot_created".to_string(),
+            snapshot_path,
+            memory_path,
+            snapshot_bytes: 14,
+            memory_bytes: 15,
+            steps: vec!["paused", "snapshot_created", "resumed"],
+            failure_stage: None,
+            failure_reason: None,
+        };
+
+        let artifacts = report.artifact_results("microvm-1");
+        let events = report.artifact_events("session-1", "run-1", "microvm-1");
+
+        assert!(report.succeeded());
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.artifact_id == "microvm-1-snapshot-state"
+                && artifact.name == "firecracker.snapshot"
+                && artifact.media_type == "application/octet-stream"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.artifact_id == "microvm-1-snapshot-memory"
+                && artifact.name == "firecracker.mem"
+                && artifact.media_type == "application/octet-stream"
+        }));
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| {
+            event.kind == "artifact.created"
+                && event
+                    .metadata
+                    .get("isolation_instance_id")
+                    .map(String::as_str)
+                    == Some("microvm-1")
+        }));
     }
 
     #[test]
