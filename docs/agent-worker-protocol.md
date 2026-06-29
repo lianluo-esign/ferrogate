@@ -518,6 +518,21 @@ capability, executes a bounded `/bin/sh -c` command only after
 is not a general-purpose shell runner, not Codex/Claude/Hermes task execution,
 and not Firecracker boot proof.
 
+The equivalent local tool and MCP tool execution smokes are:
+
+```bash
+agent-worker governed-tool-execution-smoke
+agent-worker governed-mcp-tool-execution-smoke
+```
+
+The tool smoke requests a managed `tool` capability, then runs the built-in
+`native.echo` smoke handler only after `capability.allowed` and emits
+`tool.requested` evidence. The MCP smoke requests a managed `mcp_tool`
+capability, then runs the local `local-smoke/echo` handler only after
+authorization and emits `mcp.tool.requested` evidence. These are deterministic
+local contract smokes; they are not a general plugin runner, not a live MCP
+server connection, and not Firecracker boot proof.
+
 The equivalent local REST execution smoke is:
 
 ```bash

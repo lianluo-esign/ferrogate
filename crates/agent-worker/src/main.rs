@@ -78,6 +78,10 @@ enum Command {
     },
     /// Execute a local governed CLI smoke after gateway authorization.
     GovernedCliExecutionSmoke,
+    /// Execute a local governed tool smoke after gateway authorization.
+    GovernedToolExecutionSmoke,
+    /// Execute a local governed MCP tool smoke after gateway authorization.
+    GovernedMcpToolExecutionSmoke,
     /// Execute a local governed REST smoke after gateway authorization.
     GovernedRestExecutionSmoke,
     /// Execute a local governed filesystem read smoke after gateway authorization.
@@ -165,6 +169,12 @@ fn main() -> Result<()> {
         ),
         Command::GovernedCliExecutionSmoke => {
             external_actions::governed_cli_execution_smoke_command()
+        }
+        Command::GovernedToolExecutionSmoke => {
+            external_actions::governed_tool_execution_smoke_command()
+        }
+        Command::GovernedMcpToolExecutionSmoke => {
+            external_actions::governed_mcp_tool_execution_smoke_command()
         }
         Command::GovernedRestExecutionSmoke => {
             external_actions::governed_rest_execution_smoke_command()

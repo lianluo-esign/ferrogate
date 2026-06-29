@@ -1158,6 +1158,8 @@ fn parse_capability_event_kind(
         "capability.allowed" => Ok(FrameworkAdapterEventKind::CapabilityAllowed),
         "capability.denied" => Ok(FrameworkAdapterEventKind::CapabilityDenied),
         "capability.requested" => Ok(FrameworkAdapterEventKind::CapabilityRequested),
+        "tool.requested" => Ok(FrameworkAdapterEventKind::ToolRequested),
+        "mcp.tool.requested" => Ok(FrameworkAdapterEventKind::McpToolRequested),
         "filesystem.requested" => Ok(FrameworkAdapterEventKind::FilesystemRequested),
         _ => Err(FrameworkAdapterError::InvalidRequest(format!(
             "unsupported gateway external action event kind {value}"

@@ -35,8 +35,8 @@ use ferrogate_runtime::{
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
     ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
     ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
-    ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer,
-    SupportedFramework,
+    ManagedMcpToolAction, ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent,
+    SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -240,6 +240,55 @@ pub(crate) fn governed_cli_execution_smoke_command() -> Result<()> {
         },
     ));
     let events = execute_governed_cli_action(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn governed_tool_execution_smoke_command() -> Result<()> {
+    let action = ManagedToolAction {
+        tool_name: "native.echo".to_string(),
+        arguments_policy: "smoke_literal:ferrogate governed tool smoke".to_string(),
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_tool_action(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn governed_mcp_tool_execution_smoke_command() -> Result<()> {
+    let action = ManagedMcpToolAction {
+        server_name: "local-smoke".to_string(),
+        tool_name: "echo".to_string(),
+        arguments_policy: "smoke_literal:ferrogate governed mcp smoke".to_string(),
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::McpTool]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_mcp_tool_action(&gate, smoke_session(), action, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -727,6 +776,76 @@ fn external_action_smoke() -> Result<ExternalActionGateDecision> {
     .map_err(Into::into)
 }
 
+fn execute_governed_tool_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedToolAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Tool(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_tool_action(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::ToolRequested,
+            message: Some("managed tool action executed after gateway authorization".to_string()),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
+fn execute_governed_mcp_tool_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedMcpToolAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::McpTool(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_mcp_tool_action(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::McpToolRequested,
+            message: Some(
+                "managed MCP tool action executed after gateway authorization".to_string(),
+            ),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
 fn execute_governed_cli_action<A>(
     authorizer: &A,
     session: FrameworkAdapterSession,
@@ -830,6 +949,100 @@ where
             metadata: execution.metadata(&action),
         },
     ])
+}
+
+struct GovernedToolExecution {
+    output_excerpt: String,
+}
+
+impl GovernedToolExecution {
+    fn metadata(self, action: &ManagedToolAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "tool".to_string()),
+            (
+                "external_target".to_string(),
+                format!("tool:{}", action.tool_name),
+            ),
+            ("tool_name".to_string(), action.tool_name.clone()),
+            (
+                "arguments_policy".to_string(),
+                action.arguments_policy.clone(),
+            ),
+            ("output_excerpt".to_string(), self.output_excerpt),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_tool_action(
+    action: &ManagedToolAction,
+) -> Result<GovernedToolExecution, FrameworkAdapterError> {
+    if action.tool_name != "native.echo" {
+        return Err(FrameworkAdapterError::InvalidRequest(format!(
+            "managed tool smoke does not support tool {}",
+            action.tool_name
+        )));
+    }
+    let message = smoke_literal_argument(&action.arguments_policy)?;
+    Ok(GovernedToolExecution {
+        output_excerpt: bounded_utf8_excerpt(message.as_bytes(), 512),
+    })
+}
+
+struct GovernedMcpToolExecution {
+    output_excerpt: String,
+}
+
+impl GovernedMcpToolExecution {
+    fn metadata(self, action: &ManagedMcpToolAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "mcp.tool".to_string()),
+            (
+                "external_target".to_string(),
+                format!("mcp:{}:{}", action.server_name, action.tool_name),
+            ),
+            ("mcp_server".to_string(), action.server_name.clone()),
+            ("mcp_tool".to_string(), action.tool_name.clone()),
+            (
+                "arguments_policy".to_string(),
+                action.arguments_policy.clone(),
+            ),
+            ("output_excerpt".to_string(), self.output_excerpt),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_mcp_tool_action(
+    action: &ManagedMcpToolAction,
+) -> Result<GovernedMcpToolExecution, FrameworkAdapterError> {
+    if action.server_name != "local-smoke" || action.tool_name != "echo" {
+        return Err(FrameworkAdapterError::InvalidRequest(format!(
+            "managed MCP smoke does not support {}/{}",
+            action.server_name, action.tool_name
+        )));
+    }
+    let message = smoke_literal_argument(&action.arguments_policy)?;
+    Ok(GovernedMcpToolExecution {
+        output_excerpt: bounded_utf8_excerpt(message.as_bytes(), 512),
+    })
+}
+
+fn smoke_literal_argument(policy: &str) -> Result<&str, FrameworkAdapterError> {
+    policy
+        .strip_prefix("smoke_literal:")
+        .filter(|message| !message.trim().is_empty())
+        .ok_or_else(|| {
+            FrameworkAdapterError::InvalidRequest(
+                "managed smoke requires arguments_policy=smoke_literal:<message>".to_string(),
+            )
+        })
 }
 
 struct GovernedFilesystemExecution {
@@ -1377,6 +1590,130 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("not allowed"));
+    }
+
+    #[test]
+    fn governed_tool_execution_runs_only_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_tool_action(
+            &gate,
+            session(),
+            ManagedToolAction {
+                tool_name: "native.echo".to_string(),
+                arguments_policy: "smoke_literal:tool smoke ok".to_string(),
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "tool.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("tool_name").map(String::as_str),
+            Some("native.echo")
+        );
+        assert_eq!(
+            events[1].metadata.get("output_excerpt").map(String::as_str),
+            Some("tool smoke ok")
+        );
+    }
+
+    #[test]
+    fn governed_tool_execution_denial_happens_before_tool_dispatch() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_tool_action(
+            &gate,
+            session(),
+            ManagedToolAction {
+                tool_name: "unsupported.tool".to_string(),
+                arguments_policy: "smoke_literal:must not run".to_string(),
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!error.to_string().contains("does not support tool"));
+    }
+
+    #[test]
+    fn governed_mcp_tool_execution_runs_only_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::McpTool]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_mcp_tool_action(
+            &gate,
+            session(),
+            ManagedMcpToolAction {
+                server_name: "local-smoke".to_string(),
+                tool_name: "echo".to_string(),
+                arguments_policy: "smoke_literal:mcp smoke ok".to_string(),
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "mcp.tool.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("mcp_server").map(String::as_str),
+            Some("local-smoke")
+        );
+        assert_eq!(
+            events[1].metadata.get("mcp_tool").map(String::as_str),
+            Some("echo")
+        );
+        assert_eq!(
+            events[1].metadata.get("output_excerpt").map(String::as_str),
+            Some("mcp smoke ok")
+        );
+    }
+
+    #[test]
+    fn governed_mcp_tool_execution_denial_happens_before_mcp_dispatch() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_mcp_tool_action(
+            &gate,
+            session(),
+            ManagedMcpToolAction {
+                server_name: "remote".to_string(),
+                tool_name: "read_file".to_string(),
+                arguments_policy: "smoke_literal:must not run".to_string(),
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!error.to_string().contains("does not support"));
     }
 
     #[test]
