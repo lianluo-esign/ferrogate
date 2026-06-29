@@ -480,7 +480,11 @@ same `request_id` and carrying the same authorization response shape used by the
 stdin smoke. The standalone worker client rejects mismatched response ids,
 missing accepted-event evidence, malformed canonical event JSON, denied
 decisions, approval-required decisions, and transport failures before handler
-execution. Same-host Unix socket transport remains available for local
+execution. Gateway authorizer transport failures and timeouts are normalized as
+`capability.denied` events with `failure_source=gateway_authorizer_transport`,
+so the management caller can still persist timeline evidence for the blocked
+action instead of seeing only a worker-local I/O error. Same-host Unix socket
+transport remains available for local
 development and deterministic tests, but it is not the product callback
 protocol. Production deployments must run this HTTP callback path inside the
 same encrypted gateway-to-worker channel family as the management API.

@@ -25,10 +25,10 @@ use std::{
 
 use anyhow::Result;
 use ferrogate_runtime::{
-    authorize_managed_external_action, CapabilityAction, CapabilityAuthorizationDecision,
-    CapabilityAuthorizer, CapabilityPolicy, ExternalActionAuthorizationRequest,
-    ExternalActionAuthorizationResponse, FrameworkAdapterError, FrameworkAdapterMode,
-    FrameworkAdapterSession, GatewayExternalActionTransportRequest,
+    authorize_managed_external_action, managed_external_action_transport_failure_event,
+    CapabilityAction, CapabilityAuthorizationDecision, CapabilityAuthorizer, CapabilityPolicy,
+    ExternalActionAuthorizationRequest, ExternalActionAuthorizationResponse, FrameworkAdapterError,
+    FrameworkAdapterMode, FrameworkAdapterSession, GatewayExternalActionTransportRequest,
     GatewayExternalActionTransportResponse, ManagedExternalAction, ManagedExternalActionDecision,
     ManagedExternalActionRequest, ManagedToolAction, NormalizedFrameworkEvent,
     SimpleCapabilityAuthorizer, SupportedFramework,
@@ -293,16 +293,21 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
         &self,
         request: ManagedExternalActionRequest,
     ) -> Result<ExternalActionGateDecision, FrameworkAdapterError> {
-        let authorization = ExternalActionAuthorizationRequest::from_managed_request(request);
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(request.clone());
         let transport_request = GatewayExternalActionTransportRequest {
             request_id: authorization.stable_request_id(),
             authorization,
         };
-        let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
-                "gateway external action authorizer transport unavailable: {error}"
-            ))
-        })?;
+        let mut stream = match UnixStream::connect(&self.socket_path) {
+            Ok(stream) => stream,
+            Err(error) => {
+                return transport_failure_decision(
+                    &request,
+                    format!("gateway external action authorizer transport unavailable: {error}"),
+                );
+            }
+        };
         let payload = serde_json::to_string(&transport_request).map_err(|error| {
             FrameworkAdapterError::InvalidRequest(format!(
                 "gateway external action authorization request serialization failed: {error}"
@@ -314,24 +319,25 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
                     .to_string(),
             ));
         }
-        stream.write_all(payload.as_bytes()).map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
-                "gateway external action authorizer write failed: {error}"
-            ))
-        })?;
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(|error| {
-                FrameworkAdapterError::CapabilityDenied(format!(
-                    "gateway external action authorizer request shutdown failed: {error}"
-                ))
-            })?;
+        if let Err(error) = stream.write_all(payload.as_bytes()) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action authorizer write failed: {error}"),
+            );
+        }
+        if let Err(error) = stream.shutdown(std::net::Shutdown::Write) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action authorizer request shutdown failed: {error}"),
+            );
+        }
         let mut response_json = String::new();
-        read_external_action_stream(&mut stream, &mut response_json).map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
-                "gateway external action authorizer response read failed: {error}"
-            ))
-        })?;
+        if let Err(error) = read_external_action_stream(&mut stream, &mut response_json) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action authorizer response read failed: {error}"),
+            );
+        }
         let response: GatewayExternalActionTransportResponse = serde_json::from_str(&response_json)
             .map_err(|error| {
                 FrameworkAdapterError::InvalidRequest(format!(
@@ -373,7 +379,8 @@ impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
         &self,
         request: ManagedExternalActionRequest,
     ) -> Result<ExternalActionGateDecision, FrameworkAdapterError> {
-        let authorization = ExternalActionAuthorizationRequest::from_managed_request(request);
+        let authorization =
+            ExternalActionAuthorizationRequest::from_managed_request(request.clone());
         let transport_request = GatewayExternalActionTransportRequest {
             request_id: authorization.stable_request_id(),
             authorization,
@@ -389,27 +396,34 @@ impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
                     .to_string(),
             ));
         }
-        let mut stream =
-            TcpStream::connect_timeout(&self.endpoint, self.timeout).map_err(|error| {
-                FrameworkAdapterError::CapabilityDenied(format!(
-                    "gateway external action HTTP authorizer transport unavailable: {error}"
-                ))
-            })?;
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(|error| {
-                FrameworkAdapterError::CapabilityDenied(format!(
+        let mut stream = match TcpStream::connect_timeout(&self.endpoint, self.timeout) {
+            Ok(stream) => stream,
+            Err(error) => {
+                return transport_failure_decision(
+                    &request,
+                    format!(
+                        "gateway external action HTTP authorizer transport unavailable: {error}"
+                    ),
+                );
+            }
+        };
+        if let Err(error) = stream.set_read_timeout(Some(self.timeout)) {
+            return transport_failure_decision(
+                &request,
+                format!(
                     "gateway external action HTTP authorizer read timeout setup failed: {error}"
-                ))
-            })?;
-        stream
-            .set_write_timeout(Some(self.timeout))
-            .map_err(|error| {
-                FrameworkAdapterError::CapabilityDenied(format!(
+                ),
+            );
+        }
+        if let Err(error) = stream.set_write_timeout(Some(self.timeout)) {
+            return transport_failure_decision(
+                &request,
+                format!(
                     "gateway external action HTTP authorizer write timeout setup failed: {error}"
-                ))
-            })?;
-        let request = format!(
+                ),
+            );
+        }
+        let http_request = format!(
             "POST /v1/agent-worker/external-actions/authorize HTTP/1.1\r\n\
              host: {}\r\n\
              content-type: application/json\r\n\
@@ -421,29 +435,38 @@ impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
             payload.len(),
             payload
         );
-        stream.write_all(request.as_bytes()).map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
-                "gateway external action HTTP authorizer write failed: {error}"
-            ))
-        })?;
-        stream.shutdown(Shutdown::Write).map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
-                "gateway external action HTTP authorizer request shutdown failed: {error}"
-            ))
-        })?;
+        if let Err(error) = stream.write_all(http_request.as_bytes()) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action HTTP authorizer write failed: {error}"),
+            );
+        }
+        if let Err(error) = stream.shutdown(Shutdown::Write) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action HTTP authorizer request shutdown failed: {error}"),
+            );
+        }
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
-                "gateway external action HTTP authorizer response read failed: {error}"
-            ))
-        })?;
+        if let Err(error) = stream.read_to_end(&mut response) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action HTTP authorizer response read failed: {error}"),
+            );
+        }
         if response.len() > EXTERNAL_ACTION_MAX_MESSAGE_BYTES {
             return Err(FrameworkAdapterError::InvalidRequest(
                 "gateway external action HTTP authorization response exceeds maximum message size"
                     .to_string(),
             ));
         }
-        let response = decode_http_authorizer_response(&response)?;
+        let response = match decode_http_authorizer_response(&response) {
+            Ok(response) => response,
+            Err(error) if matches!(error, FrameworkAdapterError::CapabilityDenied(_)) => {
+                return transport_failure_decision(&request, error.to_string());
+            }
+            Err(error) => return Err(error),
+        };
         if response.request_id != transport_request.request_id {
             return Err(FrameworkAdapterError::InvalidRequest(
                 "gateway external action HTTP authorization response request_id mismatch"
@@ -458,6 +481,16 @@ impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
                 event: decision.event,
             })
     }
+}
+
+fn transport_failure_decision(
+    request: &ManagedExternalActionRequest,
+    reason: impl Into<String>,
+) -> Result<ExternalActionGateDecision, FrameworkAdapterError> {
+    Ok(ExternalActionGateDecision {
+        decision: CapabilityAuthorizationDecision::Denied,
+        event: managed_external_action_transport_failure_event(request, reason)?,
+    })
 }
 
 fn decode_http_authorizer_response(
@@ -1202,6 +1235,49 @@ mod tests {
             Duration::from_millis(50),
         );
 
+        let decision = request_handler_external_action_decision(
+            Some(&client),
+            ExternalActionGateRequest {
+                session: session(),
+                action: ManagedExternalAction::Tool(ManagedToolAction {
+                    tool_name: "native.echo".to_string(),
+                    arguments_policy: "redacted_json".to_string(),
+                }),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+        server.join();
+
+        assert_eq!(decision.decision, CapabilityAuthorizationDecision::Denied);
+        assert_eq!(decision.event.kind.as_str(), "capability.denied");
+        assert_eq!(
+            decision.event.metadata.get("decision").map(String::as_str),
+            Some("denied")
+        );
+        assert_eq!(
+            decision
+                .event
+                .metadata
+                .get("failure_source")
+                .map(String::as_str),
+            Some("gateway_authorizer_transport")
+        );
+        assert!(decision
+            .event
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("response read failed")));
+    }
+
+    #[test]
+    fn http_gateway_authorizer_transport_timeout_blocks_handler_execution() {
+        let server = spawn_stalled_http_authorizer_server();
+        let client = HttpGatewayExternalActionAuthorizer::new_with_timeout(
+            server.endpoint,
+            Duration::from_millis(50),
+        );
+
         let error = authorize_handler_external_action(
             Some(&client),
             ExternalActionGateRequest {
@@ -1216,10 +1292,7 @@ mod tests {
         .unwrap_err();
         server.join();
 
-        let FrameworkAdapterError::CapabilityDenied(message) = error else {
-            panic!("expected fail-closed capability denial, got {error}");
-        };
-        assert!(message.contains("response read failed"));
+        assert!(error.to_string().contains("response read failed"));
     }
 
     fn session() -> FrameworkAdapterSession {

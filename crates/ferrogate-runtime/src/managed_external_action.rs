@@ -967,6 +967,53 @@ pub fn self_hosted_external_action_report(
     Ok(event)
 }
 
+pub fn managed_external_action_transport_failure_event(
+    request: &ManagedExternalActionRequest,
+    reason: impl Into<String>,
+) -> Result<NormalizedFrameworkEvent, FrameworkAdapterError> {
+    validate_managed_external_action(&request.action)?;
+    let reason = reason.into();
+    let mut metadata = request.action.metadata();
+    metadata.extend(BTreeMap::from([
+        ("tenant_id".to_string(), request.session.tenant_id.clone()),
+        (
+            "workspace_id".to_string(),
+            request.session.workspace_id.clone(),
+        ),
+        ("worker_id".to_string(), request.session.worker_id.clone()),
+        (
+            "action".to_string(),
+            request.action.capability_action().as_str().to_string(),
+        ),
+        ("target".to_string(), request.action.target()),
+        ("decision".to_string(), "denied".to_string()),
+        (
+            "isolation_backend".to_string(),
+            request.session.isolation_backend.clone(),
+        ),
+        (
+            "external_action".to_string(),
+            request.action.capability_action().as_str().to_string(),
+        ),
+        ("external_target".to_string(), request.action.target()),
+        (
+            "failure_source".to_string(),
+            "gateway_authorizer_transport".to_string(),
+        ),
+    ]));
+    Ok(NormalizedFrameworkEvent {
+        session_id: request.session.session_id.clone(),
+        run_id: request.session.run_id.clone(),
+        adapter_name: request.session.adapter_name.clone(),
+        adapter_version: request.session.adapter_version.clone(),
+        framework: request.session.framework,
+        mode: request.session.mode,
+        kind: FrameworkAdapterEventKind::CapabilityDenied,
+        message: Some(reason),
+        metadata,
+    })
+}
+
 fn validate_managed_external_action(
     action: &ManagedExternalAction,
 ) -> Result<(), FrameworkAdapterError> {
@@ -1499,6 +1546,49 @@ mod tests {
             event.metadata.get("body_policy").map(String::as_str),
             Some("redact_and_scan")
         );
+    }
+
+    #[test]
+    fn managed_external_action_transport_failure_projects_to_denied_timeline_event() {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        let event = managed_external_action_transport_failure_event(
+            &ManagedExternalActionRequest {
+                session,
+                action: ManagedExternalAction::Cli(ManagedCliAction {
+                    command: "codex".to_string(),
+                    args: vec!["run".to_string(), "--json".to_string()],
+                    working_dir: "/workspace".to_string(),
+                    env_policy: "gateway_injected_only".to_string(),
+                    timeout_millis: 30_000,
+                    stdout_limit_bytes: 1024,
+                    stderr_limit_bytes: 1024,
+                    artifact_capture: true,
+                }),
+                high_risk: false,
+            },
+            "gateway external action HTTP authorizer response read failed: timed out",
+        )
+        .unwrap();
+
+        let record = event.timeline_record().unwrap();
+
+        assert_eq!(event.kind, FrameworkAdapterEventKind::CapabilityDenied);
+        assert_eq!(record.kind, "capability.denied");
+        assert_eq!(record.target, "codex");
+        assert_eq!(record.outcome, "denied");
+        assert_eq!(
+            event.metadata.get("failure_source").map(String::as_str),
+            Some("gateway_authorizer_transport")
+        );
+        assert_eq!(
+            event.metadata.get("external_action").map(String::as_str),
+            Some("cli")
+        );
+        assert!(event
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("response read failed")));
     }
 
     #[test]
