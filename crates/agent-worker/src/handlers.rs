@@ -6,7 +6,8 @@
 
 use std::{
     env,
-    path::{Path, PathBuf},
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -81,32 +82,33 @@ fn probed_binary_handler(
     env_var: &str,
     missing_message: &str,
 ) -> AgentWorkerFrameworkHandler {
-    match env::var(env_var) {
-        Ok(path) if !path.trim().is_empty() && Path::new(&path).is_file() => {
+    let capabilities = capabilities_for_adapter(adapter_name);
+    match configured_binary_error(env_var) {
+        None => AgentWorkerFrameworkHandler {
+            adapter_name: adapter_name.to_string(),
+            framework: framework.to_string(),
+            version: "external".to_string(),
+            capabilities,
+            ready: true,
+            readiness_reason: Some(format!("{env_var} points to an executable file")),
+        },
+        Some(reason) if reason == format!("{env_var} was not configured") => {
             AgentWorkerFrameworkHandler {
                 adapter_name: adapter_name.to_string(),
                 framework: framework.to_string(),
-                version: "external".to_string(),
-                capabilities: capabilities_for_adapter(adapter_name),
-                ready: true,
-                readiness_reason: Some(format!("{env_var} points to executable candidate {path}")),
+                version: "unknown".to_string(),
+                capabilities,
+                ready: false,
+                readiness_reason: Some(missing_message.to_string()),
             }
         }
-        Ok(path) if !path.trim().is_empty() => AgentWorkerFrameworkHandler {
+        Some(reason) => AgentWorkerFrameworkHandler {
             adapter_name: adapter_name.to_string(),
             framework: framework.to_string(),
             version: "unknown".to_string(),
-            capabilities: capabilities_for_adapter(adapter_name),
+            capabilities,
             ready: false,
-            readiness_reason: Some(format!("{env_var} does not point to a file: {path}")),
-        },
-        _ => AgentWorkerFrameworkHandler {
-            adapter_name: adapter_name.to_string(),
-            framework: framework.to_string(),
-            version: "unknown".to_string(),
-            capabilities: capabilities_for_adapter(adapter_name),
-            ready: false,
-            readiness_reason: Some(missing_message.to_string()),
+            readiness_reason: Some(reason),
         },
     }
 }
@@ -228,16 +230,42 @@ fn handler_binary_smoke_target(adapter_name: &str) -> Result<HandlerBinarySmokeT
 }
 
 fn configured_binary_path(env_var: &str) -> Result<PathBuf> {
+    if let Some(reason) = configured_binary_error(env_var) {
+        bail!("{reason}");
+    }
     let raw = env::var(env_var).map_err(|_| anyhow!("{env_var} was not configured"))?;
+    Ok(PathBuf::from(raw.trim()))
+}
+
+fn configured_binary_error(env_var: &str) -> Option<String> {
+    let raw = match env::var(env_var) {
+        Ok(raw) => raw,
+        Err(_) => return Some(format!("{env_var} was not configured")),
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        bail!("{env_var} was not configured");
+        return Some(format!("{env_var} was not configured"));
     }
     let path = PathBuf::from(trimmed);
-    if !path.is_file() {
-        bail!("{env_var} does not point to a file: {}", path.display());
+    let metadata = match path.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Some(format!(
+                "{env_var} does not point to a file: {}",
+                path.display()
+            ));
+        }
+    };
+    if !metadata.is_file() {
+        return Some(format!(
+            "{env_var} does not point to a file: {}",
+            path.display()
+        ));
     }
-    Ok(path)
+    if (metadata.permissions().mode() & 0o111) == 0 {
+        return Some(format!("{env_var} is not executable: {}", path.display()));
+    }
+    None
 }
 
 fn output_excerpt(output: &[u8]) -> String {
@@ -380,5 +408,34 @@ mod tests {
             .to_string();
 
         assert!(error.contains("AGENT_WORKER_HERMES_BIN was not configured"));
+    }
+
+    #[test]
+    fn handler_probe_and_smoke_reject_non_executable_adapter_binary() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join("claude-smoke");
+        fs::write(&binary_path, "#!/bin/sh\nprintf 'claude smoke\\n'\n").unwrap();
+        let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&binary_path, permissions).unwrap();
+        env::set_var("AGENT_WORKER_CLAUDE_CODE_BIN", &binary_path);
+
+        let handlers = framework_handlers();
+        let error = smoke_handler_binary("claude-code", DEFAULT_HANDLER_SMOKE_TIMEOUT_MILLIS)
+            .unwrap_err()
+            .to_string();
+
+        env::remove_var("AGENT_WORKER_CLAUDE_CODE_BIN");
+        let claude = handlers
+            .iter()
+            .find(|handler| handler.adapter_name == "claude-code")
+            .unwrap();
+        assert!(!claude.ready);
+        assert!(claude
+            .readiness_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("is not executable")));
+        assert!(error.contains("AGENT_WORKER_CLAUDE_CODE_BIN is not executable"));
     }
 }

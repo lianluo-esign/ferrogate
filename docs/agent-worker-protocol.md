@@ -193,12 +193,13 @@ normalized framework events such as `session.started`, `capability.allowed`,
 and `collect_artifacts` can return
 `result.kind=handler_artifacts` with an artifact manifest plus the related
 events. When `framework_adapter` selects `codex`, `claude-code`, or `hermes`,
-the current worker path runs the process-shim contract and emits normalized
-prepared events such as `session.started`, `capability.allowed`,
-`run.started`, `model.requested`, `artifact.created`, and `session.closed`
-without executing a real vendor binary or SDK. This is handler selection and
+the current worker path first runs a bounded configured-binary smoke after
+gateway capability authorization, then runs the process-shim contract and emits
+normalized prepared events such as `session.started`, `capability.allowed`,
+`cli.requested`, `run.started`, `model.requested`, `artifact.created`, and
+`session.closed`. This is handler selection, configured binary startup, and
 event-contract proof inside `agent-worker`, not Firecracker boot proof and not
-Codex/Claude/Hermes process execution proof. The worker also
+Codex/Claude/Hermes task execution proof. The worker also
 keeps a process-local management state store for bounded contract smokes:
 accepted idempotency retries replay the first stored action outcome instead of
 re-dispatching lifecycle logic, and lifecycle/handler outcomes are recorded
@@ -403,10 +404,12 @@ codex|claude-code|hermes`. The smoke is owned by the worker process and reads
 only the worker-owned binary configuration variables:
 `AGENT_WORKER_CODEX_BIN`, `AGENT_WORKER_CLAUDE_CODE_BIN`, and
 `AGENT_WORKER_HERMES_BIN`. It does not scan `PATH`, and the gateway must not run
-the same probe itself. The current smoke executes a short version-style probe
-with a timeout and returns JSON evidence for the adapter, configured binary
-path, probe arguments, exit status, and output excerpts. A passing binary smoke
-proves only that the configured handler binary can be started by `agent-worker`;
+the same probe itself. The configured path must point to an executable file; a
+non-executable file is reported as handler-unready before scheduling should pick
+that adapter. The current smoke executes a short version-style probe with a
+timeout and returns JSON evidence for the adapter, configured binary path, probe
+arguments, exit status, and output excerpts. A passing binary smoke proves only
+that the configured handler binary can be started by `agent-worker`;
 it is not Firecracker boot proof, SDK integration proof, or proof that a real
 agent task completed.
 
