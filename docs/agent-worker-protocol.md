@@ -184,8 +184,10 @@ keeps the child process in worker state by `session_id/run_id`, and returns
 `status=running`, `outcome=provisioned`, plus the retained
 `isolation_instance_id`. `stream_status` reports that same retained instance as
 `running` or `exited`, `collect_artifacts` can return a Firecracker log,
-serial-output, stdout, and stderr artifact manifest for the retained instance,
-`stop` terminates and removes the retained microVM with
+serial-output, stdout, and stderr artifact manifest for the retained instance
+plus matching `artifact.created` events containing artifact id, name, byte
+length, media type, and `isolation_instance_id`, `stop` terminates and removes
+the retained microVM with
 `status=cancelled/outcome=stopped`, and `cleanup` terminates any remaining
 microVM or becomes a safe no-op after stop.
 `exec_or_attach`

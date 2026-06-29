@@ -5,6 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use std::{
+    collections::HashMap,
     env,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -17,7 +18,10 @@ use std::{
 };
 
 use anyhow::{bail, Result};
-use ferrogate_runtime::{AgentWorkerFrameworkArtifactResult, AgentWorkerIsolationBackendReport};
+use ferrogate_runtime::{
+    AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
+    AgentWorkerIsolationBackendReport,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -886,6 +890,19 @@ impl FirecrackerMicroVm {
         self.artifacts.to_artifact_results(&self.instance_id)
     }
 
+    pub(crate) fn artifact_events(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Vec<AgentWorkerFrameworkEventResult> {
+        self.artifact_results()
+            .into_iter()
+            .map(|artifact| {
+                firecracker_artifact_event(session_id, run_id, &self.instance_id, artifact)
+            })
+            .collect()
+    }
+
     pub(crate) fn stop(&mut self) -> FirecrackerStopReport {
         let process = stop_firecracker_child(&mut self.child);
         let api_socket_removed = remove_firecracker_api_socket(&self.artifacts.api_socket);
@@ -904,6 +921,33 @@ impl FirecrackerMicroVm {
 impl Drop for FirecrackerMicroVm {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+fn firecracker_artifact_event(
+    session_id: &str,
+    run_id: &str,
+    instance_id: &str,
+    artifact: AgentWorkerFrameworkArtifactResult,
+) -> AgentWorkerFrameworkEventResult {
+    let mut metadata = HashMap::new();
+    metadata.insert("artifact_id".to_string(), artifact.artifact_id);
+    metadata.insert("artifact_name".to_string(), artifact.name);
+    metadata.insert("media_type".to_string(), artifact.media_type);
+    metadata.insert("byte_len".to_string(), artifact.byte_len.to_string());
+    metadata.insert("isolation_backend".to_string(), "firecracker".to_string());
+    metadata.insert("isolation_instance_id".to_string(), instance_id.to_string());
+    metadata.insert("handler_owner".to_string(), "agent-worker".to_string());
+    AgentWorkerFrameworkEventResult {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        adapter_name: "firecracker".to_string(),
+        adapter_version: "external_bundle".to_string(),
+        framework: "firecracker".to_string(),
+        mode: "managed".to_string(),
+        kind: "artifact.created".to_string(),
+        message: Some("Firecracker microVM artifact collected by agent-worker".to_string()),
+        metadata,
     }
 }
 

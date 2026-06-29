@@ -1539,8 +1539,8 @@ mod tests {
         else {
             panic!("collect_artifacts did not return Firecracker artifact manifest");
         };
-        assert!(events.is_empty());
         assert_eq!(artifacts.len(), 4);
+        assert_eq!(events.len(), 4);
         assert!(artifacts.iter().any(|artifact| {
             artifact.artifact_id == "firecracker-test-instance-firecracker-log"
                 && artifact.name == "firecracker.log"
@@ -1549,6 +1549,19 @@ mod tests {
         assert!(artifacts
             .iter()
             .any(|artifact| artifact.name == "serial.log" && artifact.byte_len > 0));
+        assert!(events.iter().all(|event| event.kind == "artifact.created"));
+        assert!(events.iter().any(|event| {
+            event
+                .metadata
+                .get("artifact_id")
+                .is_some_and(|artifact_id| {
+                    artifact_id == "firecracker-test-instance-firecracker-log"
+                })
+                && event
+                    .metadata
+                    .get("isolation_instance_id")
+                    .is_some_and(|instance_id| instance_id == "firecracker-test-instance")
+        }));
     }
 
     #[test]
