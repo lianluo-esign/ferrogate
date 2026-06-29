@@ -31,6 +31,7 @@ pub struct SelfHostedWorkerRegistration {
     pub framework_adapter: String,
     pub token_id: String,
     pub token_secret: String,
+    pub identity_expires_at_unix: Option<u64>,
     pub capabilities: Vec<String>,
 }
 
@@ -41,6 +42,8 @@ pub struct SelfHostedWorkerIdentity {
     pub worker_id: String,
     pub token_id: String,
     pub token_secret: String,
+    #[serde(default)]
+    pub observed_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +54,7 @@ pub struct RegisteredSelfHostedWorker {
     pub framework_adapter: String,
     pub token_id: String,
     token_secret: String,
+    pub identity_expires_at_unix: Option<u64>,
     pub capabilities: Vec<String>,
     pub active: bool,
 }
@@ -63,6 +67,7 @@ impl RegisteredSelfHostedWorker {
             worker_id: self.worker_id.clone(),
             token_id: self.token_id.clone(),
             token_secret: self.token_secret.clone(),
+            observed_at_unix: None,
         }
     }
 }
@@ -96,6 +101,7 @@ impl SelfHostedWorkerRegistry {
             framework_adapter: registration.framework_adapter,
             token_id: registration.token_id,
             token_secret: registration.token_secret,
+            identity_expires_at_unix: registration.identity_expires_at_unix,
             capabilities: normalized_capabilities(registration.capabilities),
             active: true,
         };
@@ -125,6 +131,15 @@ impl SelfHostedWorkerRegistry {
         if worker.token_id != identity.token_id || worker.token_secret != identity.token_secret {
             return Err(SelfHostedWorkerError::InvalidIdentity(
                 "worker token does not match registered identity envelope".to_string(),
+            ));
+        }
+        if worker
+            .identity_expires_at_unix
+            .zip(identity.observed_at_unix)
+            .is_some_and(|(expires_at, observed_at)| observed_at >= expires_at)
+        {
+            return Err(SelfHostedWorkerError::InvalidIdentity(
+                "worker identity has expired".to_string(),
             ));
         }
         Ok(worker)
@@ -1231,6 +1246,34 @@ mod tests {
     }
 
     #[test]
+    fn validates_self_hosted_worker_identity_expiry() {
+        let mut registry = SelfHostedWorkerRegistry::default();
+        let worker = registry
+            .register(SelfHostedWorkerRegistration {
+                tenant_id: "tenant-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                worker_id: "worker-1".to_string(),
+                framework_adapter: "codex".to_string(),
+                token_id: "token-1".to_string(),
+                token_secret: "secret-1".to_string(),
+                identity_expires_at_unix: Some(100),
+                capabilities: vec!["logs".to_string()],
+            })
+            .unwrap();
+
+        let mut valid_identity = worker.identity();
+        valid_identity.observed_at_unix = Some(99);
+        registry.validate_identity(&valid_identity).unwrap();
+
+        let mut expired_identity = worker.identity();
+        expired_identity.observed_at_unix = Some(100);
+        let error = registry.validate_identity(&expired_identity).unwrap_err();
+
+        assert!(matches!(error, SelfHostedWorkerError::InvalidIdentity(_)));
+        assert!(error.to_string().contains("expired"));
+    }
+
+    #[test]
     fn ingests_reported_telemetry_with_self_hosted_trust_level() {
         let registry = registered_registry();
         let identity = registry.list()[0].identity();
@@ -1790,6 +1833,7 @@ mod tests {
                 framework_adapter: "codex".to_string(),
                 token_id: "token-2".to_string(),
                 token_secret: "secret-2".to_string(),
+                identity_expires_at_unix: None,
                 capabilities: vec!["logs".to_string(), "artifacts".to_string()],
             })
             .unwrap();
@@ -1801,6 +1845,7 @@ mod tests {
                 framework_adapter: "hermes".to_string(),
                 token_id: "token-3".to_string(),
                 token_secret: "secret-3".to_string(),
+                identity_expires_at_unix: None,
                 capabilities: vec!["logs".to_string(), "artifacts".to_string()],
             })
             .unwrap();
@@ -1846,6 +1891,7 @@ mod tests {
                 framework_adapter: "codex".to_string(),
                 token_id: "token-1".to_string(),
                 token_secret: "secret-1".to_string(),
+                identity_expires_at_unix: None,
                 capabilities: vec!["logs".to_string()],
             })
             .unwrap();
@@ -1882,6 +1928,7 @@ mod tests {
                 framework_adapter: "codex".to_string(),
                 token_id: "token-2".to_string(),
                 token_secret: "secret-2".to_string(),
+                identity_expires_at_unix: None,
                 capabilities: vec!["logs".to_string(), "artifacts".to_string()],
             })
             .unwrap();
@@ -2113,6 +2160,7 @@ mod tests {
             framework_adapter: "codex".to_string(),
             token_id: "token-1".to_string(),
             token_secret: "secret-1".to_string(),
+            identity_expires_at_unix: None,
             capabilities: vec![
                 "logs".to_string(),
                 "heartbeat".to_string(),
@@ -2129,6 +2177,7 @@ mod tests {
             worker_id: "worker-1".to_string(),
             token_id: "token-1".to_string(),
             token_secret: "secret-1".to_string(),
+            observed_at_unix: None,
         }
     }
 

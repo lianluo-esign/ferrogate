@@ -298,8 +298,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 5;
-const POSTGRES_SCHEMA_NAME: &str = "005_supabase_self_hosted_worker_lifecycle";
+const POSTGRES_SCHEMA_VERSION: u64 = 6;
+const POSTGRES_SCHEMA_NAME: &str = "006_self_hosted_worker_identity_expiry";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -582,6 +582,7 @@ pub struct StoredSelfHostedWorkerRegistration {
     pub worker_name: String,
     pub status: String,
     pub identity_fingerprint: String,
+    pub identity_expires_at_unix: Option<u64>,
     pub orchestration_enabled: bool,
     pub registered_at_unix: Option<u64>,
     pub last_seen_at_unix: Option<u64>,
@@ -1563,19 +1564,21 @@ impl PostgresControlPlaneStore {
                 .unwrap_or_else(now_unix_seconds),
         );
         let last_seen_at_unix = registration.last_seen_at_unix.map(saturating_i64);
+        let identity_expires_at_unix = registration.identity_expires_at_unix.map(saturating_i64);
         self.with_client(|client| {
             client.execute(
                 "INSERT INTO self_hosted_worker_registrations \
                  (id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
-                  orchestration_enabled, registered_at_unix, last_seen_at_unix, trust_level, \
-                  capability_envelope_json) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                  identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
+                  last_seen_at_unix, trust_level, capability_envelope_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::text::jsonb) \
                  ON CONFLICT (id) DO UPDATE SET \
                  tenant = EXCLUDED.tenant, \
                  workspace_id = EXCLUDED.workspace_id, \
                  worker_name = EXCLUDED.worker_name, \
                  status = EXCLUDED.status, \
                  identity_fingerprint = EXCLUDED.identity_fingerprint, \
+                 identity_expires_at_unix = EXCLUDED.identity_expires_at_unix, \
                  orchestration_enabled = EXCLUDED.orchestration_enabled, \
                  last_seen_at_unix = EXCLUDED.last_seen_at_unix, \
                  trust_level = EXCLUDED.trust_level, \
@@ -1587,6 +1590,7 @@ impl PostgresControlPlaneStore {
                     &registration.worker_name,
                     &registration.status,
                     &registration.identity_fingerprint,
+                    &identity_expires_at_unix,
                     &registration.orchestration_enabled,
                     &registered_at_unix,
                     &last_seen_at_unix,
@@ -1605,8 +1609,8 @@ impl PostgresControlPlaneStore {
             let rows = client
                 .query(
                     "SELECT id, tenant, workspace_id, worker_name, status, identity_fingerprint, \
-                        orchestration_enabled, registered_at_unix, last_seen_at_unix, trust_level, \
-                        capability_envelope_json::text \
+                        identity_expires_at_unix, orchestration_enabled, registered_at_unix, \
+                        last_seen_at_unix, trust_level, capability_envelope_json::text \
                      FROM self_hosted_worker_registrations \
                      ORDER BY registered_at_unix ASC, id ASC",
                     &[],
@@ -2486,6 +2490,28 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         }
     }
 
+    const BIGINT_COLUMNS: &[(&str, &str)] = &[(
+        "self_hosted_worker_registrations",
+        "identity_expires_at_unix",
+    )];
+    for (table, column) in BIGINT_COLUMNS {
+        let data_type = client
+            .query_opt(
+                "SELECT data_type FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = $1 \
+                   AND column_name = $2",
+                &[table, column],
+            )
+            .map_err(postgres_error)?
+            .map(|row| row.get::<_, String>(0));
+        if data_type.as_deref() != Some("bigint") {
+            return Err(StorageError::Postgres(format!(
+                "required schema column {table}.{column} must be bigint"
+            )));
+        }
+    }
+
     const INDEXES: &[&str] = &[
         "idx_control_plane_resources_document_gin",
         "idx_agent_runs_tenant_started",
@@ -2495,6 +2521,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_managed_worker_sessions_tenant_status",
         "idx_managed_worker_lifecycle_session_time",
         "idx_self_hosted_worker_registrations_tenant_status",
+        "idx_self_hosted_worker_registrations_identity_expiry",
         "idx_self_hosted_worker_heartbeats_worker_time",
         "idx_self_hosted_worker_telemetry_worker_time",
         "idx_self_hosted_worker_artifacts_run",
@@ -2847,11 +2874,12 @@ fn self_hosted_worker_registration_from_row(
         worker_name: row.get(3),
         status: row.get(4),
         identity_fingerprint: row.get(5),
-        orchestration_enabled: row.get(6),
-        registered_at_unix: Some(nonnegative_u64(row.get(7))),
-        last_seen_at_unix: row.get::<_, Option<i64>>(8).map(nonnegative_u64),
-        trust_level: row.get(9),
-        capability_envelope_json: row.get(10),
+        identity_expires_at_unix: row.get::<_, Option<i64>>(6).map(nonnegative_u64),
+        orchestration_enabled: row.get(7),
+        registered_at_unix: Some(nonnegative_u64(row.get(8))),
+        last_seen_at_unix: row.get::<_, Option<i64>>(9).map(nonnegative_u64),
+        trust_level: row.get(10),
+        capability_envelope_json: row.get(11),
     }
 }
 
@@ -5692,6 +5720,7 @@ mod tests {
                 worker_name: "customer-worker-a".into(),
                 status: "online".into(),
                 identity_fingerprint: "sha256:worker-identity".into(),
+                identity_expires_at_unix: Some(2_000),
                 orchestration_enabled: true,
                 registered_at_unix: Some(20),
                 last_seen_at_unix: Some(21),

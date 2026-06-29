@@ -229,6 +229,7 @@ pub(crate) struct AdminSelfHostedWorkerRecord {
     pub(crate) worker_name: String,
     pub(crate) status: String,
     pub(crate) identity_fingerprint: String,
+    pub(crate) identity_expires_at_unix: Option<u64>,
     pub(crate) orchestration_enabled: bool,
     pub(crate) registered_at_unix: Option<u64>,
     pub(crate) last_seen_at_unix: Option<u64>,
@@ -261,6 +262,8 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationRequest {
     pub(crate) worker_name: String,
     pub(crate) identity_fingerprint: String,
     #[serde(default)]
+    pub(crate) identity_expires_at_unix: Option<u64>,
+    #[serde(default)]
     pub(crate) orchestration_enabled: bool,
     #[serde(default)]
     pub(crate) capability_envelope_json: Option<String>,
@@ -276,6 +279,8 @@ pub(crate) struct AdminSelfHostedWorkerRegistrationResponse {
 #[serde(deny_unknown_fields)]
 pub(crate) struct AdminSelfHostedWorkerRotateRequest {
     pub(crate) identity_fingerprint: String,
+    #[serde(default)]
+    pub(crate) identity_expires_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -283,6 +288,7 @@ pub(crate) struct AdminSelfHostedWorkerRotateResponse {
     pub(crate) object: &'static str,
     pub(crate) worker: AdminSelfHostedWorkerRecord,
     pub(crate) previous_identity_fingerprint: String,
+    pub(crate) previous_identity_expires_at_unix: Option<u64>,
     pub(crate) rotated_at_unix: Option<u64>,
 }
 

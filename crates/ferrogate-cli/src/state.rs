@@ -2606,6 +2606,7 @@ impl SelfHostedWorkerDispatchRuntime {
             ),
             token_id: identity.token_id,
             token_secret: identity.token_secret,
+            identity_expires_at_unix: registration.identity_expires_at_unix,
             capabilities: capabilities.clone(),
         }) {
             Ok(_) | Err(SelfHostedWorkerError::DuplicateWorker(_)) => {}
@@ -2644,7 +2645,13 @@ impl SelfHostedWorkerDispatchRuntime {
         &self,
         identity: &SelfHostedWorkerIdentity,
     ) -> Result<(), SelfHostedWorkerError> {
-        self.registry.validate_identity(identity).map(|_| ())
+        let mut observed_identity = identity.clone();
+        if observed_identity.observed_at_unix.is_none() {
+            observed_identity.observed_at_unix = now_unix_seconds();
+        }
+        self.registry
+            .validate_identity(&observed_identity)
+            .map(|_| ())
     }
 
     fn seed_run(
@@ -2697,6 +2704,7 @@ fn self_hosted_worker_runtime_identity(
         worker_id: registration.id.clone(),
         token_id: registration.identity_fingerprint.clone(),
         token_secret: registration.identity_fingerprint.clone(),
+        observed_at_unix: None,
     }
 }
 
@@ -4960,6 +4968,7 @@ impl AppState {
             worker_name: request.worker_name.trim().to_string(),
             status: "registered".into(),
             identity_fingerprint: request.identity_fingerprint.trim().to_string(),
+            identity_expires_at_unix: request.identity_expires_at_unix,
             orchestration_enabled: request.orchestration_enabled,
             registered_at_unix: now,
             last_seen_at_unix: None,
@@ -5001,7 +5010,9 @@ impl AppState {
                 ))
             })?;
         let previous_identity_fingerprint = registration.identity_fingerprint.clone();
+        let previous_identity_expires_at_unix = registration.identity_expires_at_unix;
         registration.identity_fingerprint = request.identity_fingerprint.trim().to_string();
+        registration.identity_expires_at_unix = request.identity_expires_at_unix;
         let rotated_at_unix = now_unix_seconds();
         self.repositories
             .upsert_self_hosted_worker_registration(registration.clone())
@@ -5016,6 +5027,7 @@ impl AppState {
             object: "self_hosted_worker_identity_rotation",
             worker,
             previous_identity_fingerprint,
+            previous_identity_expires_at_unix,
             rotated_at_unix,
         })
     }
@@ -5033,8 +5045,11 @@ impl AppState {
 
     pub(crate) fn poll_self_hosted_worker_run(
         &self,
-        request: SelfHostedRunPollRequest,
+        mut request: SelfHostedRunPollRequest,
     ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
+        if request.identity.observed_at_unix.is_none() {
+            request.identity.observed_at_unix = Some(request.now_unix);
+        }
         match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => dispatch.poll_run(request),
             Err(poisoned) => poisoned.into_inner().poll_run(request),
@@ -5043,8 +5058,11 @@ impl AppState {
 
     pub(crate) fn ack_self_hosted_worker_run(
         &self,
-        request: SelfHostedRunAckRequest,
+        mut request: SelfHostedRunAckRequest,
     ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
+        if request.identity.observed_at_unix.is_none() {
+            request.identity.observed_at_unix = Some(request.reported_at_unix);
+        }
         match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => dispatch.ack_run(request),
             Err(poisoned) => poisoned.into_inner().ack_run(request),
@@ -5342,6 +5360,7 @@ impl AppState {
                     worker_name: registration.worker_name,
                     status: registration.status,
                     identity_fingerprint: registration.identity_fingerprint,
+                    identity_expires_at_unix: registration.identity_expires_at_unix,
                     orchestration_enabled: registration.orchestration_enabled,
                     registered_at_unix: registration.registered_at_unix,
                     last_seen_at_unix: registration.last_seen_at_unix,
@@ -8008,6 +8027,7 @@ mod tests {
                 worker_name: "customer-worker".into(),
                 status: "online".into(),
                 identity_fingerprint: "sha256:worker".into(),
+                identity_expires_at_unix: None,
                 orchestration_enabled: true,
                 registered_at_unix: Some(10),
                 last_seen_at_unix: Some(20),
@@ -8173,6 +8193,7 @@ mod tests {
                     workspace_id: " workspace-1 ".into(),
                     worker_name: " customer-worker ".into(),
                     identity_fingerprint: " sha256:worker ".into(),
+                    identity_expires_at_unix: Some(9_999),
                     orchestration_enabled: true,
                     capability_envelope_json: Some(r#"{"frameworks":["codex"]}"#.into()),
                 },
@@ -8184,6 +8205,7 @@ mod tests {
         assert_eq!(worker.worker_name, "customer-worker");
         assert_eq!(worker.status, "registered");
         assert_eq!(worker.identity_fingerprint, "sha256:worker");
+        assert_eq!(worker.identity_expires_at_unix, Some(9_999));
         assert!(worker.orchestration_enabled);
         assert_eq!(worker.trust_level, "reported_by_self_hosted_worker");
         assert!(worker.registered_at_unix.is_some());
@@ -8197,6 +8219,7 @@ mod tests {
         assert_eq!(records[0].workspace_id, "workspace-1");
         assert_eq!(records[0].worker_name, "customer-worker");
         assert_eq!(records[0].identity_fingerprint, "sha256:worker");
+        assert_eq!(records[0].identity_expires_at_unix, Some(9_999));
         assert_eq!(
             records[0].capability_envelope_json,
             r#"{"frameworks":["codex"]}"#
@@ -8220,6 +8243,7 @@ mod tests {
                 workspace_id: " ".into(),
                 worker_name: "customer-worker".into(),
                 identity_fingerprint: "sha256:worker".into(),
+                identity_expires_at_unix: None,
                 orchestration_enabled: false,
                 capability_envelope_json: None,
             },
@@ -8236,6 +8260,7 @@ mod tests {
                 workspace_id: "workspace-1".into(),
                 worker_name: "customer-worker".into(),
                 identity_fingerprint: "sha256:worker".into(),
+                identity_expires_at_unix: None,
                 orchestration_enabled: false,
                 capability_envelope_json: Some("{not-json".into()),
             },
@@ -8262,6 +8287,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:old".into(),
+                    identity_expires_at_unix: Some(100),
                     orchestration_enabled: false,
                     capability_envelope_json: None,
                 },
@@ -8273,19 +8299,23 @@ mod tests {
                 &worker.id,
                 crate::responses::AdminSelfHostedWorkerRotateRequest {
                     identity_fingerprint: " sha256:new ".into(),
+                    identity_expires_at_unix: Some(200),
                 },
             )
             .expect("rotation should be accepted");
 
         assert_eq!(response.object, "self_hosted_worker_identity_rotation");
         assert_eq!(response.previous_identity_fingerprint, "sha256:old");
+        assert_eq!(response.previous_identity_expires_at_unix, Some(100));
         assert_eq!(response.worker.id, worker.id);
         assert_eq!(response.worker.identity_fingerprint, "sha256:new");
+        assert_eq!(response.worker.identity_expires_at_unix, Some(200));
         assert!(response.rotated_at_unix.is_some());
 
         let records = state.repositories.self_hosted_worker_registrations();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].identity_fingerprint, "sha256:new");
+        assert_eq!(records[0].identity_expires_at_unix, Some(200));
     }
 
     #[test]
@@ -8296,6 +8326,7 @@ mod tests {
             "missing-worker",
             crate::responses::AdminSelfHostedWorkerRotateRequest {
                 identity_fingerprint: "sha256:new".into(),
+                identity_expires_at_unix: None,
             },
         );
         assert!(matches!(
@@ -8311,6 +8342,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:old".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: false,
                     capability_envelope_json: None,
                 },
@@ -8320,6 +8352,7 @@ mod tests {
             &worker.id,
             crate::responses::AdminSelfHostedWorkerRotateRequest {
                 identity_fingerprint: " ".into(),
+                identity_expires_at_unix: None,
             },
         );
         assert!(matches!(
@@ -8348,6 +8381,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: true,
                     capability_envelope_json: None,
                 },
@@ -8423,6 +8457,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: false,
                     capability_envelope_json: None,
                 },
@@ -8478,6 +8513,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: true,
                     capability_envelope_json: None,
                 },
@@ -8542,6 +8578,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: false,
                     capability_envelope_json: None,
                 },
@@ -8601,6 +8638,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: true,
                     capability_envelope_json: None,
                 },
@@ -8673,6 +8711,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: false,
                     capability_envelope_json: None,
                 },
@@ -8754,6 +8793,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: true,
                     capability_envelope_json: None,
                 },
@@ -8823,6 +8863,7 @@ mod tests {
                     workspace_id: "workspace-1".into(),
                     worker_name: "customer-worker".into(),
                     identity_fingerprint: "sha256:worker".into(),
+                    identity_expires_at_unix: None,
                     orchestration_enabled: false,
                     capability_envelope_json: None,
                 },

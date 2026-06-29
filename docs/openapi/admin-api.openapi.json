@@ -10234,6 +10234,14 @@
             "type": "string",
             "minLength": 1
           },
+          "identity_expires_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Optional Unix timestamp after which the self-hosted worker identity is rejected by worker-facing transport APIs."
+          },
           "orchestration_enabled": {
             "type": "boolean",
             "default": false
@@ -10476,6 +10484,7 @@
           "worker_name",
           "status",
           "identity_fingerprint",
+          "identity_expires_at_unix",
           "orchestration_enabled",
           "trust_level",
           "stale",
@@ -10504,6 +10513,14 @@
           },
           "identity_fingerprint": {
             "type": "string"
+          },
+          "identity_expires_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Unix timestamp after which the self-hosted worker identity is rejected by worker-facing transport APIs. Null means no gateway-enforced identity expiry."
           },
           "orchestration_enabled": {
             "type": "boolean"
@@ -11065,6 +11082,14 @@
           "identity_fingerprint": {
             "type": "string",
             "minLength": 1
+          },
+          "identity_expires_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Optional replacement expiry for the rotated identity. Null clears gateway-enforced identity expiry."
           }
         },
         "additionalProperties": false
@@ -11075,6 +11100,7 @@
           "object",
           "worker",
           "previous_identity_fingerprint",
+          "previous_identity_expires_at_unix",
           "rotated_at_unix"
         ],
         "properties": {
@@ -11087,6 +11113,13 @@
           },
           "previous_identity_fingerprint": {
             "type": "string"
+          },
+          "previous_identity_expires_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           },
           "rotated_at_unix": {
             "type": [

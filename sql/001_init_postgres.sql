@@ -170,6 +170,7 @@ CREATE TABLE IF NOT EXISTS self_hosted_worker_registrations (
     worker_name TEXT NOT NULL,
     status TEXT NOT NULL,
     identity_fingerprint TEXT NOT NULL,
+    identity_expires_at_unix BIGINT,
     orchestration_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     registered_at_unix BIGINT NOT NULL,
     last_seen_at_unix BIGINT,
@@ -185,6 +186,12 @@ CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_workspace_status
 
 CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_identity
     ON self_hosted_worker_registrations(identity_fingerprint);
+
+CREATE INDEX IF NOT EXISTS idx_self_hosted_worker_registrations_identity_expiry
+    ON self_hosted_worker_registrations(identity_expires_at_unix);
+
+ALTER TABLE self_hosted_worker_registrations
+    ADD COLUMN IF NOT EXISTS identity_expires_at_unix BIGINT;
 
 CREATE TABLE IF NOT EXISTS self_hosted_worker_heartbeats (
     id TEXT PRIMARY KEY,
@@ -497,5 +504,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (5, '005_supabase_self_hosted_worker_lifecycle')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (6, '006_self_hosted_worker_identity_expiry')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

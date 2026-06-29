@@ -20,6 +20,7 @@ use std::{cell::RefCell, thread, time::Duration};
 pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
     let case = LocalHarness::start(&args.ferrogate_bin, 4)?;
     let self_hosted_worker_id = RefCell::new(String::new());
+    let expired_self_hosted_worker_id = RefCell::new(String::new());
     let self_hosted_lease_id = RefCell::new(String::new());
 
     case.expect_json("GET", "/healthz", &[], "", 200, |body| {
@@ -338,6 +339,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
           "workspace_id": "workspace-1",
           "worker_name": "customer-worker-a",
           "identity_fingerprint": "sha256:test-worker",
+          "identity_expires_at_unix": 9999999999,
           "orchestration_enabled": true,
           "capability_envelope_json": "{\"frameworks\":[\"codex\"],\"capabilities\":[\"shell\",\"mcp\"]}"
         }"#,
@@ -353,6 +355,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["worker"]["worker_name"], "customer-worker-a");
             assert_eq!(body["worker"]["status"], "registered");
             assert_eq!(body["worker"]["identity_fingerprint"], "sha256:test-worker");
+            assert_eq!(body["worker"]["identity_expires_at_unix"], 9999999999_u64);
             assert_eq!(body["worker"]["orchestration_enabled"], true);
             assert_eq!(
                 body["worker"]["trust_level"],
@@ -364,6 +367,50 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["worker"]["telemetry_event_count"], 0);
             assert_eq!(body["worker"]["artifact_count"], 0);
             assert_eq!(body["worker"]["checkpoint_count"], 0);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/admin/v1/self-hosted-workers",
+        &[ADMIN_AUTH, JSON_CONTENT],
+        r#"{
+          "tenant": {
+            "organization_id": "org_demo",
+            "project_id": "project_gateway",
+            "api_key_id": "key_admin"
+          },
+          "workspace_id": "workspace-1",
+          "worker_name": "customer-worker-expired",
+          "identity_fingerprint": "sha256:test-worker",
+          "identity_expires_at_unix": 999,
+          "orchestration_enabled": true
+        }"#,
+        201,
+        |body| {
+            assert_eq!(body["object"], "self_hosted_worker");
+            let worker_id = body["worker"]["id"]
+                .as_str()
+                .context("expired self-hosted worker id should be present")?;
+            expired_self_hosted_worker_id.replace(worker_id.to_string());
+            assert_eq!(body["worker"]["identity_expires_at_unix"], 999_u64);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/self-hosted-workers/runs/poll",
+        &[JSON_CONTENT, SELF_HOSTED_MTLS_HEADER],
+        &self_hosted_worker_poll_body(
+            &expired_self_hosted_worker_id.borrow(),
+            "sha256:test-worker",
+        ),
+        401,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_self_hosted_worker_identity");
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("expired")));
             Ok(())
         },
     )?;
@@ -565,6 +612,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             assert_eq!(body["worker_name"], "customer-worker-a");
             assert_eq!(body["status"], "registered");
             assert_eq!(body["identity_fingerprint"], "sha256:test-worker");
+            assert_eq!(body["identity_expires_at_unix"], 9999999999_u64);
             assert_eq!(body["orchestration_enabled"], true);
             assert_eq!(body["trust_level"], "reported_by_self_hosted_worker");
             assert_eq!(body["stale"], false);
@@ -582,7 +630,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &self_hosted_worker_rotate_path,
         &[ADMIN_AUTH, JSON_CONTENT],
         r#"{
-          "identity_fingerprint": "sha256:test-worker-rotated"
+          "identity_fingerprint": "sha256:test-worker-rotated",
+          "identity_expires_at_unix": 8888888888
         }"#,
         200,
         |body| {
@@ -592,7 +641,9 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
                 body["worker"]["identity_fingerprint"],
                 "sha256:test-worker-rotated"
             );
+            assert_eq!(body["worker"]["identity_expires_at_unix"], 8888888888_u64);
             assert_eq!(body["previous_identity_fingerprint"], "sha256:test-worker");
+            assert_eq!(body["previous_identity_expires_at_unix"], 9999999999_u64);
             assert!(body["rotated_at_unix"].as_u64().is_some());
             Ok(())
         },
@@ -606,6 +657,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         |body| {
             assert_eq!(body["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["identity_fingerprint"], "sha256:test-worker-rotated");
+            assert_eq!(body["identity_expires_at_unix"], 8888888888_u64);
             Ok(())
         },
     )?;
@@ -1201,31 +1253,38 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         200,
         |body| {
             assert_eq!(body["object"], "list");
-            assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
-            assert_eq!(body["total"], 1);
+            assert_eq!(body["data"].as_array().map(Vec::len), Some(2));
+            assert_eq!(body["total"], 2);
             assert_eq!(body["offset"], 0);
-            assert_eq!(body["data"][0]["workspace_id"], "workspace-1");
-            assert_eq!(body["data"][0]["worker_name"], "customer-worker-a");
-            assert_eq!(body["data"][0]["status"], "online");
-            assert_eq!(
-                body["data"][0]["identity_fingerprint"],
-                "sha256:test-worker-rotated"
-            );
-            assert_eq!(body["data"][0]["orchestration_enabled"], true);
-            assert_eq!(
-                body["data"][0]["trust_level"],
-                "reported_by_self_hosted_worker"
-            );
-            assert_eq!(body["data"][0]["stale"], false);
-            assert!(body["data"][0]["stale_after_unix"].as_u64().is_some());
-            assert_eq!(body["data"][0]["stale_threshold_secs"], 300);
-            assert_eq!(body["data"][0]["latest_heartbeat"]["status"], "online");
-            assert_eq!(body["data"][0]["telemetry_event_count"], 2);
-            assert_eq!(body["data"][0]["latest_event_at_unix"], 456);
-            assert_eq!(body["data"][0]["artifact_count"], 2);
-            assert_eq!(body["data"][0]["latest_artifact_at_unix"], 789);
-            assert_eq!(body["data"][0]["checkpoint_count"], 2);
-            assert_eq!(body["data"][0]["latest_checkpoint_at_unix"], 890);
+            let records = body["data"]
+                .as_array()
+                .context("self-hosted worker records data should be an array")?;
+            let worker = records
+                .iter()
+                .find(|record| record["id"] == *self_hosted_worker_id.borrow())
+                .context("registered self-hosted worker should be present in list")?;
+            let expired_worker = records
+                .iter()
+                .find(|record| record["id"] == *expired_self_hosted_worker_id.borrow())
+                .context("expired self-hosted worker should be present in list")?;
+            assert_eq!(worker["workspace_id"], "workspace-1");
+            assert_eq!(worker["worker_name"], "customer-worker-a");
+            assert_eq!(worker["status"], "online");
+            assert_eq!(worker["identity_fingerprint"], "sha256:test-worker-rotated");
+            assert_eq!(worker["identity_expires_at_unix"], 8888888888_u64);
+            assert_eq!(worker["orchestration_enabled"], true);
+            assert_eq!(worker["trust_level"], "reported_by_self_hosted_worker");
+            assert_eq!(worker["stale"], false);
+            assert!(worker["stale_after_unix"].as_u64().is_some());
+            assert_eq!(worker["stale_threshold_secs"], 300);
+            assert_eq!(worker["latest_heartbeat"]["status"], "online");
+            assert_eq!(worker["telemetry_event_count"], 2);
+            assert_eq!(worker["latest_event_at_unix"], 456);
+            assert_eq!(worker["artifact_count"], 2);
+            assert_eq!(worker["latest_artifact_at_unix"], 789);
+            assert_eq!(worker["checkpoint_count"], 2);
+            assert_eq!(worker["latest_checkpoint_at_unix"], 890);
+            assert_eq!(expired_worker["identity_expires_at_unix"], 999_u64);
             Ok(())
         },
     )?;
