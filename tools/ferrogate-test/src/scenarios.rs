@@ -563,6 +563,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_poll_body,
         200,
         |body| {
+            let body = decrypted_self_hosted_transport_response(body, "sha256:test-worker")?;
             assert_eq!(body["object"], "self_hosted_run_lease");
             assert_eq!(
                 body["dispatch_id"],
@@ -640,6 +641,7 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_ack_body,
         200,
         |body| {
+            let body = decrypted_self_hosted_transport_response(body, "sha256:test-worker")?;
             assert_eq!(body["object"], "self_hosted_run_ack");
             assert_eq!(
                 body["dispatch_id"],
@@ -775,6 +777,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_heartbeat_body,
         201,
         |body| {
+            let body =
+                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
             assert_eq!(body["object"], "self_hosted_worker_heartbeat");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["status"], "online");
@@ -905,6 +909,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_event_body,
         201,
         |body| {
+            let body =
+                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
             assert_eq!(body["object"], "self_hosted_worker_event");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["telemetry_event_count"], 1);
@@ -1138,6 +1144,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_artifact_body,
         201,
         |body| {
+            let body =
+                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
             assert_eq!(body["object"], "self_hosted_worker_artifact");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["artifact_count"], 1);
@@ -1306,6 +1314,8 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         &encrypted_checkpoint_body,
         201,
         |body| {
+            let body =
+                decrypted_self_hosted_transport_response(body, "sha256:test-worker-rotated")?;
             assert_eq!(body["object"], "self_hosted_worker_checkpoint");
             assert_eq!(body["worker"]["id"], *self_hosted_worker_id.borrow());
             assert_eq!(body["worker"]["checkpoint_count"], 1);
@@ -2109,6 +2119,18 @@ fn encrypted_self_hosted_transport_frame(
         [nonce_byte; 24],
     )
     .context("encrypt self-hosted worker transport frame")
+}
+
+fn decrypted_self_hosted_transport_response(
+    body: serde_json::Value,
+    token_secret: &str,
+) -> Result<serde_json::Value> {
+    let frame: SelfHostedWorkerTransportFrame =
+        serde_json::from_value(body).context("decode encrypted self-hosted response")?;
+    let plaintext_json = frame
+        .decrypt_json(token_secret)
+        .context("decrypt self-hosted response frame")?;
+    serde_json::from_str(&plaintext_json).context("decode self-hosted response JSON")
 }
 
 fn self_hosted_worker_ack_body_for_scope(

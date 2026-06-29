@@ -361,6 +361,21 @@ impl SelfHostedWorkerTransportFrame {
         })
     }
 
+    pub fn encrypt_json_with_generated_nonce(
+        protocol_version: u32,
+        identity: &SelfHostedWorkerIdentity,
+        plaintext_json: &str,
+        shared_secret: &str,
+    ) -> Result<Self, SelfHostedWorkerError> {
+        Self::encrypt_json(
+            protocol_version,
+            identity,
+            plaintext_json,
+            shared_secret,
+            next_self_hosted_transport_nonce(),
+        )
+    }
+
     pub fn decode_json<T>(&self, shared_secret: &str) -> Result<T, SelfHostedWorkerError>
     where
         T: for<'de> Deserialize<'de> + SelfHostedWorkerTransportIdentity,

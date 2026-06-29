@@ -9,7 +9,7 @@ use bytes::Bytes;
 use ferrogate_observability::render_prometheus_text;
 use ferrogate_runtime::{
     SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedWorkerError,
-    SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame,
+    SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
 };
 use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
@@ -4073,6 +4073,7 @@ impl FerroGateway {
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
+        let response_identity = request.identity.clone();
         let worker_id = request.identity.worker_id.clone();
         let heartbeat = AdminSelfHostedWorkerHeartbeatRequest {
             status: request.status,
@@ -4086,7 +4087,15 @@ impl FerroGateway {
                     worker,
                     heartbeat,
                 };
-                write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+                write_self_hosted_transport_json_response(
+                    session,
+                    StatusCode::CREATED,
+                    &body,
+                    ctx,
+                    transport_security,
+                    &response_identity,
+                )
+                .await
             }
             Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
                 write_json_error(
@@ -4152,6 +4161,7 @@ impl FerroGateway {
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
+        let response_identity = request.identity.clone();
         let worker_id = request.identity.worker_id.clone();
         let checkpoint = AdminSelfHostedWorkerCheckpointRequest {
             checkpoint_id: request.checkpoint_id,
@@ -4169,7 +4179,15 @@ impl FerroGateway {
                     worker,
                     checkpoint,
                 };
-                write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+                write_self_hosted_transport_json_response(
+                    session,
+                    StatusCode::CREATED,
+                    &body,
+                    ctx,
+                    transport_security,
+                    &response_identity,
+                )
+                .await
             }
             Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
                 write_json_error(
@@ -4235,6 +4253,7 @@ impl FerroGateway {
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
+        let response_identity = request.identity.clone();
         let worker_id = request.identity.worker_id.clone();
         let artifact = AdminSelfHostedWorkerArtifactRequest {
             artifact_id: request.artifact_id,
@@ -4253,7 +4272,15 @@ impl FerroGateway {
                     worker,
                     artifact,
                 };
-                write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+                write_self_hosted_transport_json_response(
+                    session,
+                    StatusCode::CREATED,
+                    &body,
+                    ctx,
+                    transport_security,
+                    &response_identity,
+                )
+                .await
             }
             Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
                 write_json_error(
@@ -4320,6 +4347,7 @@ impl FerroGateway {
         if let Err(error) = state.validate_self_hosted_worker_identity(&request.identity) {
             return write_self_hosted_worker_transport_error(session, ctx, error).await;
         }
+        let response_identity = request.identity.clone();
         let worker_id = request.identity.worker_id.clone();
         let event = AdminSelfHostedWorkerTelemetryEventRequest {
             session_id: request.session_id,
@@ -4335,7 +4363,15 @@ impl FerroGateway {
                     worker,
                     event,
                 };
-                write_json_response(session, StatusCode::CREATED, &body, &ctx.request_id).await
+                write_self_hosted_transport_json_response(
+                    session,
+                    StatusCode::CREATED,
+                    &body,
+                    ctx,
+                    transport_security,
+                    &response_identity,
+                )
+                .await
             }
             Err(SelfHostedWorkerRecordError::InvalidRequest(message)) => {
                 write_json_error(
@@ -4397,13 +4433,22 @@ impl FerroGateway {
                 return write_self_hosted_worker_transport_error(session, ctx, error).await;
             }
         };
+        let response_identity = request.identity.clone();
         match state.poll_self_hosted_worker_run(request) {
             Ok(Some(lease)) => {
                 let body = SelfHostedWorkerRunLeaseResponse {
                     object: "self_hosted_run_lease",
                     lease,
                 };
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                write_self_hosted_transport_json_response(
+                    session,
+                    StatusCode::OK,
+                    &body,
+                    ctx,
+                    transport_security,
+                    &response_identity,
+                )
+                .await
             }
             Ok(None) => {
                 write_empty_response(session, StatusCode::NO_CONTENT, &ctx.request_id).await
@@ -4439,13 +4484,22 @@ impl FerroGateway {
                 return write_self_hosted_worker_transport_error(session, ctx, error).await;
             }
         };
+        let response_identity = request.identity.clone();
         match state.ack_self_hosted_worker_run(request) {
             Ok(ack) => {
                 let body = SelfHostedWorkerRunAckResponse {
                     object: "self_hosted_run_ack",
                     ack,
                 };
-                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                write_self_hosted_transport_json_response(
+                    session,
+                    StatusCode::OK,
+                    &body,
+                    ctx,
+                    transport_security,
+                    &response_identity,
+                )
+                .await
             }
             Err(error) => write_self_hosted_worker_transport_error(session, ctx, error).await,
         }
@@ -8901,6 +8955,53 @@ fn validate_self_hosted_transport_frame_identity(
         ));
     }
     Ok(())
+}
+
+async fn write_self_hosted_transport_json_response<T>(
+    session: &mut Session,
+    status: StatusCode,
+    body: &T,
+    ctx: &ProxyContext,
+    transport_security: SelfHostedTransportSecurity,
+    identity: &SelfHostedWorkerIdentity,
+) -> PingoraResult<()>
+where
+    T: serde::Serialize,
+{
+    match transport_security {
+        SelfHostedTransportSecurity::MutualTls => {
+            write_json_response(session, status, body, &ctx.request_id).await
+        }
+        SelfHostedTransportSecurity::SymmetricAead => {
+            let plaintext_json = match serde_json::to_string(body) {
+                Ok(plaintext_json) => plaintext_json,
+                Err(error) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "self_hosted_worker_transport_response_failed",
+                        format!(
+                            "self-hosted worker transport response serialization failed: {error}"
+                        ),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+            let frame = match SelfHostedWorkerTransportFrame::encrypt_json_with_generated_nonce(
+                SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+                identity,
+                &plaintext_json,
+                &identity.token_secret,
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return write_self_hosted_worker_transport_error(session, ctx, error).await;
+                }
+            };
+            write_json_response(session, status, &frame, &ctx.request_id).await
+        }
+    }
 }
 
 async fn write_self_hosted_worker_transport_error(
