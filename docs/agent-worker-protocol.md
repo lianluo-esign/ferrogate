@@ -557,6 +557,17 @@ and reading a local session-scoped smoke value, then emits `memory.write` and
 session-memory contract coverage; it is not durable memory storage, cross-run
 memory indexing, or Firecracker boot proof.
 
+The equivalent local secret access smoke is:
+
+```bash
+agent-worker governed-secret-execution-smoke
+```
+
+It requests a managed `secret` capability before looking up a local smoke
+secret, then emits `secret.requested` evidence with the value redacted. This is
+local secret-access contract coverage; it is not production secret injection,
+ambient environment access, or Firecracker boot proof.
+
 The equivalent local REST execution smoke is:
 
 ```bash

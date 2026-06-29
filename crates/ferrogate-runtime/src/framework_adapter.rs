@@ -292,6 +292,7 @@ pub enum FrameworkAdapterEventKind {
     CliRequested,
     RestRequested,
     FilesystemRequested,
+    SecretRequested,
     MemoryRead,
     MemoryWrite,
     CheckpointCreated,
@@ -320,6 +321,7 @@ impl FrameworkAdapterEventKind {
             Self::CliRequested => "cli.requested",
             Self::RestRequested => "rest.requested",
             Self::FilesystemRequested => "filesystem.requested",
+            Self::SecretRequested => "secret.requested",
             Self::MemoryRead => "memory.read",
             Self::MemoryWrite => "memory.write",
             Self::CheckpointCreated => "checkpoint.created",
@@ -433,7 +435,8 @@ impl NormalizedFrameworkEvent {
             | FrameworkAdapterEventKind::SkillRequested
             | FrameworkAdapterEventKind::CliRequested
             | FrameworkAdapterEventKind::RestRequested
-            | FrameworkAdapterEventKind::FilesystemRequested => "requested",
+            | FrameworkAdapterEventKind::FilesystemRequested
+            | FrameworkAdapterEventKind::SecretRequested => "requested",
             FrameworkAdapterEventKind::CapabilityAllowed
             | FrameworkAdapterEventKind::ToolApproved => "allowed",
             FrameworkAdapterEventKind::CapabilityDenied | FrameworkAdapterEventKind::ToolDenied => {

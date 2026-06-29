@@ -36,8 +36,8 @@ use ferrogate_runtime::{
     ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
     ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
     ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedRestAction,
-    ManagedSkillAction, ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer,
-    SupportedFramework,
+    ManagedSecretAction, ManagedSkillAction, ManagedToolAction, NormalizedFrameworkEvent,
+    SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -360,6 +360,34 @@ pub(crate) fn governed_memory_execution_smoke_command() -> Result<()> {
         &mut store,
         false,
     )?);
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn governed_secret_execution_smoke_command() -> Result<()> {
+    let secrets = BTreeMap::from([(
+        "openai-api-key".to_string(),
+        "ferrogate governed secret smoke".to_string(),
+    )]);
+    let action = ManagedSecretAction {
+        secret_id: "openai-api-key".to_string(),
+        purpose: "provider_call".to_string(),
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Secret]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_secret_action(&gate, smoke_session(), action, &secrets, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -989,6 +1017,41 @@ where
     ])
 }
 
+fn execute_governed_secret_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedSecretAction,
+    secrets: &BTreeMap<String, String>,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Secret(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_secret_action(&action, secrets)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::SecretRequested,
+            message: Some("managed secret action executed after gateway authorization".to_string()),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
 fn execute_governed_cli_action<A>(
     authorizer: &A,
     session: FrameworkAdapterSession,
@@ -1295,6 +1358,44 @@ fn run_authorized_memory_action(
             })
         }
     }
+}
+
+struct GovernedSecretExecution {
+    secret_len: usize,
+}
+
+impl GovernedSecretExecution {
+    fn metadata(self, action: &ManagedSecretAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "secret".to_string()),
+            (
+                "external_target".to_string(),
+                format!("secret:{}", action.secret_id),
+            ),
+            ("secret_id".to_string(), action.secret_id.clone()),
+            ("purpose".to_string(), action.purpose.clone()),
+            ("redacted_value".to_string(), "***".to_string()),
+            ("secret_len".to_string(), self.secret_len.to_string()),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_secret_action(
+    action: &ManagedSecretAction,
+    secrets: &BTreeMap<String, String>,
+) -> Result<GovernedSecretExecution, FrameworkAdapterError> {
+    let secret = secrets.get(&action.secret_id).ok_or_else(|| {
+        FrameworkAdapterError::CapabilityDenied(
+            "managed secret action lookup failed after gateway authorization".to_string(),
+        )
+    })?;
+    Ok(GovernedSecretExecution {
+        secret_len: secret.len(),
+    })
 }
 
 struct GovernedFilesystemExecution {
@@ -2165,6 +2266,76 @@ mod tests {
 
         assert!(error.to_string().contains("not allowed"));
         assert!(!error.to_string().contains("read failed"));
+    }
+
+    #[test]
+    fn governed_secret_execution_runs_only_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Secret]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let secrets = BTreeMap::from([(
+            "openai-api-key".to_string(),
+            "ferrogate governed secret smoke".to_string(),
+        )]);
+
+        let events = execute_governed_secret_action(
+            &gate,
+            session(),
+            ManagedSecretAction {
+                secret_id: "openai-api-key".to_string(),
+                purpose: "provider_call".to_string(),
+            },
+            &secrets,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "secret.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("secret_id").map(String::as_str),
+            Some("openai-api-key")
+        );
+        assert_eq!(
+            events[1].metadata.get("redacted_value").map(String::as_str),
+            Some("***")
+        );
+        assert_eq!(
+            events[1].metadata.get("secret_len").map(String::as_str),
+            Some("31")
+        );
+    }
+
+    #[test]
+    fn governed_secret_execution_denial_happens_before_secret_lookup() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+        let secrets = BTreeMap::new();
+
+        let error = execute_governed_secret_action(
+            &gate,
+            session(),
+            ManagedSecretAction {
+                secret_id: "missing-secret".to_string(),
+                purpose: "provider_call".to_string(),
+            },
+            &secrets,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!error.to_string().contains("lookup failed"));
     }
 
     #[test]

@@ -1162,6 +1162,7 @@ fn parse_capability_event_kind(
         "mcp.tool.requested" => Ok(FrameworkAdapterEventKind::McpToolRequested),
         "skill.requested" => Ok(FrameworkAdapterEventKind::SkillRequested),
         "filesystem.requested" => Ok(FrameworkAdapterEventKind::FilesystemRequested),
+        "secret.requested" => Ok(FrameworkAdapterEventKind::SecretRequested),
         "memory.read" => Ok(FrameworkAdapterEventKind::MemoryRead),
         "memory.write" => Ok(FrameworkAdapterEventKind::MemoryWrite),
         _ => Err(FrameworkAdapterError::InvalidRequest(format!(
