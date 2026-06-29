@@ -393,25 +393,41 @@ emit prepared run/model/artifact events. The binary smoke records a normalized
 binary path, probe args, status code, and output excerpts. The recorded handler
 events therefore prove the managed action gate was crossed, `agent-worker`
 started the configured adapter binary, and the selected adapter contract was
-used; they still do not prove real agent task execution or microVM boot. Adding
-real lifecycle success requires the Firecracker handler implementation,
-HTTP/mTLS production transport, and contract coverage for Codex/Claude/Hermes
-binary or SDK task launch.
+used.
+
+Real binary task smoke is explicit because it may consume model/provider quota.
+When `AGENT_WORKER_HANDLER_TASK_SMOKE=1` is set, managed `exec_or_attach` also
+runs a bounded worker-owned task smoke after `capability.allowed` and after the
+version-style binary smoke. The task smoke uses the configured handler binary,
+redacts the prompt argument from recorded argv metadata, records prompt length
+instead of prompt text, and emits a normalized `run.started` event with
+`real_binary_task_smoke=true`. This proves that `agent-worker` can start the
+configured adapter through the framework's non-interactive task entrypoint; it
+still does not prove Firecracker boot, SDK-level production integration, or full
+multi-step agent correctness. Adding real lifecycle success requires the
+Firecracker handler implementation, HTTP/mTLS production transport, and
+contract coverage for Codex/Claude/Hermes binary or SDK task launch inside the
+selected isolation backend.
 
 When an adapter dependency is available on the worker host, `agent-worker` can
 run a bounded binary smoke with `agent-worker smoke-handler-binary --adapter
-codex|claude-code|hermes`. The smoke is owned by the worker process and reads
-only the worker-owned binary configuration variables:
+codex|claude-code|hermes`. For an explicit non-interactive task smoke, use
+`agent-worker smoke-handler-task --adapter codex|claude-code|hermes --prompt
+"..."`. Both smokes are owned by the worker process and read only the
+worker-owned binary configuration variables:
 `AGENT_WORKER_CODEX_BIN`, `AGENT_WORKER_CLAUDE_CODE_BIN`, and
 `AGENT_WORKER_HERMES_BIN`. It does not scan `PATH`, and the gateway must not run
 the same probe itself. The configured path must point to an executable file; a
 non-executable file is reported as handler-unready before scheduling should pick
-that adapter. The current smoke executes a short version-style probe with a
+that adapter. The binary smoke executes a short version-style probe with a
 timeout and returns JSON evidence for the adapter, configured binary path, probe
-arguments, exit status, and output excerpts. A passing binary smoke proves only
-that the configured handler binary can be started by `agent-worker`;
-it is not Firecracker boot proof, SDK integration proof, or proof that a real
-agent task completed.
+arguments, exit status, and output excerpts. The task smoke uses each
+framework's non-interactive entrypoint (`codex exec`, `claude --print`, and
+Hermes oneshot mode), redacts the prompt argument in metadata, and returns
+bounded stdout/stderr excerpts. A passing task smoke proves only that the
+configured handler binary accepted and completed a bounded non-interactive task
+under `agent-worker` ownership; it is not Firecracker boot proof or proof of the
+full production managed execution path.
 
 The gateway/control-plane side uses `AgentWorkerHttpManagementClient` for the
 primary worker management path. The client sends `POST

@@ -81,6 +81,9 @@ pub(crate) fn exec_or_attach_framework_handler_with_authorizer(
     if let Some(binary_event) = process_handler_binary_event(&session)? {
         events.push(binary_event);
     }
+    if let Some(task_event) = process_handler_task_event(&session)? {
+        events.push(task_event);
+    }
     events.extend(
         adapter
             .submit_run(FrameworkAdapterRunRequest {
@@ -338,6 +341,75 @@ fn process_handler_binary_event(
     }))
 }
 
+fn process_handler_task_event(
+    session: &FrameworkAdapterSession,
+) -> Result<Option<NormalizedFrameworkEvent>, ManagedWorkerError> {
+    if !matches!(
+        session.adapter_name.as_str(),
+        "codex" | "claude-code" | "hermes"
+    ) || std::env::var("AGENT_WORKER_HANDLER_TASK_SMOKE")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return Ok(None);
+    }
+    let prompt = std::env::var("AGENT_WORKER_HANDLER_TASK_SMOKE_PROMPT")
+        .unwrap_or_else(|_| "Return exactly: ferrogate-agent-worker-task-smoke".to_string());
+    let timeout_millis = std::env::var("AGENT_WORKER_HANDLER_TASK_SMOKE_TIMEOUT_MILLIS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000);
+    let smoke = crate::handlers::smoke_handler_task(&session.adapter_name, timeout_millis, &prompt)
+        .map_err(|error| {
+            ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::RunFailed,
+                format!(
+                    "agent-worker failed to execute configured {} handler task smoke: {error}",
+                    session.adapter_name
+                ),
+            )
+        })?;
+    Ok(Some(NormalizedFrameworkEvent {
+        session_id: session.session_id.clone(),
+        run_id: session.run_id.clone(),
+        adapter_name: session.adapter_name.clone(),
+        adapter_version: session.adapter_version.clone(),
+        framework: session.framework,
+        mode: session.mode,
+        kind: FrameworkAdapterEventKind::RunStarted,
+        message: Some(format!(
+            "{} configured handler task executed by agent-worker",
+            session.adapter_name
+        )),
+        metadata: BTreeMap::from([
+            ("handler_owner".to_string(), "agent-worker".to_string()),
+            ("gateway_handler_probe".to_string(), "false".to_string()),
+            ("real_binary_task_smoke".to_string(), "true".to_string()),
+            ("adapter_name".to_string(), smoke.adapter_name.to_string()),
+            ("env_var".to_string(), smoke.env_var.to_string()),
+            (
+                "binary_path".to_string(),
+                smoke.binary_path.display().to_string(),
+            ),
+            (
+                "task_args".to_string(),
+                crate::handlers::redacted_args(&smoke.task_args, smoke.prompt_arg_index).join(" "),
+            ),
+            ("prompt_chars".to_string(), smoke.prompt_chars.to_string()),
+            (
+                "status_code".to_string(),
+                smoke
+                    .status_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_default(),
+            ),
+            ("stdout_excerpt".to_string(), smoke.stdout_excerpt),
+            ("stderr_excerpt".to_string(), smoke.stderr_excerpt),
+        ]),
+    }))
+}
+
 fn lifecycle_session_id(
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<String, ManagedWorkerError> {
@@ -483,6 +555,73 @@ mod tests {
     }
 
     #[test]
+    fn codex_process_shim_can_run_explicit_task_smoke_after_authorization() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let _binary = configured_fake_handler_binary(
+            "AGENT_WORKER_CODEX_BIN",
+            "codex-task-smoke",
+            "codex handler args",
+        );
+        env::set_var("AGENT_WORKER_HANDLER_TASK_SMOKE", "1");
+        env::set_var(
+            "AGENT_WORKER_HANDLER_TASK_SMOKE_PROMPT",
+            "Return exactly smoke-ok",
+        );
+        let mut envelope = envelope();
+        envelope.framework_adapter = Some("codex".to_string());
+        let authorizer = authorizer();
+
+        let (_, result) =
+            exec_or_attach_framework_handler_with_authorizer(&envelope, Some(&authorizer)).unwrap();
+
+        env::remove_var("AGENT_WORKER_HANDLER_TASK_SMOKE");
+        env::remove_var("AGENT_WORKER_HANDLER_TASK_SMOKE_PROMPT");
+        let AgentWorkerManagementResult::HandlerEvents { events } = result else {
+            panic!("expected handler events");
+        };
+        let task_event = events
+            .iter()
+            .find(|event| {
+                event.kind == "run.started"
+                    && event
+                        .metadata
+                        .get("real_binary_task_smoke")
+                        .is_some_and(|value| value == "true")
+            })
+            .expect("expected explicit task smoke event");
+        assert!(task_event
+            .metadata
+            .get("handler_owner")
+            .is_some_and(|value| value == "agent-worker"));
+        assert!(task_event
+            .metadata
+            .get("task_args")
+            .is_some_and(|value| value.contains("<prompt>") && !value.contains("smoke-ok")));
+        assert_eq!(
+            task_event.metadata.get("prompt_chars").map(String::as_str),
+            Some("23")
+        );
+        assert!(task_event
+            .metadata
+            .get("stdout_excerpt")
+            .is_some_and(|value| value.contains("codex handler args exec")));
+        let capability_index = events
+            .iter()
+            .position(|event| event.kind == "capability.allowed")
+            .unwrap();
+        let task_index = events
+            .iter()
+            .position(|event| {
+                event
+                    .metadata
+                    .get("real_binary_task_smoke")
+                    .is_some_and(|value| value == "true")
+            })
+            .unwrap();
+        assert!(capability_index < task_index);
+    }
+
+    #[test]
     fn approval_required_framework_capability_is_returned_without_handler_execution() {
         let mut envelope = envelope();
         envelope.framework_adapter = Some("codex".to_string());
@@ -569,7 +708,7 @@ mod tests {
         let binary_path = temp.path().join(filename);
         fs::write(
             &binary_path,
-            format!("#!/bin/sh\nprintf '{output_prefix} %s\\n' \"$1\"\n"),
+            format!("#!/bin/sh\nprintf '{output_prefix}'\nprintf ' %s' \"$@\"\nprintf '\\n'\n"),
         )
         .unwrap();
         #[cfg(unix)]

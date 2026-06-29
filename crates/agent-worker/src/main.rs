@@ -66,6 +66,21 @@ enum Command {
         #[arg(long, default_value_t = 2_000)]
         timeout_millis: u64,
     },
+    /// Execute a configured framework handler task smoke inside agent-worker ownership.
+    SmokeHandlerTask {
+        /// Adapter to smoke: codex, claude-code, or hermes.
+        #[arg(long)]
+        adapter: String,
+        /// Maximum time to wait for the task smoke command.
+        #[arg(long, default_value_t = 30_000)]
+        timeout_millis: u64,
+        /// Minimal prompt sent to the configured handler binary.
+        #[arg(
+            long,
+            default_value = "Return exactly: ferrogate-agent-worker-task-smoke"
+        )]
+        prompt: String,
+    },
     /// Run a managed external-action authorization smoke without executing the action.
     ExternalActionSmoke,
     /// Accept one managed external-action authorization request as JSON on stdin.
@@ -172,6 +187,11 @@ fn main() -> Result<()> {
             adapter,
             timeout_millis,
         } => handlers::smoke_handler_binary_command(&adapter, timeout_millis),
+        Command::SmokeHandlerTask {
+            adapter,
+            timeout_millis,
+            prompt,
+        } => handlers::smoke_handler_task_command(&adapter, timeout_millis, &prompt),
         Command::ExternalActionSmoke => external_actions::external_action_smoke_command(),
         Command::AcceptExternalActionJson => {
             external_actions::accept_external_action_json_command()

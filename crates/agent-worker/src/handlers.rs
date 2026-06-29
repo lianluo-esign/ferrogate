@@ -7,7 +7,7 @@
 use std::{
     env,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -35,6 +35,31 @@ pub(crate) fn smoke_handler_binary_command(adapter_name: &str, timeout_millis: u
             "env_var": result.env_var,
             "binary_path": result.binary_path.display().to_string(),
             "probe_args": result.probe_args,
+            "status_code": result.status_code,
+            "stdout_excerpt": result.stdout_excerpt,
+            "stderr_excerpt": result.stderr_excerpt,
+        })
+    );
+    Ok(())
+}
+
+pub(crate) fn smoke_handler_task_command(
+    adapter_name: &str,
+    timeout_millis: u64,
+    prompt: &str,
+) -> Result<()> {
+    let result = smoke_handler_task(adapter_name, timeout_millis, prompt)?;
+    println!(
+        "{}",
+        json!({
+            "process": "agent-worker",
+            "handler_owner": "agent-worker",
+            "gateway_handler_probe": false,
+            "adapter_name": result.adapter_name,
+            "env_var": result.env_var,
+            "binary_path": result.binary_path.display().to_string(),
+            "task_args": redacted_args(&result.task_args, result.prompt_arg_index),
+            "prompt_chars": result.prompt_chars,
             "status_code": result.status_code,
             "stdout_excerpt": result.stdout_excerpt,
             "stderr_excerpt": result.stderr_excerpt,
@@ -148,8 +173,76 @@ pub(crate) fn smoke_handler_binary(
 ) -> Result<HandlerBinarySmokeResult> {
     let target = handler_binary_smoke_target(adapter_name)?;
     let binary_path = configured_binary_path(target.env_var)?;
-    let mut child = Command::new(&binary_path)
-        .args(target.probe_args)
+    let output = run_configured_handler_binary(
+        target.adapter_name,
+        &binary_path,
+        &target
+            .probe_args
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect::<Vec<_>>(),
+        timeout_millis,
+    )?;
+
+    Ok(HandlerBinarySmokeResult {
+        adapter_name: target.adapter_name,
+        env_var: target.env_var,
+        binary_path,
+        probe_args: target.probe_args.to_vec(),
+        status_code: output.status.code(),
+        stdout_excerpt: output_excerpt(&output.stdout),
+        stderr_excerpt: output_excerpt(&output.stderr),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandlerTaskSmokeResult {
+    pub(crate) adapter_name: &'static str,
+    pub(crate) env_var: &'static str,
+    pub(crate) binary_path: PathBuf,
+    pub(crate) task_args: Vec<String>,
+    pub(crate) prompt_arg_index: usize,
+    pub(crate) prompt_chars: usize,
+    pub(crate) status_code: Option<i32>,
+    pub(crate) stdout_excerpt: String,
+    pub(crate) stderr_excerpt: String,
+}
+
+pub(crate) fn smoke_handler_task(
+    adapter_name: &str,
+    timeout_millis: u64,
+    prompt: &str,
+) -> Result<HandlerTaskSmokeResult> {
+    let target = handler_binary_task_target(adapter_name, prompt)?;
+    let binary_path = configured_binary_path(target.env_var)?;
+    let output = run_configured_handler_binary(
+        target.adapter_name,
+        &binary_path,
+        &target.task_args,
+        timeout_millis,
+    )?;
+
+    Ok(HandlerTaskSmokeResult {
+        adapter_name: target.adapter_name,
+        env_var: target.env_var,
+        binary_path,
+        task_args: target.task_args,
+        prompt_arg_index: target.prompt_arg_index,
+        prompt_chars: prompt.chars().count(),
+        status_code: output.status.code(),
+        stdout_excerpt: output_excerpt(&output.stdout),
+        stderr_excerpt: output_excerpt(&output.stderr),
+    })
+}
+
+fn run_configured_handler_binary(
+    adapter_name: &str,
+    binary_path: &Path,
+    args: &[String],
+    timeout_millis: u64,
+) -> Result<std::process::Output> {
+    let mut child = Command::new(binary_path)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -157,7 +250,7 @@ pub(crate) fn smoke_handler_binary(
         .with_context(|| {
             format!(
                 "failed to start {} handler binary from {}",
-                target.adapter_name,
+                adapter_name,
                 binary_path.display()
             )
         })?;
@@ -171,8 +264,8 @@ pub(crate) fn smoke_handler_binary(
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "agent-worker {} handler binary smoke timed out after {}ms",
-                target.adapter_name,
+                "agent-worker {} handler binary command timed out after {}ms",
+                adapter_name,
                 timeout.as_millis()
             );
         }
@@ -181,21 +274,12 @@ pub(crate) fn smoke_handler_binary(
     let output = child.wait_with_output()?;
     if !output.status.success() {
         bail!(
-            "agent-worker {} handler binary smoke exited with status {:?}",
-            target.adapter_name,
+            "agent-worker {} handler binary command exited with status {:?}",
+            adapter_name,
             output.status.code()
         );
     }
-
-    Ok(HandlerBinarySmokeResult {
-        adapter_name: target.adapter_name,
-        env_var: target.env_var,
-        binary_path,
-        probe_args: target.probe_args.to_vec(),
-        status_code: output.status.code(),
-        stdout_excerpt: output_excerpt(&output.stdout),
-        stderr_excerpt: output_excerpt(&output.stderr),
-    })
+    Ok(output)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -226,6 +310,81 @@ fn handler_binary_smoke_target(adapter_name: &str) -> Result<HandlerBinarySmokeT
             "native-harness is built into agent-worker and has no external handler binary smoke"
         ),
         other => bail!("unsupported framework handler adapter for binary smoke: {other}"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandlerBinaryTaskTarget {
+    adapter_name: &'static str,
+    env_var: &'static str,
+    task_args: Vec<String>,
+    prompt_arg_index: usize,
+}
+
+fn handler_binary_task_target(adapter_name: &str, prompt: &str) -> Result<HandlerBinaryTaskTarget> {
+    if prompt.trim().is_empty() {
+        bail!("handler task smoke prompt must not be empty");
+    }
+    match adapter_name {
+        "codex" => {
+            let mut task_args = vec![
+                "exec".to_string(),
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--ask-for-approval".to_string(),
+                "never".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "--ignore-rules".to_string(),
+                "--ephemeral".to_string(),
+            ];
+            let prompt_arg_index = task_args.len();
+            task_args.push(prompt.to_string());
+            Ok(HandlerBinaryTaskTarget {
+                adapter_name: "codex",
+                env_var: "AGENT_WORKER_CODEX_BIN",
+                task_args,
+                prompt_arg_index,
+            })
+        }
+        "claude-code" | "claude_code" => {
+            let mut task_args = vec![
+                "--bare".to_string(),
+                "--print".to_string(),
+                "--permission-mode".to_string(),
+                "dontAsk".to_string(),
+                "--tools".to_string(),
+                String::new(),
+                "--no-session-persistence".to_string(),
+            ];
+            let prompt_arg_index = task_args.len();
+            task_args.push(prompt.to_string());
+            Ok(HandlerBinaryTaskTarget {
+                adapter_name: "claude-code",
+                env_var: "AGENT_WORKER_CLAUDE_CODE_BIN",
+                task_args,
+                prompt_arg_index,
+            })
+        }
+        "hermes" => {
+            let mut task_args = vec![
+                "--ignore-rules".to_string(),
+                "--max-turns".to_string(),
+                "1".to_string(),
+                "-z".to_string(),
+            ];
+            let prompt_arg_index = task_args.len();
+            task_args.push(prompt.to_string());
+            Ok(HandlerBinaryTaskTarget {
+                adapter_name: "hermes",
+                env_var: "AGENT_WORKER_HERMES_BIN",
+                task_args,
+                prompt_arg_index,
+            })
+        }
+        "native-harness" | "native_harness" => bail!(
+            "native-harness is built into agent-worker and has no external handler task smoke"
+        ),
+        other => bail!("unsupported framework handler adapter for task smoke: {other}"),
     }
 }
 
@@ -266,6 +425,19 @@ fn configured_binary_error(env_var: &str) -> Option<String> {
         return Some(format!("{env_var} is not executable: {}", path.display()));
     }
     None
+}
+
+pub(crate) fn redacted_args(args: &[String], prompt_arg_index: usize) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            if index == prompt_arg_index {
+                "<prompt>".to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect()
 }
 
 fn output_excerpt(output: &[u8]) -> String {
@@ -396,6 +568,59 @@ mod tests {
         assert_eq!(result.probe_args, vec!["--version"]);
         assert_eq!(result.status_code, Some(0));
         assert!(result.stdout_excerpt.contains("codex smoke --version"));
+    }
+
+    #[test]
+    fn handler_task_smoke_executes_worker_owned_configured_adapter_binary() {
+        let _env_lock = crate::test_support::lock_handler_env();
+        let temp = tempfile::tempdir().unwrap();
+        let binary_path = temp.path().join("codex-task-smoke");
+        fs::write(
+            &binary_path,
+            "#!/bin/sh\nprintf 'codex task args:'\nprintf ' [%s]' \"$@\"\nprintf '\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&binary_path, permissions).unwrap();
+        env::set_var("AGENT_WORKER_CODEX_BIN", &binary_path);
+
+        let result = smoke_handler_task(
+            "codex",
+            DEFAULT_HANDLER_SMOKE_TIMEOUT_MILLIS,
+            "Return exactly smoke-ok",
+        )
+        .unwrap();
+
+        env::remove_var("AGENT_WORKER_CODEX_BIN");
+        assert_eq!(result.adapter_name, "codex");
+        assert_eq!(result.env_var, "AGENT_WORKER_CODEX_BIN");
+        assert_eq!(result.binary_path, binary_path);
+        assert_eq!(result.task_args[0], "exec");
+        assert!(result.task_args.iter().any(|arg| arg == "read-only"));
+        assert_eq!(
+            result.task_args[result.prompt_arg_index],
+            "Return exactly smoke-ok"
+        );
+        assert_eq!(
+            result.prompt_chars,
+            "Return exactly smoke-ok".chars().count()
+        );
+        assert_eq!(result.status_code, Some(0));
+        assert!(result.stdout_excerpt.contains("codex task args:"));
+
+        let redacted = redacted_args(&result.task_args, result.prompt_arg_index);
+        assert_eq!(redacted[result.prompt_arg_index], "<prompt>");
+        assert!(!redacted.iter().any(|arg| arg == "Return exactly smoke-ok"));
+    }
+
+    #[test]
+    fn handler_task_smoke_rejects_empty_prompt_before_spawn() {
+        let error = smoke_handler_task("hermes", DEFAULT_HANDLER_SMOKE_TIMEOUT_MILLIS, "   ")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("handler task smoke prompt must not be empty"));
     }
 
     #[test]
