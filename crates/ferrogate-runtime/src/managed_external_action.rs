@@ -1318,6 +1318,17 @@ mod tests {
     }
 
     #[test]
+    fn managed_external_action_transport_requests_match_golden_fixture() {
+        let actual = serde_json::to_value(managed_external_action_transport_requests()).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/managed_external_action_transport_requests.golden.json"
+        ))
+        .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn external_action_response_rejects_malformed_accepted_evidence() {
         let response = ExternalActionAuthorizationResponse {
             accepted: true,
@@ -1562,5 +1573,72 @@ mod tests {
                 ..FrameworkAdapterCapabilities::default()
             },
         }
+    }
+
+    fn managed_external_action_transport_requests() -> Vec<GatewayExternalActionTransportRequest> {
+        let mut adapter = NativeHarnessAdapter::default();
+        let (session, _) = adapter.start_session(session_request()).unwrap();
+        [
+            ManagedExternalActionRequest {
+                session: session.clone(),
+                action: ManagedExternalAction::Tool(ManagedToolAction {
+                    tool_name: "native.echo".to_string(),
+                    arguments_policy: "redacted_json".to_string(),
+                }),
+                high_risk: false,
+            },
+            ManagedExternalActionRequest {
+                session: session.clone(),
+                action: ManagedExternalAction::McpTool(ManagedMcpToolAction {
+                    server_name: "filesystem".to_string(),
+                    tool_name: "read_file".to_string(),
+                    arguments_policy: "workspace_only".to_string(),
+                }),
+                high_risk: false,
+            },
+            ManagedExternalActionRequest {
+                session: session.clone(),
+                action: ManagedExternalAction::Cli(ManagedCliAction {
+                    command: "cargo".to_string(),
+                    args: vec!["test".to_string()],
+                    working_dir: "/workspace".to_string(),
+                    env_policy: "gateway_injected_only".to_string(),
+                    timeout_millis: 30_000,
+                    stdout_limit_bytes: 65_536,
+                    stderr_limit_bytes: 65_536,
+                    artifact_capture: true,
+                }),
+                high_risk: true,
+            },
+            ManagedExternalActionRequest {
+                session: session.clone(),
+                action: ManagedExternalAction::Skill(ManagedSkillAction {
+                    skill_id: "repo-test".to_string(),
+                    declared_capabilities: vec!["cli".to_string(), "filesystem".to_string()],
+                }),
+                high_risk: true,
+            },
+            ManagedExternalActionRequest {
+                session,
+                action: ManagedExternalAction::Rest(ManagedRestAction {
+                    method: "POST".to_string(),
+                    url: "https://api.example.test/v1/jobs".to_string(),
+                    headers_policy: "redact_authorization".to_string(),
+                    body_policy: "guardrail_scan".to_string(),
+                    timeout_millis: 10_000,
+                    retry_limit: 2,
+                }),
+                high_risk: true,
+            },
+        ]
+        .into_iter()
+        .map(|managed| {
+            let authorization = ExternalActionAuthorizationRequest::from_managed_request(managed);
+            GatewayExternalActionTransportRequest {
+                request_id: authorization.stable_request_id(),
+                authorization,
+            }
+        })
+        .collect()
     }
 }

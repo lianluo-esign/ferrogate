@@ -1,0 +1,133 @@
+[
+  {
+    "request_id": "run-1:session-1:worker-1:native-harness:tool",
+    "authorization": {
+      "session": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "worker_id": "worker-1",
+        "isolation_backend": "firecracker",
+        "adapter_name": "native-harness",
+        "adapter_version": "1",
+        "framework": "native_harness",
+        "mode": "managed"
+      },
+      "action": {
+        "kind": "tool",
+        "tool_name": "native.echo",
+        "arguments_policy": "redacted_json"
+      },
+      "high_risk": false
+    }
+  },
+  {
+    "request_id": "run-1:session-1:worker-1:native-harness:mcp_tool",
+    "authorization": {
+      "session": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "worker_id": "worker-1",
+        "isolation_backend": "firecracker",
+        "adapter_name": "native-harness",
+        "adapter_version": "1",
+        "framework": "native_harness",
+        "mode": "managed"
+      },
+      "action": {
+        "kind": "mcp_tool",
+        "server_name": "filesystem",
+        "tool_name": "read_file",
+        "arguments_policy": "workspace_only"
+      },
+      "high_risk": false
+    }
+  },
+  {
+    "request_id": "run-1:session-1:worker-1:native-harness:cli",
+    "authorization": {
+      "session": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "worker_id": "worker-1",
+        "isolation_backend": "firecracker",
+        "adapter_name": "native-harness",
+        "adapter_version": "1",
+        "framework": "native_harness",
+        "mode": "managed"
+      },
+      "action": {
+        "kind": "cli",
+        "command": "cargo",
+        "args": [
+          "test"
+        ],
+        "working_dir": "/workspace",
+        "env_policy": "gateway_injected_only",
+        "timeout_millis": 30000,
+        "stdout_limit_bytes": 65536,
+        "stderr_limit_bytes": 65536,
+        "artifact_capture": true
+      },
+      "high_risk": true
+    }
+  },
+  {
+    "request_id": "run-1:session-1:worker-1:native-harness:skill",
+    "authorization": {
+      "session": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "worker_id": "worker-1",
+        "isolation_backend": "firecracker",
+        "adapter_name": "native-harness",
+        "adapter_version": "1",
+        "framework": "native_harness",
+        "mode": "managed"
+      },
+      "action": {
+        "kind": "skill",
+        "skill_id": "repo-test",
+        "declared_capabilities": [
+          "cli",
+          "filesystem"
+        ]
+      },
+      "high_risk": true
+    }
+  },
+  {
+    "request_id": "run-1:session-1:worker-1:native-harness:rest",
+    "authorization": {
+      "session": {
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "worker_id": "worker-1",
+        "isolation_backend": "firecracker",
+        "adapter_name": "native-harness",
+        "adapter_version": "1",
+        "framework": "native_harness",
+        "mode": "managed"
+      },
+      "action": {
+        "kind": "rest",
+        "method": "POST",
+        "url": "https://api.example.test/v1/jobs",
+        "headers_policy": "redact_authorization",
+        "body_policy": "guardrail_scan",
+        "timeout_millis": 10000,
+        "retry_limit": 2
+      },
+      "high_risk": true
+    }
+  }
+]
