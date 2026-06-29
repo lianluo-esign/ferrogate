@@ -568,6 +568,18 @@ secret, then emits `secret.requested` evidence with the value redacted. This is
 local secret-access contract coverage; it is not production secret injection,
 ambient environment access, or Firecracker boot proof.
 
+The equivalent local network egress smoke is:
+
+```bash
+agent-worker governed-network-egress-execution-smoke
+```
+
+It requests a managed `network.egress` capability with direct egress explicitly
+enabled by policy, then opens a single loopback TCP connection and emits
+`network.egress.requested` evidence. This proves the network egress gate for a
+deterministic local socket; it is not unrestricted public egress, browser
+automation, REST execution, or Firecracker boot proof.
+
 The equivalent local REST execution smoke is:
 
 ```bash

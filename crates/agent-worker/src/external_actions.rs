@@ -35,9 +35,9 @@ use ferrogate_runtime::{
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
     ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
     ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
-    ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedRestAction,
-    ManagedSecretAction, ManagedSkillAction, ManagedToolAction, NormalizedFrameworkEvent,
-    SimpleCapabilityAuthorizer, SupportedFramework,
+    ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedNetworkEgressAction,
+    ManagedRestAction, ManagedSecretAction, ManagedSkillAction, ManagedToolAction,
+    NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -397,6 +397,33 @@ pub(crate) fn governed_secret_execution_smoke_command() -> Result<()> {
                 .collect::<Vec<_>>()
         )?
     );
+    Ok(())
+}
+
+pub(crate) fn governed_network_egress_execution_smoke_command() -> Result<()> {
+    let server = spawn_one_shot_network_egress_smoke_server();
+    let action = ManagedNetworkEgressAction {
+        host: "127.0.0.1".to_string(),
+        port: server.endpoint.port(),
+        protocol: "tcp".to_string(),
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
+            allow_direct_network_egress: true,
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events = execute_governed_network_egress_action(&gate, smoke_session(), action, false)?;
+    let received_payload = server.join()?;
+    let output = serde_json::json!({
+        "events": events
+            .into_iter()
+            .map(|event| event.canonical_json())
+            .collect::<Vec<_>>(),
+        "received_payload": received_payload,
+    });
+    println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
 
@@ -1052,6 +1079,42 @@ where
     ])
 }
 
+fn execute_governed_network_egress_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedNetworkEgressAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::NetworkEgress(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_network_egress_action(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::NetworkEgressRequested,
+            message: Some(
+                "managed network egress action executed after gateway authorization".to_string(),
+            ),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
 fn execute_governed_cli_action<A>(
     authorizer: &A,
     session: FrameworkAdapterSession,
@@ -1395,6 +1458,78 @@ fn run_authorized_secret_action(
     })?;
     Ok(GovernedSecretExecution {
         secret_len: secret.len(),
+    })
+}
+
+struct GovernedNetworkEgressExecution {
+    bytes_written: usize,
+}
+
+impl GovernedNetworkEgressExecution {
+    fn metadata(self, action: &ManagedNetworkEgressAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "network.egress".to_string()),
+            (
+                "external_target".to_string(),
+                format!("{}:{}", action.host, action.port),
+            ),
+            ("host".to_string(), action.host.clone()),
+            ("port".to_string(), action.port.to_string()),
+            ("protocol".to_string(), action.protocol.clone()),
+            ("bytes_written".to_string(), self.bytes_written.to_string()),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_network_egress_action(
+    action: &ManagedNetworkEgressAction,
+) -> Result<GovernedNetworkEgressExecution, FrameworkAdapterError> {
+    if action.protocol != "tcp" {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed network egress smoke only supports tcp".to_string(),
+        ));
+    }
+    if action.host != "127.0.0.1" && action.host != "localhost" {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed network egress smoke only supports loopback hosts".to_string(),
+        ));
+    }
+    let endpoint = SocketAddr::new(
+        "127.0.0.1".parse().map_err(|error| {
+            FrameworkAdapterError::InvalidRequest(format!(
+                "managed network egress smoke loopback parse failed: {error}"
+            ))
+        })?,
+        action.port,
+    );
+    let payload = b"ferrogate governed network smoke\n";
+    let timeout = Duration::from_secs(2);
+    let mut stream = TcpStream::connect_timeout(&endpoint, timeout).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed network egress connection failed after gateway authorization: {error}"
+        ))
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed network egress write timeout setup failed: {error}"
+        ))
+    })?;
+    stream.write_all(payload).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed network egress write failed: {error}"
+        ))
+    })?;
+    stream.shutdown(Shutdown::Write).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed network egress shutdown failed: {error}"
+        ))
+    })?;
+    Ok(GovernedNetworkEgressExecution {
+        bytes_written: payload.len(),
     })
 }
 
@@ -1752,6 +1887,31 @@ fn spawn_one_shot_rest_smoke_server() -> RestSmokeServer {
         Ok(request.lines().next().unwrap_or_default().to_string())
     });
     RestSmokeServer { endpoint, handle }
+}
+
+struct NetworkEgressSmokeServer {
+    endpoint: SocketAddr,
+    handle: thread::JoinHandle<Result<String>>,
+}
+
+impl NetworkEgressSmokeServer {
+    fn join(self) -> Result<String> {
+        self.handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("network egress smoke server thread panicked"))?
+    }
+}
+
+fn spawn_one_shot_network_egress_smoke_server() -> NetworkEgressSmokeServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let mut payload = Vec::new();
+        stream.read_to_end(&mut payload)?;
+        Ok(String::from_utf8_lossy(&payload).to_string())
+    });
+    NetworkEgressSmokeServer { endpoint, handle }
 }
 
 fn smoke_session() -> FrameworkAdapterSession {
@@ -2336,6 +2496,107 @@ mod tests {
 
         assert!(error.to_string().contains("not allowed"));
         assert!(!error.to_string().contains("lookup failed"));
+    }
+
+    #[test]
+    fn governed_network_egress_runs_only_after_gateway_authorization() {
+        let server = spawn_one_shot_network_egress_smoke_server();
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
+                allow_direct_network_egress: true,
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_network_egress_action(
+            &gate,
+            session(),
+            ManagedNetworkEgressAction {
+                host: "127.0.0.1".to_string(),
+                port: server.endpoint.port(),
+                protocol: "tcp".to_string(),
+            },
+            false,
+        )
+        .unwrap();
+        let received_payload = server.join().unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "network.egress.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("protocol").map(String::as_str),
+            Some("tcp")
+        );
+        assert_eq!(
+            events[1].metadata.get("bytes_written").map(String::as_str),
+            Some("33")
+        );
+        assert_eq!(received_payload, "ferrogate governed network smoke\n");
+    }
+
+    #[test]
+    fn governed_network_egress_denial_happens_before_tcp_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_nonblocking(true)
+            .expect("set test listener nonblocking");
+        let endpoint = listener.local_addr().unwrap();
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_network_egress_action(
+            &gate,
+            session(),
+            ManagedNetworkEgressAction {
+                host: "127.0.0.1".to_string(),
+                port: endpoint.port(),
+                protocol: "tcp".to_string(),
+            },
+            false,
+        )
+        .unwrap_err();
+        let accepted = listener.accept();
+
+        assert!(error.to_string().contains("direct network egress"));
+        assert!(matches!(
+            accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[test]
+    fn governed_network_egress_respects_direct_egress_policy() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
+                allow_direct_network_egress: false,
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let mut session = session();
+        session.worker_id = "network-policy-worker".to_string();
+
+        let error = execute_governed_network_egress_action(
+            &gate,
+            session,
+            ManagedNetworkEgressAction {
+                host: "127.0.0.1".to_string(),
+                port: 9,
+                protocol: "tcp".to_string(),
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("direct network egress"));
     }
 
     #[test]

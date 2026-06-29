@@ -293,6 +293,7 @@ pub enum FrameworkAdapterEventKind {
     RestRequested,
     FilesystemRequested,
     SecretRequested,
+    NetworkEgressRequested,
     MemoryRead,
     MemoryWrite,
     CheckpointCreated,
@@ -322,6 +323,7 @@ impl FrameworkAdapterEventKind {
             Self::RestRequested => "rest.requested",
             Self::FilesystemRequested => "filesystem.requested",
             Self::SecretRequested => "secret.requested",
+            Self::NetworkEgressRequested => "network.egress.requested",
             Self::MemoryRead => "memory.read",
             Self::MemoryWrite => "memory.write",
             Self::CheckpointCreated => "checkpoint.created",
@@ -436,7 +438,8 @@ impl NormalizedFrameworkEvent {
             | FrameworkAdapterEventKind::CliRequested
             | FrameworkAdapterEventKind::RestRequested
             | FrameworkAdapterEventKind::FilesystemRequested
-            | FrameworkAdapterEventKind::SecretRequested => "requested",
+            | FrameworkAdapterEventKind::SecretRequested
+            | FrameworkAdapterEventKind::NetworkEgressRequested => "requested",
             FrameworkAdapterEventKind::CapabilityAllowed
             | FrameworkAdapterEventKind::ToolApproved => "allowed",
             FrameworkAdapterEventKind::CapabilityDenied | FrameworkAdapterEventKind::ToolDenied => {
