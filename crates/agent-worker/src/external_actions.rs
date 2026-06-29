@@ -253,6 +253,37 @@ pub(crate) fn governed_cli_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn governed_cli_timeout_smoke_command() -> Result<()> {
+    let action = ManagedCliAction {
+        command: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 1".to_string()],
+        working_dir: std::env::current_dir()?.display().to_string(),
+        env_policy: "deny_all".to_string(),
+        timeout_millis: 25,
+        stdout_limit_bytes: 4096,
+        stderr_limit_bytes: 4096,
+        artifact_capture: false,
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events =
+        execute_governed_cli_action_with_failure_evidence(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
 pub(crate) fn governed_tool_execution_smoke_command() -> Result<()> {
     let action = ManagedToolAction {
         tool_name: "native.echo".to_string(),
@@ -1207,6 +1238,91 @@ where
             message: Some("managed CLI action executed after gateway authorization".to_string()),
             metadata: execution.metadata(&action),
         },
+    ])
+}
+
+fn execute_governed_cli_action_with_failure_evidence<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedCliAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Cli(action.clone()),
+            high_risk,
+        },
+    )?;
+    match run_authorized_cli_action(&action) {
+        Ok(execution) => Ok(vec![
+            decision.event,
+            NormalizedFrameworkEvent {
+                session_id: session.session_id,
+                run_id: session.run_id,
+                adapter_name: session.adapter_name,
+                adapter_version: session.adapter_version,
+                framework: session.framework,
+                mode: session.mode,
+                kind: FrameworkAdapterEventKind::CliRequested,
+                message: Some(
+                    "managed CLI action executed after gateway authorization".to_string(),
+                ),
+                metadata: execution.metadata(&action),
+            },
+        ]),
+        Err(error) => Ok(vec![
+            decision.event,
+            NormalizedFrameworkEvent {
+                session_id: session.session_id,
+                run_id: session.run_id,
+                adapter_name: session.adapter_name,
+                adapter_version: session.adapter_version,
+                framework: session.framework,
+                mode: session.mode,
+                kind: FrameworkAdapterEventKind::RunFailed,
+                message: Some(format!(
+                    "managed CLI action failed after gateway authorization: {error}"
+                )),
+                metadata: governed_cli_failure_metadata(&action, &error),
+            },
+        ]),
+    }
+}
+
+fn governed_cli_failure_metadata(
+    action: &ManagedCliAction,
+    error: &FrameworkAdapterError,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("external_action".to_string(), "cli".to_string()),
+        ("external_target".to_string(), action.command.clone()),
+        ("command".to_string(), action.command.clone()),
+        ("args".to_string(), action.args.join("\n")),
+        ("working_dir".to_string(), action.working_dir.clone()),
+        ("env_policy".to_string(), action.env_policy.clone()),
+        (
+            "timeout_millis".to_string(),
+            action.timeout_millis.to_string(),
+        ),
+        (
+            "stdout_limit_bytes".to_string(),
+            action.stdout_limit_bytes.to_string(),
+        ),
+        (
+            "stderr_limit_bytes".to_string(),
+            action.stderr_limit_bytes.to_string(),
+        ),
+        (
+            "artifact_capture".to_string(),
+            action.artifact_capture.to_string(),
+        ),
+        ("failed_after_authorization".to_string(), "true".to_string()),
+        ("failure_reason".to_string(), error.to_string()),
     ])
 }
 
@@ -2869,6 +2985,48 @@ mod tests {
 
         assert!(error.to_string().contains("not allowed"));
         assert!(!marker_path.exists());
+    }
+
+    #[test]
+    fn governed_cli_timeout_is_recorded_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_cli_action_with_failure_evidence(
+            &gate,
+            session(),
+            ManagedCliAction {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "sleep 1".to_string()],
+                working_dir: std::env::current_dir().unwrap().display().to_string(),
+                env_policy: "deny_all".to_string(),
+                timeout_millis: 25,
+                stdout_limit_bytes: 128,
+                stderr_limit_bytes: 128,
+                artifact_capture: false,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "run.failed");
+        assert!(events[1]
+            .metadata
+            .get("failed_after_authorization")
+            .is_some_and(|value| value == "true"));
+        assert!(events[1]
+            .metadata
+            .get("failure_reason")
+            .is_some_and(|reason| reason.contains("timed out after")));
+        assert_eq!(
+            events[1].metadata.get("timeout_millis").map(String::as_str),
+            Some("25")
+        );
     }
 
     #[test]

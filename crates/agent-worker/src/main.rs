@@ -80,6 +80,8 @@ enum Command {
     },
     /// Execute a local governed CLI smoke after gateway authorization.
     GovernedCliExecutionSmoke,
+    /// Execute a local governed CLI timeout smoke after gateway authorization.
+    GovernedCliTimeoutSmoke,
     /// Execute a local governed tool smoke after gateway authorization.
     GovernedToolExecutionSmoke,
     /// Execute a local governed MCP tool smoke after gateway authorization.
@@ -183,6 +185,7 @@ fn main() -> Result<()> {
         Command::GovernedCliExecutionSmoke => {
             external_actions::governed_cli_execution_smoke_command()
         }
+        Command::GovernedCliTimeoutSmoke => external_actions::governed_cli_timeout_smoke_command(),
         Command::GovernedToolExecutionSmoke => {
             external_actions::governed_tool_execution_smoke_command()
         }
