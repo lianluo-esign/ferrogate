@@ -545,6 +545,18 @@ It requests a managed `skill` capability, then invokes the built-in
 local skill contract coverage; it is not an external skill package runtime,
 not ambient host skill execution, and not Firecracker boot proof.
 
+The equivalent local memory read/write smoke is:
+
+```bash
+agent-worker governed-memory-execution-smoke
+```
+
+It requests managed `memory.write` and `memory.read` capabilities before writing
+and reading a local session-scoped smoke value, then emits `memory.write` and
+`memory.read` evidence with `executed_after_authorization=true`. This is local
+session-memory contract coverage; it is not durable memory storage, cross-run
+memory indexing, or Firecracker boot proof.
+
 The equivalent local REST execution smoke is:
 
 ```bash

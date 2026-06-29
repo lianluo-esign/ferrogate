@@ -84,6 +84,8 @@ enum Command {
     GovernedMcpToolExecutionSmoke,
     /// Execute a local governed skill smoke after gateway authorization.
     GovernedSkillExecutionSmoke,
+    /// Execute local governed memory read/write smokes after gateway authorization.
+    GovernedMemoryExecutionSmoke,
     /// Execute a local governed REST smoke after gateway authorization.
     GovernedRestExecutionSmoke,
     /// Execute a local governed filesystem read smoke after gateway authorization.
@@ -180,6 +182,9 @@ fn main() -> Result<()> {
         }
         Command::GovernedSkillExecutionSmoke => {
             external_actions::governed_skill_execution_smoke_command()
+        }
+        Command::GovernedMemoryExecutionSmoke => {
+            external_actions::governed_memory_execution_smoke_command()
         }
         Command::GovernedRestExecutionSmoke => {
             external_actions::governed_rest_execution_smoke_command()

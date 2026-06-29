@@ -35,8 +35,9 @@ use ferrogate_runtime::{
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
     ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
     ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
-    ManagedMcpToolAction, ManagedRestAction, ManagedSkillAction, ManagedToolAction,
-    NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
+    ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedRestAction,
+    ManagedSkillAction, ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer,
+    SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -313,6 +314,52 @@ pub(crate) fn governed_skill_execution_smoke_command() -> Result<()> {
         },
     ));
     let events = execute_governed_skill_action(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn governed_memory_execution_smoke_command() -> Result<()> {
+    let mut store = BTreeMap::new();
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([
+                CapabilityAction::MemoryRead,
+                CapabilityAction::MemoryWrite,
+            ]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let mut events = Vec::new();
+    events.extend(execute_governed_memory_action(
+        &gate,
+        smoke_session(),
+        ManagedMemoryAction {
+            access: ManagedMemoryAccess::Write,
+            namespace: "session".to_string(),
+            key: "summary".to_string(),
+        },
+        &mut store,
+        false,
+    )?);
+    events.extend(execute_governed_memory_action(
+        &gate,
+        smoke_session(),
+        ManagedMemoryAction {
+            access: ManagedMemoryAccess::Read,
+            namespace: "session".to_string(),
+            key: "summary".to_string(),
+        },
+        &mut store,
+        false,
+    )?);
     println!(
         "{}",
         serde_json::to_string(
@@ -904,6 +951,44 @@ where
     ])
 }
 
+fn execute_governed_memory_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedMemoryAction,
+    store: &mut BTreeMap<String, String>,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Memory(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_memory_action(&action, store)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: match action.access {
+                ManagedMemoryAccess::Read => FrameworkAdapterEventKind::MemoryRead,
+                ManagedMemoryAccess::Write => FrameworkAdapterEventKind::MemoryWrite,
+            },
+            message: Some("managed memory action executed after gateway authorization".to_string()),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
 fn execute_governed_cli_action<A>(
     authorizer: &A,
     session: FrameworkAdapterSession,
@@ -1144,6 +1229,72 @@ fn run_authorized_skill_action(
             512,
         ),
     })
+}
+
+struct GovernedMemoryExecution {
+    value_excerpt: String,
+}
+
+impl GovernedMemoryExecution {
+    fn metadata(self, action: &ManagedMemoryAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "external_action".to_string(),
+                format!("memory.{}", action.access.as_str()),
+            ),
+            (
+                "external_target".to_string(),
+                format!(
+                    "memory:{}:{}:{}",
+                    action.access.as_str(),
+                    action.namespace,
+                    action.key
+                ),
+            ),
+            (
+                "memory_access".to_string(),
+                action.access.as_str().to_string(),
+            ),
+            ("namespace".to_string(), action.namespace.clone()),
+            ("key".to_string(), action.key.clone()),
+            ("value_excerpt".to_string(), self.value_excerpt),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_memory_action(
+    action: &ManagedMemoryAction,
+    store: &mut BTreeMap<String, String>,
+) -> Result<GovernedMemoryExecution, FrameworkAdapterError> {
+    if action.namespace != "session" {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed memory smoke only supports session namespace".to_string(),
+        ));
+    }
+    let store_key = format!("{}:{}", action.namespace, action.key);
+    match action.access {
+        ManagedMemoryAccess::Write => {
+            let value = "ferrogate governed memory smoke".to_string();
+            store.insert(store_key, value.clone());
+            Ok(GovernedMemoryExecution {
+                value_excerpt: bounded_utf8_excerpt(value.as_bytes(), 512),
+            })
+        }
+        ManagedMemoryAccess::Read => {
+            let value = store.get(&store_key).ok_or_else(|| {
+                FrameworkAdapterError::CapabilityDenied(
+                    "managed memory action read failed after gateway authorization".to_string(),
+                )
+            })?;
+            Ok(GovernedMemoryExecution {
+                value_excerpt: bounded_utf8_excerpt(value.as_bytes(), 512),
+            })
+        }
+    }
 }
 
 struct GovernedFilesystemExecution {
@@ -1881,6 +2032,139 @@ mod tests {
 
         assert!(error.to_string().contains("not allowed"));
         assert!(!error.to_string().contains("does not support skill"));
+    }
+
+    #[test]
+    fn governed_memory_write_runs_only_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::MemoryWrite]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let mut store = BTreeMap::new();
+
+        let events = execute_governed_memory_action(
+            &gate,
+            session(),
+            ManagedMemoryAction {
+                access: ManagedMemoryAccess::Write,
+                namespace: "session".to_string(),
+                key: "summary".to_string(),
+            },
+            &mut store,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "memory.write");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("memory_access").map(String::as_str),
+            Some("write")
+        );
+        assert_eq!(
+            store.get("session:summary").map(String::as_str),
+            Some("ferrogate governed memory smoke")
+        );
+    }
+
+    #[test]
+    fn governed_memory_read_runs_only_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::MemoryRead]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let mut store = BTreeMap::from([(
+            "session:summary".to_string(),
+            "ferrogate governed memory smoke".to_string(),
+        )]);
+
+        let events = execute_governed_memory_action(
+            &gate,
+            session(),
+            ManagedMemoryAction {
+                access: ManagedMemoryAccess::Read,
+                namespace: "session".to_string(),
+                key: "summary".to_string(),
+            },
+            &mut store,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "memory.read");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1].metadata.get("memory_access").map(String::as_str),
+            Some("read")
+        );
+        assert_eq!(
+            events[1].metadata.get("value_excerpt").map(String::as_str),
+            Some("ferrogate governed memory smoke")
+        );
+    }
+
+    #[test]
+    fn governed_memory_write_denial_happens_before_store_mutation() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+        let mut store = BTreeMap::new();
+
+        let error = execute_governed_memory_action(
+            &gate,
+            session(),
+            ManagedMemoryAction {
+                access: ManagedMemoryAccess::Write,
+                namespace: "session".to_string(),
+                key: "summary".to_string(),
+            },
+            &mut store,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!store.contains_key("session:summary"));
+    }
+
+    #[test]
+    fn governed_memory_read_denial_happens_before_store_lookup() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+        let mut store = BTreeMap::new();
+
+        let error = execute_governed_memory_action(
+            &gate,
+            session(),
+            ManagedMemoryAction {
+                access: ManagedMemoryAccess::Read,
+                namespace: "session".to_string(),
+                key: "missing".to_string(),
+            },
+            &mut store,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!error.to_string().contains("read failed"));
     }
 
     #[test]
