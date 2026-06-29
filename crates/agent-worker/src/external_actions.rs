@@ -284,6 +284,37 @@ pub(crate) fn governed_cli_timeout_smoke_command() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn governed_cli_cancel_smoke_command() -> Result<()> {
+    let action = ManagedCliAction {
+        command: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 5".to_string()],
+        working_dir: std::env::current_dir()?.display().to_string(),
+        env_policy: "deny_all".to_string(),
+        timeout_millis: 5_000,
+        stdout_limit_bytes: 4096,
+        stderr_limit_bytes: 4096,
+        artifact_capture: false,
+    };
+    let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+        CapabilityPolicy {
+            allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+            ..CapabilityPolicy::default()
+        },
+    ));
+    let events =
+        execute_governed_cli_action_with_cancel_evidence(&gate, smoke_session(), action, false)?;
+    println!(
+        "{}",
+        serde_json::to_string(
+            &events
+                .into_iter()
+                .map(|event| event.canonical_json())
+                .collect::<Vec<_>>()
+        )?
+    );
+    Ok(())
+}
+
 pub(crate) fn governed_tool_execution_smoke_command() -> Result<()> {
     let action = ManagedToolAction {
         tool_name: "native.echo".to_string(),
@@ -1294,6 +1325,40 @@ where
     }
 }
 
+fn execute_governed_cli_action_with_cancel_evidence<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedCliAction,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Cli(action.clone()),
+            high_risk,
+        },
+    )?;
+    let cancellation = run_authorized_cli_action_until_cancelled(&action)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::RunCancelled,
+            message: Some("managed CLI action cancelled after gateway authorization".to_string()),
+            metadata: cancellation.metadata(&action),
+        },
+    ])
+}
+
 fn governed_cli_failure_metadata(
     action: &ManagedCliAction,
     error: &FrameworkAdapterError,
@@ -1324,6 +1389,91 @@ fn governed_cli_failure_metadata(
         ("failed_after_authorization".to_string(), "true".to_string()),
         ("failure_reason".to_string(), error.to_string()),
     ])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GovernedCliCancellation {
+    cancellation_reason: String,
+    elapsed_millis: u128,
+}
+
+impl GovernedCliCancellation {
+    fn metadata(self, action: &ManagedCliAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "cli".to_string()),
+            ("external_target".to_string(), action.command.clone()),
+            ("command".to_string(), action.command.clone()),
+            ("args".to_string(), action.args.join("\n")),
+            ("working_dir".to_string(), action.working_dir.clone()),
+            ("env_policy".to_string(), action.env_policy.clone()),
+            (
+                "timeout_millis".to_string(),
+                action.timeout_millis.to_string(),
+            ),
+            (
+                "stdout_limit_bytes".to_string(),
+                action.stdout_limit_bytes.to_string(),
+            ),
+            (
+                "stderr_limit_bytes".to_string(),
+                action.stderr_limit_bytes.to_string(),
+            ),
+            (
+                "artifact_capture".to_string(),
+                action.artifact_capture.to_string(),
+            ),
+            (
+                "cancelled_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+            ("cancellation_reason".to_string(), self.cancellation_reason),
+            (
+                "elapsed_millis".to_string(),
+                self.elapsed_millis.to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_cli_action_until_cancelled(
+    action: &ManagedCliAction,
+) -> Result<GovernedCliCancellation, FrameworkAdapterError> {
+    let mut command = Command::new(&action.command);
+    command
+        .args(&action.args)
+        .current_dir(&action.working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if action.env_policy == "deny_all" {
+        command.env_clear();
+    }
+    let mut child = command.spawn().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed CLI action spawn failed after gateway authorization: {error}"
+        ))
+    })?;
+    let started_at = Instant::now();
+    thread::sleep(Duration::from_millis(25));
+    if child
+        .try_wait()
+        .map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed CLI action status check failed: {error}"
+            ))
+        })?
+        .is_none()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(GovernedCliCancellation {
+            cancellation_reason: "operator_cancelled".to_string(),
+            elapsed_millis: started_at.elapsed().as_millis(),
+        });
+    }
+    Err(FrameworkAdapterError::CapabilityDenied(
+        "managed CLI action completed before cancellation could be observed".to_string(),
+    ))
 }
 
 fn execute_governed_rest_action<A>(
@@ -3026,6 +3176,51 @@ mod tests {
         assert_eq!(
             events[1].metadata.get("timeout_millis").map(String::as_str),
             Some("25")
+        );
+    }
+
+    #[test]
+    fn governed_cli_cancellation_is_recorded_after_gateway_authorization() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_cli_action_with_cancel_evidence(
+            &gate,
+            session(),
+            ManagedCliAction {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "sleep 5".to_string()],
+                working_dir: std::env::current_dir().unwrap().display().to_string(),
+                env_policy: "deny_all".to_string(),
+                timeout_millis: 5_000,
+                stdout_limit_bytes: 128,
+                stderr_limit_bytes: 128,
+                artifact_capture: false,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "run.cancelled");
+        assert!(events[1]
+            .metadata
+            .get("cancelled_after_authorization")
+            .is_some_and(|value| value == "true"));
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("cancellation_reason")
+                .map(String::as_str),
+            Some("operator_cancelled")
+        );
+        assert_eq!(
+            events[1].metadata.get("timeout_millis").map(String::as_str),
+            Some("5000")
         );
     }
 

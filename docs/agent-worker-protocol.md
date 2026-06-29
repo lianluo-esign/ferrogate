@@ -529,6 +529,7 @@ after gateway authorization, `agent-worker` also provides:
 ```bash
 agent-worker governed-cli-execution-smoke
 agent-worker governed-cli-timeout-smoke
+agent-worker governed-cli-cancel-smoke
 ```
 
 The execution smoke uses a built-in allow-only CLI policy, requests a managed `cli`
@@ -537,8 +538,11 @@ capability, executes a bounded `/bin/sh -c` command only after
 `cli.requested` execution evidence. The timeout smoke uses the same authorization
 path, then runs a deliberately slow command with a short timeout and prints
 `run.failed` evidence with `failed_after_authorization=true`. These are
-deterministic local CLI smokes; they are not a general-purpose shell runner, not
-Codex/Claude/Hermes task execution, and not Firecracker boot proof.
+deterministic local CLI smokes. The cancellation smoke starts a slow command
+after authorization, simulates an operator cancellation, kills the child process,
+and prints `run.cancelled` evidence with `cancelled_after_authorization=true`.
+They are not a general-purpose shell runner, not Codex/Claude/Hermes task
+execution, and not Firecracker boot proof.
 
 The equivalent local tool and MCP tool execution smokes are:
 
