@@ -391,9 +391,12 @@ closed before provisioning.
 `stop` removes the retained microVM from worker state; a later `cleanup` for the
 same `session_id/run_id` is accepted as an idempotent no-op. The current
 `exec_or_attach` path still does not run framework handlers inside that microVM;
-handler execution remains a separate worker-owned path that requires a
-`capability.allowed` decision from the configured gateway HTTP authorizer before
-continuing. The requested capability is framework-specific: the native harness
+when a retained microVM exists, it returns failed lifecycle evidence with the
+same `isolation_instance_id` and `outcome=handler_attach_not_implemented`
+without stopping the VM. Handler execution remains a separate worker-owned path
+that requires a `capability.allowed` decision from the configured gateway HTTP
+authorizer before continuing. The requested capability is framework-specific:
+the native harness
 uses a managed tool dispatch capability, Codex and Claude Code use a managed
 CLI capability with gateway-controlled environment policy and output limits, and
 Hermes uses managed memory-read capability for run context. The native harness

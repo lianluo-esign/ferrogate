@@ -1448,7 +1448,7 @@ fn run_authorized_cli_action_until_cancelled(
     if action.env_policy == "deny_all" {
         command.env_clear();
     }
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = spawn_cli_with_executable_busy_retry(&mut command).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
             "managed CLI action spawn failed after gateway authorization: {error}"
         ))
@@ -2042,7 +2042,7 @@ fn run_authorized_cli_action(
     if action.env_policy == "deny_all" {
         command.env_clear();
     }
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = spawn_cli_with_executable_busy_retry(&mut command).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
             "managed CLI action spawn failed after gateway authorization: {error}"
         ))
@@ -2087,6 +2087,21 @@ fn run_authorized_cli_action(
         stdout_excerpt: bounded_utf8_excerpt(&output.stdout, action.stdout_limit_bytes),
         stderr_excerpt: bounded_utf8_excerpt(&output.stderr, action.stderr_limit_bytes),
     })
+}
+
+fn spawn_cli_with_executable_busy_retry(command: &mut Command) -> io::Result<std::process::Child> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(5 * (attempt + 1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.expect("ExecutableFileBusy retry loop records the last error"))
 }
 
 fn bounded_utf8_excerpt(bytes: &[u8], limit: u64) -> String {

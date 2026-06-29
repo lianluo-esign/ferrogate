@@ -225,6 +225,20 @@ fn exec_or_attach(
     if let Some(existing) = state.get_handler_run_state(&session_id, &run_id) {
         return Ok(Some(stream_native_harness_status(&existing)));
     }
+    if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
+        let running = existing.is_running();
+        let lifecycle = lifecycle_result_with_instance(
+            envelope,
+            ManagedWorkerSessionStatus::Failed,
+            "handler_attach_not_implemented",
+            &format!(
+                "Firecracker microVM {} is provisioned with running={running}, but agent-worker handler execution inside the microVM is not implemented yet",
+                existing.instance_id
+            ),
+            Some(existing.instance_id.clone()),
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
     let lifecycle = lifecycle_result(
         envelope,
         ManagedWorkerSessionStatus::Failed,
