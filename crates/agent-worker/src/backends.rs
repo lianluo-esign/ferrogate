@@ -9,6 +9,7 @@ use std::{
     fs::{self, OpenOptions},
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{bail, Result};
@@ -277,7 +278,9 @@ struct FirecrackerPathCheck {
     configured: bool,
     exists: bool,
     file: bool,
+    size_bytes: Option<u64>,
     executable: Option<bool>,
+    version_output: Option<String>,
     char_device: Option<bool>,
     open_read_write: Option<bool>,
     reason: Option<String>,
@@ -313,12 +316,21 @@ fn configured_file_check(
         Ok(metadata) => {
             let file = metadata.is_file();
             let executable = (metadata.permissions().mode() & 0o111) != 0;
+            let version_output = if file && must_be_executable && executable {
+                executable_version_output(&path)
+            } else {
+                None
+            };
             let reason = if !file {
                 Some(format!(
                     "{env_var} does not point to a file: {path_display}"
                 ))
             } else if must_be_executable && !executable {
                 Some(format!("{env_var} is not executable: {path_display}"))
+            } else if must_be_executable && version_output.is_none() {
+                Some(format!(
+                    "{env_var} is executable but did not return version output: {path_display}"
+                ))
             } else {
                 None
             };
@@ -329,7 +341,9 @@ fn configured_file_check(
                 configured: true,
                 exists: true,
                 file,
+                size_bytes: Some(metadata.len()),
                 executable: Some(executable),
+                version_output,
                 char_device: None,
                 open_read_write: None,
                 reason,
@@ -384,7 +398,9 @@ fn kvm_device_check() -> FirecrackerPathCheck {
                 configured: true,
                 exists: true,
                 file: false,
+                size_bytes: None,
                 executable: None,
+                version_output: None,
                 char_device: Some(char_device),
                 open_read_write: Some(open_read_write),
                 reason,
@@ -414,10 +430,28 @@ fn path_check_failure(
         configured,
         exists: false,
         file: false,
+        size_bytes: None,
         executable: None,
+        version_output: None,
         char_device: None,
         open_read_write: None,
         reason: Some(reason),
+    }
+}
+
+fn executable_version_output(path: &Path) -> Option<String> {
+    let output = Command::new(path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.lines().next().unwrap_or_default().to_string())
     }
 }
 
@@ -434,8 +468,8 @@ mod tests {
         let jailer_path = temp.path().join("jailer");
         let kernel_path = temp.path().join("vmlinux");
         let rootfs_path = temp.path().join("rootfs.ext4");
-        std::fs::write(&firecracker_path, b"not executed").unwrap();
-        std::fs::write(&jailer_path, b"not executed").unwrap();
+        write_executable_version_script(&firecracker_path, "Firecracker v.test").unwrap();
+        write_executable_version_script(&jailer_path, "Jailer v.test").unwrap();
         std::fs::write(&kernel_path, b"not executed").unwrap();
         std::fs::write(&rootfs_path, b"not executed").unwrap();
         env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
@@ -479,7 +513,7 @@ mod tests {
         let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
         let firecracker_path = temp.path().join("firecracker");
-        std::fs::write(&firecracker_path, b"not executed").unwrap();
+        write_executable_version_script(&firecracker_path, "Firecracker v.test").unwrap();
         env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
         env::remove_var("AGENT_WORKER_FIRECRACKER_JAILER");
         env::remove_var("AGENT_WORKER_FIRECRACKER_KERNEL");
@@ -502,8 +536,8 @@ mod tests {
         let jailer_path = temp.path().join("jailer");
         let kernel_path = temp.path().join("vmlinux");
         let rootfs_path = temp.path().join("rootfs.ext4");
-        std::fs::write(&firecracker_path, b"not executed").unwrap();
-        std::fs::write(&jailer_path, b"not executed").unwrap();
+        write_executable_version_script(&firecracker_path, "Firecracker v.test").unwrap();
+        write_executable_version_script(&jailer_path, "Jailer v.test").unwrap();
         std::fs::write(&kernel_path, b"not executed").unwrap();
         std::fs::write(&rootfs_path, b"not executed").unwrap();
         env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
@@ -574,6 +608,53 @@ mod tests {
         assert!(preflight
             .failure_summary()
             .contains("not a character device"));
+    }
+
+    #[test]
+    fn firecracker_host_preflight_reports_binary_versions_and_bundle_sizes() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let firecracker_path = temp.path().join("firecracker");
+        let jailer_path = temp.path().join("jailer");
+        let kernel_path = temp.path().join("vmlinux");
+        let rootfs_path = temp.path().join("rootfs.ext4");
+        write_executable_version_script(&firecracker_path, "Firecracker v.test").unwrap();
+        write_executable_version_script(&jailer_path, "Jailer v.test").unwrap();
+        std::fs::write(&kernel_path, b"kernel-bytes").unwrap();
+        std::fs::write(&rootfs_path, b"rootfs-bytes").unwrap();
+        env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+        env::set_var("AGENT_WORKER_FIRECRACKER_JAILER", &jailer_path);
+        env::set_var("AGENT_WORKER_FIRECRACKER_KERNEL", &kernel_path);
+        env::set_var("AGENT_WORKER_FIRECRACKER_ROOTFS", &rootfs_path);
+        env::set_var(
+            "AGENT_WORKER_FIRECRACKER_KVM_DEVICE",
+            temp.path().join("missing-kvm"),
+        );
+
+        let preflight = firecracker_host_preflight();
+
+        clear_firecracker_env();
+        assert_eq!(
+            preflight.bundle.firecracker_bin.version_output.as_deref(),
+            Some("Firecracker v.test")
+        );
+        assert_eq!(
+            preflight.bundle.jailer_bin.version_output.as_deref(),
+            Some("Jailer v.test")
+        );
+        assert_eq!(preflight.bundle.kernel_image.size_bytes, Some(12));
+        assert_eq!(preflight.bundle.rootfs_image.size_bytes, Some(12));
+        assert!(!preflight.proves_microvm_boot);
+    }
+
+    fn write_executable_version_script(path: &Path, version: &str) -> std::io::Result<()> {
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo '{version}'; exit 0; fi\nexit 0\n"),
+        )?;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions)
     }
 
     fn clear_firecracker_env() {
