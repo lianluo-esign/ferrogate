@@ -530,6 +530,20 @@ prints the `rest.requested` execution evidence plus the served request line.
 This proves the managed REST execution gate and local evidence path; it is not
 unrestricted public egress, browser automation, or Firecracker boot proof.
 
+The equivalent local filesystem read smoke is:
+
+```bash
+agent-worker governed-filesystem-execution-smoke
+```
+
+It creates a temporary workspace file, requests a managed `filesystem`
+capability, reads that workspace-relative file only after
+`capability.allowed`, and prints `filesystem.requested` evidence with the
+resolved path, access mode, byte count, and bounded content excerpt. This proves
+the managed filesystem execution gate for local read-only workspace access; it
+is not broad host filesystem access, write/delete coverage, or Firecracker boot
+proof.
+
 The gateway/control-plane side can serve this HTTP authorizer when
 managed runtime is enabled with:
 

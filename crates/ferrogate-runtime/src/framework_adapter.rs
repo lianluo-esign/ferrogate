@@ -290,6 +290,7 @@ pub enum FrameworkAdapterEventKind {
     McpToolRequested,
     CliRequested,
     RestRequested,
+    FilesystemRequested,
     MemoryRead,
     MemoryWrite,
     CheckpointCreated,
@@ -316,6 +317,7 @@ impl FrameworkAdapterEventKind {
             Self::McpToolRequested => "mcp.tool.requested",
             Self::CliRequested => "cli.requested",
             Self::RestRequested => "rest.requested",
+            Self::FilesystemRequested => "filesystem.requested",
             Self::MemoryRead => "memory.read",
             Self::MemoryWrite => "memory.write",
             Self::CheckpointCreated => "checkpoint.created",
@@ -427,7 +429,8 @@ impl NormalizedFrameworkEvent {
             | FrameworkAdapterEventKind::ToolRequested
             | FrameworkAdapterEventKind::McpToolRequested
             | FrameworkAdapterEventKind::CliRequested
-            | FrameworkAdapterEventKind::RestRequested => "requested",
+            | FrameworkAdapterEventKind::RestRequested
+            | FrameworkAdapterEventKind::FilesystemRequested => "requested",
             FrameworkAdapterEventKind::CapabilityAllowed
             | FrameworkAdapterEventKind::ToolApproved => "allowed",
             FrameworkAdapterEventKind::CapabilityDenied | FrameworkAdapterEventKind::ToolDenied => {

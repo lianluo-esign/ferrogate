@@ -80,6 +80,8 @@ enum Command {
     GovernedCliExecutionSmoke,
     /// Execute a local governed REST smoke after gateway authorization.
     GovernedRestExecutionSmoke,
+    /// Execute a local governed filesystem read smoke after gateway authorization.
+    GovernedFilesystemExecutionSmoke,
     /// Accept one signed management envelope as JSON on stdin and emit a JSON response.
     AcceptManagementJson {
         /// Management key id expected in the signed envelope.
@@ -166,6 +168,9 @@ fn main() -> Result<()> {
         }
         Command::GovernedRestExecutionSmoke => {
             external_actions::governed_rest_execution_smoke_command()
+        }
+        Command::GovernedFilesystemExecutionSmoke => {
+            external_actions::governed_filesystem_execution_smoke_command()
         }
         Command::AcceptManagementJson {
             key_id,

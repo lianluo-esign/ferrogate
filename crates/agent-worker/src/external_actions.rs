@@ -19,7 +19,7 @@ use std::{
     net::TcpListener,
     net::{Shutdown, SocketAddr, TcpStream},
     os::unix::net::{UnixListener, UnixStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
     thread,
@@ -34,8 +34,9 @@ use ferrogate_runtime::{
     FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterSession,
     GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
     ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
-    ManagedExternalActionRequest, ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent,
-    SimpleCapabilityAuthorizer, SupportedFramework,
+    ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
+    ManagedRestAction, ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer,
+    SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -278,6 +279,48 @@ pub(crate) fn governed_rest_execution_smoke_command() -> Result<()> {
     });
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
+}
+
+pub(crate) fn governed_filesystem_execution_smoke_command() -> Result<()> {
+    let workspace = std::env::temp_dir().join(format!(
+        "ferrogate-agent-worker-filesystem-smoke-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    std::fs::create_dir(&workspace)?;
+    let result = (|| -> Result<()> {
+        let file_path = workspace.join("governed-filesystem-smoke.txt");
+        std::fs::write(&file_path, "ferrogate governed filesystem smoke\n")?;
+        let action = ManagedFilesystemAction {
+            path: "governed-filesystem-smoke.txt".to_string(),
+            access: ManagedFilesystemAccess::Read,
+            workspace_relative: true,
+        };
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Filesystem]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+        let events =
+            execute_governed_filesystem_action(&gate, smoke_session(), action, &workspace, false)?;
+        println!(
+            "{}",
+            serde_json::to_string(
+                &events
+                    .into_iter()
+                    .map(|event| event.canonical_json())
+                    .collect::<Vec<_>>()
+            )?
+        );
+        Ok(())
+    })();
+    let cleanup = std::fs::remove_dir_all(&workspace);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(error), _) => Err(error),
+    }
 }
 
 pub(crate) fn serve_gateway_authorizer_unix(
@@ -750,6 +793,117 @@ where
             metadata: execution.metadata(&action),
         },
     ])
+}
+
+fn execute_governed_filesystem_action<A>(
+    authorizer: &A,
+    session: FrameworkAdapterSession,
+    action: ManagedFilesystemAction,
+    workspace_root: &Path,
+    high_risk: bool,
+) -> Result<Vec<NormalizedFrameworkEvent>, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let decision = authorize_handler_external_action(
+        Some(authorizer),
+        ExternalActionGateRequest {
+            session: session.clone(),
+            action: ManagedExternalAction::Filesystem(action.clone()),
+            high_risk,
+        },
+    )?;
+    let execution = run_authorized_filesystem_action(&action, workspace_root)?;
+    Ok(vec![
+        decision.event,
+        NormalizedFrameworkEvent {
+            session_id: session.session_id,
+            run_id: session.run_id,
+            adapter_name: session.adapter_name,
+            adapter_version: session.adapter_version,
+            framework: session.framework,
+            mode: session.mode,
+            kind: FrameworkAdapterEventKind::FilesystemRequested,
+            message: Some(
+                "managed filesystem action executed after gateway authorization".to_string(),
+            ),
+            metadata: execution.metadata(&action),
+        },
+    ])
+}
+
+struct GovernedFilesystemExecution {
+    resolved_path: PathBuf,
+    byte_len: usize,
+    content_excerpt: String,
+}
+
+impl GovernedFilesystemExecution {
+    fn metadata(self, action: &ManagedFilesystemAction) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("external_action".to_string(), "filesystem".to_string()),
+            (
+                "external_target".to_string(),
+                format!("{}:{}", action.access.as_str(), action.path),
+            ),
+            ("path".to_string(), action.path.clone()),
+            (
+                "filesystem_access".to_string(),
+                action.access.as_str().to_string(),
+            ),
+            (
+                "workspace_relative".to_string(),
+                action.workspace_relative.to_string(),
+            ),
+            (
+                "resolved_path".to_string(),
+                self.resolved_path.display().to_string(),
+            ),
+            ("byte_len".to_string(), self.byte_len.to_string()),
+            ("content_excerpt".to_string(), self.content_excerpt),
+            (
+                "executed_after_authorization".to_string(),
+                "true".to_string(),
+            ),
+        ])
+    }
+}
+
+fn run_authorized_filesystem_action(
+    action: &ManagedFilesystemAction,
+    workspace_root: &Path,
+) -> Result<GovernedFilesystemExecution, FrameworkAdapterError> {
+    if action.access != ManagedFilesystemAccess::Read {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed filesystem smoke currently supports read access only".to_string(),
+        ));
+    }
+    if !action.workspace_relative {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed filesystem smoke requires workspace_relative=true".to_string(),
+        ));
+    }
+    let relative = Path::new(&action.path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(FrameworkAdapterError::InvalidRequest(
+            "managed filesystem smoke path must stay inside the workspace".to_string(),
+        ));
+    }
+    let resolved_path = workspace_root.join(relative);
+    let bytes = std::fs::read(&resolved_path).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem action read failed after gateway authorization: {error}"
+        ))
+    })?;
+    Ok(GovernedFilesystemExecution {
+        resolved_path,
+        byte_len: bytes.len(),
+        content_excerpt: bounded_utf8_excerpt(&bytes, 512),
+    })
 }
 
 struct GovernedCliExecution {
@@ -1401,6 +1555,109 @@ mod tests {
             accepted,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
         ));
+    }
+
+    #[test]
+    fn governed_filesystem_execution_reads_only_after_gateway_authorization() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("allowed.txt"),
+            "ferrogate governed filesystem smoke\n",
+        )
+        .unwrap();
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Filesystem]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let events = execute_governed_filesystem_action(
+            &gate,
+            session(),
+            ManagedFilesystemAction {
+                path: "allowed.txt".to_string(),
+                access: ManagedFilesystemAccess::Read,
+                workspace_relative: true,
+            },
+            temp.path(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(events[0].kind.as_str(), "capability.allowed");
+        assert_eq!(events[1].kind.as_str(), "filesystem.requested");
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("executed_after_authorization")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[1]
+                .metadata
+                .get("filesystem_access")
+                .map(String::as_str),
+            Some("read")
+        );
+        assert_eq!(
+            events[1].metadata.get("byte_len").map(String::as_str),
+            Some("36")
+        );
+        assert!(events[1]
+            .metadata
+            .get("content_excerpt")
+            .is_some_and(|content| content.contains("governed filesystem smoke")));
+    }
+
+    #[test]
+    fn governed_filesystem_execution_denial_happens_before_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+
+        let error = execute_governed_filesystem_action(
+            &gate,
+            session(),
+            ManagedFilesystemAction {
+                path: "missing-after-denial.txt".to_string(),
+                access: ManagedFilesystemAccess::Read,
+                workspace_relative: true,
+            },
+            temp.path(),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not allowed"));
+        assert!(!error.to_string().contains("read failed"));
+    }
+
+    #[test]
+    fn governed_filesystem_execution_rejects_workspace_escape_after_authorization() {
+        let temp = tempfile::tempdir().unwrap();
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Filesystem]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let error = execute_governed_filesystem_action(
+            &gate,
+            session(),
+            ManagedFilesystemAction {
+                path: "../secret.txt".to_string(),
+                access: ManagedFilesystemAccess::Read,
+                workspace_relative: true,
+            },
+            temp.path(),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must stay inside the workspace"));
     }
 
     #[test]
