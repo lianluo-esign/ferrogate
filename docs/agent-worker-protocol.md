@@ -452,13 +452,18 @@ startup details out of the gateway API. These identity fields are part of the
 filesystem/browser/secret/memory/network request must be attributable to the
 same worker and isolation instance. For `rpc_channel=stdio-json-lines`, the
 worker sends this start request to the configured guest-agent command over
-stdin and parses one versioned JSON response from stdout. Spawn, write, timeout,
-non-zero exit, malformed response, unsupported status, or a response claiming
-handler execution return `outcome=guest_handler_rpc_unavailable`. The only
-accepted response status today is `not_implemented`, which returns
+stdin and parses one versioned JSON response from stdout. The response must
+bind back to the same request by echoing `action`, `worker_id`, `session_id`,
+`run_id`, `framework_adapter`, `isolation_backend`, and
+`isolation_instance_id`; mismatches fail closed and leave the retained microVM
+available for later lifecycle actions. Spawn, write, timeout, non-zero exit,
+malformed response, identity mismatch, unsupported status, or a response
+claiming handler execution return `outcome=guest_handler_rpc_unavailable`. The
+only accepted response status today is `not_implemented`, which returns
 `outcome=guest_handler_rpc_not_implemented`; this proves the request/response
-contract can be exercised, not that Codex/Claude/Hermes handler execution
-inside the microVM exists.
+contract can be exercised for the current worker/session/run/isolation
+instance, not that Codex/Claude/Hermes handler execution inside the microVM
+exists.
 `snapshot_or_checkpoint` is now a first-class management action; before
 provision it returns `outcome=not_started`, and with a retained running
 Firecracker microVM it calls the Firecracker API to pause the VM, create a full

@@ -490,8 +490,11 @@ pub(crate) fn firecracker_guest_rpc_start_attempt(
                         ),
                     ));
                 }
-                let parsed_response =
-                    FirecrackerGuestRpcStartResponse::parse(&output.stdout, elapsed_millis);
+                let parsed_response = FirecrackerGuestRpcStartResponse::parse(
+                    &output.stdout,
+                    elapsed_millis,
+                    request,
+                );
                 let response = match parsed_response {
                     Ok(response) => response,
                     Err(reason) => {
@@ -956,6 +959,13 @@ impl FirecrackerGuestRpcStartRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct FirecrackerGuestRpcStartResponse {
     protocol_version: String,
+    action: String,
+    worker_id: String,
+    session_id: String,
+    run_id: String,
+    framework_adapter: String,
+    isolation_backend: String,
+    isolation_instance_id: String,
     status: String,
     message: Option<String>,
     proves_handler_execution: bool,
@@ -964,7 +974,11 @@ pub(crate) struct FirecrackerGuestRpcStartResponse {
 }
 
 impl FirecrackerGuestRpcStartResponse {
-    fn parse(stdout: &[u8], elapsed_millis: u128) -> Result<Self, String> {
+    fn parse(
+        stdout: &[u8],
+        elapsed_millis: u128,
+        request: &FirecrackerGuestRpcStartRequest,
+    ) -> Result<Self, String> {
         let text = std::str::from_utf8(stdout).map_err(|error| error.to_string())?;
         let line = text
             .lines()
@@ -982,6 +996,25 @@ impl FirecrackerGuestRpcStartResponse {
         if response.status.trim().is_empty() {
             return Err("status was empty".to_string());
         }
+        Self::require_matches("action", &response.action, &request.action)?;
+        Self::require_matches("worker_id", &response.worker_id, &request.worker_id)?;
+        Self::require_matches("session_id", &response.session_id, &request.session_id)?;
+        Self::require_matches("run_id", &response.run_id, &request.run_id)?;
+        Self::require_matches(
+            "framework_adapter",
+            &response.framework_adapter,
+            &request.framework_adapter,
+        )?;
+        Self::require_matches(
+            "isolation_backend",
+            &response.isolation_backend,
+            &request.isolation_backend,
+        )?;
+        Self::require_matches(
+            "isolation_instance_id",
+            &response.isolation_instance_id,
+            &request.isolation_instance_id,
+        )?;
         if response.proves_handler_execution {
             return Err(
                 "response claimed handler execution before in-guest execution is wired".to_string(),
@@ -993,12 +1026,28 @@ impl FirecrackerGuestRpcStartResponse {
 
     pub(crate) fn summary(&self) -> String {
         format!(
-            "guest_rpc_start_response(status={}, message={}, proves_handler_execution={}, elapsed_millis={})",
+            "guest_rpc_start_response(status={}, action={}, worker_id={}, session_id={}, run_id={}, adapter={}, isolation_backend={}, isolation_instance_id={}, message={}, proves_handler_execution={}, elapsed_millis={})",
             self.status,
+            self.action,
+            self.worker_id,
+            self.session_id,
+            self.run_id,
+            self.framework_adapter,
+            self.isolation_backend,
+            self.isolation_instance_id,
             self.message.as_deref().unwrap_or(""),
             self.proves_handler_execution,
             self.elapsed_millis
         )
+    }
+
+    fn require_matches(field: &str, actual: &str, expected: &str) -> Result<(), String> {
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "{field} mismatch: response={actual}; request={expected}"
+        ))
     }
 }
 
