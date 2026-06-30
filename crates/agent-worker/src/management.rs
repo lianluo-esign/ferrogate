@@ -837,10 +837,14 @@ mod tests {
         test_support::lock_firecracker_env,
     };
     use ferrogate_runtime::{AgentWorkerManagementFrame, AgentWorkerUnixManagementClient};
+    use std::io::BufRead;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
     use std::thread;
-    use std::{net::TcpStream, os::unix::net::UnixStream};
+    use std::{
+        net::TcpStream,
+        os::unix::net::{UnixListener, UnixStream},
+    };
 
     #[test]
     fn smoke_envelope_uses_signed_management_contract() {
@@ -1967,6 +1971,87 @@ mod tests {
     }
 
     #[test]
+    fn exec_or_attach_can_send_guest_start_request_over_unix_json_lines_channel() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace = temp.path().join("workspace");
+        let rpc_socket = temp.path().join("guest-rpc.sock");
+        write_guest_agent_unix_rpc_handshake_script(&guest_agent, &rpc_socket).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let response = guest_start_not_implemented_response(
+            "agent-worker-firecracker-exec-unix-rpc",
+            "codex",
+            "firecracker-exec-unix-rpc-instance",
+        );
+        let listener = UnixListener::bind(&rpc_socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            reader.read_line(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(b"\n").unwrap();
+            request
+        });
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
+        std::env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+        let exec_envelope = shared_lifecycle_envelope_with_adapter(
+            AgentWorkerManagementAction::ExecOrAttach,
+            "agent-worker-firecracker-exec-unix-rpc",
+            "",
+            "codex",
+        );
+        let session_id = exec_envelope.session_id.clone().unwrap();
+        let run_id = exec_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-exec-unix-rpc-instance", temp.path()).unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let exec =
+            accept_management_envelope(&mut transport, &mut state, &runtime, exec_envelope, 1_000);
+        let request = server.join().unwrap();
+
+        clear_guest_agent_env();
+        assert!(exec.accepted);
+        assert!(request.contains("\"action\":\"start_handler\""));
+        assert!(request.contains("\"framework_adapter\":\"codex\""));
+        assert!(request.contains("\"rpc_channel\":\"unix-json-lines\""));
+        assert!(request.contains(
+            "\"required_gateway_capabilities\":[\"cli\",\"filesystem\",\"tools\",\"artifacts\",\"checkpoint\"]"
+        ));
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = exec.result else {
+            panic!("exec did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "guest_handler_rpc_not_implemented");
+        assert!(lifecycle
+            .message
+            .contains("guest_rpc_channel=unix-json-lines"));
+        assert!(lifecycle
+            .message
+            .contains("guest_rpc_start_response(status=not_implemented"));
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-exec-unix-rpc-instance")
+        );
+    }
+
+    #[test]
     fn exec_or_attach_rejects_successful_guest_agent_without_handshake() {
         let _env_lock = lock_firecracker_env();
         let temp = tempfile::tempdir().unwrap();
@@ -2466,6 +2551,26 @@ mod tests {
             path,
             &format!(
                 "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo 'ferrogate guest agent v.test'; exit 0; fi\nif [ \"${{1:-}}\" = \"--ferrogate-guest-agent-probe\" ]; then printf '%s\\n' '{{\"protocol_version\":\"ferrogate.agent-worker.guest.v1\",\"ready\":true,\"rpc_channel\":\"stdio-json-lines\",\"guest_agent_version\":\"ferrogate guest agent v.test\"}}'; exit 0; fi\nif [ \"${{1:-}}\" = \"--ferrogate-guest-agent-start\" ]; then grep -q '\"action\":\"start_handler\"' || exit 2; printf '%s\\n' '{start_response}'; exit 0; fi\nexit 1\n"
+            ),
+        )
+    }
+
+    fn write_guest_agent_unix_rpc_handshake_script(
+        path: &Path,
+        rpc_socket: &Path,
+    ) -> std::io::Result<()> {
+        let handshake = serde_json::json!({
+            "protocol_version": "ferrogate.agent-worker.guest.v1",
+            "ready": true,
+            "rpc_channel": "unix-json-lines",
+            "rpc_socket_path": rpc_socket.display().to_string(),
+            "guest_agent_version": "ferrogate guest agent v.test",
+        })
+        .to_string();
+        write_executable_script(
+            path,
+            &format!(
+                "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo 'ferrogate guest agent v.test'; exit 0; fi\nif [ \"${{1:-}}\" = \"--ferrogate-guest-agent-probe\" ]; then printf '%s\\n' '{handshake}'; exit 0; fi\nif [ \"${{1:-}}\" = \"--ferrogate-guest-agent-start\" ]; then exit 44; fi\nexit 1\n"
             ),
         )
     }

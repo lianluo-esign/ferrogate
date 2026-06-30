@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     env,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::fs::{FileTypeExt, PermissionsExt},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -416,15 +416,24 @@ pub(crate) fn firecracker_guest_rpc_start_attempt(
     launch_attempt: &FirecrackerGuestAgentLaunchAttempt,
     request: &FirecrackerGuestRpcStartRequest,
 ) -> Result<FirecrackerGuestRpcStartResponse, FirecrackerGuestAgentLaunchAttemptError> {
-    if launch_attempt.handshake.rpc_channel() != "stdio-json-lines" {
-        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+    match launch_attempt.handshake.rpc_channel() {
+        "stdio-json-lines" => {
+            firecracker_guest_rpc_start_attempt_over_stdio_command(launch_attempt, request)
+        }
+        "unix-json-lines" => {
+            firecracker_guest_rpc_start_attempt_over_unix_socket(launch_attempt, request)
+        }
+        channel => Err(FirecrackerGuestAgentLaunchAttemptError::new(
             "guest_handler_rpc_unavailable",
-            format!(
-                "unsupported Firecracker guest RPC channel {}",
-                launch_attempt.handshake.rpc_channel()
-            ),
-        ));
+            format!("unsupported Firecracker guest RPC channel {channel}"),
+        )),
     }
+}
+
+fn firecracker_guest_rpc_start_attempt_over_stdio_command(
+    launch_attempt: &FirecrackerGuestAgentLaunchAttempt,
+    request: &FirecrackerGuestRpcStartRequest,
+) -> Result<FirecrackerGuestRpcStartResponse, FirecrackerGuestAgentLaunchAttemptError> {
     let timeout = parse_guest_agent_launch_timeout();
     let mut child = Command::new(&launch_attempt.command)
         .arg("--ferrogate-guest-agent-start")
@@ -490,33 +499,11 @@ pub(crate) fn firecracker_guest_rpc_start_attempt(
                         ),
                     ));
                 }
-                let parsed_response = FirecrackerGuestRpcStartResponse::parse(
+                return parse_firecracker_guest_rpc_start_response(
                     &output.stdout,
                     elapsed_millis,
                     request,
                 );
-                let response = match parsed_response {
-                    Ok(response) => response,
-                    Err(reason) => {
-                        let reason = format!(
-                            "Firecracker guest start RPC returned invalid response: {reason}"
-                        );
-                        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
-                            "guest_handler_rpc_unavailable",
-                            reason,
-                        ));
-                    }
-                };
-                if response.status != "not_implemented" {
-                    return Err(FirecrackerGuestAgentLaunchAttemptError::new(
-                        "guest_handler_rpc_unavailable",
-                        format!(
-                            "Firecracker guest start RPC returned unsupported status {}; real handler execution is not wired yet",
-                            response.status
-                        ),
-                    ));
-                }
-                return Ok(response);
             }
             Ok(None) if started_at.elapsed() >= timeout => {
                 let _ = child.kill();
@@ -540,6 +527,119 @@ pub(crate) fn firecracker_guest_rpc_start_attempt(
             }
         }
     }
+}
+
+fn firecracker_guest_rpc_start_attempt_over_unix_socket(
+    launch_attempt: &FirecrackerGuestAgentLaunchAttempt,
+    request: &FirecrackerGuestRpcStartRequest,
+) -> Result<FirecrackerGuestRpcStartResponse, FirecrackerGuestAgentLaunchAttemptError> {
+    let socket_path = launch_attempt.handshake.rpc_socket_path().ok_or_else(|| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            "Firecracker guest unix-json-lines RPC channel did not provide rpc_socket_path"
+                .to_string(),
+        )
+    })?;
+    let timeout = parse_guest_agent_launch_timeout();
+    let started_at = Instant::now();
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "failed to connect Firecracker guest start RPC unix socket {socket_path}: {error}"
+            ),
+        )
+    })?;
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "failed to configure Firecracker guest start RPC unix socket read timeout for {socket_path}: {error}"
+            ),
+        )
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|error| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "failed to configure Firecracker guest start RPC unix socket write timeout for {socket_path}: {error}"
+            ),
+        )
+    })?;
+    serde_json::to_writer(&mut stream, request).map_err(|error| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!("failed to serialize Firecracker guest start request: {error}"),
+        )
+    })?;
+    stream.write_all(b"\n").map_err(|error| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "failed to write Firecracker guest start RPC request to unix socket {socket_path}: {error}"
+            ),
+        )
+    })?;
+    stream.flush().map_err(|error| {
+        FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "failed to flush Firecracker guest start RPC request to unix socket {socket_path}: {error}"
+            ),
+        )
+    })?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|error| {
+            FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_handler_rpc_unavailable",
+                format!(
+                    "failed to read Firecracker guest start RPC response from unix socket {socket_path}: {error}"
+                ),
+            )
+        })?;
+    if response.trim().is_empty() {
+        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "Firecracker guest start RPC unix socket {socket_path} returned an empty response"
+            ),
+        ));
+    }
+    parse_firecracker_guest_rpc_start_response(
+        response.as_bytes(),
+        started_at.elapsed().as_millis(),
+        request,
+    )
+}
+
+fn parse_firecracker_guest_rpc_start_response(
+    stdout: &[u8],
+    elapsed_millis: u128,
+    request: &FirecrackerGuestRpcStartRequest,
+) -> Result<FirecrackerGuestRpcStartResponse, FirecrackerGuestAgentLaunchAttemptError> {
+    let parsed_response = FirecrackerGuestRpcStartResponse::parse(stdout, elapsed_millis, request);
+    let response = match parsed_response {
+        Ok(response) => response,
+        Err(reason) => {
+            let reason = format!("Firecracker guest start RPC returned invalid response: {reason}");
+            return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_handler_rpc_unavailable",
+                reason,
+            ));
+        }
+    };
+    if response.status != "not_implemented" {
+        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "Firecracker guest start RPC returned unsupported status {}; real handler execution is not wired yet",
+                response.status
+            ),
+        ));
+    }
+    Ok(response)
 }
 
 fn firecracker_boot_smoke(options: FirecrackerBootSmokeOptions) -> FirecrackerBootSmokeReport {
@@ -867,6 +967,7 @@ pub(crate) struct FirecrackerGuestAgentHandshake {
     protocol_version: String,
     ready: bool,
     rpc_channel: String,
+    rpc_socket_path: Option<String>,
     guest_agent_version: Option<String>,
 }
 
@@ -894,6 +995,16 @@ impl FirecrackerGuestAgentHandshake {
         if handshake.rpc_channel.trim().is_empty() {
             return Err("handshake rpc_channel was empty".to_string());
         }
+        if handshake.rpc_channel == "unix-json-lines"
+            && handshake
+                .rpc_socket_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .is_none()
+        {
+            return Err("unix-json-lines handshake rpc_socket_path was empty".to_string());
+        }
         Ok(handshake)
     }
 
@@ -903,6 +1014,10 @@ impl FirecrackerGuestAgentHandshake {
 
     pub(crate) fn guest_agent_version(&self) -> Option<&str> {
         self.guest_agent_version.as_deref()
+    }
+
+    pub(crate) fn rpc_socket_path(&self) -> Option<&str> {
+        self.rpc_socket_path.as_deref()
     }
 }
 

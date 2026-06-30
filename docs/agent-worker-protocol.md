@@ -438,8 +438,12 @@ leave the retained VM available for later lifecycle actions. A zero-exit probe
 is not sufficient by itself: stdout must contain a single JSON handshake line
 with `protocol_version=ferrogate.agent-worker.guest.v1`, `ready=true`, and a
 non-empty `rpc_channel`. Missing, malformed, unsupported, or not-ready
-handshakes return `outcome=guest_agent_handshake_unavailable`. A successful
-handshake causes `agent-worker` to build the normalized guest RPC
+handshakes return `outcome=guest_agent_handshake_unavailable`. For
+`rpc_channel=unix-json-lines`, the handshake must also include a non-empty
+`rpc_socket_path`; this is the host-visible endpoint for the guest-side
+JSON-lines bridge and is treated as a transport endpoint, not as handler
+execution proof. A successful handshake causes `agent-worker` to build the
+normalized guest RPC
 `start_handler` request contract with the tenant/workspace/session/run ids,
 worker id, Firecracker isolation backend and instance id, selected adapter,
 adapter-specific launch profile, required gateway-mediated capabilities,
@@ -452,7 +456,11 @@ startup details out of the gateway API. These identity fields are part of the
 filesystem/browser/secret/memory/network request must be attributable to the
 same worker and isolation instance. For `rpc_channel=stdio-json-lines`, the
 worker sends this start request to the configured guest-agent command over
-stdin and parses one versioned JSON response from stdout. The response must
+stdin and parses one versioned JSON response from stdout. For
+`rpc_channel=unix-json-lines`, the worker connects to the handshake-declared
+Unix socket, writes one JSON request line, and reads one JSON response line;
+this is the current bridge-shaped transport for a future Firecracker/vsock
+guest channel. The response must
 bind back to the same request by echoing `action`, `worker_id`, `session_id`,
 `run_id`, `framework_adapter`, `isolation_backend`, and
 `isolation_instance_id`, and it must also echo the selected adapter launch
