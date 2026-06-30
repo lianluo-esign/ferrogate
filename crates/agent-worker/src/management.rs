@@ -1860,7 +1860,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let guest_agent = temp.path().join("ferrogate-guest-agent");
         let workspace = temp.path().join("workspace");
-        write_executable_version_script(&guest_agent, "ferrogate guest agent v.test").unwrap();
+        write_guest_agent_handshake_script(&guest_agent).unwrap();
         std::fs::create_dir(&workspace).unwrap();
         std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
         std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
@@ -1899,11 +1899,71 @@ mod tests {
         };
         assert_eq!(lifecycle.outcome, "guest_handler_rpc_not_implemented");
         assert!(lifecycle.message.contains("guest agent command launched"));
+        assert!(lifecycle
+            .message
+            .contains("guest_rpc_channel=stdio-json-lines"));
+        assert!(lifecycle
+            .message
+            .contains("guest_agent_version=ferrogate guest agent v.test"));
         assert!(lifecycle.message.contains("proves_microvm_boot=false"));
         assert!(lifecycle.message.contains("proves_handler_execution=false"));
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-exec-ready-instance")
+        );
+    }
+
+    #[test]
+    fn exec_or_attach_rejects_successful_guest_agent_without_handshake() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace = temp.path().join("workspace");
+        write_executable_version_script(&guest_agent, "ferrogate guest agent v.test").unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
+        std::env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+        let exec_envelope = lifecycle_envelope(
+            AgentWorkerManagementAction::ExecOrAttach,
+            "agent-worker-firecracker-exec-no-handshake",
+        );
+        let session_id = exec_envelope.session_id.clone().unwrap();
+        let run_id = exec_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-exec-no-handshake-instance", temp.path())
+                .unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let exec =
+            accept_management_envelope(&mut transport, &mut state, &runtime, exec_envelope, 1_000);
+
+        clear_guest_agent_env();
+        assert!(exec.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = exec.result else {
+            panic!("exec did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "guest_agent_handshake_unavailable");
+        assert!(lifecycle
+            .message
+            .contains("did not return a valid guest RPC handshake"));
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-exec-no-handshake-instance")
         );
     }
 
@@ -2122,6 +2182,13 @@ mod tests {
             &format!(
                 "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo '{version}'; exit 0; fi\nexit 0\n"
             ),
+        )
+    }
+
+    fn write_guest_agent_handshake_script(path: &Path) -> std::io::Result<()> {
+        write_executable_script(
+            path,
+            "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'ferrogate guest agent v.test'; exit 0; fi\nprintf '%s\\n' '{\"protocol_version\":\"ferrogate.agent-worker.guest.v1\",\"ready\":true,\"rpc_channel\":\"stdio-json-lines\",\"guest_agent_version\":\"ferrogate guest agent v.test\"}'\nexit 0\n",
         )
     }
 

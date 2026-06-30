@@ -434,10 +434,15 @@ bounded worker-owned guest-agent command launch probe with a cleared ambient
 environment and only the configured gateway endpoint/workspace values injected.
 Probe spawn, timeout, or non-zero exit failures return
 `outcome=guest_agent_launch_failed` with the same `isolation_instance_id` and
-leave the retained VM available for later lifecycle actions. A successful probe
-still fails closed with `outcome=guest_handler_rpc_not_implemented`; this proves
-only that the configured guest-agent command can be launched by `agent-worker`,
-not that handler RPC or Codex/Claude/Hermes execution inside the microVM exists.
+leave the retained VM available for later lifecycle actions. A zero-exit probe
+is not sufficient by itself: stdout must contain a single JSON handshake line
+with `protocol_version=ferrogate.agent-worker.guest.v1`, `ready=true`, and a
+non-empty `rpc_channel`. Missing, malformed, unsupported, or not-ready
+handshakes return `outcome=guest_agent_handshake_unavailable`. A successful
+handshake still fails closed with `outcome=guest_handler_rpc_not_implemented`;
+this proves only that the configured guest-agent command can be launched by
+`agent-worker` and returned a versioned RPC-channel readiness signal, not that
+Codex/Claude/Hermes handler execution inside the microVM exists.
 `snapshot_or_checkpoint` is now a first-class management action; before
 provision it returns `outcome=not_started`, and with a retained running
 Firecracker microVM it calls the Firecracker API to pause the VM, create a full

@@ -22,7 +22,7 @@ use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
     AgentWorkerIsolationBackendReport,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub(crate) fn isolation_backends() -> Vec<AgentWorkerIsolationBackendReport> {
@@ -296,8 +296,8 @@ pub(crate) fn firecracker_guest_agent_launch_attempt(
         )
         .env("FERROGATE_AGENT_WORKER_GUEST_WORKSPACE", &workspace)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| {
             FirecrackerGuestAgentLaunchAttemptError::new(
@@ -311,12 +311,30 @@ pub(crate) fn firecracker_guest_agent_launch_attempt(
             Ok(Some(status)) => {
                 let elapsed_millis = started_at.elapsed().as_millis();
                 if status.success() {
+                    let output = child.wait_with_output().map_err(|error| {
+                        FirecrackerGuestAgentLaunchAttemptError::new(
+                            "guest_agent_launch_failed",
+                            format!(
+                                "failed to collect Firecracker guest agent command output from {command}: {error}"
+                            ),
+                        )
+                    })?;
+                    let handshake = FirecrackerGuestAgentHandshake::parse(&output.stdout)
+                        .map_err(|reason| {
+                            FirecrackerGuestAgentLaunchAttemptError::new(
+                                "guest_agent_handshake_unavailable",
+                                format!(
+                                    "Firecracker guest agent command {command} exited successfully but did not return a valid guest RPC handshake: {reason}"
+                                ),
+                            )
+                        })?;
                     return Ok(FirecrackerGuestAgentLaunchAttempt {
                         command,
                         workspace,
                         gateway_endpoint,
                         elapsed_millis,
                         exit_status: status.to_string(),
+                        handshake,
                         proves_microvm_boot: false,
                         proves_handler_execution: false,
                     });
@@ -676,8 +694,53 @@ pub(crate) struct FirecrackerGuestAgentLaunchAttempt {
     pub(crate) gateway_endpoint: String,
     pub(crate) elapsed_millis: u128,
     pub(crate) exit_status: String,
+    pub(crate) handshake: FirecrackerGuestAgentHandshake,
     pub(crate) proves_microvm_boot: bool,
     pub(crate) proves_handler_execution: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct FirecrackerGuestAgentHandshake {
+    protocol_version: String,
+    ready: bool,
+    rpc_channel: String,
+    guest_agent_version: Option<String>,
+}
+
+impl FirecrackerGuestAgentHandshake {
+    const PROTOCOL_VERSION: &'static str = "ferrogate.agent-worker.guest.v1";
+
+    fn parse(stdout: &[u8]) -> Result<Self, String> {
+        let text = std::str::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| "stdout was empty".to_string())?;
+        let handshake: Self = serde_json::from_str(line).map_err(|error| error.to_string())?;
+        if handshake.protocol_version != Self::PROTOCOL_VERSION {
+            return Err(format!(
+                "unsupported protocol_version {}; expected {}",
+                handshake.protocol_version,
+                Self::PROTOCOL_VERSION
+            ));
+        }
+        if !handshake.ready {
+            return Err("handshake ready flag was false".to_string());
+        }
+        if handshake.rpc_channel.trim().is_empty() {
+            return Err("handshake rpc_channel was empty".to_string());
+        }
+        Ok(handshake)
+    }
+
+    pub(crate) fn rpc_channel(&self) -> &str {
+        &self.rpc_channel
+    }
+
+    pub(crate) fn guest_agent_version(&self) -> Option<&str> {
+        self.guest_agent_version.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

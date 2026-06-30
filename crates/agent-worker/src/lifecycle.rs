@@ -270,13 +270,18 @@ fn exec_or_attach(
             ManagedWorkerSessionStatus::Failed,
             "guest_handler_rpc_not_implemented",
             &format!(
-                "Firecracker microVM {} is provisioned with running={running}; guest agent command launched from {} in {} and exited with {}; elapsed_millis={}; gateway_endpoint_configured={}; proves_microvm_boot={}; proves_handler_execution={}; agent-worker guest handler RPC is not implemented yet",
+                "Firecracker microVM {} is provisioned with running={running}; guest agent command launched from {} in {} and exited with {}; elapsed_millis={}; gateway_endpoint_configured={}; guest_rpc_channel={}; guest_agent_version={}; proves_microvm_boot={}; proves_handler_execution={}; agent-worker guest handler RPC is not implemented yet",
                 existing.instance_id,
                 launch_attempt.command,
                 launch_attempt.workspace,
                 launch_attempt.exit_status,
                 launch_attempt.elapsed_millis,
                 !launch_attempt.gateway_endpoint.is_empty(),
+                launch_attempt.handshake.rpc_channel(),
+                launch_attempt
+                    .handshake
+                    .guest_agent_version()
+                    .unwrap_or("unknown"),
                 launch_attempt.proves_microvm_boot,
                 launch_attempt.proves_handler_execution
             ),
