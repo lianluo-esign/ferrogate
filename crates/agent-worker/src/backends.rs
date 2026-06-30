@@ -412,6 +412,133 @@ pub(crate) fn firecracker_guest_rpc_start_request(
     }
 }
 
+pub(crate) fn firecracker_guest_rpc_start_attempt(
+    launch_attempt: &FirecrackerGuestAgentLaunchAttempt,
+    request: &FirecrackerGuestRpcStartRequest,
+) -> Result<FirecrackerGuestRpcStartResponse, FirecrackerGuestAgentLaunchAttemptError> {
+    if launch_attempt.handshake.rpc_channel() != "stdio-json-lines" {
+        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+            "guest_handler_rpc_unavailable",
+            format!(
+                "unsupported Firecracker guest RPC channel {}",
+                launch_attempt.handshake.rpc_channel()
+            ),
+        ));
+    }
+    let timeout = parse_guest_agent_launch_timeout();
+    let mut child = Command::new(&launch_attempt.command)
+        .arg("--ferrogate-guest-agent-start")
+        .current_dir(&launch_attempt.workspace)
+        .env_clear()
+        .env(
+            "FERROGATE_AGENT_WORKER_GUEST_GATEWAY_ENDPOINT",
+            &launch_attempt.gateway_endpoint,
+        )
+        .env(
+            "FERROGATE_AGENT_WORKER_GUEST_WORKSPACE",
+            &launch_attempt.workspace,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_handler_rpc_unavailable",
+                format!(
+                    "failed to start Firecracker guest-agent start RPC command {}: {error}",
+                    launch_attempt.command
+                ),
+            )
+        })?;
+    {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_handler_rpc_unavailable",
+                "Firecracker guest-agent start RPC stdin was unavailable".to_string(),
+            )
+        })?;
+        serde_json::to_writer(&mut stdin, request).map_err(|error| {
+            FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_handler_rpc_unavailable",
+                format!("failed to serialize Firecracker guest start request: {error}"),
+            )
+        })?;
+        stdin.write_all(b"\n").map_err(|error| {
+            FirecrackerGuestAgentLaunchAttemptError::new(
+                "guest_handler_rpc_unavailable",
+                format!("failed to write Firecracker guest start request: {error}"),
+            )
+        })?;
+    }
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let elapsed_millis = started_at.elapsed().as_millis();
+                let output = child.wait_with_output().map_err(|error| {
+                    FirecrackerGuestAgentLaunchAttemptError::new(
+                        "guest_handler_rpc_unavailable",
+                        format!("failed to collect Firecracker guest start RPC output: {error}"),
+                    )
+                })?;
+                if !status.success() {
+                    return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                        "guest_handler_rpc_unavailable",
+                        format!(
+                            "Firecracker guest start RPC command exited with status={status}; elapsed_millis={elapsed_millis}"
+                        ),
+                    ));
+                }
+                let parsed_response =
+                    FirecrackerGuestRpcStartResponse::parse(&output.stdout, elapsed_millis);
+                let response = match parsed_response {
+                    Ok(response) => response,
+                    Err(reason) => {
+                        let reason = format!(
+                            "Firecracker guest start RPC returned invalid response: {reason}"
+                        );
+                        return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                            "guest_handler_rpc_unavailable",
+                            reason,
+                        ));
+                    }
+                };
+                if response.status != "not_implemented" {
+                    return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                        "guest_handler_rpc_unavailable",
+                        format!(
+                            "Firecracker guest start RPC returned unsupported status {}; real handler execution is not wired yet",
+                            response.status
+                        ),
+                    ));
+                }
+                return Ok(response);
+            }
+            Ok(None) if started_at.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                    "guest_handler_rpc_unavailable",
+                    format!(
+                        "Firecracker guest start RPC timed out after timeout_millis={}",
+                        timeout.as_millis()
+                    ),
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FirecrackerGuestAgentLaunchAttemptError::new(
+                    "guest_handler_rpc_unavailable",
+                    format!("Firecracker guest start RPC status check failed: {error}"),
+                ));
+            }
+        }
+    }
+}
+
 fn firecracker_boot_smoke(options: FirecrackerBootSmokeOptions) -> FirecrackerBootSmokeReport {
     let preflight = firecracker_host_preflight();
     if !preflight.ready() {
@@ -822,6 +949,55 @@ impl FirecrackerGuestRpcStartRequest {
             self.filesystem_policy,
             self.proves_microvm_boot,
             self.proves_handler_execution
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct FirecrackerGuestRpcStartResponse {
+    protocol_version: String,
+    status: String,
+    message: Option<String>,
+    proves_handler_execution: bool,
+    #[serde(skip)]
+    elapsed_millis: u128,
+}
+
+impl FirecrackerGuestRpcStartResponse {
+    fn parse(stdout: &[u8], elapsed_millis: u128) -> Result<Self, String> {
+        let text = std::str::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| "stdout was empty".to_string())?;
+        let mut response: Self = serde_json::from_str(line).map_err(|error| error.to_string())?;
+        if response.protocol_version != FirecrackerGuestAgentHandshake::PROTOCOL_VERSION {
+            return Err(format!(
+                "unsupported protocol_version {}; expected {}",
+                response.protocol_version,
+                FirecrackerGuestAgentHandshake::PROTOCOL_VERSION
+            ));
+        }
+        if response.status.trim().is_empty() {
+            return Err("status was empty".to_string());
+        }
+        if response.proves_handler_execution {
+            return Err(
+                "response claimed handler execution before in-guest execution is wired".to_string(),
+            );
+        }
+        response.elapsed_millis = elapsed_millis;
+        Ok(response)
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "guest_rpc_start_response(status={}, message={}, proves_handler_execution={}, elapsed_millis={})",
+            self.status,
+            self.message.as_deref().unwrap_or(""),
+            self.proves_handler_execution,
+            self.elapsed_millis
         )
     }
 }

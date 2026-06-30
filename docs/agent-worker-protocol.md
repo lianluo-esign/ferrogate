@@ -450,11 +450,15 @@ native harness; this is the #84 adapter boundary that keeps framework-specific
 startup details out of the gateway API. These identity fields are part of the
 #86 capability evidence chain: every later guest-side tool/MCP/CLI/REST/
 filesystem/browser/secret/memory/network request must be attributable to the
-same worker and isolation instance. The worker still fails closed
-with `outcome=guest_handler_rpc_not_implemented`; this proves only that the
-configured guest-agent command can be launched and returned a versioned
-RPC-channel readiness signal, not that the start request has been sent or that
-Codex/Claude/Hermes handler execution inside the microVM exists.
+same worker and isolation instance. For `rpc_channel=stdio-json-lines`, the
+worker sends this start request to the configured guest-agent command over
+stdin and parses one versioned JSON response from stdout. Spawn, write, timeout,
+non-zero exit, malformed response, unsupported status, or a response claiming
+handler execution return `outcome=guest_handler_rpc_unavailable`. The only
+accepted response status today is `not_implemented`, which returns
+`outcome=guest_handler_rpc_not_implemented`; this proves the request/response
+contract can be exercised, not that Codex/Claude/Hermes handler execution
+inside the microVM exists.
 `snapshot_or_checkpoint` is now a first-class management action; before
 provision it returns `outcome=not_started`, and with a retained running
 Firecracker microVM it calls the Firecracker API to pause the VM, create a full
