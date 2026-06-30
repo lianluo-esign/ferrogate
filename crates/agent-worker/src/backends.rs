@@ -79,6 +79,36 @@ pub(crate) fn firecracker_guest_launch_plan_command(adapter: Option<&str>) -> Re
     Ok(())
 }
 
+pub(crate) fn firecracker_guest_agent_probe_entrypoint() -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "protocol_version": FirecrackerGuestAgentHandshake::PROTOCOL_VERSION,
+            "ready": true,
+            "rpc_channel": "stdio-json-lines",
+            "guest_agent_version": env!("CARGO_PKG_VERSION"),
+        }))?
+    );
+    Ok(())
+}
+
+pub(crate) fn firecracker_guest_agent_start_entrypoint() -> Result<()> {
+    let mut input = Vec::new();
+    std::io::stdin().read_to_end(&mut input)?;
+    let request: FirecrackerGuestRpcStartRequest = serde_json::from_slice(&input)?;
+    request
+        .validate_for_guest_agent()
+        .map_err(|reason| anyhow::anyhow!("invalid guest start request: {reason}"))?;
+    println!(
+        "{}",
+        serde_json::to_string(&FirecrackerGuestRpcStartResponse::not_implemented_for_request(
+            &request,
+            "agent-worker guest agent entrypoint is wired; framework handler execution is not implemented yet",
+        ))?
+    );
+    Ok(())
+}
+
 pub(crate) fn firecracker_microvm_provision(
     timeout_millis: u64,
     vcpu_count: u8,
@@ -1027,7 +1057,7 @@ pub(crate) struct FirecrackerGuestAgentLaunchAttemptError {
     reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FirecrackerGuestRpcStartRequest {
     protocol_version: String,
     action: String,
@@ -1051,6 +1081,45 @@ pub(crate) struct FirecrackerGuestRpcStartRequest {
 }
 
 impl FirecrackerGuestRpcStartRequest {
+    fn validate_for_guest_agent(&self) -> Result<(), String> {
+        if self.protocol_version != FirecrackerGuestAgentHandshake::PROTOCOL_VERSION {
+            return Err(format!(
+                "unsupported protocol_version {}; expected {}",
+                self.protocol_version,
+                FirecrackerGuestAgentHandshake::PROTOCOL_VERSION
+            ));
+        }
+        if self.action != "start_handler" {
+            return Err(format!("unsupported action {}", self.action));
+        }
+        for (field, value) in [
+            ("tenant_id", &self.tenant_id),
+            ("workspace_id", &self.workspace_id),
+            ("worker_id", &self.worker_id),
+            ("session_id", &self.session_id),
+            ("run_id", &self.run_id),
+            ("framework_adapter", &self.framework_adapter),
+            ("isolation_backend", &self.isolation_backend),
+            ("isolation_instance_id", &self.isolation_instance_id),
+            ("rpc_channel", &self.rpc_channel),
+            ("network_policy", &self.network_policy),
+            ("filesystem_policy", &self.filesystem_policy),
+            ("artifact_policy", &self.artifact_policy),
+            ("checkpoint_policy", &self.checkpoint_policy),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("{field} was empty"));
+            }
+        }
+        if self.required_gateway_capabilities.is_empty() {
+            return Err("required_gateway_capabilities was empty".to_string());
+        }
+        if self.proves_handler_execution {
+            return Err("start request cannot claim handler execution".to_string());
+        }
+        Ok(())
+    }
+
     pub(crate) fn summary(&self) -> String {
         format!(
             "guest_rpc_start_request(protocol_version={}, action={}, worker_id={}, adapter={}, launch_profile={}, isolation_backend={}, isolation_instance_id={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={})",
@@ -1071,7 +1140,7 @@ impl FirecrackerGuestRpcStartRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FirecrackerGuestRpcStartResponse {
     protocol_version: String,
     action: String,
@@ -1095,6 +1164,32 @@ pub(crate) struct FirecrackerGuestRpcStartResponse {
 }
 
 impl FirecrackerGuestRpcStartResponse {
+    fn not_implemented_for_request(
+        request: &FirecrackerGuestRpcStartRequest,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol_version: request.protocol_version.clone(),
+            action: request.action.clone(),
+            worker_id: request.worker_id.clone(),
+            session_id: request.session_id.clone(),
+            run_id: request.run_id.clone(),
+            framework_adapter: request.framework_adapter.clone(),
+            adapter_launch_profile: request.adapter_launch_profile.clone(),
+            isolation_backend: request.isolation_backend.clone(),
+            isolation_instance_id: request.isolation_instance_id.clone(),
+            required_gateway_capabilities: request.required_gateway_capabilities.clone(),
+            network_policy: request.network_policy.clone(),
+            filesystem_policy: request.filesystem_policy.clone(),
+            artifact_policy: request.artifact_policy.clone(),
+            checkpoint_policy: request.checkpoint_policy.clone(),
+            status: "not_implemented".to_string(),
+            message: Some(message.into()),
+            proves_handler_execution: false,
+            elapsed_millis: 0,
+        }
+    }
+
     fn parse(
         stdout: &[u8],
         elapsed_millis: u128,
@@ -2981,6 +3076,92 @@ mod tests {
         assert_eq!(
             vsock["uds_path"],
             artifacts.guest_rpc_socket.display().to_string()
+        );
+    }
+
+    #[test]
+    fn guest_agent_builtin_start_response_is_identity_and_policy_bound() {
+        let request = FirecrackerGuestRpcStartRequest {
+            protocol_version: FirecrackerGuestAgentHandshake::PROTOCOL_VERSION.to_string(),
+            action: "start_handler".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            workspace_id: "workspace-a".to_string(),
+            worker_id: "worker-a".to_string(),
+            session_id: "session-a".to_string(),
+            run_id: "run-a".to_string(),
+            framework_adapter: "codex".to_string(),
+            adapter_launch_profile: adapter_launch_profile("codex"),
+            isolation_backend: "firecracker".to_string(),
+            isolation_instance_id: "microvm-a".to_string(),
+            rpc_channel: "stdio-json-lines".to_string(),
+            required_gateway_capabilities: guest_launch_capabilities("codex")
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect(),
+            network_policy: "gateway_control_channel_only_no_direct_public_egress".to_string(),
+            filesystem_policy: "prepared_workspace_only_with_read_only_runtime_bundle".to_string(),
+            artifact_policy: "guest_artifacts_must_return_as_artifact_created_events".to_string(),
+            checkpoint_policy:
+                "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence"
+                    .to_string(),
+            proves_microvm_boot: false,
+            proves_handler_execution: false,
+        };
+
+        request.validate_for_guest_agent().unwrap();
+        let response =
+            FirecrackerGuestRpcStartResponse::not_implemented_for_request(&request, "pending");
+        let line = serde_json::to_string(&response).unwrap();
+        let parsed = FirecrackerGuestRpcStartResponse::parse(line.as_bytes(), 7, &request).unwrap();
+
+        assert_eq!(parsed.status, "not_implemented");
+        assert_eq!(parsed.worker_id, request.worker_id);
+        assert_eq!(parsed.session_id, request.session_id);
+        assert_eq!(parsed.run_id, request.run_id);
+        assert_eq!(parsed.framework_adapter, request.framework_adapter);
+        assert_eq!(parsed.isolation_instance_id, request.isolation_instance_id);
+        assert_eq!(
+            parsed.required_gateway_capabilities,
+            request.required_gateway_capabilities
+        );
+        assert!(!parsed.proves_handler_execution);
+        assert!(parsed.summary().contains("elapsed_millis=7"));
+    }
+
+    #[test]
+    fn guest_agent_builtin_start_request_validation_rejects_execution_claims() {
+        let mut request = FirecrackerGuestRpcStartRequest {
+            protocol_version: FirecrackerGuestAgentHandshake::PROTOCOL_VERSION.to_string(),
+            action: "start_handler".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            workspace_id: "workspace-a".to_string(),
+            worker_id: "worker-a".to_string(),
+            session_id: "session-a".to_string(),
+            run_id: "run-a".to_string(),
+            framework_adapter: "codex".to_string(),
+            adapter_launch_profile: adapter_launch_profile("codex"),
+            isolation_backend: "firecracker".to_string(),
+            isolation_instance_id: "microvm-a".to_string(),
+            rpc_channel: "stdio-json-lines".to_string(),
+            required_gateway_capabilities: vec!["cli".to_string()],
+            network_policy: "gateway_control_channel_only_no_direct_public_egress".to_string(),
+            filesystem_policy: "prepared_workspace_only_with_read_only_runtime_bundle".to_string(),
+            artifact_policy: "guest_artifacts_must_return_as_artifact_created_events".to_string(),
+            checkpoint_policy:
+                "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence"
+                    .to_string(),
+            proves_microvm_boot: false,
+            proves_handler_execution: true,
+        };
+
+        let reason = request.validate_for_guest_agent().unwrap_err();
+
+        assert!(reason.contains("cannot claim handler execution"));
+        request.proves_handler_execution = false;
+        request.worker_id.clear();
+        assert_eq!(
+            request.validate_for_guest_agent().unwrap_err(),
+            "worker_id was empty"
         );
     }
 

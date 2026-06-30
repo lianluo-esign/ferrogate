@@ -437,6 +437,13 @@ it returns failed lifecycle evidence with the same `isolation_instance_id` and
 guest-channel configuration preflight passes, `exec_or_attach` performs a
 bounded worker-owned guest-agent command launch probe with a cleared ambient
 environment and only the configured gateway endpoint/workspace values injected.
+The `agent-worker` binary itself exposes hidden guest-agent compatibility
+entrypoints for rootfs packaging: `--ferrogate-guest-agent-probe` emits the
+versioned `stdio-json-lines` handshake, and `--ferrogate-guest-agent-start`
+reads one start request from stdin and returns an identity/policy-bound
+`not_implemented` response. This makes the guest-agent protocol executable by a
+real packaged binary instead of only by shell fixtures, but it still does not
+claim framework handler execution.
 Probe spawn, timeout, or non-zero exit failures return
 `outcome=guest_agent_launch_failed` with the same `isolation_instance_id` and
 leave the retained VM available for later lifecycle actions. A zero-exit probe

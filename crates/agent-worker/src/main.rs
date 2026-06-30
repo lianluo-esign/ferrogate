@@ -6,7 +6,7 @@
 
 use std::{net::SocketAddr, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 mod backends;
@@ -42,9 +42,16 @@ mod test_support {
 #[derive(Debug, Parser)]
 #[command(name = "agent-worker")]
 #[command(about = "Standalone FerroGate agent-worker process boundary")]
+#[command(version)]
 struct Cli {
+    /// Hidden compatibility entrypoint used by Firecracker guest-agent launch probes.
+    #[arg(long = "ferrogate-guest-agent-probe", hide = true)]
+    ferrogate_guest_agent_probe: bool,
+    /// Hidden compatibility entrypoint used by Firecracker guest-agent start RPC.
+    #[arg(long = "ferrogate-guest-agent-start", hide = true)]
+    ferrogate_guest_agent_start: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -200,7 +207,19 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    if cli.ferrogate_guest_agent_probe && cli.ferrogate_guest_agent_start {
+        bail!("only one Firecracker guest-agent entrypoint may be selected");
+    }
+    if cli.ferrogate_guest_agent_probe {
+        return backends::firecracker_guest_agent_probe_entrypoint();
+    }
+    if cli.ferrogate_guest_agent_start {
+        return backends::firecracker_guest_agent_start_entrypoint();
+    }
+    let Some(command) = cli.command else {
+        bail!("no agent-worker command provided");
+    };
+    match command {
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
         Command::FirecrackerPreparePlan => backends::firecracker_prepare_plan_command(),
