@@ -10,6 +10,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod backends;
+mod events;
 mod external_actions;
 mod handler_runtime;
 mod handlers;
