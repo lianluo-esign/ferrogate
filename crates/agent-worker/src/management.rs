@@ -1621,6 +1621,8 @@ mod tests {
         );
         assert_eq!(lifecycle.outcome, "stopped");
         assert!(lifecycle.message.contains("process_outcome=killed"));
+        assert!(lifecycle.message.contains("api_socket_removed=false"));
+        assert!(lifecycle.message.contains("guest_rpc_socket_removed=false"));
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-stop-instance")
@@ -1676,6 +1678,7 @@ mod tests {
         assert_eq!(lifecycle.outcome, "cleanup_failed");
         assert!(lifecycle.message.contains("process_outcome=killed"));
         assert!(lifecycle.message.contains("api_socket_remove_error="));
+        assert!(lifecycle.message.contains("guest_rpc_socket_removed=false"));
         assert_eq!(
             lifecycle.isolation_instance_id.as_deref(),
             Some("firecracker-cleanup-failed-instance")

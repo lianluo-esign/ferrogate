@@ -413,6 +413,11 @@ Firecracker/jailer paths, bundle files, or read/write KVM access. If the host
 preflight passes, `provision` boots a real Firecracker microVM, retains the
 child process in the `agent-worker` state store, and exposes the same
 `isolation_instance_id` through status, artifact, stop, and cleanup actions.
+During Firecracker configuration, `agent-worker` also attaches a `guest-rpc`
+vsock device with a host-side Unix socket in the microVM run directory. That
+host socket is the lifecycle-owned transport anchor for the `unix-json-lines`
+guest RPC bridge; its existence is channel setup evidence, not handler
+execution proof.
 The current worker-side Firecracker resource policy is read from
 `AGENT_WORKER_FIRECRACKER_PROVISION_TIMEOUT_MILLIS` (default `30000`),
 `AGENT_WORKER_FIRECRACKER_VCPU_COUNT` (default `1`), and
@@ -420,12 +425,12 @@ The current worker-side Firecracker resource policy is read from
 closed before provisioning.
 `stop` removes the retained microVM from worker state and returns lifecycle
 evidence that distinguishes whether the process was already exited or killed,
-plus whether the Firecracker API socket was removed. `cleanup` uses the same
-host-resource cleanup path but reports `outcome=cleanup_failed` if the retained
-microVM's host resources cannot be removed; a later `cleanup` for the same
-`session_id/run_id` is accepted as an idempotent no-op after a successful
-`stop`. The current `exec_or_attach` path still does not run framework handlers
-inside that microVM;
+plus whether the Firecracker API socket and guest RPC socket were removed.
+`cleanup` uses the same host-resource cleanup path but reports
+`outcome=cleanup_failed` if the retained microVM's host resources cannot be
+removed; a later `cleanup` for the same `session_id/run_id` is accepted as an
+idempotent no-op after a successful `stop`. The current `exec_or_attach` path
+still does not run framework handlers inside that microVM;
 when a retained microVM exists but the guest channel preflight is incomplete,
 it returns failed lifecycle evidence with the same `isolation_instance_id` and
 `outcome=guest_agent_channel_unavailable` without stopping the VM. If the

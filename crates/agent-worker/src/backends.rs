@@ -1716,11 +1716,14 @@ impl FirecrackerMicroVm {
 
     pub(crate) fn stop(&mut self) -> FirecrackerStopReport {
         let process = stop_firecracker_child(&mut self.child);
-        let api_socket_removed = remove_firecracker_api_socket(&self.artifacts.api_socket);
+        let api_socket_removed = remove_firecracker_host_socket(&self.artifacts.api_socket);
+        let guest_rpc_socket_removed =
+            remove_firecracker_host_socket(&self.artifacts.guest_rpc_socket);
         FirecrackerStopReport {
             was_running: process.was_running,
             process_outcome: process.outcome,
             api_socket_removed,
+            guest_rpc_socket_removed,
         }
     }
 
@@ -1839,6 +1842,7 @@ fn firecracker_artifact_event(
 pub(crate) struct FirecrackerMicroVmArtifacts {
     run_dir: PathBuf,
     api_socket: PathBuf,
+    guest_rpc_socket: PathBuf,
     firecracker_log: PathBuf,
     serial_output: PathBuf,
     stdout: PathBuf,
@@ -1850,21 +1854,27 @@ pub(crate) struct FirecrackerStopReport {
     pub(crate) was_running: bool,
     pub(crate) process_outcome: FirecrackerProcessStopOutcome,
     pub(crate) api_socket_removed: Result<bool, String>,
+    pub(crate) guest_rpc_socket_removed: Result<bool, String>,
 }
 
 impl FirecrackerStopReport {
     pub(crate) fn cleanup_succeeded(&self) -> bool {
-        self.api_socket_removed.is_ok()
+        self.api_socket_removed.is_ok() && self.guest_rpc_socket_removed.is_ok()
     }
 
     pub(crate) fn summary(&self) -> String {
-        let socket = match &self.api_socket_removed {
+        let api_socket = match &self.api_socket_removed {
             Ok(true) => "api_socket_removed=true".to_string(),
             Ok(false) => "api_socket_removed=false".to_string(),
             Err(error) => format!("api_socket_remove_error={error}"),
         };
+        let guest_rpc_socket = match &self.guest_rpc_socket_removed {
+            Ok(true) => "guest_rpc_socket_removed=true".to_string(),
+            Ok(false) => "guest_rpc_socket_removed=false".to_string(),
+            Err(error) => format!("guest_rpc_socket_remove_error={error}"),
+        };
         format!(
-            "was_running={}; process_outcome={}; {socket}",
+            "was_running={}; process_outcome={}; {api_socket}; {guest_rpc_socket}",
             self.was_running,
             self.process_outcome.as_str()
         )
@@ -1904,6 +1914,7 @@ impl FirecrackerMicroVmArtifacts {
         Ok(Self {
             run_dir: run_dir.clone(),
             api_socket: run_dir.join("firecracker.sock"),
+            guest_rpc_socket: run_dir.join("firecracker-guest-rpc.sock"),
             firecracker_log: run_dir.join("firecracker.log"),
             serial_output: run_dir.join("serial.log"),
             stdout: run_dir.join("firecracker.stdout"),
@@ -1914,6 +1925,7 @@ impl FirecrackerMicroVmArtifacts {
     fn to_report_paths(&self) -> FirecrackerBootSmokeArtifactReport {
         FirecrackerBootSmokeArtifactReport {
             api_socket: Some(self.api_socket.display().to_string()),
+            guest_rpc_socket: Some(self.guest_rpc_socket.display().to_string()),
             firecracker_log: Some(self.firecracker_log.display().to_string()),
             serial_output: Some(self.serial_output.display().to_string()),
             stdout: Some(self.stdout.display().to_string()),
@@ -2061,6 +2073,7 @@ fn file_len(path: &Path) -> u64 {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 struct FirecrackerBootSmokeArtifactReport {
     api_socket: Option<String>,
+    guest_rpc_socket: Option<String>,
     firecracker_log: Option<String>,
     serial_output: Option<String>,
     stdout: Option<String>,
@@ -2123,6 +2136,7 @@ pub(crate) fn test_firecracker_microvm(
     let artifacts = FirecrackerMicroVmArtifacts {
         run_dir: run_dir.to_path_buf(),
         api_socket: run_dir.join("firecracker.sock"),
+        guest_rpc_socket: run_dir.join("firecracker-guest-rpc.sock"),
         firecracker_log: run_dir.join("firecracker.log"),
         serial_output: run_dir.join("serial.log"),
         stdout: run_dir.join("firecracker.stdout"),
@@ -2246,6 +2260,12 @@ fn configure_and_start_firecracker(
     )?;
     firecracker_put_json(
         &artifacts.api_socket,
+        "/vsock",
+        firecracker_guest_rpc_vsock_config(artifacts),
+        deadline,
+    )?;
+    firecracker_put_json(
+        &artifacts.api_socket,
         "/actions",
         json!({
             "action_type": "InstanceStart",
@@ -2253,6 +2273,16 @@ fn configure_and_start_firecracker(
         deadline,
     )?;
     wait_for_serial_boot_evidence(artifacts, deadline, child)
+}
+
+fn firecracker_guest_rpc_vsock_config(
+    artifacts: &FirecrackerMicroVmArtifacts,
+) -> serde_json::Value {
+    json!({
+        "vsock_id": "guest-rpc",
+        "guest_cid": 3,
+        "uds_path": artifacts.guest_rpc_socket.display().to_string(),
+    })
 }
 
 fn wait_for_api_socket(
@@ -2552,7 +2582,7 @@ fn stop_firecracker_child(child: &mut Child) -> FirecrackerChildStopReport {
     }
 }
 
-fn remove_firecracker_api_socket(socket_path: &Path) -> Result<bool, String> {
+fn remove_firecracker_host_socket(socket_path: &Path) -> Result<bool, String> {
     match fs::remove_file(socket_path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -2932,6 +2962,29 @@ mod tests {
     }
 
     #[test]
+    fn firecracker_start_configures_guest_rpc_vsock_without_claiming_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = FirecrackerMicroVmArtifacts {
+            run_dir: temp.path().to_path_buf(),
+            api_socket: temp.path().join("firecracker.sock"),
+            guest_rpc_socket: temp.path().join("firecracker-guest-rpc.sock"),
+            firecracker_log: temp.path().join("firecracker.log"),
+            serial_output: temp.path().join("serial.log"),
+            stdout: temp.path().join("firecracker.stdout"),
+            stderr: temp.path().join("firecracker.stderr"),
+        };
+
+        let vsock = firecracker_guest_rpc_vsock_config(&artifacts);
+
+        assert_eq!(vsock["vsock_id"], "guest-rpc");
+        assert_eq!(vsock["guest_cid"], 3);
+        assert_eq!(
+            vsock["uds_path"],
+            artifacts.guest_rpc_socket.display().to_string()
+        );
+    }
+
+    #[test]
     fn firecracker_boot_smoke_fails_closed_when_preflight_fails() {
         let _env_lock = lock_firecracker_env();
         clear_firecracker_env();
@@ -2953,12 +3006,12 @@ mod tests {
     }
 
     #[test]
-    fn firecracker_api_socket_cleanup_reports_host_resource_failure() {
+    fn firecracker_host_socket_cleanup_reports_host_resource_failure() {
         let temp = tempfile::tempdir().unwrap();
         let socket_path = temp.path().join("firecracker.sock");
         std::fs::create_dir(&socket_path).unwrap();
 
-        let result = remove_firecracker_api_socket(&socket_path);
+        let result = remove_firecracker_host_socket(&socket_path);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(socket_path.to_str().unwrap()));
