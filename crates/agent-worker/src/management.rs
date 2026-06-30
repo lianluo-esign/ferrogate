@@ -1940,6 +1940,24 @@ mod tests {
         assert!(lifecycle
             .message
             .contains("run_id=agent-worker-firecracker-exec-ready-run"));
+        assert!(lifecycle.message.contains(
+            "launch_profile=codex:codex_exec:normalized_jsonl:gateway_mediated_cli_filesystem_tools"
+        ));
+        assert!(lifecycle
+            .message
+            .contains("required_gateway_capabilities=cli|filesystem|tools|artifacts|checkpoint"));
+        assert!(lifecycle
+            .message
+            .contains("network_policy=gateway_control_channel_only_no_direct_public_egress"));
+        assert!(lifecycle
+            .message
+            .contains("filesystem_policy=prepared_workspace_only_with_read_only_runtime_bundle"));
+        assert!(lifecycle
+            .message
+            .contains("artifact_policy=guest_artifacts_must_return_as_artifact_created_events"));
+        assert!(lifecycle.message.contains(
+            "checkpoint_policy=guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence"
+        ));
         assert!(lifecycle.message.contains("proves_microvm_boot=false"));
         assert!(lifecycle.message.contains("proves_handler_execution=false"));
         assert_eq!(
@@ -2238,6 +2256,75 @@ mod tests {
     }
 
     #[test]
+    fn exec_or_attach_rejects_guest_start_response_for_wrong_capability_envelope() {
+        let _env_lock = lock_firecracker_env();
+        let temp = tempfile::tempdir().unwrap();
+        let guest_agent = temp.path().join("ferrogate-guest-agent");
+        let workspace = temp.path().join("workspace");
+        write_guest_agent_handshake_script(
+            &guest_agent,
+            &guest_start_not_implemented_response_with_capabilities(
+                "agent-worker-firecracker-exec-capability-mismatch",
+                "codex",
+                "firecracker-exec-capability-mismatch-instance",
+                &["tools", "artifacts", "checkpoint"],
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_AGENT", &guest_agent);
+        std::env::set_var("AGENT_WORKER_FIRECRACKER_GUEST_WORKSPACE", &workspace);
+        std::env::set_var(
+            "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
+            "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
+        );
+        let exec_envelope = shared_lifecycle_envelope_with_adapter(
+            AgentWorkerManagementAction::ExecOrAttach,
+            "agent-worker-firecracker-exec-capability-mismatch",
+            "",
+            "codex",
+        );
+        let session_id = exec_envelope.session_id.clone().unwrap();
+        let run_id = exec_envelope.run_id.clone().unwrap();
+        let mut transport = InMemoryAgentWorkerManagementTransport::new(
+            AgentWorkerManagementVerifier::new(vec![AgentWorkerManagementKey {
+                key_id: "agent-worker-smoke-key".to_string(),
+                shared_secret: SMOKE_SHARED_SECRET.to_string(),
+            }])
+            .unwrap(),
+        );
+        let mut state = InMemoryAgentWorkerStateStore::new();
+        state.put_firecracker_microvm(
+            session_id,
+            run_id,
+            test_firecracker_microvm("firecracker-exec-capability-mismatch-instance", temp.path())
+                .unwrap(),
+        );
+        let runtime = AgentWorkerRuntime::default();
+
+        let exec =
+            accept_management_envelope(&mut transport, &mut state, &runtime, exec_envelope, 1_000);
+
+        clear_guest_agent_env();
+        assert!(exec.accepted);
+        let Some(AgentWorkerManagementResult::Lifecycle { lifecycle }) = exec.result else {
+            panic!("exec did not return lifecycle evidence");
+        };
+        assert_eq!(lifecycle.outcome, "guest_handler_rpc_unavailable");
+        assert!(lifecycle.message.contains("invalid response"));
+        assert!(lifecycle
+            .message
+            .contains("required_gateway_capabilities mismatch"));
+        assert!(lifecycle
+            .message
+            .contains("request=cli|filesystem|tools|artifacts|checkpoint"));
+        assert_eq!(
+            lifecycle.isolation_instance_id.as_deref(),
+            Some("firecracker-exec-capability-mismatch-instance")
+        );
+    }
+
+    #[test]
     fn unix_socket_server_handles_later_connection_while_first_is_slow() {
         let temp = tempfile::tempdir().unwrap();
         let socket_path = temp.path().join("agent-worker-management.sock");
@@ -2388,9 +2475,83 @@ mod tests {
         framework_adapter: &str,
         isolation_instance_id: &str,
     ) -> String {
-        format!(
-            "{{\"protocol_version\":\"ferrogate.agent-worker.guest.v1\",\"action\":\"start_handler\",\"worker_id\":\"agent-worker-smoke\",\"session_id\":\"{envelope_prefix}-session\",\"run_id\":\"{envelope_prefix}-run\",\"framework_adapter\":\"{framework_adapter}\",\"isolation_backend\":\"firecracker\",\"isolation_instance_id\":\"{isolation_instance_id}\",\"status\":\"not_implemented\",\"message\":\"guest handler RPC transport is not implemented\",\"proves_handler_execution\":false}}"
+        guest_start_not_implemented_response_with_capabilities(
+            envelope_prefix,
+            framework_adapter,
+            isolation_instance_id,
+            guest_start_capabilities(framework_adapter),
         )
+    }
+
+    fn guest_start_not_implemented_response_with_capabilities(
+        envelope_prefix: &str,
+        framework_adapter: &str,
+        isolation_instance_id: &str,
+        required_gateway_capabilities: &[&str],
+    ) -> String {
+        serde_json::json!({
+            "protocol_version": "ferrogate.agent-worker.guest.v1",
+            "action": "start_handler",
+            "worker_id": "agent-worker-smoke",
+            "session_id": format!("{envelope_prefix}-session"),
+            "run_id": format!("{envelope_prefix}-run"),
+            "framework_adapter": framework_adapter,
+            "adapter_launch_profile": guest_start_launch_profile(framework_adapter),
+            "isolation_backend": "firecracker",
+            "isolation_instance_id": isolation_instance_id,
+            "required_gateway_capabilities": required_gateway_capabilities,
+            "network_policy": "gateway_control_channel_only_no_direct_public_egress",
+            "filesystem_policy": "prepared_workspace_only_with_read_only_runtime_bundle",
+            "artifact_policy": "guest_artifacts_must_return_as_artifact_created_events",
+            "checkpoint_policy": "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence",
+            "status": "not_implemented",
+            "message": "guest handler RPC transport is not implemented",
+            "proves_handler_execution": false,
+        })
+        .to_string()
+    }
+
+    fn guest_start_capabilities(framework_adapter: &str) -> &'static [&'static str] {
+        match framework_adapter {
+            "codex" | "claude-code" => &["cli", "filesystem", "tools", "artifacts", "checkpoint"],
+            "hermes" => &[
+                "memory.read",
+                "memory.write",
+                "subagents",
+                "artifacts",
+                "checkpoint",
+            ],
+            _ => &["tools", "artifacts", "checkpoint"],
+        }
+    }
+
+    fn guest_start_launch_profile(framework_adapter: &str) -> serde_json::Value {
+        match framework_adapter {
+            "codex" => serde_json::json!({
+                "framework": "codex",
+                "entrypoint": "codex_exec",
+                "event_stream": "normalized_jsonl",
+                "external_action_mode": "gateway_mediated_cli_filesystem_tools",
+            }),
+            "claude-code" => serde_json::json!({
+                "framework": "claude_code",
+                "entrypoint": "claude_code_non_interactive",
+                "event_stream": "normalized_jsonl",
+                "external_action_mode": "gateway_mediated_cli_filesystem_tools",
+            }),
+            "hermes" => serde_json::json!({
+                "framework": "hermes",
+                "entrypoint": "hermes_oneshot",
+                "event_stream": "normalized_jsonl",
+                "external_action_mode": "gateway_mediated_memory_subagents",
+            }),
+            _ => serde_json::json!({
+                "framework": "native_harness",
+                "entrypoint": "native_harness_task",
+                "event_stream": "normalized_jsonl",
+                "external_action_mode": "gateway_mediated_tools",
+            }),
+        }
     }
 
     fn write_executable_script(path: &Path, content: &str) -> std::io::Result<()> {

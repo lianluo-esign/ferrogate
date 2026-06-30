@@ -964,8 +964,14 @@ pub(crate) struct FirecrackerGuestRpcStartResponse {
     session_id: String,
     run_id: String,
     framework_adapter: String,
+    adapter_launch_profile: FirecrackerGuestAdapterLaunchProfile,
     isolation_backend: String,
     isolation_instance_id: String,
+    required_gateway_capabilities: Vec<String>,
+    network_policy: String,
+    filesystem_policy: String,
+    artifact_policy: String,
+    checkpoint_policy: String,
     status: String,
     message: Option<String>,
     proves_handler_execution: bool,
@@ -1006,6 +1012,11 @@ impl FirecrackerGuestRpcStartResponse {
             &request.framework_adapter,
         )?;
         Self::require_matches(
+            "adapter_launch_profile",
+            &response.adapter_launch_profile.summary(),
+            &request.adapter_launch_profile.summary(),
+        )?;
+        Self::require_matches(
             "isolation_backend",
             &response.isolation_backend,
             &request.isolation_backend,
@@ -1014,6 +1025,31 @@ impl FirecrackerGuestRpcStartResponse {
             "isolation_instance_id",
             &response.isolation_instance_id,
             &request.isolation_instance_id,
+        )?;
+        Self::require_vec_matches(
+            "required_gateway_capabilities",
+            &response.required_gateway_capabilities,
+            &request.required_gateway_capabilities,
+        )?;
+        Self::require_matches(
+            "network_policy",
+            &response.network_policy,
+            &request.network_policy,
+        )?;
+        Self::require_matches(
+            "filesystem_policy",
+            &response.filesystem_policy,
+            &request.filesystem_policy,
+        )?;
+        Self::require_matches(
+            "artifact_policy",
+            &response.artifact_policy,
+            &request.artifact_policy,
+        )?;
+        Self::require_matches(
+            "checkpoint_policy",
+            &response.checkpoint_policy,
+            &request.checkpoint_policy,
         )?;
         if response.proves_handler_execution {
             return Err(
@@ -1026,15 +1062,21 @@ impl FirecrackerGuestRpcStartResponse {
 
     pub(crate) fn summary(&self) -> String {
         format!(
-            "guest_rpc_start_response(status={}, action={}, worker_id={}, session_id={}, run_id={}, adapter={}, isolation_backend={}, isolation_instance_id={}, message={}, proves_handler_execution={}, elapsed_millis={})",
+            "guest_rpc_start_response(status={}, action={}, worker_id={}, session_id={}, run_id={}, adapter={}, launch_profile={}, isolation_backend={}, isolation_instance_id={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, artifact_policy={}, checkpoint_policy={}, message={}, proves_handler_execution={}, elapsed_millis={})",
             self.status,
             self.action,
             self.worker_id,
             self.session_id,
             self.run_id,
             self.framework_adapter,
+            self.adapter_launch_profile.summary(),
             self.isolation_backend,
             self.isolation_instance_id,
+            self.required_gateway_capabilities.join("|"),
+            self.network_policy,
+            self.filesystem_policy,
+            self.artifact_policy,
+            self.checkpoint_policy,
             self.message.as_deref().unwrap_or(""),
             self.proves_handler_execution,
             self.elapsed_millis
@@ -1049,14 +1091,29 @@ impl FirecrackerGuestRpcStartResponse {
             "{field} mismatch: response={actual}; request={expected}"
         ))
     }
+
+    fn require_vec_matches(
+        field: &str,
+        actual: &[String],
+        expected: &[String],
+    ) -> Result<(), String> {
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "{field} mismatch: response={}; request={}",
+            actual.join("|"),
+            expected.join("|")
+        ))
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FirecrackerGuestAdapterLaunchProfile {
-    framework: &'static str,
-    entrypoint: &'static str,
-    event_stream: &'static str,
-    external_action_mode: &'static str,
+    framework: String,
+    entrypoint: String,
+    event_stream: String,
+    external_action_mode: String,
 }
 
 impl FirecrackerGuestAdapterLaunchProfile {
@@ -1108,28 +1165,28 @@ fn guest_launch_capabilities(adapter: &str) -> Vec<&'static str> {
 fn adapter_launch_profile(adapter: &str) -> FirecrackerGuestAdapterLaunchProfile {
     match adapter {
         "codex" => FirecrackerGuestAdapterLaunchProfile {
-            framework: "codex",
-            entrypoint: "codex_exec",
-            event_stream: "normalized_jsonl",
-            external_action_mode: "gateway_mediated_cli_filesystem_tools",
+            framework: "codex".to_string(),
+            entrypoint: "codex_exec".to_string(),
+            event_stream: "normalized_jsonl".to_string(),
+            external_action_mode: "gateway_mediated_cli_filesystem_tools".to_string(),
         },
         "claude-code" => FirecrackerGuestAdapterLaunchProfile {
-            framework: "claude_code",
-            entrypoint: "claude_code_non_interactive",
-            event_stream: "normalized_jsonl",
-            external_action_mode: "gateway_mediated_cli_filesystem_tools",
+            framework: "claude_code".to_string(),
+            entrypoint: "claude_code_non_interactive".to_string(),
+            event_stream: "normalized_jsonl".to_string(),
+            external_action_mode: "gateway_mediated_cli_filesystem_tools".to_string(),
         },
         "hermes" => FirecrackerGuestAdapterLaunchProfile {
-            framework: "hermes",
-            entrypoint: "hermes_oneshot",
-            event_stream: "normalized_jsonl",
-            external_action_mode: "gateway_mediated_memory_subagents",
+            framework: "hermes".to_string(),
+            entrypoint: "hermes_oneshot".to_string(),
+            event_stream: "normalized_jsonl".to_string(),
+            external_action_mode: "gateway_mediated_memory_subagents".to_string(),
         },
         _ => FirecrackerGuestAdapterLaunchProfile {
-            framework: "native_harness",
-            entrypoint: "native_harness_task",
-            event_stream: "normalized_jsonl",
-            external_action_mode: "gateway_mediated_tools",
+            framework: "native_harness".to_string(),
+            entrypoint: "native_harness_task".to_string(),
+            event_stream: "normalized_jsonl".to_string(),
+            external_action_mode: "gateway_mediated_tools".to_string(),
         },
     }
 }
