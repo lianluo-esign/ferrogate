@@ -21,7 +21,8 @@ use ferrogate_runtime::{
 use crate::{
     backends::{
         firecracker_guest_agent_launch_attempt, firecracker_guest_agent_preflight,
-        firecracker_host_preflight, firecracker_microvm_provision, isolation_backends,
+        firecracker_guest_rpc_start_request, firecracker_host_preflight,
+        firecracker_microvm_provision, isolation_backends,
     },
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
@@ -265,12 +266,14 @@ fn exec_or_attach(
                 return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
             }
         };
+        let guest_rpc_start_request =
+            firecracker_guest_rpc_start_request(envelope, &launch_attempt.handshake);
         let lifecycle = lifecycle_result_with_instance(
             envelope,
             ManagedWorkerSessionStatus::Failed,
             "guest_handler_rpc_not_implemented",
             &format!(
-                "Firecracker microVM {} is provisioned with running={running}; guest agent command launched from {} in {} and exited with {}; elapsed_millis={}; gateway_endpoint_configured={}; guest_rpc_channel={}; guest_agent_version={}; proves_microvm_boot={}; proves_handler_execution={}; agent-worker guest handler RPC is not implemented yet",
+                "Firecracker microVM {} is provisioned with running={running}; guest agent command launched from {} in {} and exited with {}; elapsed_millis={}; gateway_endpoint_configured={}; guest_rpc_channel={}; guest_agent_version={}; {}; proves_microvm_boot={}; proves_handler_execution={}; agent-worker guest handler RPC is not implemented yet",
                 existing.instance_id,
                 launch_attempt.command,
                 launch_attempt.workspace,
@@ -282,6 +285,7 @@ fn exec_or_attach(
                     .handshake
                     .guest_agent_version()
                     .unwrap_or("unknown"),
+                guest_rpc_start_request.summary(),
                 launch_attempt.proves_microvm_boot,
                 launch_attempt.proves_handler_execution
             ),

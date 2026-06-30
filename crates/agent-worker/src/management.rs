@@ -1868,9 +1868,11 @@ mod tests {
             "AGENT_WORKER_FIRECRACKER_GUEST_GATEWAY_ENDPOINT",
             "https://gateway.example.test/v1/agent-worker/external-actions/authorize",
         );
-        let exec_envelope = lifecycle_envelope(
+        let exec_envelope = shared_lifecycle_envelope_with_adapter(
             AgentWorkerManagementAction::ExecOrAttach,
             "agent-worker-firecracker-exec-ready",
+            "",
+            "codex",
         );
         let session_id = exec_envelope.session_id.clone().unwrap();
         let run_id = exec_envelope.run_id.clone().unwrap();
@@ -1905,6 +1907,13 @@ mod tests {
         assert!(lifecycle
             .message
             .contains("guest_agent_version=ferrogate guest agent v.test"));
+        assert!(lifecycle
+            .message
+            .contains("guest_rpc_start_request(protocol_version=ferrogate.agent-worker.guest.v1"));
+        assert!(lifecycle.message.contains("adapter=codex"));
+        assert!(lifecycle
+            .message
+            .contains("required_gateway_capabilities=cli|filesystem|tools|artifacts|checkpoint"));
         assert!(lifecycle.message.contains("proves_microvm_boot=false"));
         assert!(lifecycle.message.contains("proves_handler_execution=false"));
         assert_eq!(

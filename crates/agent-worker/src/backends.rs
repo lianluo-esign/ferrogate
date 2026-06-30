@@ -379,6 +379,34 @@ fn parse_guest_agent_launch_timeout() -> Duration {
     Duration::from_millis(millis)
 }
 
+pub(crate) fn firecracker_guest_rpc_start_request(
+    envelope: &ferrogate_runtime::AgentWorkerManagementEnvelope,
+    handshake: &FirecrackerGuestAgentHandshake,
+) -> FirecrackerGuestRpcStartRequest {
+    let adapter = normalize_guest_launch_adapter(envelope.framework_adapter.as_deref());
+    FirecrackerGuestRpcStartRequest {
+        protocol_version: FirecrackerGuestAgentHandshake::PROTOCOL_VERSION.to_string(),
+        action: "start_handler".to_string(),
+        tenant_id: envelope.tenant_id.clone(),
+        workspace_id: envelope.workspace_id.clone(),
+        session_id: envelope.session_id.clone().unwrap_or_default(),
+        run_id: envelope.run_id.clone().unwrap_or_default(),
+        framework_adapter: adapter.to_string(),
+        rpc_channel: handshake.rpc_channel().to_string(),
+        required_gateway_capabilities: guest_launch_capabilities(adapter)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect(),
+        network_policy: "gateway_control_channel_only_no_direct_public_egress".to_string(),
+        filesystem_policy: "prepared_workspace_only_with_read_only_runtime_bundle".to_string(),
+        artifact_policy: "guest_artifacts_must_return_as_artifact_created_events".to_string(),
+        checkpoint_policy:
+            "guest_checkpoint_requests_must_return_as_snapshot_or_checkpoint_evidence".to_string(),
+        proves_microvm_boot: false,
+        proves_handler_execution: false,
+    }
+}
+
 fn firecracker_boot_smoke(options: FirecrackerBootSmokeOptions) -> FirecrackerBootSmokeReport {
     let preflight = firecracker_host_preflight();
     if !preflight.ready() {
@@ -747,6 +775,42 @@ impl FirecrackerGuestAgentHandshake {
 pub(crate) struct FirecrackerGuestAgentLaunchAttemptError {
     outcome: &'static str,
     reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct FirecrackerGuestRpcStartRequest {
+    protocol_version: String,
+    action: String,
+    tenant_id: String,
+    workspace_id: String,
+    session_id: String,
+    run_id: String,
+    framework_adapter: String,
+    rpc_channel: String,
+    required_gateway_capabilities: Vec<String>,
+    network_policy: String,
+    filesystem_policy: String,
+    artifact_policy: String,
+    checkpoint_policy: String,
+    proves_microvm_boot: bool,
+    proves_handler_execution: bool,
+}
+
+impl FirecrackerGuestRpcStartRequest {
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "guest_rpc_start_request(protocol_version={}, action={}, adapter={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={})",
+            self.protocol_version,
+            self.action,
+            self.framework_adapter,
+            self.rpc_channel,
+            self.required_gateway_capabilities.join("|"),
+            self.network_policy,
+            self.filesystem_policy,
+            self.proves_microvm_boot,
+            self.proves_handler_execution
+        )
+    }
 }
 
 impl FirecrackerGuestAgentLaunchAttemptError {
