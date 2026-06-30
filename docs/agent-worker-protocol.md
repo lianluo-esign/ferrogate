@@ -441,8 +441,12 @@ non-empty `rpc_channel`. Missing, malformed, unsupported, or not-ready
 handshakes return `outcome=guest_agent_handshake_unavailable`. A successful
 handshake causes `agent-worker` to build the normalized guest RPC
 `start_handler` request contract with the tenant/workspace/session/run ids,
-selected adapter, required gateway-mediated capabilities, network/filesystem
-policy, artifact policy, and checkpoint policy. The worker still fails closed
+worker id, Firecracker isolation backend and instance id, selected adapter,
+required gateway-mediated capabilities, network/filesystem policy, artifact
+policy, and checkpoint policy. These identity fields are part of the #86
+capability evidence chain: every later guest-side tool/MCP/CLI/REST/filesystem/
+browser/secret/memory/network request must be attributable to the same worker
+and isolation instance. The worker still fails closed
 with `outcome=guest_handler_rpc_not_implemented`; this proves only that the
 configured guest-agent command can be launched and returned a versioned
 RPC-channel readiness signal, not that the start request has been sent or that

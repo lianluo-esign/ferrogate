@@ -1910,7 +1910,12 @@ mod tests {
         assert!(lifecycle
             .message
             .contains("guest_rpc_start_request(protocol_version=ferrogate.agent-worker.guest.v1"));
+        assert!(lifecycle.message.contains("worker_id=agent-worker-smoke"));
         assert!(lifecycle.message.contains("adapter=codex"));
+        assert!(lifecycle.message.contains("isolation_backend=firecracker"));
+        assert!(lifecycle
+            .message
+            .contains("isolation_instance_id=firecracker-exec-ready-instance"));
         assert!(lifecycle
             .message
             .contains("required_gateway_capabilities=cli|filesystem|tools|artifacts|checkpoint"));

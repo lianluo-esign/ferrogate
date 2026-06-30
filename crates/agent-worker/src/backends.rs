@@ -382,6 +382,7 @@ fn parse_guest_agent_launch_timeout() -> Duration {
 pub(crate) fn firecracker_guest_rpc_start_request(
     envelope: &ferrogate_runtime::AgentWorkerManagementEnvelope,
     handshake: &FirecrackerGuestAgentHandshake,
+    isolation_instance_id: &str,
 ) -> FirecrackerGuestRpcStartRequest {
     let adapter = normalize_guest_launch_adapter(envelope.framework_adapter.as_deref());
     FirecrackerGuestRpcStartRequest {
@@ -389,9 +390,12 @@ pub(crate) fn firecracker_guest_rpc_start_request(
         action: "start_handler".to_string(),
         tenant_id: envelope.tenant_id.clone(),
         workspace_id: envelope.workspace_id.clone(),
+        worker_id: envelope.worker_id.clone(),
         session_id: envelope.session_id.clone().unwrap_or_default(),
         run_id: envelope.run_id.clone().unwrap_or_default(),
         framework_adapter: adapter.to_string(),
+        isolation_backend: "firecracker".to_string(),
+        isolation_instance_id: isolation_instance_id.to_string(),
         rpc_channel: handshake.rpc_channel().to_string(),
         required_gateway_capabilities: guest_launch_capabilities(adapter)
             .into_iter()
@@ -783,9 +787,12 @@ pub(crate) struct FirecrackerGuestRpcStartRequest {
     action: String,
     tenant_id: String,
     workspace_id: String,
+    worker_id: String,
     session_id: String,
     run_id: String,
     framework_adapter: String,
+    isolation_backend: String,
+    isolation_instance_id: String,
     rpc_channel: String,
     required_gateway_capabilities: Vec<String>,
     network_policy: String,
@@ -799,10 +806,13 @@ pub(crate) struct FirecrackerGuestRpcStartRequest {
 impl FirecrackerGuestRpcStartRequest {
     pub(crate) fn summary(&self) -> String {
         format!(
-            "guest_rpc_start_request(protocol_version={}, action={}, adapter={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={})",
+            "guest_rpc_start_request(protocol_version={}, action={}, worker_id={}, adapter={}, isolation_backend={}, isolation_instance_id={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={})",
             self.protocol_version,
             self.action,
+            self.worker_id,
             self.framework_adapter,
+            self.isolation_backend,
+            self.isolation_instance_id,
             self.rpc_channel,
             self.required_gateway_capabilities.join("|"),
             self.network_policy,

@@ -266,8 +266,11 @@ fn exec_or_attach(
                 return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
             }
         };
-        let guest_rpc_start_request =
-            firecracker_guest_rpc_start_request(envelope, &launch_attempt.handshake);
+        let guest_rpc_start_request = firecracker_guest_rpc_start_request(
+            envelope,
+            &launch_attempt.handshake,
+            &existing.instance_id,
+        );
         let lifecycle = lifecycle_result_with_instance(
             envelope,
             ManagedWorkerSessionStatus::Failed,
