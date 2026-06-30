@@ -62,6 +62,200 @@ impl ExternalActionGateDecision {
     }
 }
 
+/// Trust level marker for managed external-action audit/billing evidence.
+///
+/// Managed actions are enforced at the gateway capability boundary, so their
+/// evidence is `enforced`. Self-hosted worker telemetry is only reported and
+/// must never be treated as enforced evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalActionEvidenceTrust {
+    Enforced,
+    Reported,
+}
+
+impl ExternalActionEvidenceTrust {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforced => "enforced",
+            Self::Reported => "reported",
+        }
+    }
+
+    fn for_mode(mode: FrameworkAdapterMode) -> Self {
+        match mode {
+            FrameworkAdapterMode::Managed => Self::Enforced,
+            FrameworkAdapterMode::SelfHosted => Self::Reported,
+        }
+    }
+}
+
+/// Coarse billing class derived from the capability action, so downstream
+/// billing can attribute spend to tool, runtime, network, or third-party API
+/// usage without inspecting the action payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalActionBillingClass {
+    Tool,
+    Runtime,
+    Network,
+    ThirdPartyApi,
+}
+
+impl ExternalActionBillingClass {
+    fn for_action(action: CapabilityAction) -> Self {
+        match action {
+            CapabilityAction::Tool | CapabilityAction::McpTool => Self::Tool,
+            CapabilityAction::Cli
+            | CapabilityAction::Skill
+            | CapabilityAction::Browser
+            | CapabilityAction::Filesystem
+            | CapabilityAction::Secret
+            | CapabilityAction::MemoryRead
+            | CapabilityAction::MemoryWrite => Self::Runtime,
+            CapabilityAction::NetworkEgress => Self::Network,
+            CapabilityAction::Rest => Self::ThirdPartyApi,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::Runtime => "runtime",
+            Self::Network => "network",
+            Self::ThirdPartyApi => "third_party_api",
+        }
+    }
+}
+
+/// Usage units placeholder for one authorized external action.
+///
+/// Authorization can only attribute the invocation itself; token, runtime, and
+/// egress units stay zero until the action runs and the billing pipeline settles
+/// real usage. This is a typed placeholder, not a pricing engine.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ExternalActionUsageUnits {
+    pub(crate) invocations: u64,
+    pub(crate) token_units: u64,
+    pub(crate) runtime_millis: u64,
+    pub(crate) egress_bytes: u64,
+}
+
+/// Billing attribution for one managed external-action authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalActionBillingAttribution {
+    pub(crate) action_class: ExternalActionBillingClass,
+    pub(crate) usage: ExternalActionUsageUnits,
+}
+
+impl ExternalActionBillingAttribution {
+    fn for_action(action: CapabilityAction) -> Self {
+        Self {
+            action_class: ExternalActionBillingClass::for_action(action),
+            usage: ExternalActionUsageUnits {
+                invocations: 1,
+                ..ExternalActionUsageUnits::default()
+            },
+        }
+    }
+}
+
+/// Typed audit + billing evidence for one managed external-action authorization.
+///
+/// Every managed authorization decision (allow, deny, or approval-required)
+/// yields exactly one record linking the decision to the full worker identity
+/// tuple — tenant, workspace, session, run, worker, adapter, and isolation
+/// backend — plus the capability action, the trust level, and billing
+/// attribution. Self-hosted telemetry produces a record marked `reported` with
+/// no gateway enforcement decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalActionEvidenceRecord {
+    pub(crate) tenant_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) worker_id: String,
+    pub(crate) adapter_name: String,
+    pub(crate) adapter_version: String,
+    pub(crate) isolation_backend: String,
+    pub(crate) action: CapabilityAction,
+    pub(crate) target: String,
+    pub(crate) decision: Option<CapabilityAuthorizationDecision>,
+    pub(crate) trust: ExternalActionEvidenceTrust,
+    pub(crate) billing: ExternalActionBillingAttribution,
+}
+
+impl ExternalActionEvidenceRecord {
+    /// Build the audit/billing record from a worker session, the managed action,
+    /// and the gateway decision. `decision` is `None` for self-hosted reported
+    /// telemetry, where there is no gateway enforcement decision to attribute.
+    pub(crate) fn for_action(
+        session: &FrameworkAdapterSession,
+        action: &ManagedExternalAction,
+        decision: Option<CapabilityAuthorizationDecision>,
+    ) -> Self {
+        let capability = action.capability_action();
+        Self {
+            tenant_id: session.tenant_id.clone(),
+            workspace_id: session.workspace_id.clone(),
+            session_id: session.session_id.clone(),
+            run_id: session.run_id.clone(),
+            worker_id: session.worker_id.clone(),
+            adapter_name: session.adapter_name.clone(),
+            adapter_version: session.adapter_version.clone(),
+            isolation_backend: session.isolation_backend.clone(),
+            action: capability,
+            target: action.target(),
+            decision,
+            trust: ExternalActionEvidenceTrust::for_mode(session.mode),
+            billing: ExternalActionBillingAttribution::for_action(capability),
+        }
+    }
+
+    pub(crate) fn decision_label(&self) -> &'static str {
+        match self.decision {
+            Some(CapabilityAuthorizationDecision::Allowed) => "allowed",
+            Some(CapabilityAuthorizationDecision::Denied) => "denied",
+            Some(CapabilityAuthorizationDecision::ApprovalRequired) => "approval_required",
+            None => "reported",
+        }
+    }
+
+    /// Single-line audit tag linking the decision to the full identity tuple.
+    ///
+    /// Emitted alongside denial errors so denied managed actions stay visible in
+    /// run timelines instead of disappearing as opaque worker-local failures.
+    pub(crate) fn audit_tag(&self) -> String {
+        format!(
+            "audit[tenant={} workspace={} session={} run={} worker={} adapter={}@{} \
+             isolation={} action={} target={} decision={} trust={} \
+             billing={}/invocations:{}/tokens:{}/runtime_ms:{}/egress_bytes:{}]",
+            self.tenant_id,
+            self.workspace_id,
+            self.session_id,
+            self.run_id,
+            self.worker_id,
+            self.adapter_name,
+            self.adapter_version,
+            self.isolation_backend,
+            self.action.as_str(),
+            self.target,
+            self.decision_label(),
+            self.trust.as_str(),
+            self.billing.action_class.as_str(),
+            self.billing.usage.invocations,
+            self.billing.usage.token_units,
+            self.billing.usage.runtime_millis,
+            self.billing.usage.egress_bytes,
+        )
+    }
+}
+
+/// A managed external-action gate decision paired with its audit/billing record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandlerExternalActionEvidence {
+    pub(crate) decision: ExternalActionGateDecision,
+    pub(crate) evidence: ExternalActionEvidenceRecord,
+}
+
 pub(crate) trait GatewayExternalActionAuthorizer {
     fn authorize_external_action(
         &self,
@@ -103,19 +297,44 @@ pub(crate) fn authorize_handler_external_action<A>(
 where
     A: GatewayExternalActionAuthorizer + ?Sized,
 {
-    let decision = request_handler_external_action_decision(authorizer, request)?;
+    let HandlerExternalActionEvidence { decision, evidence } =
+        request_handler_external_action_evidence(authorizer, request)?;
     if decision.allowed() {
         Ok(decision)
     } else {
         Err(FrameworkAdapterError::CapabilityDenied(format!(
-            "managed external action denied before handler execution: {}",
+            "managed external action denied before handler execution: {} {}",
             decision
                 .event
                 .message
                 .as_deref()
-                .unwrap_or("gateway authorization was not allowed")
+                .unwrap_or("gateway authorization was not allowed"),
+            evidence.audit_tag(),
         )))
     }
+}
+
+/// Authorize a managed external action and return the gate decision paired with
+/// its typed audit/billing evidence record.
+///
+/// This is the managed authorization entrypoint that always produces evidence:
+/// allow, deny, and approval-required decisions each yield exactly one record.
+/// Denied decisions are returned here (not converted to an error) so the
+/// evidence stays visible to the caller instead of being swallowed as a
+/// worker-local failure.
+pub(crate) fn request_handler_external_action_evidence<A>(
+    authorizer: Option<&A>,
+    request: ExternalActionGateRequest,
+) -> Result<HandlerExternalActionEvidence, FrameworkAdapterError>
+where
+    A: GatewayExternalActionAuthorizer + ?Sized,
+{
+    let session = request.session.clone();
+    let action = request.action.clone();
+    let decision = request_handler_external_action_decision(authorizer, request)?;
+    let evidence =
+        ExternalActionEvidenceRecord::for_action(&session, &action, Some(decision.decision));
+    Ok(HandlerExternalActionEvidence { decision, evidence })
 }
 
 pub(crate) fn request_handler_external_action_decision<A>(
@@ -3893,6 +4112,245 @@ mod tests {
         server.join();
 
         assert!(error.to_string().contains("response read failed"));
+    }
+
+    #[test]
+    fn managed_allowed_action_emits_enforced_audit_billing_evidence() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let result = request_handler_external_action_evidence(
+            Some(&gate),
+            ExternalActionGateRequest {
+                session: session(),
+                action: ManagedExternalAction::Tool(ManagedToolAction {
+                    tool_name: "native.echo".to_string(),
+                    arguments_policy: "redacted_json".to_string(),
+                }),
+                high_risk: false,
+            },
+        )
+        .unwrap();
+
+        assert!(result.decision.allowed());
+        let evidence = &result.evidence;
+        // Full identity tuple links the action to tenant/workspace/session/run/
+        // worker/adapter/isolation-backend.
+        assert_eq!(evidence.tenant_id, "tenant-1");
+        assert_eq!(evidence.workspace_id, "workspace-1");
+        assert_eq!(evidence.session_id, "session-1");
+        assert_eq!(evidence.run_id, "run-1");
+        assert_eq!(evidence.worker_id, "worker-1");
+        assert_eq!(evidence.adapter_name, "native-harness");
+        assert_eq!(evidence.adapter_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(evidence.isolation_backend, "firecracker");
+        assert_eq!(evidence.action, CapabilityAction::Tool);
+        assert_eq!(evidence.target, "tool:native.echo");
+        assert_eq!(
+            evidence.decision,
+            Some(CapabilityAuthorizationDecision::Allowed)
+        );
+        assert_eq!(evidence.decision_label(), "allowed");
+        assert_eq!(evidence.trust, ExternalActionEvidenceTrust::Enforced);
+        assert_eq!(
+            evidence.billing.action_class,
+            ExternalActionBillingClass::Tool
+        );
+        assert_eq!(evidence.billing.usage.invocations, 1);
+        let tag = evidence.audit_tag();
+        assert!(tag.contains("worker=worker-1"));
+        assert!(tag.contains("decision=allowed"));
+        assert!(tag.contains("trust=enforced"));
+    }
+
+    #[test]
+    fn managed_denied_action_still_emits_visible_evidence() {
+        let gate =
+            RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::default());
+        let request = || ExternalActionGateRequest {
+            session: session(),
+            action: ManagedExternalAction::McpTool(ManagedMcpToolAction {
+                server_name: "filesystem".to_string(),
+                tool_name: "read_file".to_string(),
+                arguments_policy: "workspace_only".to_string(),
+            }),
+            high_risk: false,
+        };
+
+        // The denied decision is returned with evidence, not swallowed.
+        let result = request_handler_external_action_evidence(Some(&gate), request()).unwrap();
+        assert!(!result.decision.allowed());
+        assert_eq!(
+            result.decision.decision,
+            CapabilityAuthorizationDecision::Denied
+        );
+        let evidence = &result.evidence;
+        assert_eq!(
+            evidence.decision,
+            Some(CapabilityAuthorizationDecision::Denied)
+        );
+        assert_eq!(evidence.decision_label(), "denied");
+        assert_eq!(evidence.trust, ExternalActionEvidenceTrust::Enforced);
+        assert_eq!(evidence.action, CapabilityAction::McpTool);
+        assert_eq!(evidence.tenant_id, "tenant-1");
+        assert_eq!(evidence.worker_id, "worker-1");
+        assert_eq!(evidence.isolation_backend, "firecracker");
+
+        // The deny error carries the audit tag so the denial stays visible in
+        // run timelines rather than becoming an opaque worker-local failure.
+        let error = authorize_handler_external_action(Some(&gate), request()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("not allowed"));
+        assert!(message.contains("audit["));
+        assert!(message.contains("decision=denied"));
+        assert!(message.contains("trust=enforced"));
+        assert!(message.contains("worker=worker-1"));
+    }
+
+    #[test]
+    fn managed_approval_required_action_emits_approval_evidence() {
+        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
+            CapabilityPolicy {
+                allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
+                ..CapabilityPolicy::default()
+            },
+        ));
+
+        let result = request_handler_external_action_evidence(
+            Some(&gate),
+            ExternalActionGateRequest {
+                session: session(),
+                action: ManagedExternalAction::Cli(ManagedCliAction {
+                    command: "bash".to_string(),
+                    args: vec!["-lc".to_string(), "curl https://example.test".to_string()],
+                    working_dir: "/workspace".to_string(),
+                    env_policy: "deny_all_except_path".to_string(),
+                    timeout_millis: 1_000,
+                    stdout_limit_bytes: 4096,
+                    stderr_limit_bytes: 4096,
+                    artifact_capture: false,
+                }),
+                high_risk: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!result.decision.allowed());
+        assert_eq!(
+            result.decision.decision,
+            CapabilityAuthorizationDecision::ApprovalRequired
+        );
+        let evidence = &result.evidence;
+        assert_eq!(
+            evidence.decision,
+            Some(CapabilityAuthorizationDecision::ApprovalRequired)
+        );
+        assert_eq!(evidence.decision_label(), "approval_required");
+        assert_eq!(evidence.trust, ExternalActionEvidenceTrust::Enforced);
+        assert_eq!(evidence.action, CapabilityAction::Cli);
+        assert_eq!(
+            evidence.billing.action_class,
+            ExternalActionBillingClass::Runtime
+        );
+    }
+
+    #[test]
+    fn self_hosted_action_evidence_is_reported_not_enforced() {
+        let mut self_hosted = session();
+        self_hosted.mode = FrameworkAdapterMode::SelfHosted;
+
+        let evidence = ExternalActionEvidenceRecord::for_action(
+            &self_hosted,
+            &ManagedExternalAction::Tool(ManagedToolAction {
+                tool_name: "native.echo".to_string(),
+                arguments_policy: "redacted_json".to_string(),
+            }),
+            None,
+        );
+
+        assert_eq!(evidence.trust, ExternalActionEvidenceTrust::Reported);
+        assert_ne!(evidence.trust, ExternalActionEvidenceTrust::Enforced);
+        assert_eq!(evidence.trust.as_str(), "reported");
+        assert_eq!(evidence.decision, None);
+        assert_eq!(evidence.decision_label(), "reported");
+        assert_eq!(evidence.tenant_id, "tenant-1");
+        assert_eq!(evidence.worker_id, "worker-1");
+        assert!(evidence.audit_tag().contains("trust=reported"));
+    }
+
+    #[test]
+    fn billing_attribution_is_populated_for_action_classes() {
+        let rest = ExternalActionEvidenceRecord::for_action(
+            &session(),
+            &ManagedExternalAction::Rest(ManagedRestAction {
+                method: "POST".to_string(),
+                url: "https://api.example.test/v1/jobs".to_string(),
+                headers_policy: "strip_credentials".to_string(),
+                body_policy: "redact_and_scan".to_string(),
+                timeout_millis: 2_000,
+                retry_limit: 0,
+            }),
+            Some(CapabilityAuthorizationDecision::Allowed),
+        );
+        assert_eq!(
+            rest.billing.action_class,
+            ExternalActionBillingClass::ThirdPartyApi
+        );
+        assert_eq!(rest.billing.action_class.as_str(), "third_party_api");
+        // Usage units are populated placeholders: one invocation is attributed at
+        // authorization time; token/runtime/egress settle after execution.
+        assert_eq!(rest.billing.usage.invocations, 1);
+        assert_eq!(rest.billing.usage.token_units, 0);
+        assert_eq!(rest.billing.usage.runtime_millis, 0);
+        assert_eq!(rest.billing.usage.egress_bytes, 0);
+
+        let network = ExternalActionEvidenceRecord::for_action(
+            &session(),
+            &ManagedExternalAction::NetworkEgress(ManagedNetworkEgressAction {
+                host: "api.example.test".to_string(),
+                port: 443,
+                protocol: "https".to_string(),
+            }),
+            Some(CapabilityAuthorizationDecision::Allowed),
+        );
+        assert_eq!(
+            network.billing.action_class,
+            ExternalActionBillingClass::Network
+        );
+
+        let tool = ExternalActionEvidenceRecord::for_action(
+            &session(),
+            &ManagedExternalAction::Tool(ManagedToolAction {
+                tool_name: "native.echo".to_string(),
+                arguments_policy: "redacted_json".to_string(),
+            }),
+            Some(CapabilityAuthorizationDecision::Allowed),
+        );
+        assert_eq!(tool.billing.action_class, ExternalActionBillingClass::Tool);
+
+        let cli = ExternalActionEvidenceRecord::for_action(
+            &session(),
+            &ManagedExternalAction::Cli(ManagedCliAction {
+                command: "cargo".to_string(),
+                args: vec!["test".to_string()],
+                working_dir: "/workspace".to_string(),
+                env_policy: "allowlist".to_string(),
+                timeout_millis: 30_000,
+                stdout_limit_bytes: 65_536,
+                stderr_limit_bytes: 65_536,
+                artifact_capture: true,
+            }),
+            Some(CapabilityAuthorizationDecision::Allowed),
+        );
+        assert_eq!(
+            cli.billing.action_class,
+            ExternalActionBillingClass::Runtime
+        );
     }
 
     fn session() -> FrameworkAdapterSession {
