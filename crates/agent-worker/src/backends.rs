@@ -394,6 +394,7 @@ pub(crate) fn firecracker_guest_rpc_start_request(
         session_id: envelope.session_id.clone().unwrap_or_default(),
         run_id: envelope.run_id.clone().unwrap_or_default(),
         framework_adapter: adapter.to_string(),
+        adapter_launch_profile: adapter_launch_profile(adapter),
         isolation_backend: "firecracker".to_string(),
         isolation_instance_id: isolation_instance_id.to_string(),
         rpc_channel: handshake.rpc_channel().to_string(),
@@ -791,6 +792,7 @@ pub(crate) struct FirecrackerGuestRpcStartRequest {
     session_id: String,
     run_id: String,
     framework_adapter: String,
+    adapter_launch_profile: FirecrackerGuestAdapterLaunchProfile,
     isolation_backend: String,
     isolation_instance_id: String,
     rpc_channel: String,
@@ -806,11 +808,12 @@ pub(crate) struct FirecrackerGuestRpcStartRequest {
 impl FirecrackerGuestRpcStartRequest {
     pub(crate) fn summary(&self) -> String {
         format!(
-            "guest_rpc_start_request(protocol_version={}, action={}, worker_id={}, adapter={}, isolation_backend={}, isolation_instance_id={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={})",
+            "guest_rpc_start_request(protocol_version={}, action={}, worker_id={}, adapter={}, launch_profile={}, isolation_backend={}, isolation_instance_id={}, rpc_channel={}, required_gateway_capabilities={}, network_policy={}, filesystem_policy={}, proves_microvm_boot={}, proves_handler_execution={})",
             self.protocol_version,
             self.action,
             self.worker_id,
             self.framework_adapter,
+            self.adapter_launch_profile.summary(),
             self.isolation_backend,
             self.isolation_instance_id,
             self.rpc_channel,
@@ -819,6 +822,23 @@ impl FirecrackerGuestRpcStartRequest {
             self.filesystem_policy,
             self.proves_microvm_boot,
             self.proves_handler_execution
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FirecrackerGuestAdapterLaunchProfile {
+    framework: &'static str,
+    entrypoint: &'static str,
+    event_stream: &'static str,
+    external_action_mode: &'static str,
+}
+
+impl FirecrackerGuestAdapterLaunchProfile {
+    fn summary(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.framework, self.entrypoint, self.event_stream, self.external_action_mode
         )
     }
 }
@@ -857,6 +877,35 @@ fn guest_launch_capabilities(adapter: &str) -> Vec<&'static str> {
             "checkpoint",
         ],
         _ => vec!["tools", "artifacts", "checkpoint"],
+    }
+}
+
+fn adapter_launch_profile(adapter: &str) -> FirecrackerGuestAdapterLaunchProfile {
+    match adapter {
+        "codex" => FirecrackerGuestAdapterLaunchProfile {
+            framework: "codex",
+            entrypoint: "codex_exec",
+            event_stream: "normalized_jsonl",
+            external_action_mode: "gateway_mediated_cli_filesystem_tools",
+        },
+        "claude-code" => FirecrackerGuestAdapterLaunchProfile {
+            framework: "claude_code",
+            entrypoint: "claude_code_non_interactive",
+            event_stream: "normalized_jsonl",
+            external_action_mode: "gateway_mediated_cli_filesystem_tools",
+        },
+        "hermes" => FirecrackerGuestAdapterLaunchProfile {
+            framework: "hermes",
+            entrypoint: "hermes_oneshot",
+            event_stream: "normalized_jsonl",
+            external_action_mode: "gateway_mediated_memory_subagents",
+        },
+        _ => FirecrackerGuestAdapterLaunchProfile {
+            framework: "native_harness",
+            entrypoint: "native_harness_task",
+            event_stream: "normalized_jsonl",
+            external_action_mode: "gateway_mediated_tools",
+        },
     }
 }
 
@@ -2458,6 +2507,31 @@ mod tests {
             .required_gateway_capabilities
             .contains(&"memory.read"));
         assert!(hermes.required_gateway_capabilities.contains(&"subagents"));
+    }
+
+    #[test]
+    fn adapter_launch_profiles_are_framework_specific_without_claiming_execution() {
+        let codex = adapter_launch_profile("codex");
+        let claude = adapter_launch_profile("claude-code");
+        let hermes = adapter_launch_profile("hermes");
+        let native = adapter_launch_profile("native-harness");
+
+        assert_eq!(codex.framework, "codex");
+        assert_eq!(codex.entrypoint, "codex_exec");
+        assert_eq!(
+            codex.external_action_mode,
+            "gateway_mediated_cli_filesystem_tools"
+        );
+        assert_eq!(claude.framework, "claude_code");
+        assert_eq!(claude.entrypoint, "claude_code_non_interactive");
+        assert_eq!(hermes.framework, "hermes");
+        assert_eq!(hermes.entrypoint, "hermes_oneshot");
+        assert_eq!(
+            hermes.external_action_mode,
+            "gateway_mediated_memory_subagents"
+        );
+        assert_eq!(native.framework, "native_harness");
+        assert_eq!(native.event_stream, "normalized_jsonl");
     }
 
     #[test]

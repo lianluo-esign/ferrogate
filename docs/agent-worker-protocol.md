@@ -442,11 +442,15 @@ handshakes return `outcome=guest_agent_handshake_unavailable`. A successful
 handshake causes `agent-worker` to build the normalized guest RPC
 `start_handler` request contract with the tenant/workspace/session/run ids,
 worker id, Firecracker isolation backend and instance id, selected adapter,
-required gateway-mediated capabilities, network/filesystem policy, artifact
-policy, and checkpoint policy. These identity fields are part of the #86
-capability evidence chain: every later guest-side tool/MCP/CLI/REST/filesystem/
-browser/secret/memory/network request must be attributable to the same worker
-and isolation instance. The worker still fails closed
+adapter-specific launch profile, required gateway-mediated capabilities,
+network/filesystem policy, artifact policy, and checkpoint policy. The launch
+profile records the normalized framework family, guest entrypoint, event stream
+format, and external-action mode for `codex`, `claude-code`, `hermes`, or the
+native harness; this is the #84 adapter boundary that keeps framework-specific
+startup details out of the gateway API. These identity fields are part of the
+#86 capability evidence chain: every later guest-side tool/MCP/CLI/REST/
+filesystem/browser/secret/memory/network request must be attributable to the
+same worker and isolation instance. The worker still fails closed
 with `outcome=guest_handler_rpc_not_implemented`; this proves only that the
 configured guest-agent command can be launched and returned a versioned
 RPC-channel readiness signal, not that the start request has been sent or that

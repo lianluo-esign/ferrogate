@@ -1912,6 +1912,9 @@ mod tests {
             .contains("guest_rpc_start_request(protocol_version=ferrogate.agent-worker.guest.v1"));
         assert!(lifecycle.message.contains("worker_id=agent-worker-smoke"));
         assert!(lifecycle.message.contains("adapter=codex"));
+        assert!(lifecycle.message.contains(
+            "launch_profile=codex:codex_exec:normalized_jsonl:gateway_mediated_cli_filesystem_tools"
+        ));
         assert!(lifecycle.message.contains("isolation_backend=firecracker"));
         assert!(lifecycle
             .message
