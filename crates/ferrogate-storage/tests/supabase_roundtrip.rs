@@ -19,9 +19,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ferrogate_core::TenantContext;
 use ferrogate_storage::{
     ControlPlaneDocuments, PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories,
-    StorageMigrationSnapshot,
+    StorageMigrationSnapshot, StoredAgentWorkerInstance, StoredManagedWorkerIsolationEvidence,
+    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
+    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredManagedWorkerTemplate,
 };
 
 const IMAGE: &str = "postgres:16-alpine";
@@ -172,6 +175,190 @@ fn documents() -> ControlPlaneDocuments {
         )],
         ..ControlPlaneDocuments::default()
     }
+}
+
+const RUN_ID: &str = "run-worker-rt";
+const SESSION_ID: &str = "sess-worker-rt";
+const TEMPLATE_ID: &str = "tmpl-worker-rt";
+const INSTANCE_ID: &str = "awi-worker-rt";
+const EVENT_ID: &str = "evt-worker-rt";
+
+fn worker_lifecycle_snapshot() -> StorageMigrationSnapshot {
+    let tenant = TenantContext {
+        organization_id: Some("org_worker".into()),
+        team_id: None,
+        project_id: Some("proj_worker".into()),
+        user_id: None,
+        api_key_id: Some("key_worker".into()),
+    };
+    StorageMigrationSnapshot {
+        managed_worker_templates: vec![StoredManagedWorkerTemplate {
+            id: TEMPLATE_ID.into(),
+            framework_adapter: "langgraph".into(),
+            isolation_backend_kind: "firecracker".into(),
+            enabled: true,
+            max_tenant_sessions: Some(4),
+            max_workspace_sessions: Some(2),
+            created_at_unix: Some(1),
+            updated_at_unix: Some(1),
+        }],
+        agent_worker_instances: vec![StoredAgentWorkerInstance {
+            id: INSTANCE_ID.into(),
+            process_name: "agent-worker-1".into(),
+            host_id: Some("host-a".into()),
+            worker_version: Some("2026.6.22".into()),
+            status: "running".into(),
+            started_at_unix: Some(1),
+            last_seen_at_unix: Some(2),
+            process_json: r#"{"pid":4242}"#.into(),
+        }],
+        managed_worker_sessions: vec![StoredManagedWorkerSession {
+            id: SESSION_ID.into(),
+            run_id: RUN_ID.into(),
+            tenant: tenant.clone(),
+            workspace_id: "ws-worker-rt".into(),
+            worker_template_id: TEMPLATE_ID.into(),
+            agent_worker_instance_id: Some(INSTANCE_ID.into()),
+            status: "running".into(),
+            isolation_backend_kind: "firecracker".into(),
+            microvm_id: Some("vm-worker-rt".into()),
+            capability_envelope_id: "cap-worker-rt".into(),
+            requested_at_unix: Some(1),
+            started_at_unix: Some(2),
+            completed_at_unix: None,
+            cleanup_completed_at_unix: None,
+            capability_envelope_json: r#"{"network":"governed"}"#.into(),
+            resource_limits_json: r#"{"cpu":2}"#.into(),
+        }],
+        managed_worker_lifecycle_events: vec![StoredManagedWorkerLifecycleEvent {
+            id: EVENT_ID.into(),
+            session_id: SESSION_ID.into(),
+            run_id: RUN_ID.into(),
+            tenant: tenant.clone(),
+            workspace_id: "ws-worker-rt".into(),
+            agent_worker_instance_id: Some(INSTANCE_ID.into()),
+            status: "running".into(),
+            action: "provision".into(),
+            outcome: "succeeded".into(),
+            occurred_at_unix: Some(2),
+            evidence_json: r#"{"stage":"boot"}"#.into(),
+        }],
+        managed_worker_isolation_selections: vec![StoredManagedWorkerIsolationSelection {
+            session_id: SESSION_ID.into(),
+            run_id: RUN_ID.into(),
+            tenant: tenant.clone(),
+            workspace_id: "ws-worker-rt".into(),
+            agent_worker_instance_id: Some(INSTANCE_ID.into()),
+            backend_name: "firecracker".into(),
+            backend_version: "1.7".into(),
+            backend_kind: "microvm".into(),
+            host_lifecycle_owner: "gateway".into(),
+            gateway_controls_backend: true,
+            capability_envelope_id: "cap-worker-rt".into(),
+            selected_at_unix: Some(1),
+        }],
+        managed_worker_isolation_policies: vec![StoredManagedWorkerIsolationPolicy {
+            session_id: SESSION_ID.into(),
+            cpu_count: 2,
+            memory_mib: 1024,
+            disk_mib: 4096,
+            max_runtime_millis: Some(600_000),
+            direct_public_egress: false,
+            gateway_control_channel: true,
+            governed_egress: true,
+            read_only_rootfs: true,
+            writable_workspace: true,
+            host_path_mounts: false,
+        }],
+        managed_worker_isolation_evidence: vec![StoredManagedWorkerIsolationEvidence {
+            id: "eva-worker-rt".into(),
+            session_id: SESSION_ID.into(),
+            lifecycle_event_id: EVENT_ID.into(),
+            run_id: RUN_ID.into(),
+            tenant,
+            workspace_id: "ws-worker-rt".into(),
+            agent_worker_instance_id: Some(INSTANCE_ID.into()),
+            isolation_instance_id: Some("vm-worker-rt".into()),
+            action: "provision".into(),
+            outcome: "succeeded".into(),
+            failure_reason: None,
+            occurred_at_unix: Some(2),
+            evidence_json: r#"{"attestation":"ok"}"#.into(),
+        }],
+        ..StorageMigrationSnapshot::default()
+    }
+}
+
+/// #109: a managed-worker session's full lifecycle & isolation record must
+/// persist to real Supabase/Postgres and survive a fresh connection — proving
+/// tenant-scoped worker governance is durable, not process-local.
+#[test]
+fn managed_worker_lifecycle_and_isolation_round_trip_through_real_supabase() {
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping managed-worker round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    storage
+        .import_migration_snapshot(worker_lifecycle_snapshot())
+        .expect("import managed-worker lifecycle into supabase must succeed");
+
+    let counts = storage
+        .export_migration_snapshot()
+        .expect("export from supabase must succeed")
+        .counts();
+    assert_eq!(counts.managed_worker_templates, 1, "template must persist");
+    assert_eq!(counts.agent_worker_instances, 1, "worker instance persists");
+    assert_eq!(counts.managed_worker_sessions, 1, "session must persist");
+    assert_eq!(
+        counts.managed_worker_lifecycle_events, 1,
+        "lifecycle event must persist"
+    );
+    assert_eq!(
+        counts.managed_worker_isolation_selections, 1,
+        "isolation selection must persist"
+    );
+    assert_eq!(
+        counts.managed_worker_isolation_policies, 1,
+        "isolation policy must persist"
+    );
+    assert_eq!(
+        counts.managed_worker_isolation_evidence, 1,
+        "isolation evidence must persist"
+    );
+
+    // Reopen a fresh handle: rows must be in Postgres, not memory, and the
+    // session must keep its tenant scoping and backend selection intact.
+    let reopened =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
+            .expect("re-open against existing schema must succeed");
+    let reexported = reopened
+        .export_migration_snapshot()
+        .expect("re-export must succeed");
+    let rcounts = reexported.counts();
+    assert_eq!(rcounts.managed_worker_sessions, 1);
+    assert_eq!(rcounts.managed_worker_isolation_evidence, 1);
+
+    let session = &reexported.managed_worker_sessions[0];
+    assert_eq!(session.id, SESSION_ID);
+    assert_eq!(session.run_id, RUN_ID);
+    assert_eq!(session.worker_template_id, TEMPLATE_ID);
+    assert_eq!(
+        session.tenant.organization_id.as_deref(),
+        Some("org_worker")
+    );
+    assert_eq!(session.isolation_backend_kind, "firecracker");
+
+    let selection = &reexported.managed_worker_isolation_selections[0];
+    assert!(
+        selection.gateway_controls_backend,
+        "gateway must remain the isolation backend owner across a reconnect"
+    );
+    assert_eq!(selection.backend_kind, "microvm");
 }
 
 #[test]
