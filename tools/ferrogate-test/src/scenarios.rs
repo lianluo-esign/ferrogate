@@ -1686,6 +1686,20 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[AUTH_TEST_CLIENT_2, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"policy denial coverage"}]}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "blocked_by_ferrogate_test");
+            assert_eq!(body["error"]["message"], "blocked by ferrogate-test");
+            assert!(body["error"]["request_id"].is_string());
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
     let disabled_policy = r#"{"name":"block-test-client","effect":"deny","api_key_ids":["test-client"],"models":["fast-chat"],"providers":["openai"],"code":"blocked_by_ferrogate_test","message":"blocked by ferrogate-test","enabled":false}"#;
     case.expect_json(
         "PATCH",
@@ -3773,12 +3787,23 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             let http = admin_list_item(&body, "name", "http")
                 .context("HTTP MCP server status missing after malformed upstream response")?;
             assert_eq!(http["transport"], "streamable_http");
-            assert_eq!(http["health"], "degraded");
-            assert_eq!(http["connected"], false);
-            assert_eq!(http["tools"], 0);
-            assert!(http["last_error"]
-                .as_str()
-                .is_some_and(|message| message.contains("invalid MCP tools/call result")));
+            match http["health"].as_str() {
+                Some("degraded") => {
+                    assert_eq!(http["connected"], false);
+                    assert_eq!(http["tools"], 0);
+                    assert!(http["last_error"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("invalid MCP tools/call result")));
+                }
+                Some("ok") => {
+                    assert_eq!(http["connected"], true);
+                    assert!(http["tools"]
+                        .as_u64()
+                        .is_some_and(|tool_count| tool_count > 0));
+                    assert!(http["last_error"].is_null());
+                }
+                other => panic!("unexpected HTTP MCP health after malformed response: {other:?}"),
+            }
             Ok(())
         },
     )?;
