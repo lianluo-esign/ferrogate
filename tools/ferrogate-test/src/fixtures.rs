@@ -92,6 +92,10 @@ service_name = "ferrogate-test"
 log_bodies = true
 
 [reliability]
+provider_circuit_breaker_failure_threshold = 1
+provider_circuit_breaker_cooldown_secs = 60
+provider_dispatch_timeout_secs = 3
+provider_dispatch_max_retries = 0
 mcp_dispatch_timeout_secs = 1
 mcp_dispatch_max_concurrency = 4
 
@@ -125,6 +129,12 @@ tenant_allowlist = ["org_demo"]
 
 [[providers]]
 name = "openai"
+kind = "openai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[providers]]
+name = "backup-openai"
 kind = "openai"
 base_url = "http://{provider_addr}/v1"
 api_key_env = "FERROGATE_PROVIDER_SECRET"
@@ -173,6 +183,22 @@ input_price_per_1m = 1.0
 output_price_per_1m = 2.0
 
 [[models]]
+name = "fallback-chat"
+provider = "openai"
+provider_model = "gpt-4o-mini-failover-primary"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models.fallbacks]]
+provider = "backup-openai"
+provider_model = "gpt-4o-mini-fallback"
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+priority = 0
+weight = 1
+
+[[models]]
 name = "blocked-chat"
 provider = "openai"
 provider_model = "gpt-4o-mini"
@@ -185,7 +211,7 @@ id = "client"
 name = "Client"
 key = "client-secret"
 scopes = ["models.read", "chat.completions", "responses.create", "agent.runs.create", "admin.read", "agents.read", "agents.invoke", "tools.read", "tools.execute"]
-allowed_models = ["fast-chat"]
+allowed_models = ["fast-chat", "fallback-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
 log_bodies = true

@@ -21,7 +21,7 @@ use ferrogate_runtime::{
 use std::{cell::RefCell, thread, time::Duration};
 
 pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start(&args.ferrogate_bin, 4)?;
+    let case = LocalHarness::start(&args.ferrogate_bin, 5)?;
     let self_hosted_worker_id = RefCell::new(String::new());
     let expired_self_hosted_worker_id = RefCell::new(String::new());
     let self_hosted_lease_id = RefCell::new(String::new());
@@ -2446,7 +2446,7 @@ fn oversized_self_hosted_transport_body() -> String {
 }
 
 pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
-    let case = LocalHarness::start_with_billing_and_agent(&args.ferrogate_bin, 7)?;
+    let mut case = LocalHarness::start_with_billing_and_agent(&args.ferrogate_bin, 12)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));
@@ -2972,6 +2972,36 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
             Ok(())
         },
     )?;
+    case.expect_text(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","stream":true,"messages":[{"role":"user","content":"gateway stream coverage"}]}"#,
+        200,
+        |body| {
+            assert!(body.contains("stream-ok"), "missing streaming delta: {body}");
+            assert!(body.contains("[DONE]"), "missing streaming terminator: {body}");
+            assert_secret_redacted(body);
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"provider upstream error"}]}"#,
+        400,
+        |body| {
+            assert_eq!(body["error"]["type"], "provider_error");
+            assert_eq!(body["error"]["code"], "bad_provider_request");
+            assert_eq!(body["error"]["provider_status"], 400);
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("bad provider request")));
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
     case.expect_json(
         "POST",
         "/v1/chat/completions",
@@ -3197,6 +3227,40 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
         403,
         |body| {
             assert_eq!(body["error"]["code"], "model_not_allowed");
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: provider-fallback-e2e-1",
+        ],
+        r#"{"model":"fallback-chat","messages":[{"role":"user","content":"fallback first"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_eq!(body["choices"][0]["message"]["content"], "fallback ok");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[
+            CLIENT_AUTH,
+            JSON_CONTENT,
+            "x-ferrogate-agent-run-id: provider-fallback-e2e-2",
+        ],
+        r#"{"model":"fallback-chat","messages":[{"role":"user","content":"fallback circuit skip"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_eq!(body["choices"][0]["message"]["content"], "fallback ok");
+            assert_secret_redacted(&body.to_string());
             Ok(())
         },
     )?;
@@ -3661,6 +3725,35 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     case.expect_openmeter_export()?;
     case.wait_for_metering_export_status()?;
     case.expect_agent_run_otlp_trace_export("agent-run-e2e")?;
+    let provider_requests = case.take_provider_requests()?;
+    assert_eq!(
+        provider_requests
+            .iter()
+            .filter(|request| request.contains(r#""model":"gpt-4o-mini-failover-primary""#))
+            .count(),
+        1,
+        "primary failover provider should be called once before its circuit opens: {provider_requests:#?}"
+    );
+    assert_eq!(
+        provider_requests
+            .iter()
+            .filter(|request| request.contains(r#""model":"gpt-4o-mini-fallback""#))
+            .count(),
+        2,
+        "fallback provider should handle both fallback-chat requests: {provider_requests:#?}"
+    );
+    assert!(
+        provider_requests
+            .iter()
+            .any(|request| request.contains("provider upstream error")),
+        "provider error scenario did not reach the upstream mock: {provider_requests:#?}"
+    );
+    assert!(
+        provider_requests.iter().any(|request| {
+            request.contains(r#""stream":true"#) && request.contains("gateway stream coverage")
+        }),
+        "streaming scenario did not reach the upstream mock: {provider_requests:#?}"
+    );
 
     println!("gateway-api scenario passed");
     Ok(())
@@ -3668,7 +3761,7 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
 
 pub(crate) fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthArgs) -> Result<()> {
     let auth = AuthHarness::start(&auth_args.ferrogate_auth_bin)?;
-    let case = LocalHarness::start_with_external_auth(&local.ferrogate_bin, 1, &auth.auth_addr)?;
+    let case = LocalHarness::start_with_external_auth(&local.ferrogate_bin, 2, &auth.auth_addr)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));
@@ -3704,7 +3797,7 @@ pub(crate) fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthA
 
 pub(crate) fn run_gateway_third_party_auth_api(local: &LocalArgs) -> Result<()> {
     let auth = spawn_mock_third_party_auth_server(5)?;
-    let case = LocalHarness::start_with_external_auth(&local.ferrogate_bin, 1, &auth.addr)?;
+    let case = LocalHarness::start_with_external_auth(&local.ferrogate_bin, 2, &auth.addr)?;
 
     case.expect_json("GET", "/v1/models", &[CLIENT_AUTH], "", 200, |body| {
         assert!(list_contains(&body, "id", "fast-chat"));

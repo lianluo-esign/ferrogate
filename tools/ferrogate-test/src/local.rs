@@ -340,6 +340,15 @@ impl LocalHarness {
             .context("agent harness is not configured")
     }
 
+    pub(crate) fn take_provider_requests(&mut self) -> Result<Vec<String>> {
+        let Some(provider) = self.provider.take() else {
+            bail!("provider mock request collector is not configured");
+        };
+        provider
+            .join()
+            .map_err(|_| anyhow::anyhow!("provider mock thread panicked"))
+    }
+
     pub(crate) fn expect_openmeter_export(&self) -> Result<()> {
         let Some(billing) = &self.billing else {
             bail!("billing provider mock is not configured");

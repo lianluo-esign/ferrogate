@@ -61,25 +61,21 @@ pub(crate) fn spawn_local_provider_upstream(
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
         let started = Instant::now();
-        while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(3) {
+        while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(90) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let request = match read_http_request(&mut stream) {
                         Ok(request) => request,
                         Err(_) => continue,
                     };
-                    let body = if request.contains("GET /v1/models ") {
-                        r#"{"object":"list","data":[{"id":"provider-chat","owned_by":"ferrogate-test","created":1781417600,"context_window":8192,"capabilities":["chat","tools"]}]}"#
-                    } else if request.contains("POST /v1/responses ") {
-                        r#"{"id":"resp_ferrogate_test","object":"response","output_text":"ok","usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}"#
-                    } else {
-                        r#"{"id":"chatcmpl_ferrogate_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
-                    };
+                    let response = provider_response_for_request(&request);
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
+                        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        response.status,
+                        response.content_type,
+                        response.body.len(),
+                        response.body
                     );
                     requests.push(request);
                 }
@@ -92,6 +88,62 @@ pub(crate) fn spawn_local_provider_upstream(
         requests
     });
     Ok((addr, handle))
+}
+
+struct ProviderMockResponse {
+    status: &'static str,
+    content_type: &'static str,
+    body: &'static str,
+}
+
+fn provider_response_for_request(request: &str) -> ProviderMockResponse {
+    if request.contains("GET /v1/models ") {
+        return ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"object":"list","data":[{"id":"provider-chat","owned_by":"ferrogate-test","created":1781417600,"context_window":8192,"capabilities":["chat","tools"]}]}"#,
+        };
+    }
+    if request.contains(r#""model":"gpt-4o-mini-failover-primary""#) {
+        return ProviderMockResponse {
+            status: "503 Service Unavailable",
+            content_type: "application/json",
+            body: r#"{"error":{"message":"primary provider overloaded","type":"server_error","code":"primary_overloaded"}}"#,
+        };
+    }
+    if request.contains(r#""model":"gpt-4o-mini-fallback""#) {
+        return ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"id":"chatcmpl_ferrogate_fallback","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"fallback ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}"#,
+        };
+    }
+    if request.contains("provider upstream error") {
+        return ProviderMockResponse {
+            status: "400 Bad Request",
+            content_type: "application/json",
+            body: r#"{"error":{"message":"bad provider request","type":"invalid_request_error","code":"bad_provider_request"}}"#,
+        };
+    }
+    if request.contains(r#""stream":true"#) {
+        return ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"id\":\"chatcmpl_ferrogate_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"stream-ok\"}}]}\n\ndata: [DONE]\n\n",
+        };
+    }
+    if request.contains("POST /v1/responses ") {
+        return ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"id":"resp_ferrogate_test","object":"response","output_text":"ok","usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}"#,
+        };
+    }
+    ProviderMockResponse {
+        status: "200 OK",
+        content_type: "application/json",
+        body: r#"{"id":"chatcmpl_ferrogate_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+    }
 }
 
 pub(crate) fn spawn_mock_mcp_server() -> Result<(String, JoinHandle<Vec<String>>)> {
