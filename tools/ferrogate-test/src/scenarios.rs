@@ -3714,6 +3714,77 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     case.expect_mcp_json(
         "POST",
         "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"http-search","arguments":{"query":"mcp-tool-error"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["jsonrpc"], "2.0");
+            assert_eq!(body["id"], 8);
+            assert_eq!(body["result"]["isError"], true);
+            assert_eq!(
+                body["result"]["content"][0]["text"],
+                "tool rejected by harness"
+            );
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "POST",
+        "/v1/mcp/tool/execute",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"name":"http-search","arguments":{"query":"mcp-tool-error"},"session_id":"mcp-tool-error-session"}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "tool_execution");
+            assert_eq!(body["name"], "http-search");
+            assert_eq!(body["is_error"], true);
+            assert_eq!(
+                body["content"]["content"][0]["text"],
+                "tool rejected by harness"
+            );
+            assert_eq!(body["session_id"], "mcp-tool-error-session");
+            assert_secret_redacted(&body.to_string());
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"http-search","arguments":{"query":"mcp-malformed"}}}"#,
+        200,
+        |body| {
+            assert_eq!(body["jsonrpc"], "2.0");
+            assert_eq!(body["id"], 9);
+            assert_eq!(body["error"]["code"], -32000);
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("invalid MCP tools/call result")));
+            Ok(())
+        },
+    )?;
+    case.expect_json(
+        "GET",
+        "/admin/v1/mcp-servers",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let http = admin_list_item(&body, "name", "http")
+                .context("HTTP MCP server status missing after malformed upstream response")?;
+            assert_eq!(http["transport"], "streamable_http");
+            assert_eq!(http["health"], "degraded");
+            assert_eq!(http["connected"], false);
+            assert_eq!(http["tools"], 0);
+            assert!(http["last_error"]
+                .as_str()
+                .is_some_and(|message| message.contains("invalid MCP tools/call result")));
+            Ok(())
+        },
+    )?;
+    case.expect_mcp_json(
+        "POST",
+        "/v1/mcp",
         &[JSON_CONTENT],
         r#"{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}"#,
         401,

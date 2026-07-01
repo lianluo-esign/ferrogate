@@ -202,6 +202,35 @@ pub(crate) fn spawn_mock_mcp_server() -> Result<(String, JoinHandle<Vec<String>>
                             }
                         })
                         .to_string()
+                    } else if request.contains(r#""method":"tools/call""#)
+                        && request.contains("mcp-tool-error")
+                    {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "tool rejected by harness"
+                                    }
+                                ],
+                                "isError": true
+                            }
+                        })
+                        .to_string()
+                    } else if request.contains(r#""method":"tools/call""#)
+                        && request.contains("mcp-malformed")
+                    {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": extract_jsonrpc_id(&request),
+                            "result": {
+                                "content": "not-a-valid-content-array",
+                                "isError": false
+                            }
+                        })
+                        .to_string()
                     } else if request.contains(r#""method":"tools/call""#) {
                         serde_json::json!({
                             "jsonrpc": "2.0",
