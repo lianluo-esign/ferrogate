@@ -15,15 +15,16 @@ use std::env;
 use ferrogate_runtime::{
     select_isolation_backend, AgentWorkerLifecycleResult, AgentWorkerManagementAction,
     AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
-    IsolationBackendKind, IsolationPolicy, ManagedWorkerError, ManagedWorkerSessionStatus,
+    IsolationBackendDescriptor, IsolationBackendKind, IsolationPolicy, ManagedWorkerError,
+    ManagedWorkerSessionStatus,
 };
 
 use crate::{
     backends::{
         firecracker_guest_agent_launch_attempt, firecracker_guest_agent_preflight,
         firecracker_guest_rpc_start_attempt, firecracker_guest_rpc_start_request,
-        firecracker_host_preflight, firecracker_microvm_provision, isolation_backends,
-        selectable_isolation_backend_descriptors,
+        firecracker_host_preflight, firecracker_microvm_provision, isolation_backend_kind_wire,
+        isolation_backends, selectable_isolation_backend_descriptors,
     },
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
@@ -94,14 +95,20 @@ fn provision(
         ));
     }
 
+    // Record the backend that was actually selected as run evidence, so the
+    // lifecycle result reflects the real selection rather than a constant.
+    let backend_identity = LifecycleBackendIdentity::from_descriptor(&selected);
+
     let preflight = firecracker_host_preflight();
     if !preflight.ready() {
         let message = preflight.failure_summary();
-        let lifecycle = lifecycle_result(
+        let lifecycle = lifecycle_result_for_backend(
             envelope,
             ManagedWorkerSessionStatus::Failed,
             "host_preflight_failed",
             &message,
+            &backend_identity,
+            None,
         )?;
         return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
     }
@@ -110,7 +117,7 @@ fn provision(
     let run_id = lifecycle_run_id(envelope)?;
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
-        let lifecycle = lifecycle_result_with_instance(
+        let lifecycle = lifecycle_result_for_backend(
             envelope,
             if running {
                 ManagedWorkerSessionStatus::Running
@@ -122,6 +129,7 @@ fn provision(
                 "Firecracker microVM {} already exists; running={running}",
                 existing.instance_id
             ),
+            &backend_identity,
             Some(existing.instance_id.clone()),
         )?;
         return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
@@ -149,18 +157,15 @@ fn provision(
     let message = format!(
         "Firecracker microVM provisioned by agent-worker; running={running}; markers={markers}"
     );
-    let lifecycle = lifecycle_result(
+    let lifecycle = lifecycle_result_for_backend(
         envelope,
         ManagedWorkerSessionStatus::Running,
         "provisioned",
         &message,
+        &backend_identity,
+        Some(instance_id),
     )?;
-    Ok(Some(AgentWorkerManagementResult::Lifecycle {
-        lifecycle: AgentWorkerLifecycleResult {
-            isolation_instance_id: Some(instance_id),
-            ..lifecycle
-        },
-    }))
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,24 +551,51 @@ fn lifecycle_not_started(
     ))
 }
 
+/// Identity of the isolation backend recorded as run evidence in a lifecycle
+/// result. Provision records the backend actually selected through the
+/// registry contract; pre-provision status paths report the managed default
+/// with an empty version, meaning "no backend selected yet".
+struct LifecycleBackendIdentity {
+    name: String,
+    kind: String,
+    version: String,
+}
+
+impl LifecycleBackendIdentity {
+    /// The managed default for lifecycle results emitted before a backend has
+    /// been selected (status, not-started, preflight failures).
+    fn managed_default() -> Self {
+        Self {
+            name: "firecracker".to_string(),
+            kind: isolation_backend_kind_wire(&IsolationBackendKind::FirecrackerMicroVm)
+                .to_string(),
+            version: String::new(),
+        }
+    }
+
+    fn from_descriptor(descriptor: &IsolationBackendDescriptor) -> Self {
+        Self {
+            name: descriptor.backend_name.clone(),
+            kind: isolation_backend_kind_wire(&descriptor.kind).to_string(),
+            version: descriptor.backend_version.clone(),
+        }
+    }
+}
+
 fn lifecycle_result(
     envelope: &AgentWorkerManagementEnvelope,
     status: ManagedWorkerSessionStatus,
     outcome: &str,
     message: &str,
 ) -> Result<AgentWorkerLifecycleResult, ManagedWorkerError> {
-    Ok(AgentWorkerLifecycleResult {
-        session_id: lifecycle_session_id(envelope)?,
-        run_id: lifecycle_run_id(envelope)?,
-        worker_id: envelope.worker_id.clone(),
-        action: envelope.action,
+    lifecycle_result_for_backend(
+        envelope,
         status,
-        backend_name: "firecracker".to_string(),
-        backend_kind: "firecracker_micro_vm".to_string(),
-        isolation_instance_id: None,
-        outcome: outcome.to_string(),
-        message: message.to_string(),
-    })
+        outcome,
+        message,
+        &LifecycleBackendIdentity::managed_default(),
+        None,
+    )
 }
 
 fn lifecycle_result_with_instance(
@@ -573,9 +605,36 @@ fn lifecycle_result_with_instance(
     message: &str,
     isolation_instance_id: Option<String>,
 ) -> Result<AgentWorkerLifecycleResult, ManagedWorkerError> {
-    Ok(AgentWorkerLifecycleResult {
+    lifecycle_result_for_backend(
+        envelope,
+        status,
+        outcome,
+        message,
+        &LifecycleBackendIdentity::managed_default(),
         isolation_instance_id,
-        ..lifecycle_result(envelope, status, outcome, message)?
+    )
+}
+
+fn lifecycle_result_for_backend(
+    envelope: &AgentWorkerManagementEnvelope,
+    status: ManagedWorkerSessionStatus,
+    outcome: &str,
+    message: &str,
+    backend: &LifecycleBackendIdentity,
+    isolation_instance_id: Option<String>,
+) -> Result<AgentWorkerLifecycleResult, ManagedWorkerError> {
+    Ok(AgentWorkerLifecycleResult {
+        session_id: lifecycle_session_id(envelope)?,
+        run_id: lifecycle_run_id(envelope)?,
+        worker_id: envelope.worker_id.clone(),
+        action: envelope.action,
+        status,
+        backend_name: backend.name.clone(),
+        backend_kind: backend.kind.clone(),
+        backend_version: backend.version.clone(),
+        isolation_instance_id,
+        outcome: outcome.to_string(),
+        message: message.to_string(),
     })
 }
 

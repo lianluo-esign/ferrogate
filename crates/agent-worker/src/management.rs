@@ -1446,6 +1446,16 @@ mod tests {
             response["result"]["lifecycle"]["backend_name"],
             "firecracker"
         );
+        assert_eq!(
+            response["result"]["lifecycle"]["backend_kind"],
+            "firecracker_micro_vm"
+        );
+        // The recorded evidence carries the version of the backend that was
+        // actually selected through the registry contract, not a constant.
+        assert_eq!(
+            response["result"]["lifecycle"]["backend_version"],
+            "external_bundle"
+        );
         assert!(response["result"]["lifecycle"]["message"]
             .as_str()
             .is_some_and(|message| message.contains("host preflight failed")

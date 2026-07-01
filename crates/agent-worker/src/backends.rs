@@ -93,7 +93,7 @@ impl RegisteredIsolationBackend {
     }
 }
 
-fn isolation_backend_kind_wire(kind: &IsolationBackendKind) -> &'static str {
+pub(crate) fn isolation_backend_kind_wire(kind: &IsolationBackendKind) -> &'static str {
     match kind {
         IsolationBackendKind::FirecrackerMicroVm => "firecracker_micro_vm",
         IsolationBackendKind::KataContainers => "kata_containers",
