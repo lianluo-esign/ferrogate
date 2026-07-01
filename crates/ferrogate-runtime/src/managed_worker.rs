@@ -140,6 +140,7 @@ pub struct ManagedWorkerLifecycleRecord {
     pub worker_template_id: String,
     pub agent_worker_id: String,
     pub isolation_backend_kind: crate::IsolationBackendKind,
+    pub isolation_backend_version: String,
     pub isolation_instance_id: Option<String>,
     pub capability_envelope_id: String,
     pub status: ManagedWorkerSessionStatus,
@@ -1843,6 +1844,7 @@ impl ManagedWorkerSession {
             worker_template_id: self.worker_template_id.clone(),
             agent_worker_id: evidence.agent_worker_id.clone(),
             isolation_backend_kind: self.selected_backend.kind.clone(),
+            isolation_backend_version: self.selected_backend.backend_version.clone(),
             isolation_instance_id: evidence
                 .isolation_instance_id
                 .clone()

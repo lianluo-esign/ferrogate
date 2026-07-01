@@ -6119,7 +6119,7 @@ impl AppState {
             workspace_id: record.workspace_id.clone(),
             agent_worker_instance_id: Some(record.agent_worker_id.clone()),
             backend_name: backend_kind.to_string(),
-            backend_version: "unknown".to_string(),
+            backend_version: record.isolation_backend_version.clone(),
             backend_kind: backend_kind.to_string(),
             host_lifecycle_owner: "agent-worker".to_string(),
             gateway_controls_backend: false,
@@ -8452,6 +8452,7 @@ mod tests {
             worker_template_id: "template-codex".into(),
             agent_worker_id: "agent-worker-1".into(),
             isolation_backend_kind: ferrogate_runtime::IsolationBackendKind::FirecrackerMicroVm,
+            isolation_backend_version: "external_bundle".into(),
             isolation_instance_id: Some("microvm-1".into()),
             capability_envelope_id: "capability-1".into(),
             status: ferrogate_runtime::ManagedWorkerSessionStatus::CleanedUp,
@@ -8522,6 +8523,9 @@ mod tests {
         assert_eq!(selections.len(), 1);
         assert_eq!(selections[0].session_id, "session-1");
         assert_eq!(selections[0].backend_kind, "firecracker_microvm");
+        // The persisted selection carries the real backend version reported by
+        // agent-worker, not a hardcoded "unknown".
+        assert_eq!(selections[0].backend_version, "external_bundle");
         assert_eq!(selections[0].host_lifecycle_owner, "agent-worker");
         assert!(!selections[0].gateway_controls_backend);
         assert_eq!(
