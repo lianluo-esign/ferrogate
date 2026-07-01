@@ -313,41 +313,46 @@ impl McpManager {
         &self,
         request: McpToolExecutionRequest,
     ) -> Result<McpToolExecutionResult, McpExecutionError> {
-        let (server_name, remote_name) = namespaced_tool_parts(&request.name).ok_or_else(|| {
-            McpExecutionError::NotFound(format!(
-                "MCP tool {} must use serverName-toolName namespace",
-                request.name
-            ))
-        })?;
-        let session = {
+        let (server_name, remote_name, session) = {
             let inner = self.inner.lock().map_err(|_| {
                 McpExecutionError::Unavailable("MCP manager lock is unavailable".into())
             })?;
-            inner.sessions.get(server_name).cloned().ok_or_else(|| {
-                McpExecutionError::NotFound(format!("MCP server {server_name} is not configured"))
-            })?
+            match resolve_namespaced_session(&inner.sessions, &request.name) {
+                Some(resolved) => resolved,
+                None => {
+                    return Err(McpExecutionError::NotFound(if request.name.contains('-') {
+                        format!(
+                            "MCP tool {} did not match any configured MCP server",
+                            request.name
+                        )
+                    } else {
+                        format!(
+                            "MCP tool {} must use serverName-toolName namespace",
+                            request.name
+                        )
+                    }));
+                }
+            }
         };
         let mut session = session.lock().map_err(|_| {
             McpExecutionError::Unavailable(format!("MCP server {server_name} lock is unavailable"))
         })?;
-        session.execute(remote_name, request.arguments)
+        session.execute(&remote_name, request.arguments)
     }
 
     pub fn dispatch_cleanup_handle(&self, namespaced_tool: &str) -> Option<McpDispatchCleanup> {
-        let (server_name, tool_name) = namespaced_tool_parts(namespaced_tool)?;
-        let session = self
-            .inner
-            .lock()
-            .ok()
-            .and_then(|inner| inner.sessions.get(server_name).cloned())?;
+        let (server_name, tool_name, session) = {
+            let inner = self.inner.lock().ok()?;
+            resolve_namespaced_session(&inner.sessions, namespaced_tool)?
+        };
         let stdio_child = session
             .try_lock()
             .ok()
             .and_then(|session| session.client.as_ref().and_then(McpClient::stdio_child));
         let stdio_child = stdio_child?;
         Some(McpDispatchCleanup {
-            server_name: server_name.to_string(),
-            tool_name: tool_name.to_string(),
+            server_name,
+            tool_name,
             session,
             stdio_child,
         })
@@ -951,9 +956,26 @@ fn selector_matches(pattern: &str, value: &str) -> bool {
             .is_some_and(|needle| value.contains(needle))
 }
 
-fn namespaced_tool_parts(name: &str) -> Option<(&str, &str)> {
-    name.split_once('-')
-        .filter(|(server, tool)| !server.trim().is_empty() && !tool.trim().is_empty())
+/// Resolve a namespaced `serverName-toolName` string to its configured server.
+///
+/// Tool names are built as `{server_name}-{remote_name}`, and both server and
+/// remote names may themselves contain hyphens, so a naive `split_once('-')`
+/// mis-routes (e.g. server `my-fs` tool `read` -> `my-fs-read` would resolve to
+/// server `my`). Match against the actual configured server names and prefer
+/// the longest match, so hyphenated server names still route correctly.
+fn resolve_namespaced_session(
+    sessions: &HashMap<String, Arc<Mutex<McpSession>>>,
+    name: &str,
+) -> Option<(String, String, Arc<Mutex<McpSession>>)> {
+    sessions
+        .iter()
+        .filter_map(|(server_name, session)| {
+            name.strip_prefix(server_name.as_str())
+                .and_then(|rest| rest.strip_prefix('-'))
+                .filter(|remote| !remote.trim().is_empty())
+                .map(|remote| (server_name.clone(), remote.to_string(), Arc::clone(session)))
+        })
+        .max_by_key(|(server_name, _, _)| server_name.len())
 }
 
 fn now_unix_seconds() -> Option<u64> {
@@ -1011,213 +1033,5 @@ pub fn validate_mcp_server_config(config: &McpServerConfig) -> AnyResult<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn deny_by_default_requires_execute_allowlist() {
-        let config = McpServerConfig {
-            name: "github".into(),
-            transport: McpTransport::StreamableHttp,
-            url: Some("http://127.0.0.1/mcp".into()),
-            command: None,
-            args: Vec::new(),
-            auth_type: McpAuthType::None,
-            headers: Vec::new(),
-            tools_to_execute: Vec::new(),
-            tools_to_auto_execute: Vec::new(),
-            approval_policy: ApprovalPolicy::Never,
-            tool_include: Vec::new(),
-            tool_regex: Vec::new(),
-            tls: McpTlsConfig::default(),
-            timeout_ms: 1000,
-            health_ping_interval_secs: 10,
-            max_reconnect_attempts: 5,
-            min_reconnect_backoff_secs: 1,
-            max_reconnect_backoff_secs: 30,
-        };
-
-        let error = validate_mcp_server_config(&config).unwrap_err().to_string();
-
-        assert!(error.contains("tools_to_execute"));
-    }
-
-    #[test]
-    fn namespaces_and_filters_tools() {
-        let config = McpServerConfig {
-            name: "github".into(),
-            transport: McpTransport::StreamableHttp,
-            url: Some("http://127.0.0.1/mcp".into()),
-            command: None,
-            args: Vec::new(),
-            auth_type: McpAuthType::None,
-            headers: Vec::new(),
-            tools_to_execute: vec!["search".into()],
-            tools_to_auto_execute: vec!["search".into()],
-            approval_policy: ApprovalPolicy::Never,
-            tool_include: vec!["sea*".into()],
-            tool_regex: Vec::new(),
-            tls: McpTlsConfig::default(),
-            timeout_ms: 1000,
-            health_ping_interval_secs: 10,
-            max_reconnect_attempts: 5,
-            min_reconnect_backoff_secs: 1,
-            max_reconnect_backoff_secs: 30,
-        };
-
-        assert!(tool_selected(&config, "search"));
-        assert!(!tool_selected(&config, "write"));
-        assert!(tool_allowlisted(&config.tools_to_execute, "search"));
-        assert!(!tool_allowlisted(&config.tools_to_execute, "write"));
-    }
-
-    #[test]
-    fn parses_tools_list_with_rmcp_model() {
-        let response = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "tools": [{
-                    "name": "search",
-                    "description": "Search repos",
-                    "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}
-                }]
-            }
-        });
-
-        let tools = parse_tools_list(&response).unwrap();
-
-        assert_eq!(tools[0].name, "search");
-        assert_eq!(tools[0].description.as_deref(), Some("Search repos"));
-        assert_eq!(tools[0].input_schema["type"], "object");
-    }
-
-    #[test]
-    fn manager_status_and_tools_skip_busy_sessions() {
-        let manager = McpManager::default();
-        let busy = Arc::new(Mutex::new(McpSession::new(test_config("busy"))));
-        let ready = Arc::new(Mutex::new(McpSession::new(test_config("ready"))));
-        {
-            let mut ready_session = ready.lock().unwrap();
-            ready_session.connected = true;
-            ready_session.tools = vec![McpTool {
-                name: "ready-search".into(),
-                server_name: "ready".into(),
-                remote_name: "search".into(),
-                description: Some("Search".into()),
-                input_schema: json!({"type": "object"}),
-                auto_execute: false,
-                approval_policy: ApprovalPolicy::Never,
-            }];
-        }
-        {
-            let mut inner = manager.inner.lock().unwrap();
-            inner.sessions.insert("busy".into(), Arc::clone(&busy));
-            inner.sessions.insert("ready".into(), Arc::clone(&ready));
-        }
-        let _busy_guard = busy.lock().unwrap();
-
-        let tools = manager.tools();
-        let statuses = manager.statuses();
-
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "ready-search");
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].name, "ready");
-    }
-
-    #[test]
-    fn timeout_cleanup_kills_stdio_child_and_marks_session_degraded() {
-        let manager = McpManager::default();
-        let mut child = std::process::Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let child = Arc::new(Mutex::new(child));
-        let session = Arc::new(Mutex::new(McpSession {
-            config: test_config("local"),
-            tools: vec![McpTool {
-                name: "local-search".into(),
-                server_name: "local".into(),
-                remote_name: "search".into(),
-                description: Some("Search".into()),
-                input_schema: json!({"type": "object"}),
-                auto_execute: false,
-                approval_policy: ApprovalPolicy::Never,
-            }],
-            client: Some(McpClient::Stdio(StdioMcpClient {
-                child: Arc::clone(&child),
-                stdin,
-                stdout: BufReader::new(stdout),
-                next_id: 1,
-            })),
-            connected: true,
-            last_error: None,
-            reconnect_attempts: 0,
-            last_connected_at_unix: Some(1),
-            next_reconnect_backoff_secs: 1,
-        }));
-        {
-            let mut inner = manager.inner.lock().unwrap();
-            inner.sessions.insert("local".into(), Arc::clone(&session));
-        }
-
-        let cleanup = manager.dispatch_cleanup_handle("local-search").unwrap();
-        assert!(cleanup.cleanup_after_timeout(Duration::from_secs(1)));
-
-        let mut child = child.lock().unwrap();
-        let status = wait_for_child_exit(&mut child)
-            .expect("stdio child should be killed by timeout cleanup");
-        assert!(!status.success());
-        drop(child);
-
-        let status = manager.statuses().pop().unwrap();
-        assert_eq!(status.name, "local");
-        assert!(!status.connected);
-        assert_eq!(status.health, "degraded");
-        assert_eq!(status.tools, 0);
-        assert!(status
-            .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("timed out after 1 seconds")));
-    }
-
-    fn test_config(name: &str) -> McpServerConfig {
-        McpServerConfig {
-            name: name.into(),
-            transport: McpTransport::StreamableHttp,
-            url: Some("http://127.0.0.1/mcp".into()),
-            command: None,
-            args: Vec::new(),
-            auth_type: McpAuthType::None,
-            headers: Vec::new(),
-            tools_to_execute: vec!["search".into()],
-            tools_to_auto_execute: Vec::new(),
-            approval_policy: ApprovalPolicy::Never,
-            tool_include: Vec::new(),
-            tool_regex: Vec::new(),
-            tls: McpTlsConfig::default(),
-            timeout_ms: 1000,
-            health_ping_interval_secs: 10,
-            max_reconnect_attempts: 5,
-            min_reconnect_backoff_secs: 1,
-            max_reconnect_backoff_secs: 30,
-        }
-    }
-
-    fn wait_for_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(2) {
-            if let Some(status) = child.try_wait().unwrap() {
-                return Some(status);
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        None
-    }
-}
+#[path = "lib_test.rs"]
+mod tests;
