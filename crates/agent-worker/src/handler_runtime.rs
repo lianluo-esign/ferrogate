@@ -12,7 +12,6 @@
 
 #[cfg(test)]
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 
 use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
@@ -29,6 +28,7 @@ use ferrogate_runtime::{
     ManagedToolAction,
 };
 
+use crate::events::NormalizedWorkerEvent;
 #[cfg(test)]
 use crate::external_actions::{
     request_handler_external_action_decision, ExternalActionGateRequest,
@@ -189,18 +189,14 @@ pub(crate) fn cleanup_native_harness(
     })
 }
 
+/// Normalize a framework-specific event and lower it onto the management wire
+/// result.
+///
+/// Every codex, claude-code, hermes, and native-harness event takes this single
+/// path, so the control plane receives one [`NormalizedWorkerEvent`] schema with
+/// all framework-specific data confined to the opaque metadata field.
 fn event_result(event: NormalizedFrameworkEvent) -> AgentWorkerFrameworkEventResult {
-    AgentWorkerFrameworkEventResult {
-        session_id: event.session_id,
-        run_id: event.run_id,
-        adapter_name: event.adapter_name,
-        adapter_version: event.adapter_version,
-        framework: event.framework.as_str().to_string(),
-        mode: event.mode.as_str().to_string(),
-        kind: event.kind.as_str().to_string(),
-        message: event.message,
-        metadata: event.metadata.into_iter().collect::<HashMap<_, _>>(),
-    }
+    NormalizedWorkerEvent::from(&event).into_management_event_result()
 }
 
 fn artifact_result(artifact: FrameworkAdapterArtifact) -> AgentWorkerFrameworkArtifactResult {
