@@ -1973,6 +1973,112 @@ pub(crate) fn run_auth_api(args: &AuthArgs) -> Result<()> {
         },
     )?;
 
+    // --- Scenario coverage: api-key resolution failure and multi-tenant paths (#103) ---
+
+    // Unknown secret must fail closed with 401 invalid_api_key.
+    case.expect_json(
+        "POST",
+        "/v1/auth/resolve-api-key",
+        &[JSON_CONTENT],
+        r#"{"presented_key":"not-a-real-secret"}"#,
+        401,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_api_key");
+            Ok(())
+        },
+    )?;
+
+    // A second tenant's key resolves to that tenant and subject, not a shared one.
+    case.expect_json(
+        "POST",
+        "/v1/auth/resolve-api-key",
+        &[JSON_CONTENT],
+        r#"{"presented_key":"client-secret"}"#,
+        200,
+        |body| {
+            assert_eq!(body["tenant"]["organization_id"], "org_demo");
+            assert_eq!(body["subject"]["api_key_id"], "client");
+            Ok(())
+        },
+    )?;
+
+    // Malformed request body must be rejected as invalid_json, not silently accepted.
+    case.expect_json(
+        "POST",
+        "/v1/auth/resolve-api-key",
+        &[JSON_CONTENT],
+        "this is not json",
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_json");
+            Ok(())
+        },
+    )?;
+
+    // --- Scenario coverage: RBAC wildcard, cross-tenant isolation, second tenant (#103) ---
+
+    // Wildcard resource permission (`models.read` on `*`) grants any resource.
+    case.expect_json(
+        "POST",
+        "/v1/auth/authorize",
+        &[JSON_CONTENT],
+        r#"{"tenant":{"organization_id":"org-example","team_id":"team-example","project_id":"project-example","user_id":null,"api_key_id":"key-example"},"subject":{"type":"api_key","api_key_id":"key-example"},"action":"models.read","resource":"model:anything-at-all"}"#,
+        200,
+        |body| {
+            assert_eq!(body["allowed"], true);
+            assert_eq!(body["reason"], "matched_rbac_binding");
+            Ok(())
+        },
+    )?;
+
+    // Cross-tenant isolation: the key-example subject presented under a different
+    // tenant (org_demo) must NOT match its org-example binding — fail closed.
+    case.expect_json(
+        "POST",
+        "/v1/auth/authorize",
+        &[JSON_CONTENT],
+        r#"{"tenant":{"organization_id":"org_demo","team_id":null,"project_id":"project_gateway","user_id":null,"api_key_id":"key-example"},"subject":{"type":"api_key","api_key_id":"key-example"},"action":"chat.completions","resource":"model:fast-chat"}"#,
+        200,
+        |body| {
+            assert_eq!(body["allowed"], false);
+            assert_eq!(body["reason"], "no_matching_rbac_binding");
+            Ok(())
+        },
+    )?;
+
+    // The second tenant's own subject is authorized under its own binding.
+    case.expect_json(
+        "POST",
+        "/v1/auth/authorize",
+        &[JSON_CONTENT],
+        r#"{"tenant":{"organization_id":"org_demo","team_id":null,"project_id":"project_gateway","user_id":null,"api_key_id":"client"},"subject":{"type":"api_key","api_key_id":"client"},"action":"chat.completions","resource":"model:fast-chat"}"#,
+        200,
+        |body| {
+            assert_eq!(body["allowed"], true);
+            assert_eq!(body["reason"], "matched_rbac_binding");
+            Ok(())
+        },
+    )?;
+
+    // Malformed authorize body must be rejected as invalid_json.
+    case.expect_json(
+        "POST",
+        "/v1/auth/authorize",
+        &[JSON_CONTENT],
+        "{ broken",
+        400,
+        |body| {
+            assert_eq!(body["error"]["code"], "invalid_json");
+            Ok(())
+        },
+    )?;
+
+    // Unknown endpoint must fail closed with 404, not leak into another handler.
+    case.expect_json("GET", "/v1/does-not-exist", &[], "", 404, |body| {
+        assert_eq!(body["error"]["code"], "not_found");
+        Ok(())
+    })?;
+
     println!("auth-api scenario passed");
     Ok(())
 }
