@@ -13,9 +13,9 @@
 use std::env;
 
 use ferrogate_runtime::{
-    AgentWorkerLifecycleResult, AgentWorkerManagementAction, AgentWorkerManagementEnvelope,
-    AgentWorkerManagementErrorCode, AgentWorkerManagementResult, ManagedWorkerError,
-    ManagedWorkerSessionStatus,
+    select_isolation_backend, AgentWorkerLifecycleResult, AgentWorkerManagementAction,
+    AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
+    IsolationBackendKind, IsolationPolicy, ManagedWorkerError, ManagedWorkerSessionStatus,
 };
 
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
         firecracker_guest_agent_launch_attempt, firecracker_guest_agent_preflight,
         firecracker_guest_rpc_start_attempt, firecracker_guest_rpc_start_request,
         firecracker_host_preflight, firecracker_microvm_provision, isolation_backends,
+        selectable_isolation_backend_descriptors,
     },
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
@@ -59,22 +60,37 @@ fn provision(
     state: &mut impl AgentWorkerStateStore,
     envelope: &AgentWorkerManagementEnvelope,
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
-    let Some(backend) = isolation_backends()
-        .into_iter()
-        .find(|backend| backend.backend_name == "firecracker")
-    else {
-        return Err(ManagedWorkerError::management_protocol_error(
-            AgentWorkerManagementErrorCode::IncompatibleBackend,
-            "agent-worker Firecracker backend registry returned no firecracker backend",
-        ));
+    // Choose the isolation backend through the replaceable-registry contract
+    // rather than hardcoding Firecracker. Only backends whose host lifecycle is
+    // implemented and configured are selectable, so an unimplemented or
+    // unconfigured backend can never be provisioned — the path fails closed.
+    let selectable = selectable_isolation_backend_descriptors();
+    let selected = match select_isolation_backend(&IsolationPolicy::default(), &selectable) {
+        Ok(descriptor) => descriptor.clone(),
+        Err(_) => {
+            // Nothing selectable. Surface the Firecracker readiness reason when
+            // we have one so the operator learns why, instead of a generic error.
+            let reason = isolation_backends()
+                .into_iter()
+                .find(|backend| backend.backend_name == "firecracker")
+                .and_then(|backend| backend.readiness_reason)
+                .unwrap_or_else(|| "no isolation backend is ready for provisioning".to_string());
+            return Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::IncompatibleBackend,
+                reason,
+            ));
+        }
     };
 
-    if !backend.ready {
+    // This build owns only the Firecracker host lifecycle. Any other selected
+    // kind must fail closed instead of silently doing nothing.
+    if selected.kind != IsolationBackendKind::FirecrackerMicroVm {
         return Err(ManagedWorkerError::management_protocol_error(
             AgentWorkerManagementErrorCode::IncompatibleBackend,
-            backend
-                .readiness_reason
-                .unwrap_or_else(|| "Firecracker backend is not ready".to_string()),
+            format!(
+                "selected isolation backend {} has no host lifecycle in this agent-worker build",
+                selected.backend_name
+            ),
         ));
     }
 

@@ -20,13 +20,121 @@ use std::{
 use anyhow::{bail, Result};
 use ferrogate_runtime::{
     AgentWorkerFrameworkArtifactResult, AgentWorkerFrameworkEventResult,
-    AgentWorkerIsolationBackendReport,
+    AgentWorkerIsolationBackendReport, IsolationBackendCapabilities, IsolationBackendDescriptor,
+    IsolationBackendKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub(crate) fn isolation_backends() -> Vec<AgentWorkerIsolationBackendReport> {
-    vec![probed_firecracker_backend()]
+    registered_isolation_backends()
+        .iter()
+        .map(RegisteredIsolationBackend::to_report)
+        .collect()
+}
+
+/// Descriptors for the isolation backends that can be selected for a managed
+/// workload right now: every registered backend whose host lifecycle is
+/// actually implemented and reports ready. Callers feed these to the runtime
+/// `select_isolation_backend` contract, so an unimplemented or unconfigured
+/// backend can never be chosen. The registry is fail-closed by construction:
+/// unimplemented backends advertise no capabilities and are filtered out here
+/// regardless.
+pub(crate) fn selectable_isolation_backend_descriptors() -> Vec<IsolationBackendDescriptor> {
+    registered_isolation_backends()
+        .into_iter()
+        .filter(RegisteredIsolationBackend::is_selectable)
+        .map(|backend| backend.descriptor)
+        .collect()
+}
+
+/// Whether this agent-worker build owns a real host lifecycle for a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IsolationBackendImplementation {
+    /// The worker owns the host lifecycle; readiness is probed from host
+    /// configuration.
+    HostImplemented,
+    /// Registered for the replaceable isolation contract but not implemented in
+    /// this build. Always fails closed.
+    NotYetImplemented,
+}
+
+/// One backend in the worker's replaceable isolation registry. Every entry
+/// speaks the runtime `IsolationBackendDescriptor` contract, so adding a
+/// backend means adding a descriptor plus a host implementation — the gateway
+/// side and the wire report never change shape.
+struct RegisteredIsolationBackend {
+    descriptor: IsolationBackendDescriptor,
+    implementation: IsolationBackendImplementation,
+    ready: bool,
+    readiness_reason: Option<String>,
+}
+
+impl RegisteredIsolationBackend {
+    /// A backend may be selected for a real workload only when the worker owns
+    /// its host lifecycle and the host is configured and ready.
+    fn is_selectable(&self) -> bool {
+        matches!(
+            self.implementation,
+            IsolationBackendImplementation::HostImplemented
+        ) && self.ready
+    }
+
+    fn to_report(&self) -> AgentWorkerIsolationBackendReport {
+        AgentWorkerIsolationBackendReport {
+            backend_name: self.descriptor.backend_name.clone(),
+            backend_version: self.descriptor.backend_version.clone(),
+            kind: isolation_backend_kind_wire(&self.descriptor.kind).to_string(),
+            host_lifecycle_owner: self.descriptor.host_lifecycle_owner.clone(),
+            gateway_controls_backend: self.descriptor.gateway_controls_backend,
+            ready: self.ready,
+            readiness_reason: self.readiness_reason.clone(),
+        }
+    }
+}
+
+fn isolation_backend_kind_wire(kind: &IsolationBackendKind) -> &'static str {
+    match kind {
+        IsolationBackendKind::FirecrackerMicroVm => "firecracker_micro_vm",
+        IsolationBackendKind::KataContainers => "kata_containers",
+        IsolationBackendKind::Gvisor => "gvisor",
+        IsolationBackendKind::RootlessDocker => "rootless_docker",
+    }
+}
+
+/// The full replaceable backend registry. Firecracker is the only backend with
+/// a host lifecycle in this build; the rest are registered so the uniform
+/// contract is visible to the gateway but fail closed until implemented.
+fn registered_isolation_backends() -> Vec<RegisteredIsolationBackend> {
+    vec![
+        firecracker_registered_backend(),
+        unimplemented_registered_backend("kata-containers", IsolationBackendKind::KataContainers),
+        unimplemented_registered_backend("gvisor", IsolationBackendKind::Gvisor),
+        unimplemented_registered_backend("rootless-docker", IsolationBackendKind::RootlessDocker),
+    ]
+}
+
+fn unimplemented_registered_backend(
+    backend_name: &str,
+    kind: IsolationBackendKind,
+) -> RegisteredIsolationBackend {
+    RegisteredIsolationBackend {
+        descriptor: IsolationBackendDescriptor {
+            backend_name: backend_name.to_string(),
+            backend_version: "unimplemented".to_string(),
+            kind,
+            host_lifecycle_owner: "agent-worker".to_string(),
+            gateway_controls_backend: false,
+            capabilities: IsolationBackendCapabilities::none(),
+        },
+        implementation: IsolationBackendImplementation::NotYetImplemented,
+        ready: false,
+        readiness_reason: Some(
+            "backend is registered for the replaceable isolation contract but its host lifecycle \
+             is not implemented in this agent-worker build"
+                .to_string(),
+        ),
+    }
 }
 
 pub(crate) fn firecracker_prepare_plan_command() -> Result<()> {
@@ -742,7 +850,7 @@ fn firecracker_boot_smoke(options: FirecrackerBootSmokeOptions) -> FirecrackerBo
     report
 }
 
-fn probed_firecracker_backend() -> AgentWorkerIsolationBackendReport {
+fn firecracker_registered_backend() -> RegisteredIsolationBackend {
     let requirements = [
         ("AGENT_WORKER_FIRECRACKER_BIN", "Firecracker binary path"),
         (
@@ -763,29 +871,31 @@ fn probed_firecracker_backend() -> AgentWorkerIsolationBackendReport {
         .filter_map(|(env_var, label)| configured_file_error(env_var, label))
         .collect::<Vec<_>>();
 
-    if missing.is_empty() {
-        AgentWorkerIsolationBackendReport {
-            backend_name: "firecracker".to_string(),
-            backend_version: "external_bundle".to_string(),
-            kind: "firecracker_micro_vm".to_string(),
-            host_lifecycle_owner: "agent-worker".to_string(),
-            gateway_controls_backend: false,
-            ready: true,
-            readiness_reason: Some(
+    let (ready, backend_version, readiness_reason) = if missing.is_empty() {
+        (
+            true,
+            "external_bundle",
+            Some(
                 "Firecracker binary, jailer binary, kernel image, and rootfs image are configured"
                     .to_string(),
             ),
-        }
+        )
     } else {
-        AgentWorkerIsolationBackendReport {
+        (false, "unknown", Some(missing.join("; ")))
+    };
+
+    RegisteredIsolationBackend {
+        descriptor: IsolationBackendDescriptor {
             backend_name: "firecracker".to_string(),
-            backend_version: "unknown".to_string(),
-            kind: "firecracker_micro_vm".to_string(),
+            backend_version: backend_version.to_string(),
+            kind: IsolationBackendKind::FirecrackerMicroVm,
             host_lifecycle_owner: "agent-worker".to_string(),
             gateway_controls_backend: false,
-            ready: false,
-            readiness_reason: Some(missing.join("; ")),
-        }
+            capabilities: IsolationBackendCapabilities::full(),
+        },
+        implementation: IsolationBackendImplementation::HostImplemented,
+        ready,
+        readiness_reason,
     }
 }
 
@@ -2710,7 +2820,10 @@ mod tests {
         let backends = isolation_backends();
 
         clear_firecracker_env();
-        assert_eq!(backends.len(), 1);
+        // Firecracker is the implemented backend and leads the registry; the
+        // other kinds are registered behind the same contract so the gateway
+        // can see the full replaceable set.
+        assert_eq!(backends.len(), 4);
         assert_eq!(backends[0].backend_name, "firecracker");
         assert_eq!(backends[0].kind, "firecracker_micro_vm");
         assert_eq!(backends[0].host_lifecycle_owner, "agent-worker");
@@ -2756,6 +2869,94 @@ mod tests {
         let reason = backends[0].readiness_reason.as_deref().unwrap();
         assert!(reason.contains("Firecracker kernel image was not configured"));
         assert!(reason.contains("Firecracker rootfs image was not configured"));
+    }
+
+    #[test]
+    fn backend_registry_registers_replaceable_backends_and_fails_closed_for_unimplemented() {
+        let _env_lock = lock_firecracker_env();
+        clear_firecracker_env();
+
+        let backends = isolation_backends();
+
+        // Every registered backend speaks the same contract: the worker owns
+        // the host lifecycle and the gateway never controls it directly.
+        for backend in &backends {
+            assert_eq!(backend.host_lifecycle_owner, "agent-worker");
+            assert!(!backend.gateway_controls_backend);
+        }
+
+        let kinds = backends
+            .iter()
+            .map(|backend| backend.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "firecracker_micro_vm",
+                "kata_containers",
+                "gvisor",
+                "rootless_docker",
+            ]
+        );
+
+        // The backends without a host implementation must fail closed: not
+        // ready, and the reason must say why so an operator is not misled.
+        for backend in backends
+            .iter()
+            .filter(|backend| backend.kind != "firecracker_micro_vm")
+        {
+            assert!(!backend.ready, "{} must fail closed", backend.backend_name);
+            assert_eq!(backend.backend_version, "unimplemented");
+            assert!(backend.readiness_reason.as_deref().is_some_and(
+                |reason| reason.contains("not implemented in this agent-worker build")
+            ));
+        }
+    }
+
+    #[test]
+    fn selectable_backends_exclude_unimplemented_and_unconfigured_firecracker() {
+        let _env_lock = lock_firecracker_env();
+        clear_firecracker_env();
+
+        // With no Firecracker bundle configured, nothing is selectable: the
+        // registry fails closed rather than handing back an inert backend.
+        let unconfigured = selectable_isolation_backend_descriptors();
+        assert!(unconfigured.is_empty());
+        let error = ferrogate_runtime::select_isolation_backend(&Default::default(), &unconfigured)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ferrogate_runtime::IsolationError::NoCompatibleBackend(_)
+        ));
+
+        // Configure a Firecracker bundle: only Firecracker becomes selectable,
+        // and the runtime selection contract returns exactly that backend. The
+        // registered-but-unimplemented kinds never win selection because they
+        // advertise no capabilities.
+        let temp = tempfile::tempdir().unwrap();
+        let firecracker_path = temp.path().join("firecracker");
+        let jailer_path = temp.path().join("jailer");
+        let kernel_path = temp.path().join("vmlinux");
+        let rootfs_path = temp.path().join("rootfs.ext4");
+        write_executable_version_script(&firecracker_path, "Firecracker v.test").unwrap();
+        write_executable_version_script(&jailer_path, "Jailer v.test").unwrap();
+        std::fs::write(&kernel_path, b"not executed").unwrap();
+        std::fs::write(&rootfs_path, b"not executed").unwrap();
+        env::set_var("AGENT_WORKER_FIRECRACKER_BIN", &firecracker_path);
+        env::set_var("AGENT_WORKER_FIRECRACKER_JAILER", &jailer_path);
+        env::set_var("AGENT_WORKER_FIRECRACKER_KERNEL", &kernel_path);
+        env::set_var("AGENT_WORKER_FIRECRACKER_ROOTFS", &rootfs_path);
+
+        let selectable = selectable_isolation_backend_descriptors();
+        clear_firecracker_env();
+
+        assert_eq!(selectable.len(), 1);
+        assert_eq!(selectable[0].kind, IsolationBackendKind::FirecrackerMicroVm);
+
+        let selected =
+            ferrogate_runtime::select_isolation_backend(&Default::default(), &selectable).unwrap();
+        assert_eq!(selected.backend_name, "firecracker");
+        assert_eq!(selected.kind, IsolationBackendKind::FirecrackerMicroVm);
     }
 
     #[test]

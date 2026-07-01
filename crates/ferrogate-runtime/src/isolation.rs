@@ -53,6 +53,26 @@ impl IsolationBackendCapabilities {
         }
     }
 
+    /// A backend that advertises no lifecycle capability at all. Used for a
+    /// backend that is part of the replaceable contract but has no host
+    /// implementation yet, so it can never satisfy a policy's required
+    /// capabilities and can never be selected. This keeps selection
+    /// fail-closed by construction, independent of any readiness filtering.
+    pub fn none() -> Self {
+        Self {
+            prepare: false,
+            start: false,
+            exec_or_attach: false,
+            stop: false,
+            snapshot_or_checkpoint: false,
+            collect_logs: false,
+            collect_artifacts: false,
+            cleanup: false,
+            governed_egress: false,
+            secret_injection: false,
+        }
+    }
+
     pub fn supports(&self, required: &Self) -> bool {
         (!required.prepare || self.prepare)
             && (!required.start || self.start)
@@ -394,6 +414,19 @@ mod tests {
         let error = select_isolation_backend(&policy, &candidates).unwrap_err();
 
         assert!(matches!(error, IsolationError::NoCompatibleBackend(_)));
+    }
+
+    #[test]
+    fn capability_free_backend_is_never_selectable() {
+        let mut inert = descriptor("kata", IsolationBackendKind::KataContainers);
+        inert.capabilities = IsolationBackendCapabilities::none();
+        let candidates = vec![inert];
+
+        let error = select_isolation_backend(&IsolationPolicy::default(), &candidates).unwrap_err();
+
+        assert!(matches!(error, IsolationError::NoCompatibleBackend(_)));
+        assert!(!IsolationBackendCapabilities::none()
+            .supports(&IsolationBackendCapabilities::default()));
     }
 
     #[test]
