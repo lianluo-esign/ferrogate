@@ -19,7 +19,10 @@ use ferrogate_runtime::{
     AgentWorkerManagementResponse, AgentWorkerManagementResult, ManagedWorkerError,
 };
 
-use crate::{backends::FirecrackerMicroVm, handler_runtime::HandlerRunState};
+use crate::{
+    backends::FirecrackerMicroVm, docker_backend::DockerIsolationBackend,
+    handler_runtime::HandlerRunState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredLifecycleEvent {
@@ -103,6 +106,25 @@ pub(crate) trait AgentWorkerStateStore {
         run_id: &str,
     ) -> Option<FirecrackerMicroVm>;
 
+    fn get_docker_backend_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut DockerIsolationBackend>;
+
+    fn put_docker_backend(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        backend: DockerIsolationBackend,
+    );
+
+    fn remove_docker_backend(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<DockerIsolationBackend>;
+
     #[cfg(test)]
     fn lifecycle_events(&self) -> Vec<StoredLifecycleEvent>;
 }
@@ -113,6 +135,7 @@ pub(crate) struct InMemoryAgentWorkerStateStore {
     lifecycle_events: Vec<StoredLifecycleEvent>,
     handler_runs: HashMap<String, HandlerRunState>,
     firecracker_vms: HashMap<String, FirecrackerMicroVm>,
+    docker_backends: HashMap<String, DockerIsolationBackend>,
 }
 
 impl InMemoryAgentWorkerStateStore {
@@ -234,6 +257,34 @@ impl AgentWorkerStateStore for InMemoryAgentWorkerStateStore {
         run_id: &str,
     ) -> Option<FirecrackerMicroVm> {
         self.firecracker_vms
+            .remove(&Self::microvm_key(session_id, run_id))
+    }
+
+    fn get_docker_backend_mut(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<&mut DockerIsolationBackend> {
+        self.docker_backends
+            .get_mut(&Self::microvm_key(session_id, run_id))
+    }
+
+    fn put_docker_backend(
+        &mut self,
+        session_id: String,
+        run_id: String,
+        backend: DockerIsolationBackend,
+    ) {
+        self.docker_backends
+            .insert(Self::microvm_key(&session_id, &run_id), backend);
+    }
+
+    fn remove_docker_backend(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Option<DockerIsolationBackend> {
+        self.docker_backends
             .remove(&Self::microvm_key(session_id, run_id))
     }
 

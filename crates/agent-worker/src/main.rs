@@ -10,6 +10,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 mod backends;
+mod docker_backend;
 mod events;
 mod external_actions;
 mod handler_runtime;

@@ -13,10 +13,11 @@
 use std::env;
 
 use ferrogate_runtime::{
-    select_isolation_backend, AgentWorkerLifecycleResult, AgentWorkerManagementAction,
-    AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode, AgentWorkerManagementResult,
-    IsolationBackendDescriptor, IsolationBackendKind, IsolationPolicy, ManagedWorkerError,
-    ManagedWorkerSessionStatus,
+    select_isolation_backend, AgentWorkerFrameworkArtifactResult, AgentWorkerLifecycleResult,
+    AgentWorkerManagementAction, AgentWorkerManagementEnvelope, AgentWorkerManagementErrorCode,
+    AgentWorkerManagementResult, IsolationBackendDescriptor, IsolationBackendKind,
+    IsolationBackendLifecycle, IsolationExecRequest, IsolationPolicy, IsolationPrepareRequest,
+    ManagedWorkerError, ManagedWorkerSessionStatus,
 };
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
         firecracker_host_preflight, firecracker_microvm_provision, isolation_backend_kind_wire,
         isolation_backends, selectable_isolation_backend_descriptors,
     },
+    docker_backend::DockerIsolationBackend,
     external_actions::GatewayExternalActionAuthorizer,
     handler_runtime::{
         cancel_native_harness, cleanup_native_harness, collect_native_harness_artifacts,
@@ -83,16 +85,23 @@ fn provision(
         }
     };
 
-    // This build owns only the Firecracker host lifecycle. Any other selected
-    // kind must fail closed instead of silently doing nothing.
-    if selected.kind != IsolationBackendKind::FirecrackerMicroVm {
-        return Err(ManagedWorkerError::management_protocol_error(
-            AgentWorkerManagementErrorCode::IncompatibleBackend,
-            format!(
-                "selected isolation backend {} has no host lifecycle in this agent-worker build",
-                selected.backend_name
-            ),
-        ));
+    // Dispatch to the host lifecycle for the selected backend. Firecracker is
+    // the high-isolation managed default; Docker is the opt-in low-risk tier.
+    // Any other kind fails closed instead of silently doing nothing.
+    match selected.kind {
+        IsolationBackendKind::FirecrackerMicroVm => {}
+        IsolationBackendKind::RootlessDocker => {
+            return provision_docker(state, envelope, &selected);
+        }
+        _ => {
+            return Err(ManagedWorkerError::management_protocol_error(
+                AgentWorkerManagementErrorCode::IncompatibleBackend,
+                format!(
+                    "selected isolation backend {} has no host lifecycle in this agent-worker build",
+                    selected.backend_name
+                ),
+            ));
+        }
     }
 
     // Record the backend that was actually selected as run evidence, so the
@@ -163,6 +172,302 @@ fn provision(
         "provisioned",
         &message,
         &backend_identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+// ---- Docker isolation backend lifecycle (opt-in low-risk tier) ----
+//
+// Every operation drives the worker-owned DockerIsolationBackend, which
+// implements the same runtime IsolationBackendLifecycle contract as the
+// Firecracker path. The gateway/control plane and the management wire result
+// are identical regardless of which backend serviced the session — that is the
+// replaceability #82 requires.
+
+fn docker_prepare_request(
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> IsolationPrepareRequest {
+    IsolationPrepareRequest {
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        worker_template_id: envelope.worker_id.clone(),
+        framework_adapter: envelope
+            .framework_adapter
+            .clone()
+            .unwrap_or_else(|| "native_harness".to_string()),
+        capability_envelope_id: format!("cap:{session_id}:{run_id}"),
+        policy: IsolationPolicy::default(),
+    }
+}
+
+fn docker_lifecycle_error(
+    code: AgentWorkerManagementErrorCode,
+    operation: &str,
+    error: ferrogate_runtime::IsolationError,
+) -> ManagedWorkerError {
+    ManagedWorkerError::management_protocol_error(
+        code,
+        format!("agent-worker Docker {operation} failed: {error}"),
+    )
+}
+
+fn docker_missing_backend_error(operation: &str) -> ManagedWorkerError {
+    ManagedWorkerError::management_protocol_error(
+        AgentWorkerManagementErrorCode::IncompatibleBackend,
+        format!(
+            "agent-worker Docker {operation} found no provisioned container for this session/run"
+        ),
+    )
+}
+
+fn provision_docker(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    selected: &IsolationBackendDescriptor,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let session_id = lifecycle_session_id(envelope)?;
+    let run_id = lifecycle_run_id(envelope)?;
+    let identity = LifecycleBackendIdentity::from_descriptor(selected);
+
+    if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
+        let lifecycle = lifecycle_result_for_backend(
+            envelope,
+            ManagedWorkerSessionStatus::Running,
+            "already_running",
+            "Docker isolation backend already provisioned for this session/run",
+            &identity,
+            None,
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
+
+    let mut backend = DockerIsolationBackend::new(&envelope.worker_id, &selected.backend_version);
+    let prepared = backend
+        .prepare(docker_prepare_request(envelope, &session_id, &run_id))
+        .map_err(|error| {
+            docker_lifecycle_error(
+                AgentWorkerManagementErrorCode::ProvisionFailed,
+                "provision",
+                error,
+            )
+        })?;
+    let started = backend.start(prepared).map_err(|error| {
+        docker_lifecycle_error(
+            AgentWorkerManagementErrorCode::ProvisionFailed,
+            "provision",
+            error,
+        )
+    })?;
+    let instance_id = started.instance_id.clone();
+    state.put_docker_backend(session_id, run_id, backend);
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::Running,
+        "provisioned",
+        &format!(
+            "Docker container {instance_id} provisioned by agent-worker with sealed network and enforced resource limits"
+        ),
+        &identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn exec_or_attach_docker(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_docker_backend_mut(session_id, run_id)
+        .ok_or_else(|| docker_missing_backend_error("exec_or_attach"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend.instance_id().map(ToOwned::to_owned);
+    // Managed agent workload dispatch runs through the framework adapter handler
+    // (#84) and the gateway-mediated capability path (#86). Here we prove the
+    // provisioned container is attachable and executes a deterministic probe.
+    let exec = backend
+        .exec_or_attach(IsolationExecRequest {
+            instance_id: instance_id.clone().unwrap_or_default(),
+            workload_ref: "agent://managed/readiness".to_string(),
+            args: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo agent-worker-docker-ready".to_string(),
+            ],
+        })
+        .map_err(|error| {
+            docker_lifecycle_error(
+                AgentWorkerManagementErrorCode::Cancelled,
+                "exec_or_attach",
+                error,
+            )
+        })?;
+    let succeeded = exec.exit_code == Some(0);
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        if succeeded {
+            ManagedWorkerSessionStatus::Running
+        } else {
+            ManagedWorkerSessionStatus::Failed
+        },
+        if succeeded { "executed" } else { "exec_failed" },
+        &format!(
+            "Docker container {} exec by agent-worker; exit_code={:?}; output={}",
+            instance_id.as_deref().unwrap_or("unknown"),
+            exec.exit_code,
+            exec.message
+        ),
+        &identity,
+        instance_id,
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn collect_artifacts_docker(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_docker_backend_mut(session_id, run_id)
+        .ok_or_else(|| docker_missing_backend_error("collect_artifacts"))?;
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let collected = backend.collect_artifacts(&instance_id).map_err(|error| {
+        docker_lifecycle_error(
+            AgentWorkerManagementErrorCode::CleanupFailed,
+            "collect_artifacts",
+            error,
+        )
+    })?;
+    let artifacts = collected
+        .artifacts
+        .into_iter()
+        .map(|artifact| AgentWorkerFrameworkArtifactResult {
+            artifact_id: artifact.id,
+            name: artifact.path,
+            media_type: artifact
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            byte_len: 0,
+        })
+        .collect();
+    let _ = envelope;
+    Ok(Some(AgentWorkerManagementResult::HandlerArtifacts {
+        artifacts,
+        events: Vec::new(),
+    }))
+}
+
+fn stop_docker(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_docker_backend_mut(session_id, run_id)
+        .ok_or_else(|| docker_missing_backend_error("stop"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    // Stop the container but keep the backend record so cleanup can force-remove
+    // it — a stopped container still holds host resources until cleanup.
+    let report = backend.stop(&instance_id, "stopped").map_err(|error| {
+        docker_lifecycle_error(AgentWorkerManagementErrorCode::Cancelled, "stop", error)
+    })?;
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::Cancelled,
+        "stopped",
+        &format!(
+            "Docker container {} stopped by agent-worker; outcome={}",
+            instance_id, report.evidence.outcome
+        ),
+        &identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn snapshot_docker(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let backend = state
+        .get_docker_backend_mut(session_id, run_id)
+        .ok_or_else(|| docker_missing_backend_error("snapshot_or_checkpoint"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let snapshot = backend
+        .snapshot_or_checkpoint(&instance_id)
+        .map_err(|error| {
+            docker_lifecycle_error(
+                AgentWorkerManagementErrorCode::ProvisionFailed,
+                "snapshot_or_checkpoint",
+                error,
+            )
+        })?;
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::Running,
+        "checkpointed",
+        &format!(
+            "Docker container {} checkpointed by agent-worker via commit; checkpoint_id={}",
+            instance_id,
+            snapshot.checkpoint_id.as_deref().unwrap_or("unknown")
+        ),
+        &identity,
+        Some(instance_id),
+    )?;
+    Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
+}
+
+fn cleanup_docker(
+    state: &mut impl AgentWorkerStateStore,
+    envelope: &AgentWorkerManagementEnvelope,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
+    let mut backend = state
+        .remove_docker_backend(session_id, run_id)
+        .ok_or_else(|| docker_missing_backend_error("cleanup"))?;
+    let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+    let instance_id = backend
+        .instance_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let cleanup = backend.cleanup(&instance_id).map_err(|error| {
+        docker_lifecycle_error(
+            AgentWorkerManagementErrorCode::CleanupFailed,
+            "cleanup",
+            error,
+        )
+    })?;
+    let lifecycle = lifecycle_result_for_backend(
+        envelope,
+        ManagedWorkerSessionStatus::CleanedUp,
+        "cleaned_up",
+        &format!(
+            "Docker container {} cleaned up by agent-worker; outcome={}",
+            instance_id, cleanup.evidence.outcome
+        ),
+        &identity,
         Some(instance_id),
     )?;
     Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }))
@@ -252,6 +557,9 @@ fn exec_or_attach(
     let run_id = lifecycle_run_id(envelope)?;
     if let Some(existing) = state.get_handler_run_state(&session_id, &run_id) {
         return Ok(Some(stream_native_harness_status(&existing)));
+    }
+    if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
+        return exec_or_attach_docker(state, envelope, &session_id, &run_id);
     }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
@@ -354,6 +662,27 @@ fn stream_status(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if let Some(backend) = state.get_docker_backend_mut(&session_id, &run_id) {
+        let identity = LifecycleBackendIdentity::from_descriptor(backend.backend_descriptor());
+        let running = backend.is_running();
+        let instance_id = backend.instance_id().map(ToOwned::to_owned);
+        let lifecycle = lifecycle_result_for_backend(
+            envelope,
+            if running {
+                ManagedWorkerSessionStatus::Running
+            } else {
+                ManagedWorkerSessionStatus::Failed
+            },
+            if running { "running" } else { "exited" },
+            &format!(
+                "Docker container {} status checked by agent-worker; running={running}",
+                instance_id.as_deref().unwrap_or("unknown")
+            ),
+            &identity,
+            instance_id,
+        )?;
+        return Ok(Some(AgentWorkerManagementResult::Lifecycle { lifecycle }));
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
         let lifecycle = lifecycle_result_with_instance(
@@ -384,6 +713,9 @@ fn collect_artifacts(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
+        return collect_artifacts_docker(state, envelope, &session_id, &run_id);
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         return Ok(Some(AgentWorkerManagementResult::HandlerArtifacts {
             artifacts: existing.artifact_results(),
@@ -406,6 +738,9 @@ fn stop(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
+        return stop_docker(state, envelope, &session_id, &run_id);
+    }
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();
         let report = existing.stop();
@@ -439,6 +774,9 @@ fn snapshot_or_checkpoint(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
+        return snapshot_docker(state, envelope, &session_id, &run_id);
+    }
     if let Some(existing) = state.get_firecracker_microvm_mut(&session_id, &run_id) {
         let running = existing.is_running();
         if !running {
@@ -489,6 +827,9 @@ fn cleanup(
 ) -> Result<Option<AgentWorkerManagementResult>, ManagedWorkerError> {
     let session_id = lifecycle_session_id(envelope)?;
     let run_id = lifecycle_run_id(envelope)?;
+    if state.get_docker_backend_mut(&session_id, &run_id).is_some() {
+        return cleanup_docker(state, envelope, &session_id, &run_id);
+    }
     if let Some(mut existing) = state.remove_firecracker_microvm(&session_id, &run_id) {
         let instance_id = existing.instance_id.clone();
         let report = existing.cleanup();
