@@ -1099,6 +1099,7 @@ dependencies = [
  "ferrogate-core",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
 ]
 

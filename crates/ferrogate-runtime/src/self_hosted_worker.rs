@@ -26,6 +26,14 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305,
 };
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+
+/// Compare two secrets without leaking the position of the first differing byte
+/// through timing. Length is compared first; secret length is not itself secret.
+fn constant_time_secret_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.ct_eq(b).into()
+}
 
 const SELF_HOSTED_WORKER_HTTP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const SELF_HOSTED_WORKER_SYMMETRIC_AEAD_ALGORITHM: &str = "xchacha20poly1305";
@@ -137,7 +145,12 @@ impl SelfHostedWorkerRegistry {
                 identity.worker_id.clone(),
             ));
         }
-        if worker.token_id != identity.token_id || worker.token_secret != identity.token_secret {
+        // Security (#114): compare the bearer secret in constant time so a
+        // differing-prefix attempt cannot be distinguished from a differing-suffix
+        // one by response timing. token_id is a non-secret lookup key.
+        if worker.token_id != identity.token_id
+            || !constant_time_secret_eq(&worker.token_secret, &identity.token_secret)
+        {
             return Err(SelfHostedWorkerError::InvalidIdentity(
                 "worker token does not match registered identity envelope".to_string(),
             ));
@@ -1569,6 +1582,10 @@ fn require_transport_non_empty(field: &str, value: &str) -> Result<(), SelfHoste
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "self_hosted_worker_security_test.rs"]
+mod self_hosted_worker_security_test;
 
 #[cfg(test)]
 mod tests {

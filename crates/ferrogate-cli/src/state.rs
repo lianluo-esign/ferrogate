@@ -2709,9 +2709,10 @@ impl SelfHostedWorkerDispatchRuntime {
         identity: &SelfHostedWorkerIdentity,
     ) -> Result<(), SelfHostedWorkerError> {
         let mut observed_identity = identity.clone();
-        if observed_identity.observed_at_unix.is_none() {
-            observed_identity.observed_at_unix = now_unix_seconds();
-        }
+        // Security (#113): identity expiry must be judged against the server's
+        // trusted clock. A client-supplied observed_at_unix (e.g. Some(0)) must
+        // never satisfy the expiry check, so overwrite it unconditionally.
+        observed_identity.observed_at_unix = now_unix_seconds();
         self.registry
             .validate_identity(&observed_identity)
             .map(|_| ())
@@ -5244,9 +5245,10 @@ impl AppState {
         &self,
         mut request: SelfHostedRunPollRequest,
     ) -> Result<Option<SelfHostedRunLease>, SelfHostedWorkerError> {
-        if request.identity.observed_at_unix.is_none() {
-            request.identity.observed_at_unix = Some(request.now_unix);
-        }
+        // Security (#113): never trust client time for identity expiry. request.now_unix
+        // is client-supplied; stamp the server clock so an expired identity cannot
+        // report a past observed_at to pass validation.
+        request.identity.observed_at_unix = now_unix_seconds();
         let (result, records) = match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => {
                 let result = dispatch.poll_run(request);
@@ -5278,9 +5280,10 @@ impl AppState {
         &self,
         mut request: SelfHostedRunAckRequest,
     ) -> Result<SelfHostedRunAck, SelfHostedWorkerError> {
-        if request.identity.observed_at_unix.is_none() {
-            request.identity.observed_at_unix = Some(request.reported_at_unix);
-        }
+        // Security (#113): never trust client time for identity expiry. request.reported_at_unix
+        // is client-supplied; stamp the server clock so an expired identity cannot
+        // report a past observed_at to pass validation.
+        request.identity.observed_at_unix = now_unix_seconds();
         let (result, records) = match self.self_hosted_dispatch.lock() {
             Ok(mut dispatch) => {
                 let result = dispatch.ack_run(request);
@@ -8902,7 +8905,10 @@ mod tests {
                     workspace_id: " workspace-1 ".into(),
                     worker_name: " customer-worker ".into(),
                     identity_fingerprint: " sha256:worker ".into(),
-                    identity_expires_at_unix: Some(9_999),
+                    // Far-future expiry: identity expiry is now judged against the
+                    // server's real clock (#113), so a non-expired worker must use a
+                    // realistic future timestamp rather than a toy value.
+                    identity_expires_at_unix: Some(4_000_000_000),
                     orchestration_enabled: true,
                     capability_envelope_json: Some(r#"{"frameworks":["codex"]}"#.into()),
                 },
@@ -8914,7 +8920,7 @@ mod tests {
         assert_eq!(worker.worker_name, "customer-worker");
         assert_eq!(worker.status, "registered");
         assert_eq!(worker.identity_fingerprint, "sha256:worker");
-        assert_eq!(worker.identity_expires_at_unix, Some(9_999));
+        assert_eq!(worker.identity_expires_at_unix, Some(4_000_000_000));
         assert!(worker.orchestration_enabled);
         assert_eq!(worker.trust_level, "reported_by_self_hosted_worker");
         assert!(worker.registered_at_unix.is_some());
@@ -8928,7 +8934,7 @@ mod tests {
         assert_eq!(records[0].workspace_id, "workspace-1");
         assert_eq!(records[0].worker_name, "customer-worker");
         assert_eq!(records[0].identity_fingerprint, "sha256:worker");
-        assert_eq!(records[0].identity_expires_at_unix, Some(9_999));
+        assert_eq!(records[0].identity_expires_at_unix, Some(4_000_000_000));
         assert_eq!(
             records[0].capability_envelope_json,
             r#"{"frameworks":["codex"]}"#
@@ -10222,3 +10228,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "state_self_hosted_security_test.rs"]
+mod state_self_hosted_security_test;
