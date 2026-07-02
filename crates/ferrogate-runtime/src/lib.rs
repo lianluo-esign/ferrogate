@@ -9,6 +9,7 @@
 mod agent;
 mod capability_boundary;
 mod framework_adapter;
+mod function_egress;
 mod isolation;
 mod managed_external_action;
 mod managed_worker;
@@ -37,6 +38,10 @@ pub use framework_adapter::{
     FrameworkAdapterStreamRequest, FrameworkCapabilityRequest, FrameworkEventTimelineRecord,
     NativeHarnessAdapter, NormalizedFrameworkEvent, ProcessFrameworkAdapter,
     ProcessFrameworkLaunch, SupportedFramework,
+};
+pub use function_egress::{
+    FunctionEgressAllowlist, FunctionEgressDenied, FunctionEgressRule, FunctionInvocationOutcome,
+    FunctionInvocationRequest, ANY_FUNCTION_SLUG,
 };
 pub use isolation::{
     select_isolation_backend, CollectedIsolationArtifacts, CollectedIsolationLogs,
@@ -96,8 +101,9 @@ pub use self_hosted_worker::{
     SELF_HOSTED_WORKER_PROTOCOL_VERSION,
 };
 pub use supabase_edge_function::{
-    EdgeFunctionHttpRequest, SupabaseEdgeFunctionError, SupabaseEdgeFunctionInvocation,
-    SupabaseEdgeFunctionTarget, DEFAULT_EDGE_FUNCTION_TIMEOUT_MILLIS,
+    EdgeFunctionHttpRequest, FunctionCredential, SupabaseEdgeFunctionError,
+    SupabaseEdgeFunctionInvocation, SupabaseEdgeFunctionTarget,
+    DEFAULT_EDGE_FUNCTION_TIMEOUT_MILLIS,
 };
 
 /// Runtime lifecycle commands exposed by the CLI and future control plane.

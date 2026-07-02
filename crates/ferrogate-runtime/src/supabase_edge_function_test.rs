@@ -76,7 +76,9 @@ fn validation_fails_closed() {
 #[test]
 fn build_http_request_injects_auth_and_apikey_headers() {
     let invocation = SupabaseEdgeFunctionInvocation::post(target(), r#"{"amount":10}"#);
-    let request = invocation.build_http_request("sk-resolved-key").unwrap();
+    let request = invocation
+        .build_http_request(&FunctionCredential::static_key("sk-resolved-key"))
+        .unwrap();
 
     assert_eq!(request.method, "POST");
     assert_eq!(
@@ -102,14 +104,19 @@ fn build_http_request_injects_auth_and_apikey_headers() {
 fn build_http_request_rejects_empty_resolved_key_and_bad_method() {
     let invocation = SupabaseEdgeFunctionInvocation::post(target(), "{}");
     assert_eq!(
-        invocation.build_http_request("   "),
+        invocation.build_http_request(&FunctionCredential::static_key("   ")),
+        Err(SupabaseEdgeFunctionError::EmptyResolvedKey)
+    );
+    // A scoped token with an empty apikey is also unusable.
+    assert_eq!(
+        invocation.build_http_request(&FunctionCredential::scoped_token("jwt", "  ")),
         Err(SupabaseEdgeFunctionError::EmptyResolvedKey)
     );
 
     let mut bad_method = SupabaseEdgeFunctionInvocation::post(target(), "{}");
     bad_method.method = "DELETE".to_string();
     assert!(matches!(
-        bad_method.build_http_request("k"),
+        bad_method.build_http_request(&FunctionCredential::static_key("k")),
         Err(SupabaseEdgeFunctionError::UnsupportedMethod(_))
     ));
 }

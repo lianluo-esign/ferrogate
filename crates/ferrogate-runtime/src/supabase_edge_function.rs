@@ -59,6 +59,43 @@ pub struct EdgeFunctionHttpRequest {
     pub body: String,
 }
 
+/// The credential the gateway injects when it executes an edge-function call.
+///
+/// `bearer_token` is what goes into `Authorization: Bearer …` — either a static
+/// resolved key (interim) or, preferably, a short-lived scoped JWT minted per
+/// call (#118). `apikey` is the project `apikey` header value. Modeling both
+/// lets a scoped-token credential carry the (public) project anon key as its
+/// apikey while the bearer is a narrowly-scoped JWT. Never logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionCredential {
+    pub bearer_token: String,
+    pub apikey: String,
+}
+
+impl FunctionCredential {
+    /// Interim credential where the same resolved key is used for both headers.
+    /// Replace with [`FunctionCredential::scoped_token`] once JWT minting lands.
+    pub fn static_key(key: impl Into<String>) -> Self {
+        let key = key.into();
+        Self {
+            bearer_token: key.clone(),
+            apikey: key,
+        }
+    }
+
+    /// A short-lived scoped JWT as the bearer, with the project apikey separate.
+    pub fn scoped_token(jwt: impl Into<String>, apikey: impl Into<String>) -> Self {
+        Self {
+            bearer_token: jwt.into(),
+            apikey: apikey.into(),
+        }
+    }
+
+    fn is_usable(&self) -> bool {
+        !self.bearer_token.trim().is_empty() && !self.apikey.trim().is_empty()
+    }
+}
+
 /// Fail-closed validation errors for an edge-function target/invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupabaseEdgeFunctionError {
@@ -159,24 +196,25 @@ impl SupabaseEdgeFunctionInvocation {
         }
     }
 
-    /// Build the governed HTTP request. `resolved_key` is the secret value looked
-    /// up from the tenant secret store for `target.auth_key_ref`; it is injected
-    /// into the `Authorization` and `apikey` headers and never stored elsewhere.
+    /// Build the governed HTTP request. `credential` carries the bearer token
+    /// (a minted scoped JWT, or an interim static key) and the project apikey,
+    /// resolved from `target.auth_key_ref` at call time; they are injected into
+    /// the `Authorization`/`apikey` headers and never stored elsewhere.
     pub fn build_http_request(
         &self,
-        resolved_key: &str,
+        credential: &FunctionCredential,
     ) -> Result<EdgeFunctionHttpRequest, SupabaseEdgeFunctionError> {
         self.target.validate()?;
         let method = self.normalized_method()?;
-        if resolved_key.trim().is_empty() {
+        if !credential.is_usable() {
             return Err(SupabaseEdgeFunctionError::EmptyResolvedKey);
         }
         let mut headers = BTreeMap::new();
         headers.insert(
             "authorization".to_string(),
-            format!("Bearer {resolved_key}"),
+            format!("Bearer {}", credential.bearer_token),
         );
-        headers.insert("apikey".to_string(), resolved_key.to_string());
+        headers.insert("apikey".to_string(), credential.apikey.clone());
         headers.insert("content-type".to_string(), "application/json".to_string());
         Ok(EdgeFunctionHttpRequest {
             method,
