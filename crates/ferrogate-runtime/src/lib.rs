@@ -14,6 +14,7 @@ mod managed_external_action;
 mod managed_worker;
 mod reload;
 mod self_hosted_worker;
+mod supabase_edge_function;
 
 pub use agent::{
     AgentCancellation, AgentContext, AgentHarness, AgentHarnessConfig, AgentProvider,
@@ -93,6 +94,10 @@ pub use self_hosted_worker::{
     SelfHostedWorkerRegistry, SelfHostedWorkerTransport, SelfHostedWorkerTransportFrame,
     SelfHostedWorkerTransportFrameEncoding, SelfHostedWorkerTransportIdentity,
     SELF_HOSTED_WORKER_PROTOCOL_VERSION,
+};
+pub use supabase_edge_function::{
+    EdgeFunctionHttpRequest, SupabaseEdgeFunctionError, SupabaseEdgeFunctionInvocation,
+    SupabaseEdgeFunctionTarget, DEFAULT_EDGE_FUNCTION_TIMEOUT_MILLIS,
 };
 
 /// Runtime lifecycle commands exposed by the CLI and future control plane.
