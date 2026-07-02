@@ -10,6 +10,7 @@ mod agent;
 mod capability_boundary;
 mod framework_adapter;
 mod function_egress;
+mod function_token;
 mod isolation;
 mod managed_external_action;
 mod managed_worker;
@@ -42,6 +43,10 @@ pub use framework_adapter::{
 pub use function_egress::{
     FunctionEgressAllowlist, FunctionEgressDenied, FunctionEgressRule, FunctionInvocationOutcome,
     FunctionInvocationRequest, ANY_FUNCTION_SLUG,
+};
+pub use function_token::{
+    FunctionTokenClaims, FunctionTokenError, FunctionTokenMinter, DEFAULT_FUNCTION_TOKEN_TTL_SECS,
+    MAX_FUNCTION_TOKEN_TTL_SECS,
 };
 pub use isolation::{
     select_isolation_backend, CollectedIsolationArtifacts, CollectedIsolationLogs,
