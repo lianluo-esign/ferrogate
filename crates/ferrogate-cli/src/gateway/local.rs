@@ -2615,6 +2615,149 @@ impl FerroGateway {
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
     }
 
+    pub(super) async fn handle_function_execute(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: http::HeaderMap,
+        method: &Method,
+    ) -> PingoraResult<()> {
+        if *method != Method::POST {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "function execute endpoint requires POST",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        // Fail closed: the broker is disabled unless a signing secret is configured.
+        let Some(config) = super::function_egress::function_egress_config() else {
+            return write_json_error(
+                session,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "function_egress_disabled",
+                "function egress broker is not configured",
+                &ctx.request_id,
+            )
+            .await;
+        };
+
+        let body = match read_request_body(session, 64 * 1024).await? {
+            Ok(body) => body,
+            Err(limit) => {
+                return write_json_error_and_close(
+                    session,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    format!(
+                        "request body exceeds maximum size of {} bytes",
+                        limit.max_bytes
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let request: ferrogate_runtime::FunctionInvocationRequest =
+            match serde_json::from_slice(&body) {
+                Ok(request) => request,
+                Err(error) => {
+                    return write_json_error(
+                        session,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_json",
+                        format!("invalid function invocation request: {error}"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
+
+        let state = self.state.current();
+        let auth = match authenticate(&state, &headers, "functions.execute", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        // Attribute to the authenticated tenant, never the client-supplied body.
+        let tenant = auth.tenant_context();
+        let tenant_key = tenant
+            .organization_id
+            .or(tenant.project_id)
+            .or(tenant.team_id)
+            .or(tenant.user_id)
+            .or(tenant.api_key_id)
+            .unwrap_or_default();
+        if tenant_key.trim().is_empty() {
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                "no_tenant",
+                "authenticated identity has no tenant scope for function egress",
+                &ctx.request_id,
+            )
+            .await;
+        }
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let (http_request, slug) = match super::function_egress::prepare_brokered_invocation(
+            config,
+            &tenant_key,
+            &request,
+            now_unix,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::FORBIDDEN,
+                    "function_denied",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        let outcome = match super::function_egress::execute_edge_function_request(
+            &http_request,
+            &slug,
+            std::time::Duration::from_millis(30_000),
+            256 * 1024,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_GATEWAY,
+                    "function_upstream_error",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+
+        write_json_response(session, StatusCode::OK, &outcome, &ctx.request_id).await
+    }
+
     async fn handle_tool_execute_with_backend(
         &self,
         session: &mut Session,

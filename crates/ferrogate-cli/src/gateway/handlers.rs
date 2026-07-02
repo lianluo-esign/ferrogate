@@ -90,6 +90,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/v1/functions/execute" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_function_execute(session, ctx, headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/v1/mcp" {
             let headers = req.headers.clone();
             let method = req.method.clone();

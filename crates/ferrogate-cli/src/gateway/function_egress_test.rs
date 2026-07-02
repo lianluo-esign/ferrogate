@@ -104,3 +104,73 @@ async fn rejects_unsupported_scheme() {
         .to_string()
         .contains("unsupported function url scheme"));
 }
+
+fn broker_config() -> FunctionEgressGatewayConfig {
+    let allowlist = r#"[{"tenant":"org_a","base_url":"https://aaaa.supabase.co","function_slugs":["charge-credits"]}]"#.to_string();
+    FunctionEgressGatewayConfig::from_values(
+        Some("signing-secret".to_string()),
+        Some("project-anon".to_string()),
+        Some(allowlist),
+    )
+    .expect("broker enabled when secret present")
+}
+
+fn invocation_request(slug: &str) -> FunctionInvocationRequest {
+    FunctionInvocationRequest {
+        tenant: "ignored-by-server".to_string(),
+        target: ferrogate_runtime::SupabaseEdgeFunctionTarget {
+            base_url: "https://aaaa.supabase.co".to_string(),
+            function_slug: slug.to_string(),
+            auth_key_ref: "secret:svc".to_string(),
+        },
+        method: "POST".to_string(),
+        body_json: r#"{"amount":5}"#.to_string(),
+    }
+}
+
+#[test]
+fn broker_disabled_without_signing_secret() {
+    assert!(FunctionEgressGatewayConfig::from_values(None, None, None).is_none());
+    assert!(FunctionEgressGatewayConfig::from_values(Some("   ".into()), None, None).is_none());
+}
+
+#[test]
+fn prepare_builds_request_with_scoped_bearer_for_allowlisted_target() {
+    let config = broker_config();
+    let (request, slug) = prepare_brokered_invocation(
+        &config,
+        "org_a",
+        &invocation_request("charge-credits"),
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(slug, "charge-credits");
+    assert_eq!(
+        request.url,
+        "https://aaaa.supabase.co/functions/v1/charge-credits"
+    );
+    let auth = request.headers.get("authorization").unwrap();
+    assert!(auth.starts_with("Bearer "));
+    // Bearer is a minted JWT (three dot-separated segments), not the raw key.
+    assert_eq!(auth.trim_start_matches("Bearer ").split('.').count(), 3);
+    assert_eq!(request.headers.get("apikey").unwrap(), "project-anon");
+    assert_eq!(request.body, r#"{"amount":5}"#);
+}
+
+#[test]
+fn prepare_denies_non_allowlisted_tenant_or_slug() {
+    let config = broker_config();
+    assert!(matches!(
+        prepare_brokered_invocation(
+            &config,
+            "org_ghost",
+            &invocation_request("charge-credits"),
+            1
+        ),
+        Err(FunctionBrokerError::Denied(_))
+    ));
+    assert!(matches!(
+        prepare_brokered_invocation(&config, "org_a", &invocation_request("delete-all"), 1),
+        Err(FunctionBrokerError::Denied(_))
+    ));
+}
