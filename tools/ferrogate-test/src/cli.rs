@@ -32,6 +32,8 @@ pub(crate) enum Commands {
     AuthApi(AuthArgs),
     /// Run gateway API coverage against a real local FerroGate process.
     GatewayApi(LocalArgs),
+    /// Run function egress broker coverage against a real local FerroGate process.
+    FunctionEgressApi(LocalArgs),
     /// Run local Supabase-compatible Postgres restart durability coverage.
     SupabaseRestart(LocalArgs),
     /// Opt-in live Supabase connection, migration, status, and minimal persistence smoke.
@@ -186,6 +188,7 @@ pub(crate) struct Dispatch {
     pub(crate) admin: fn(&LocalArgs) -> Result<()>,
     pub(crate) auth: fn(&AuthArgs) -> Result<()>,
     pub(crate) gateway: fn(&LocalArgs) -> Result<()>,
+    pub(crate) function_egress: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_live_smoke: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) supabase_live_restart: fn(&SupabaseLiveRestartArgs) -> Result<()>,
@@ -221,6 +224,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::AdminApi(args) => (dispatch.admin)(&args),
         Commands::AuthApi(args) => (dispatch.auth)(&args),
         Commands::GatewayApi(args) => (dispatch.gateway)(&args),
+        Commands::FunctionEgressApi(args) => (dispatch.function_egress)(&args),
         Commands::SupabaseRestart(args) => (dispatch.supabase_restart)(&args),
         Commands::SupabaseLiveSmoke(args) => (dispatch.supabase_live_smoke)(&args),
         Commands::SupabaseLiveRestart(args) => (dispatch.supabase_live_restart)(&args),

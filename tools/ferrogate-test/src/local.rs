@@ -220,6 +220,17 @@ impl LocalHarness {
             .args(["run", "--config"])
             .arg(&config_path)
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+            // Enable the function egress broker (#119) for the org_demo client so
+            // the function-egress scenario can exercise the live gateway pipeline.
+            // The allowlisted base is deliberately unreachable so the test proves
+            // auth + allowlist + token mint + build + egress-attempt without a TLS
+            // upstream.
+            .env("FG_FN_JWT_SECRET", "test-fn-signing-secret")
+            .env("FG_FN_APIKEY", "test-project-anon-key")
+            .env(
+                "FG_FN_ALLOWLIST",
+                r#"[{"tenant":"org_demo","base_url":"https://127.0.0.1:1","function_slugs":["charge-credits"]}]"#,
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(

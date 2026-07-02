@@ -131,8 +131,12 @@ impl FunctionEgressAllowlist {
 }
 
 /// The request an agent/worker sends to `/v1/functions/execute` (no secrets).
+///
+/// `tenant` is advisory only — the gateway attributes the call to the
+/// authenticated identity, never this field — so it is optional on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionInvocationRequest {
+    #[serde(default)]
     pub tenant: String,
     pub target: SupabaseEdgeFunctionTarget,
     #[serde(default = "default_invocation_method")]

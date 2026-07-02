@@ -3855,6 +3855,57 @@ pub(crate) fn run_gateway_api(args: &LocalArgs) -> Result<()> {
     Ok(())
 }
 
+/// #121: end-to-end proof of the gateway function egress broker through the live
+/// binary. The harness enables the broker (FG_FN_* env) with an allowlist for
+/// org_demo pointing at a deliberately unreachable https upstream, so the full
+/// pipeline (auth → allowlist → scoped-token mint → request build → egress
+/// attempt) is exercised via the fail-closed, deny, and unreachable-upstream
+/// paths without needing a live Supabase project.
+pub(crate) fn run_function_egress_api(args: &LocalArgs) -> Result<()> {
+    let case = LocalHarness::start_with_billing_and_agent(&args.ferrogate_bin, 13)?;
+
+    // Unauthenticated → 401 (broker is enabled, so this is an auth failure, not 503).
+    case.expect_json(
+        "POST",
+        "/v1/functions/execute",
+        &[JSON_CONTENT],
+        r#"{"target":{"base_url":"https://127.0.0.1:1","function_slug":"charge-credits","auth_key_ref":"secret:svc"},"body_json":"{}"}"#,
+        401,
+        |_body| Ok(()),
+    )?;
+
+    // Authenticated but the slug is not on the tenant allowlist → 403 fail-closed.
+    case.expect_json(
+        "POST",
+        "/v1/functions/execute",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"target":{"base_url":"https://127.0.0.1:1","function_slug":"not-allowlisted","auth_key_ref":"secret:svc"},"body_json":"{}"}"#,
+        403,
+        |body| {
+            assert_eq!(body["error"]["code"], "function_denied");
+            Ok(())
+        },
+    )?;
+
+    // Authenticated + allowlisted: the gateway authorizes, mints a scoped token,
+    // builds the request, and attempts egress to the unreachable upstream → 502.
+    // Reaching this status proves the whole live pipeline ran end to end.
+    case.expect_json(
+        "POST",
+        "/v1/functions/execute",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"target":{"base_url":"https://127.0.0.1:1","function_slug":"charge-credits","auth_key_ref":"secret:svc"},"body_json":"{\"amount\":5}"}"#,
+        502,
+        |body| {
+            assert_eq!(body["error"]["code"], "function_upstream_error");
+            Ok(())
+        },
+    )?;
+
+    println!("function-egress-api scenario passed");
+    Ok(())
+}
+
 pub(crate) fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthArgs) -> Result<()> {
     let auth = AuthHarness::start(&auth_args.ferrogate_auth_bin)?;
     let case = LocalHarness::start_with_external_auth(&local.ferrogate_bin, 2, &auth.auth_addr)?;
