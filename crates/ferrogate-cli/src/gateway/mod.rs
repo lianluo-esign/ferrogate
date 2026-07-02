@@ -9,6 +9,7 @@ mod body;
 mod chat;
 mod dispatch;
 mod external_actions;
+mod function_egress;
 mod handlers;
 mod local;
 mod mcp_rpc;
