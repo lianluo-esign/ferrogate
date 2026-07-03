@@ -60,6 +60,7 @@ Success response:
     "organization_id": "org_demo",
     "team_id": null,
     "project_id": "project_gateway",
+    "workspace_id": "workspace_prod",
     "user_id": null,
     "api_key_id": "client"
   },
@@ -158,3 +159,20 @@ bindings:
 
 Third-party services do not need to use this schema internally. They only need
 to implement the REST request and response contract.
+
+For Phase 1 virtual API keys, the built-in service can resolve API keys from the
+Supabase/PostgreSQL control-plane tables instead of YAML secrets:
+
+```sh
+ferrogate-auth serve \
+  --listen 127.0.0.1:8090 \
+  --data config/auth-service.example.yaml \
+  --supabase-dsn "$SUPABASE_DB_DSN"
+```
+
+When `--supabase-dsn` is set, `/v1/auth/resolve-api-key` uses durable `api_keys`
+records: it derives the lookup prefix from the presented key, reads matching
+rows from Supabase, verifies the stored hash, and rejects disabled, revoked, or
+expired records. The YAML file may still provide tenants, roles, and bindings
+for `/v1/auth/authorize`; plaintext YAML API keys are not used for key
+resolution in this mode.

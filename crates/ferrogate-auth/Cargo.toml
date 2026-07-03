@@ -17,11 +17,14 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+blake2.workspace = true
 clap.workspace = true
 ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-storage = { path = "../ferrogate-storage" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
 
 [[bin]]
 name = "ferrogate-auth"

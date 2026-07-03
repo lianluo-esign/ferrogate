@@ -52,6 +52,7 @@ fn main() -> AnyResult<()> {
                 ferrogate_auth::serve(ferrogate_auth::AuthServiceConfig {
                     listen: args.listen,
                     data,
+                    api_key_authenticator: None,
                 })
             }
         },

@@ -11,9 +11,12 @@
 //! permission, or binding evaluation in the request hot path.
 
 use anyhow::{anyhow, Context};
+use blake2::{Blake2b512, Digest};
 use ferrogate_core::TenantContext;
+use ferrogate_storage::{RuntimeStorageRepositories, StoredApiKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use std::{
     collections::HashMap,
     fs,
@@ -21,9 +24,11 @@ use std::{
     net::{TcpListener, TcpStream},
     path::Path,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const VIRTUAL_API_KEY_PREFIX_CHARS: usize = 16;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthServiceData {
@@ -109,8 +114,102 @@ pub struct AuthDecision {
     pub scopes: Vec<String>,
 }
 
-pub trait ApiKeyAuthenticator {
+pub trait ApiKeyAuthenticator: Send + Sync {
     fn authenticate(&self, presented_key: &str) -> Option<AuthDecision>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualApiKeyMaterial {
+    pub key_prefix: String,
+    pub key_hash: String,
+    pub last4: String,
+}
+
+pub fn virtual_api_key_material(secret: &str) -> Option<VirtualApiKeyMaterial> {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return None;
+    }
+    Some(VirtualApiKeyMaterial {
+        key_prefix: virtual_api_key_prefix(secret)?,
+        key_hash: hash_virtual_api_key_secret(secret),
+        last4: secret
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
+    })
+}
+
+pub fn hash_virtual_api_key_secret(secret: &str) -> String {
+    let digest = Sha256::digest(secret.trim().as_bytes());
+    format!("sha256:{}", encode_hex(&digest))
+}
+
+#[derive(Clone)]
+pub struct StorageApiKeyAuthenticator {
+    repositories: Arc<RuntimeStorageRepositories>,
+    now_unix_seconds: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl std::fmt::Debug for StorageApiKeyAuthenticator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StorageApiKeyAuthenticator")
+            .field("repositories", &"RuntimeStorageRepositories")
+            .finish_non_exhaustive()
+    }
+}
+
+impl StorageApiKeyAuthenticator {
+    pub fn new(repositories: Arc<RuntimeStorageRepositories>) -> Self {
+        Self {
+            repositories,
+            now_unix_seconds: Arc::new(now_unix_seconds),
+        }
+    }
+
+    pub fn with_clock(
+        repositories: Arc<RuntimeStorageRepositories>,
+        now_unix_seconds: Arc<dyn Fn() -> u64 + Send + Sync>,
+    ) -> Self {
+        Self {
+            repositories,
+            now_unix_seconds,
+        }
+    }
+}
+
+impl ApiKeyAuthenticator for StorageApiKeyAuthenticator {
+    fn authenticate(&self, presented_key: &str) -> Option<AuthDecision> {
+        let presented_key = presented_key.trim();
+        let key_prefix = virtual_api_key_prefix(presented_key)?;
+        let now_unix_seconds = (self.now_unix_seconds)();
+        let candidates = self
+            .repositories
+            .find_api_key_records_by_prefix(&key_prefix)
+            .ok()?;
+
+        candidates.into_iter().find_map(|api_key| {
+            if !api_key_record_is_active(&api_key, now_unix_seconds)
+                || !api_key_record_last4_matches(&api_key, presented_key)
+                || !verify_virtual_api_key_secret(presented_key, &api_key.key_hash)
+            {
+                return None;
+            }
+
+            Some(AuthDecision {
+                tenant: api_key_tenant_context(&api_key),
+                subject: PolicySubject::ApiKey {
+                    api_key_id: api_key.id.clone(),
+                },
+                scopes: api_key.scopes,
+            })
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -177,16 +276,88 @@ impl ApiKeyAuthenticator for RbacAuthService {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+pub struct AuthService {
+    rbac: RbacAuthService,
+    api_key_authenticator: Arc<dyn ApiKeyAuthenticator>,
+}
+
+impl std::fmt::Debug for AuthService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthService")
+            .field("rbac", &self.rbac)
+            .field("api_key_authenticator", &"dyn ApiKeyAuthenticator")
+            .finish()
+    }
+}
+
+impl AuthService {
+    pub fn from_data(data: AuthServiceData) -> Self {
+        let rbac = RbacAuthService::new(data);
+        let api_key_authenticator = Arc::new(rbac.clone());
+        Self {
+            rbac,
+            api_key_authenticator,
+        }
+    }
+
+    pub fn with_api_key_authenticator(
+        data: AuthServiceData,
+        api_key_authenticator: Arc<dyn ApiKeyAuthenticator>,
+    ) -> Self {
+        Self {
+            rbac: RbacAuthService::new(data),
+            api_key_authenticator,
+        }
+    }
+
+    pub fn tenants(&self) -> &[TenantRecord] {
+        self.rbac.tenants()
+    }
+
+    pub fn authorize(&self, request: &AuthorizeRequest) -> AuthorizationDecision {
+        self.rbac.authorize(request)
+    }
+
+    pub fn authenticate(&self, presented_key: &str) -> Option<AuthDecision> {
+        self.api_key_authenticator.authenticate(presented_key)
+    }
+}
+
+#[derive(Clone)]
 pub struct AuthServiceConfig {
     pub listen: String,
     pub data: AuthServiceData,
+    pub api_key_authenticator: Option<Arc<dyn ApiKeyAuthenticator>>,
+}
+
+impl std::fmt::Debug for AuthServiceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthServiceConfig")
+            .field("listen", &self.listen)
+            .field("data", &self.data)
+            .field(
+                "api_key_authenticator",
+                &self
+                    .api_key_authenticator
+                    .as_ref()
+                    .map(|_| "dyn ApiKeyAuthenticator"),
+            )
+            .finish()
+    }
 }
 
 pub fn serve(config: AuthServiceConfig) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.listen)
         .with_context(|| format!("failed to bind ferrogate-auth on {}", config.listen))?;
-    let service = Arc::new(RbacAuthService::new(config.data));
+    let service = Arc::new(match config.api_key_authenticator {
+        Some(api_key_authenticator) => {
+            AuthService::with_api_key_authenticator(config.data, api_key_authenticator)
+        }
+        None => AuthService::from_data(config.data),
+    });
     println!("ferrogate-auth listening on {}", config.listen);
 
     for stream in listener.incoming() {
@@ -225,7 +396,7 @@ pub struct AuthorizationDecision {
     pub reason: String,
 }
 
-fn handle_connection(mut stream: TcpStream, service: &RbacAuthService) -> anyhow::Result<()> {
+fn handle_connection(mut stream: TcpStream, service: &AuthService) -> anyhow::Result<()> {
     let request = read_http_request(&mut stream)?;
     let response = route_request(service, request);
     stream
@@ -233,7 +404,7 @@ fn handle_connection(mut stream: TcpStream, service: &RbacAuthService) -> anyhow
         .context("failed to write auth service response")
 }
 
-fn route_request(service: &RbacAuthService, request: HttpRequest) -> HttpResponse {
+fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") | ("GET", "/v1/healthz") => HttpResponse::json(
             200,
@@ -421,9 +592,86 @@ fn default_true() -> bool {
     true
 }
 
+fn virtual_api_key_prefix(secret: &str) -> Option<String> {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return None;
+    }
+    Some(secret.chars().take(VIRTUAL_API_KEY_PREFIX_CHARS).collect())
+}
+
+fn verify_virtual_api_key_secret(secret: &str, expected_hash: &str) -> bool {
+    if let Some(expected) = expected_hash.strip_prefix("sha256:") {
+        let digest = Sha256::digest(secret.as_bytes());
+        return constant_time_eq(encode_hex(&digest).as_bytes(), expected.as_bytes());
+    }
+    if let Some(expected) = expected_hash.strip_prefix("blake2b:") {
+        let digest = Blake2b512::digest(secret.as_bytes());
+        return constant_time_eq(encode_hex(&digest).as_bytes(), expected.as_bytes());
+    }
+    false
+}
+
+fn api_key_record_is_active(api_key: &StoredApiKey, now_unix_seconds: u64) -> bool {
+    api_key.enabled
+        && api_key.revoked_at_unix.is_none()
+        && api_key
+            .expires_at_unix
+            .is_none_or(|expires_at| expires_at > now_unix_seconds)
+}
+
+fn api_key_record_last4_matches(api_key: &StoredApiKey, presented_key: &str) -> bool {
+    api_key.last4.is_empty() || presented_key.ends_with(&api_key.last4)
+}
+
+fn api_key_tenant_context(api_key: &StoredApiKey) -> TenantContext {
+    let mut tenant = api_key.tenant.clone();
+    if tenant.organization_id.is_none() && !api_key.tenant_id.is_empty() {
+        tenant.organization_id = Some(api_key.tenant_id.clone());
+    }
+    if tenant.project_id.is_none() && !api_key.project_id.is_empty() {
+        tenant.project_id = Some(api_key.project_id.clone());
+    }
+    if tenant.workspace_id.is_none() && !api_key.workspace_id.is_empty() {
+        tenant.workspace_id = Some(api_key.workspace_id.clone());
+    }
+    tenant.api_key_id = Some(api_key.id.clone());
+    tenant
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrogate_core::WorkspaceScope;
+    use ferrogate_storage::{RuntimeControlPlaneState, RuntimeStorageBackend, StorageProviderKind};
 
     #[test]
     fn denies_when_no_binding_matches() {
@@ -462,6 +710,79 @@ mod tests {
         assert_eq!(decision.reason, "matched_rbac_binding");
     }
 
+    #[test]
+    fn storage_authenticator_resolves_active_hashed_api_key() {
+        let secret = "fg_live_1234567890abcdef";
+        let repositories = storage_with_api_key(stored_api_key("key-live", secret, |key| {
+            key.scopes = vec!["chat.completions".into()];
+        }));
+        let authenticator =
+            StorageApiKeyAuthenticator::with_clock(repositories, Arc::new(|| 1_700_000_000));
+
+        let decision = authenticator.authenticate(secret).unwrap();
+
+        assert_eq!(decision.scopes, ["chat.completions"]);
+        assert_eq!(
+            decision.subject,
+            PolicySubject::ApiKey {
+                api_key_id: "key-live".into()
+            }
+        );
+        assert_eq!(decision.tenant.organization_id.as_deref(), Some("tenant-1"));
+        assert_eq!(decision.tenant.project_id.as_deref(), Some("project-1"));
+        assert_eq!(decision.tenant.workspace_id.as_deref(), Some("workspace-1"));
+        assert_eq!(decision.tenant.api_key_id.as_deref(), Some("key-live"));
+    }
+
+    #[test]
+    fn storage_authenticator_rejects_wrong_disabled_revoked_and_expired_keys() {
+        let secret = "fg_live_1234567890abcdef";
+        let authenticator = StorageApiKeyAuthenticator::with_clock(
+            storage_with_api_key(stored_api_key("key-disabled", secret, |key| {
+                key.enabled = false;
+            })),
+            Arc::new(|| 1_700_000_000),
+        );
+        assert!(authenticator.authenticate(secret).is_none());
+
+        let authenticator = StorageApiKeyAuthenticator::with_clock(
+            storage_with_api_key(stored_api_key("key-revoked", secret, |key| {
+                key.revoked_at_unix = Some(1_699_999_999);
+            })),
+            Arc::new(|| 1_700_000_000),
+        );
+        assert!(authenticator.authenticate(secret).is_none());
+
+        let authenticator = StorageApiKeyAuthenticator::with_clock(
+            storage_with_api_key(stored_api_key("key-expired", secret, |key| {
+                key.expires_at_unix = Some(1_700_000_000);
+            })),
+            Arc::new(|| 1_700_000_000),
+        );
+        assert!(authenticator.authenticate(secret).is_none());
+
+        let authenticator = StorageApiKeyAuthenticator::with_clock(
+            storage_with_api_key(stored_api_key("key-live", secret, |_| {})),
+            Arc::new(|| 1_700_000_000),
+        );
+        assert!(authenticator
+            .authenticate("fg_live_wrong00000000")
+            .is_none());
+    }
+
+    #[test]
+    fn storage_authenticator_supports_existing_blake2b_hashes() {
+        let secret = "fg_live_1234567890abcdef";
+        let repositories = storage_with_api_key(stored_api_key("key-live", secret, |key| {
+            let digest = Blake2b512::digest(secret.as_bytes());
+            key.key_hash = format!("blake2b:{}", encode_hex(&digest));
+        }));
+        let authenticator =
+            StorageApiKeyAuthenticator::with_clock(repositories, Arc::new(|| 1_700_000_000));
+
+        assert!(authenticator.authenticate(secret).is_some());
+    }
+
     fn authorize_request() -> AuthorizeRequest {
         AuthorizeRequest {
             tenant: tenant(),
@@ -482,5 +803,80 @@ mod tests {
             user_id: None,
             api_key_id: Some("key".into()),
         }
+    }
+
+    fn storage_with_api_key(api_key: StoredApiKey) -> Arc<RuntimeStorageRepositories> {
+        let mut control_plane = RuntimeControlPlaneState::new();
+        control_plane.upsert_tenant_account(ferrogate_storage::StoredTenantAccount {
+            id: "tenant-1".into(),
+            name: "Tenant 1".into(),
+            slug: "tenant-1".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        });
+        control_plane.upsert_project(ferrogate_storage::StoredProject {
+            id: "project-1".into(),
+            tenant_id: "tenant-1".into(),
+            name: "Project 1".into(),
+            slug: "project-1".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        });
+        control_plane.upsert_workspace(ferrogate_storage::StoredWorkspace {
+            id: "workspace-1".into(),
+            tenant_id: "tenant-1".into(),
+            project_id: "project-1".into(),
+            name: "Workspace 1".into(),
+            slug: "workspace-1".into(),
+            environment: "prod".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        });
+        control_plane.upsert_api_key_record(api_key);
+        Arc::new(RuntimeStorageRepositories::new(
+            RuntimeStorageBackend::in_memory(vec![StorageProviderKind::Memory]),
+            control_plane,
+            0,
+            0,
+        ))
+    }
+
+    fn stored_api_key(
+        id: &str,
+        secret: &str,
+        mutate: impl FnOnce(&mut StoredApiKey),
+    ) -> StoredApiKey {
+        let material = virtual_api_key_material(secret).unwrap();
+        let scope = WorkspaceScope::new("tenant-1", "project-1", "workspace-1");
+        let mut tenant = TenantContext::default();
+        scope.apply_to(&mut tenant);
+        tenant.api_key_id = Some(id.into());
+        let mut key = StoredApiKey {
+            id: id.into(),
+            workspace_id: scope.workspace_id,
+            tenant_id: scope.tenant_id,
+            project_id: scope.project_id,
+            name: "Live key".into(),
+            key_prefix: material.key_prefix,
+            key_hash: material.key_hash,
+            last4: material.last4,
+            enabled: true,
+            scopes: Vec::new(),
+            allowed_models: Vec::new(),
+            allowed_providers: Vec::new(),
+            tenant,
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            rotated_at_unix: None,
+            expires_at_unix: None,
+            revoked_at_unix: None,
+        };
+        mutate(&mut key);
+        key
     }
 }
