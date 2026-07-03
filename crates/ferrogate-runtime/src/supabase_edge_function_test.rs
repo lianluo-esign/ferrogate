@@ -120,38 +120,3 @@ fn build_http_request_rejects_empty_resolved_key_and_bad_method() {
         Err(SupabaseEdgeFunctionError::UnsupportedMethod(_))
     ));
 }
-
-#[test]
-fn into_managed_rest_action_carries_no_secret_material() {
-    let invocation = SupabaseEdgeFunctionInvocation::post(target(), r#"{"x":1}"#);
-    let action = invocation.into_managed_rest_action().unwrap();
-
-    assert_eq!(action.method, "POST");
-    assert_eq!(
-        action.url,
-        "https://abcdefgh.supabase.co/functions/v1/charge-credits"
-    );
-    // Only the *reference* is present; the resolved key must be resolved at
-    // execution time, never embedded in the governed action.
-    assert_eq!(
-        action.headers_policy,
-        "supabase_edge_function:secret:service-role"
-    );
-    assert_eq!(action.body_policy, "json");
-    assert!(!action.headers_policy.contains("Bearer"));
-
-    // An empty body maps to the "none" body policy.
-    let empty_body = SupabaseEdgeFunctionInvocation::post(target(), "   ");
-    assert_eq!(
-        empty_body.into_managed_rest_action().unwrap().body_policy,
-        "none"
-    );
-}
-
-#[test]
-fn into_managed_rest_action_rejects_invalid_target() {
-    let mut t = target();
-    t.base_url = "http://insecure".to_string();
-    let invocation = SupabaseEdgeFunctionInvocation::post(t, "{}");
-    assert!(invocation.into_managed_rest_action().is_err());
-}

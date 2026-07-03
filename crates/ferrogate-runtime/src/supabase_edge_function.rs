@@ -9,19 +9,17 @@
 //! A "function" in the agent-native loop is invoked through a Supabase edge
 //! function at `{project_base_url}/functions/v1/{slug}`. This module models that
 //! target, validates it (fail-closed), and builds the governed HTTP request —
-//! including the `Authorization`/`apikey` headers — from a *reference* to a
-//! stored secret rather than an inline credential, so the invocation flows
-//! through the same capability/tenant governance as any other external egress.
+//! including the `Authorization`/`apikey` headers — from a [`FunctionCredential`]
+//! resolved at call time rather than an inline secret.
 //!
-//! Request construction is pure and fully testable; live TLS execution reuses
-//! the managed REST egress path (`ManagedExternalAction::Rest`) via
-//! [`SupabaseEdgeFunctionInvocation::into_managed_rest_action`].
+//! Request construction is pure and fully testable. The gateway function egress
+//! broker (`/v1/functions/execute`) authorizes the target against a per-tenant
+//! allowlist, mints a scoped token, calls [`SupabaseEdgeFunctionInvocation::build_http_request`],
+//! and executes the result through the gateway's TLS egress executor.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-
-use crate::managed_external_action::ManagedRestAction;
 
 /// Default per-call timeout for an edge-function invocation.
 pub const DEFAULT_EDGE_FUNCTION_TIMEOUT_MILLIS: u64 = 30_000;
@@ -221,27 +219,6 @@ impl SupabaseEdgeFunctionInvocation {
             url: self.target.invocation_url(),
             headers,
             body: self.body_json.clone(),
-        })
-    }
-
-    /// Adapt into a governed managed REST action so the invocation flows through
-    /// the existing external-action capability/tenant governance and egress path.
-    /// The credential is resolved at execution time via `auth_key_ref`, so no
-    /// secret material is embedded here.
-    pub fn into_managed_rest_action(self) -> Result<ManagedRestAction, SupabaseEdgeFunctionError> {
-        let method = self.normalized_method()?;
-        self.target.validate()?;
-        Ok(ManagedRestAction {
-            method,
-            url: self.target.invocation_url(),
-            headers_policy: format!("supabase_edge_function:{}", self.target.auth_key_ref),
-            body_policy: if self.body_json.trim().is_empty() {
-                "none".to_string()
-            } else {
-                "json".to_string()
-            },
-            timeout_millis: self.timeout_millis.max(1),
-            retry_limit: 0,
         })
     }
 }
