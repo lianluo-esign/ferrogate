@@ -8366,6 +8366,7 @@ mod tests {
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext {
+                workspace_id: None,
                 organization_id: Some("org".into()),
                 team_id: None,
                 project_id: Some("project".into()),
@@ -8418,6 +8419,7 @@ mod tests {
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: ferrogate_core::TenantContext {
+                workspace_id: None,
                 organization_id: None,
                 team_id: None,
                 project_id: None,
@@ -8563,6 +8565,7 @@ mod tests {
     fn self_hosted_worker_records_page_reads_storage_evidence() {
         let state = AppState::new(Config::default());
         let tenant = ferrogate_core::TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -8713,6 +8716,7 @@ mod tests {
     fn self_hosted_run_timeline_reads_reported_lifecycle_events() {
         let state = AppState::new(Config::default());
         let tenant = ferrogate_core::TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -8782,6 +8786,7 @@ mod tests {
         config.storage.admin_list_max_limit = 2;
         let state = AppState::new(config);
         let tenant = ferrogate_core::TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -8896,6 +8901,7 @@ mod tests {
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
+                        workspace_id: None,
                         organization_id: Some("org".into()),
                         team_id: None,
                         project_id: Some("project".into()),
@@ -9017,6 +9023,7 @@ mod tests {
     fn register_self_hosted_worker_rejects_invalid_registration_payloads() {
         let state = AppState::new(Config::default());
         let tenant = ferrogate_core::TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -9159,6 +9166,7 @@ mod tests {
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
+                        workspace_id: None,
                         organization_id: Some("org".into()),
                         team_id: None,
                         project_id: Some("project".into()),
@@ -9291,6 +9299,7 @@ mod tests {
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
+                        workspace_id: None,
                         organization_id: Some("org".into()),
                         team_id: None,
                         project_id: Some("project".into()),
@@ -9416,6 +9425,7 @@ mod tests {
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
+                        workspace_id: None,
                         organization_id: Some("org".into()),
                         team_id: None,
                         project_id: Some("project".into()),
@@ -9571,6 +9581,7 @@ mod tests {
             .register_self_hosted_worker(
                 crate::responses::AdminSelfHostedWorkerRegistrationRequest {
                     tenant: ferrogate_core::TenantContext {
+                        workspace_id: None,
                         organization_id: Some("org".into()),
                         team_id: None,
                         project_id: Some("project".into()),

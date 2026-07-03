@@ -478,6 +478,7 @@ mod tests {
             organization_id: Some("org".into()),
             team_id: Some("team".into()),
             project_id: Some("project".into()),
+            workspace_id: None,
             user_id: None,
             api_key_id: Some("key".into()),
         }

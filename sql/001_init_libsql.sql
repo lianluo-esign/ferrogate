@@ -17,6 +17,51 @@ CREATE TABLE IF NOT EXISTS control_plane_resources (
 CREATE INDEX IF NOT EXISTS idx_control_plane_resources_kind
     ON control_plane_resources(resource_kind, resource_id);
 
+-- Multi-tenant hierarchy: Tenant -> Project -> Workspace.
+-- Virtual API keys (added in a later migration) bind to a workspace and resolve
+-- upward to project_id and tenant_id for routing, quota, metering, and audit.
+CREATE TABLE IF NOT EXISTS tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (tenant_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_tenant
+    ON projects(tenant_id);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    environment TEXT NOT NULL DEFAULT 'default',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at_unix INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (project_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_project
+    ON workspaces(project_id);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_tenant
+    ON workspaces(tenant_id);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -25,3 +70,6 @@ CREATE TABLE IF NOT EXISTS storage_schema_migrations (
 
 INSERT OR IGNORE INTO storage_schema_migrations (version, name)
 VALUES (1, '001_init_libsql');
+
+INSERT OR IGNORE INTO storage_schema_migrations (version, name)
+VALUES (9, '009_multi_tenant_hierarchy');

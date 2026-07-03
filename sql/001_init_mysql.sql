@@ -15,6 +15,55 @@ CREATE TABLE IF NOT EXISTS control_plane_resources (
     INDEX idx_control_plane_resources_kind (resource_kind, resource_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Multi-tenant hierarchy: Tenant -> Project -> Workspace.
+-- Virtual API keys (added in a later migration) bind to a workspace and resolve
+-- upward to project_id and tenant_id for routing, quota, metering, and audit.
+CREATE TABLE IF NOT EXISTS tenants (
+    id VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) NOT NULL,
+    status VARCHAR(64) NOT NULL DEFAULT 'active',
+    created_at_unix BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at_unix BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_tenants_slug (slug)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS projects (
+    id VARCHAR(255) NOT NULL,
+    tenant_id VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) NOT NULL,
+    status VARCHAR(64) NOT NULL DEFAULT 'active',
+    created_at_unix BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at_unix BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_projects_tenant_slug (tenant_id, slug),
+    KEY idx_projects_tenant (tenant_id),
+    CONSTRAINT fk_projects_tenant FOREIGN KEY (tenant_id)
+        REFERENCES tenants(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id VARCHAR(255) NOT NULL,
+    project_id VARCHAR(255) NOT NULL,
+    tenant_id VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) NOT NULL,
+    environment VARCHAR(64) NOT NULL DEFAULT 'default',
+    status VARCHAR(64) NOT NULL DEFAULT 'active',
+    created_at_unix BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    updated_at_unix BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_workspaces_project_slug (project_id, slug),
+    KEY idx_workspaces_project (project_id),
+    KEY idx_workspaces_tenant (tenant_id),
+    CONSTRAINT fk_workspaces_project FOREIGN KEY (project_id)
+        REFERENCES projects(id) ON DELETE CASCADE,
+    CONSTRAINT fk_workspaces_tenant FOREIGN KEY (tenant_id)
+        REFERENCES tenants(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -23,4 +72,8 @@ CREATE TABLE IF NOT EXISTS storage_schema_migrations (
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (1, '001_init_mysql')
+ON DUPLICATE KEY UPDATE name = name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (9, '009_multi_tenant_hierarchy')
 ON DUPLICATE KEY UPDATE name = name;
