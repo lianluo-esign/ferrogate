@@ -1011,6 +1011,7 @@ dependencies = [
  "http",
  "instant-acme",
  "pingora",
+ "rcgen",
  "redis",
  "regex",
  "reqwest",
