@@ -2715,6 +2715,12 @@ impl FerroGateway {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default();
+        // Persist every governed decision to the control-plane audit store so the
+        // brokered function call is auditable end to end (control plane -> DB).
+        let audit_target = format!(
+            "supabase_edge_function:{}",
+            request.target.function_slug.trim()
+        );
         let (http_request, slug) = match super::function_egress::prepare_brokered_invocation(
             config,
             &tenant_key,
@@ -2723,6 +2729,14 @@ impl FerroGateway {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "function.execute",
+                    audit_target,
+                    "denied",
+                    error.to_string(),
+                ));
                 return write_json_error(
                     session,
                     StatusCode::FORBIDDEN,
@@ -2744,6 +2758,14 @@ impl FerroGateway {
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    ctx,
+                    &auth,
+                    "function.execute",
+                    audit_target,
+                    "upstream_error",
+                    error.to_string(),
+                ));
                 return write_json_error(
                     session,
                     StatusCode::BAD_GATEWAY,
@@ -2755,6 +2777,17 @@ impl FerroGateway {
             }
         };
 
+        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+            ctx,
+            &auth,
+            "function.execute",
+            audit_target,
+            "executed",
+            format!(
+                "edge function {slug} returned status {}",
+                outcome.status_code
+            ),
+        ));
         write_json_response(session, StatusCode::OK, &outcome, &ctx.request_id).await
     }
 

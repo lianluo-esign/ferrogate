@@ -84,6 +84,10 @@ impl FunctionEgressGatewayConfig {
         allowlist_json: Option<String>,
     ) -> Option<Self> {
         let signing_secret = signing_secret.filter(|value| !value.trim().is_empty())?;
+        // The Supabase `apikey` header is required, so the broker stays disabled
+        // (fail-closed) unless it is configured too. Enabling it without an apikey
+        // would surface as a misleading per-call denial instead of a clear 503.
+        let apikey = apikey.filter(|value| !value.trim().is_empty())?;
         let minter = FunctionTokenMinter::new(FUNCTION_TOKEN_ISSUER, signing_secret).ok()?;
         let rules: Vec<FunctionEgressRule> = allowlist_json
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -91,7 +95,7 @@ impl FunctionEgressGatewayConfig {
         Some(Self {
             allowlist: FunctionEgressAllowlist::new(rules),
             minter,
-            apikey: apikey.unwrap_or_default(),
+            apikey,
         })
     }
 }

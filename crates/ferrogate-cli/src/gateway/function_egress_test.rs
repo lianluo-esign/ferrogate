@@ -129,9 +129,29 @@ fn invocation_request(slug: &str) -> FunctionInvocationRequest {
 }
 
 #[test]
-fn broker_disabled_without_signing_secret() {
-    assert!(FunctionEgressGatewayConfig::from_values(None, None, None).is_none());
-    assert!(FunctionEgressGatewayConfig::from_values(Some("   ".into()), None, None).is_none());
+fn broker_disabled_unless_secret_and_apikey_are_both_configured() {
+    // No signing secret → disabled.
+    assert!(FunctionEgressGatewayConfig::from_values(None, Some("k".into()), None).is_none());
+    assert!(
+        FunctionEgressGatewayConfig::from_values(Some("   ".into()), Some("k".into()), None)
+            .is_none()
+    );
+    // Signing secret but no apikey → disabled (fail-closed, avoids misleading
+    // per-call denials).
+    assert!(FunctionEgressGatewayConfig::from_values(Some("secret".into()), None, None).is_none());
+    assert!(FunctionEgressGatewayConfig::from_values(
+        Some("secret".into()),
+        Some("  ".into()),
+        None
+    )
+    .is_none());
+    // Both present → enabled.
+    assert!(FunctionEgressGatewayConfig::from_values(
+        Some("secret".into()),
+        Some("k".into()),
+        None
+    )
+    .is_some());
 }
 
 #[test]

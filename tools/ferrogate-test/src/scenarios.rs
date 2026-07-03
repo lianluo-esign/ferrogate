@@ -3902,6 +3902,33 @@ pub(crate) fn run_function_egress_api(args: &LocalArgs) -> Result<()> {
         },
     )?;
 
+    // Closed-loop proof: every governed function decision must be persisted to
+    // the control-plane audit store (control plane -> DB), so both the deny and
+    // the upstream-error outcomes must be readable back through the admin API.
+    case.expect_json(
+        "GET",
+        "/admin/v1/audit-events",
+        &[ADMIN_AUTH],
+        "",
+        200,
+        |body| {
+            let events = body["data"].as_array().expect("audit-events data array");
+            assert!(
+                events.iter().any(|event| {
+                    event["action"] == "function.execute" && event["outcome"] == "denied"
+                }),
+                "a denied function.execute audit event must be persisted"
+            );
+            assert!(
+                events.iter().any(|event| {
+                    event["action"] == "function.execute" && event["outcome"] == "upstream_error"
+                }),
+                "an upstream_error function.execute audit event must be persisted"
+            );
+            Ok(())
+        },
+    )?;
+
     println!("function-egress-api scenario passed");
     Ok(())
 }
