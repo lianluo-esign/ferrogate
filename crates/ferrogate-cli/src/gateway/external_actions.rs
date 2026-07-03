@@ -377,6 +377,7 @@ fn tenant_context_from_external_action(
         organization_id: Some(session.tenant_id.clone()),
         team_id: None,
         project_id: Some(session.workspace_id.clone()),
+        workspace_id: Some(session.workspace_id.clone()),
         user_id: None,
         api_key_id: None,
     }

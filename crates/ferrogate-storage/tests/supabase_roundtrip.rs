@@ -185,6 +185,7 @@ const EVENT_ID: &str = "evt-worker-rt";
 
 fn worker_lifecycle_snapshot() -> StorageMigrationSnapshot {
     let tenant = TenantContext {
+        workspace_id: None,
         organization_id: Some("org_worker".into()),
         team_id: None,
         project_id: Some("proj_worker".into()),

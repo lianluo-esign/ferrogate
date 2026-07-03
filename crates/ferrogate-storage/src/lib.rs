@@ -18,7 +18,7 @@ use std::{
 };
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
-use ferrogate_core::TenantContext;
+use ferrogate_core::{TenantContext, WorkspaceScope};
 use mysql::prelude::Queryable;
 use mysql::{
     params, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, SslOpts, TxOpts,
@@ -310,8 +310,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 8;
-const POSTGRES_SCHEMA_NAME: &str = "008_managed_worker_isolation_evidence";
+const POSTGRES_SCHEMA_VERSION: u64 = 9;
+const POSTGRES_SCHEMA_NAME: &str = "009_multi_tenant_hierarchy";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -743,6 +743,9 @@ pub struct RuntimeControlPlaneState {
     mcp_servers: InMemoryRepository<StoredControlPlaneResource>,
     agent_upstreams: InMemoryRepository<StoredControlPlaneResource>,
     tool_approvals: InMemoryRepository<StoredControlPlaneResource>,
+    tenant_accounts: InMemoryRepository<StoredTenantAccount>,
+    projects: InMemoryRepository<StoredProject>,
+    workspaces: InMemoryRepository<StoredWorkspace>,
 }
 
 struct PostgresControlPlaneStore {
@@ -982,6 +985,162 @@ impl PostgresControlPlaneStore {
                 &[&kind, &id],
             )?;
             Ok(rows_changed > 0)
+        })
+    }
+
+    fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO tenants (id, name, slug, status, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 name = EXCLUDED.name, slug = EXCLUDED.slug, status = EXCLUDED.status, \
+                 updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &account.id,
+                    &account.name,
+                    &account.slug,
+                    &account.status,
+                    &account.created_at_unix,
+                    &account.updated_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_tenant_account(&self, id: &str) -> Result<Option<StoredTenantAccount>, StorageError> {
+        self.with_client(|client| {
+            let row = client.query_opt(
+                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM tenants WHERE id = $1",
+                &[&id],
+            )?;
+            Ok(row.as_ref().map(tenant_account_from_row))
+        })
+    }
+
+    fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM tenants ORDER BY id ASC",
+                &[],
+            )?;
+            Ok(rows.iter().map(tenant_account_from_row).collect())
+        })
+    }
+
+    fn upsert_project(&self, project: &StoredProject) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO projects \
+                 (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 tenant_id = EXCLUDED.tenant_id, name = EXCLUDED.name, slug = EXCLUDED.slug, \
+                 status = EXCLUDED.status, updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &project.id,
+                    &project.tenant_id,
+                    &project.name,
+                    &project.slug,
+                    &project.status,
+                    &project.created_at_unix,
+                    &project.updated_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+        self.with_client(|client| {
+            let row = client.query_opt(
+                "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM projects WHERE id = $1",
+                &[&id],
+            )?;
+            Ok(row.as_ref().map(project_from_row))
+        })
+    }
+
+    fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM projects ORDER BY id ASC",
+                &[],
+            )?;
+            Ok(rows.iter().map(project_from_row).collect())
+        })
+    }
+
+    fn upsert_workspace(&self, workspace: &StoredWorkspace) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO workspaces \
+                 (id, project_id, tenant_id, name, slug, environment, status, \
+                  created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 project_id = EXCLUDED.project_id, tenant_id = EXCLUDED.tenant_id, \
+                 name = EXCLUDED.name, slug = EXCLUDED.slug, environment = EXCLUDED.environment, \
+                 status = EXCLUDED.status, updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &workspace.id,
+                    &workspace.project_id,
+                    &workspace.tenant_id,
+                    &workspace.name,
+                    &workspace.slug,
+                    &workspace.environment,
+                    &workspace.status,
+                    &workspace.created_at_unix,
+                    &workspace.updated_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+        self.with_client(|client| {
+            let row = client.query_opt(
+                "SELECT id, project_id, tenant_id, name, slug, environment, status, \
+                 created_at_unix, updated_at_unix FROM workspaces WHERE id = $1",
+                &[&id],
+            )?;
+            Ok(row.as_ref().map(workspace_from_row))
+        })
+    }
+
+    fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "SELECT id, project_id, tenant_id, name, slug, environment, status, \
+                 created_at_unix, updated_at_unix FROM workspaces ORDER BY id ASC",
+                &[],
+            )?;
+            Ok(rows.iter().map(workspace_from_row).collect())
+        })
+    }
+
+    fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceScope>, StorageError> {
+        self.with_client(|client| {
+            let row = client.query_opt(
+                "SELECT tenant_id, project_id, id FROM workspaces WHERE id = $1",
+                &[&workspace_id],
+            )?;
+            Ok(row.map(|row| {
+                WorkspaceScope::new(
+                    row.get::<_, String>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, String>(2),
+                )
+            }))
         })
     }
 
@@ -2635,6 +2794,157 @@ impl MySqlControlPlaneStore {
         })
     }
 
+    fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_drop(
+                "INSERT INTO tenants (id, name, slug, status, created_at_unix, updated_at_unix) \
+                 VALUES (:id, :name, :slug, :status, :created_at_unix, :updated_at_unix) \
+                 ON DUPLICATE KEY UPDATE \
+                 name = VALUES(name), slug = VALUES(slug), status = VALUES(status), \
+                 updated_at_unix = VALUES(updated_at_unix)",
+                params! {
+                    "id" => &account.id,
+                    "name" => &account.name,
+                    "slug" => &account.slug,
+                    "status" => &account.status,
+                    "created_at_unix" => account.created_at_unix,
+                    "updated_at_unix" => account.updated_at_unix,
+                },
+            )
+        })
+    }
+
+    fn get_tenant_account(&self, id: &str) -> Result<Option<StoredTenantAccount>, StorageError> {
+        self.with_conn(|conn| {
+            let row: Option<(String, String, String, String, i64, i64)> = conn.exec_first(
+                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM tenants WHERE id = :id",
+                params! { "id" => id },
+            )?;
+            Ok(row.map(tenant_account_from_tuple))
+        })
+    }
+
+    fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+        self.with_conn(|conn| {
+            let rows: Vec<(String, String, String, String, i64, i64)> = conn.exec(
+                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM tenants ORDER BY id ASC",
+                (),
+            )?;
+            Ok(rows.into_iter().map(tenant_account_from_tuple).collect())
+        })
+    }
+
+    fn upsert_project(&self, project: &StoredProject) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_drop(
+                "INSERT INTO projects \
+                 (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) \
+                 VALUES (:id, :tenant_id, :name, :slug, :status, :created_at_unix, \
+                 :updated_at_unix) \
+                 ON DUPLICATE KEY UPDATE \
+                 tenant_id = VALUES(tenant_id), name = VALUES(name), slug = VALUES(slug), \
+                 status = VALUES(status), updated_at_unix = VALUES(updated_at_unix)",
+                params! {
+                    "id" => &project.id,
+                    "tenant_id" => &project.tenant_id,
+                    "name" => &project.name,
+                    "slug" => &project.slug,
+                    "status" => &project.status,
+                    "created_at_unix" => project.created_at_unix,
+                    "updated_at_unix" => project.updated_at_unix,
+                },
+            )
+        })
+    }
+
+    fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+        self.with_conn(|conn| {
+            let row: Option<(String, String, String, String, String, i64, i64)> = conn.exec_first(
+                "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM projects WHERE id = :id",
+                params! { "id" => id },
+            )?;
+            Ok(row.map(project_from_tuple))
+        })
+    }
+
+    fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+        self.with_conn(|conn| {
+            let rows: Vec<(String, String, String, String, String, i64, i64)> = conn.exec(
+                "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
+                 FROM projects ORDER BY id ASC",
+                (),
+            )?;
+            Ok(rows.into_iter().map(project_from_tuple).collect())
+        })
+    }
+
+    fn upsert_workspace(&self, workspace: &StoredWorkspace) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.exec_drop(
+                "INSERT INTO workspaces \
+                 (id, project_id, tenant_id, name, slug, environment, status, \
+                  created_at_unix, updated_at_unix) \
+                 VALUES (:id, :project_id, :tenant_id, :name, :slug, :environment, :status, \
+                 :created_at_unix, :updated_at_unix) \
+                 ON DUPLICATE KEY UPDATE \
+                 project_id = VALUES(project_id), tenant_id = VALUES(tenant_id), \
+                 name = VALUES(name), slug = VALUES(slug), environment = VALUES(environment), \
+                 status = VALUES(status), updated_at_unix = VALUES(updated_at_unix)",
+                params! {
+                    "id" => &workspace.id,
+                    "project_id" => &workspace.project_id,
+                    "tenant_id" => &workspace.tenant_id,
+                    "name" => &workspace.name,
+                    "slug" => &workspace.slug,
+                    "environment" => &workspace.environment,
+                    "status" => &workspace.status,
+                    "created_at_unix" => workspace.created_at_unix,
+                    "updated_at_unix" => workspace.updated_at_unix,
+                },
+            )
+        })
+    }
+
+    fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+        self.with_conn(|conn| {
+            let row: Option<WorkspaceRow> = conn.exec_first(
+                "SELECT id, project_id, tenant_id, name, slug, environment, status, \
+                 created_at_unix, updated_at_unix FROM workspaces WHERE id = :id",
+                params! { "id" => id },
+            )?;
+            Ok(row.map(workspace_from_tuple))
+        })
+    }
+
+    fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+        self.with_conn(|conn| {
+            let rows: Vec<WorkspaceRow> = conn.exec(
+                "SELECT id, project_id, tenant_id, name, slug, environment, status, \
+                 created_at_unix, updated_at_unix FROM workspaces ORDER BY id ASC",
+                (),
+            )?;
+            Ok(rows.into_iter().map(workspace_from_tuple).collect())
+        })
+    }
+
+    fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceScope>, StorageError> {
+        self.with_conn(|conn| {
+            let row: Option<(String, String, String)> = conn.exec_first(
+                "SELECT tenant_id, project_id, id FROM workspaces WHERE id = :id",
+                params! { "id" => workspace_id },
+            )?;
+            Ok(row.map(|(tenant_id, project_id, id)| {
+                WorkspaceScope::new(tenant_id, project_id, id)
+            }))
+        })
+    }
+
     fn with_conn<T: Send>(
         &self,
         action: impl FnOnce(&mut PooledConn) -> Result<T, mysql::Error> + Send,
@@ -2835,6 +3145,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "metering_event_routes",
         "metering_event_usage",
         "usage_aggregate_rollups",
+        "tenants",
+        "projects",
+        "workspaces",
         "storage_schema_migrations",
     ];
     for table in TABLES {
@@ -3011,6 +3324,99 @@ fn deserialize_storage_document<T: for<'de> Deserialize<'de>>(
     serde_json::from_str(value).map_err(|error| StorageError::Serialization(error.to_string()))
 }
 
+fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
+    StoredTenantAccount {
+        id: row.get::<_, String>(0),
+        name: row.get::<_, String>(1),
+        slug: row.get::<_, String>(2),
+        status: row.get::<_, String>(3),
+        created_at_unix: row.get::<_, i64>(4),
+        updated_at_unix: row.get::<_, i64>(5),
+    }
+}
+
+fn project_from_row(row: &PostgresRow) -> StoredProject {
+    StoredProject {
+        id: row.get::<_, String>(0),
+        tenant_id: row.get::<_, String>(1),
+        name: row.get::<_, String>(2),
+        slug: row.get::<_, String>(3),
+        status: row.get::<_, String>(4),
+        created_at_unix: row.get::<_, i64>(5),
+        updated_at_unix: row.get::<_, i64>(6),
+    }
+}
+
+fn workspace_from_row(row: &PostgresRow) -> StoredWorkspace {
+    StoredWorkspace {
+        id: row.get::<_, String>(0),
+        project_id: row.get::<_, String>(1),
+        tenant_id: row.get::<_, String>(2),
+        name: row.get::<_, String>(3),
+        slug: row.get::<_, String>(4),
+        environment: row.get::<_, String>(5),
+        status: row.get::<_, String>(6),
+        created_at_unix: row.get::<_, i64>(7),
+        updated_at_unix: row.get::<_, i64>(8),
+    }
+}
+
+fn tenant_account_from_tuple(
+    row: (String, String, String, String, i64, i64),
+) -> StoredTenantAccount {
+    let (id, name, slug, status, created_at_unix, updated_at_unix) = row;
+    StoredTenantAccount {
+        id,
+        name,
+        slug,
+        status,
+        created_at_unix,
+        updated_at_unix,
+    }
+}
+
+fn project_from_tuple(
+    row: (String, String, String, String, String, i64, i64),
+) -> StoredProject {
+    let (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) = row;
+    StoredProject {
+        id,
+        tenant_id,
+        name,
+        slug,
+        status,
+        created_at_unix,
+        updated_at_unix,
+    }
+}
+
+/// MySQL row shape for the `workspaces` table, in SELECT column order.
+type WorkspaceRow = (String, String, String, String, String, String, String, i64, i64);
+
+fn workspace_from_tuple(row: WorkspaceRow) -> StoredWorkspace {
+    let (id, project_id, tenant_id, name, slug, environment, status, created_at_unix, updated_at_unix) =
+        row;
+    StoredWorkspace {
+        id,
+        project_id,
+        tenant_id,
+        name,
+        slug,
+        environment,
+        status,
+        created_at_unix,
+        updated_at_unix,
+    }
+}
+
+fn resolve_scope_from_workspace(workspace: &StoredWorkspace) -> WorkspaceScope {
+    WorkspaceScope::new(
+        workspace.tenant_id.clone(),
+        workspace.project_id.clone(),
+        workspace.id.clone(),
+    )
+}
+
 fn tenant_storage_key(tenant: &TenantContext) -> String {
     tenant_parts_storage_key(
         tenant.organization_id.as_deref(),
@@ -3174,6 +3580,7 @@ fn billing_event_from_row(row: PostgresRow) -> BillingEvent {
         status_code: row.get::<_, i32>(8).clamp(0, i32::from(u16::MAX)) as u16,
         occurred_at_unix: Some(nonnegative_u64(row.get(9))),
         tenant: TenantContext {
+            workspace_id: None,
             organization_id: row.get(10),
             team_id: row.get(11),
             project_id: row.get(12),
@@ -3494,7 +3901,66 @@ impl RuntimeControlPlaneState {
             mcp_servers: InMemoryRepository::new(),
             agent_upstreams: InMemoryRepository::new(),
             tool_approvals: InMemoryRepository::new(),
+            tenant_accounts: InMemoryRepository::new(),
+            projects: InMemoryRepository::new(),
+            workspaces: InMemoryRepository::new(),
         }
+    }
+
+    pub fn upsert_tenant_account(&mut self, account: StoredTenantAccount) {
+        self.tenant_accounts.insert(account.id.clone(), account);
+    }
+
+    pub fn get_tenant_account(&self, id: &str) -> Option<StoredTenantAccount> {
+        self.tenant_accounts.get(id)
+    }
+
+    pub fn list_tenant_accounts(&self) -> Vec<StoredTenantAccount> {
+        self.tenant_accounts.list()
+    }
+
+    pub fn delete_tenant_account(&mut self, id: &str) -> bool {
+        self.tenant_accounts.remove(id).is_some()
+    }
+
+    pub fn upsert_project(&mut self, project: StoredProject) {
+        self.projects.insert(project.id.clone(), project);
+    }
+
+    pub fn get_project(&self, id: &str) -> Option<StoredProject> {
+        self.projects.get(id)
+    }
+
+    pub fn list_projects(&self) -> Vec<StoredProject> {
+        self.projects.list()
+    }
+
+    pub fn delete_project(&mut self, id: &str) -> bool {
+        self.projects.remove(id).is_some()
+    }
+
+    pub fn upsert_workspace(&mut self, workspace: StoredWorkspace) {
+        self.workspaces.insert(workspace.id.clone(), workspace);
+    }
+
+    pub fn get_workspace(&self, id: &str) -> Option<StoredWorkspace> {
+        self.workspaces.get(id)
+    }
+
+    pub fn list_workspaces(&self) -> Vec<StoredWorkspace> {
+        self.workspaces.list()
+    }
+
+    pub fn delete_workspace(&mut self, id: &str) -> bool {
+        self.workspaces.remove(id).is_some()
+    }
+
+    /// Resolve a workspace id to its full attribution chain using the workspace's
+    /// stored `tenant_id`/`project_id`. Returns `None` when the workspace is unknown.
+    pub fn resolve_workspace_scope(&self, workspace_id: &str) -> Option<WorkspaceScope> {
+        self.workspaces
+            .get(workspace_id)
+            .map(|workspace| resolve_scope_from_workspace(&workspace))
     }
 
     pub fn from_documents(documents: ControlPlaneDocuments) -> Self {
@@ -3830,6 +4296,64 @@ pub struct StoredTenant {
     pub id: String,
     pub name: String,
     pub tenant: TenantContext,
+}
+
+/// Top-level tenant account (billing / isolation boundary) in the
+/// Tenant -> Project -> Workspace hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTenantAccount {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    #[serde(default = "default_active_status")]
+    pub status: String,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+/// Project (business line) nested under a tenant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredProject {
+    pub id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub slug: String,
+    #[serde(default = "default_active_status")]
+    pub status: String,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+/// Workspace (environment such as dev/staging/prod) nested under a project.
+/// `tenant_id` is stored redundantly so top-level isolation and aggregation can
+/// filter workspaces without a join back through `projects`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredWorkspace {
+    pub id: String,
+    pub project_id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub slug: String,
+    #[serde(default = "default_environment")]
+    pub environment: String,
+    #[serde(default = "default_active_status")]
+    pub status: String,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+fn default_active_status() -> String {
+    "active".to_string()
+}
+
+fn default_environment() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4644,6 +5168,155 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("api_key", id.to_string())
+            }
+        }
+    }
+
+    // --- Multi-tenant hierarchy: Tenant -> Project -> Workspace ---
+
+    pub fn upsert_tenant_account(
+        &self,
+        account: StoredTenantAccount,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_tenant_account(account);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_tenant_account(&account)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert_tenant_account(&account)
+            }
+        }
+    }
+
+    pub fn get_tenant_account(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredTenantAccount>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_tenant_account(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_tenant_account(id)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.get_tenant_account(id)
+            }
+        }
+    }
+
+    pub fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_tenant_accounts())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_tenant_accounts()
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.list_tenant_accounts(),
+        }
+    }
+
+    pub fn upsert_project(&self, project: StoredProject) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_project(project);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_project(&project)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert_project(&project),
+        }
+    }
+
+    pub fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_project(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_project(id),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.get_project(id),
+        }
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_projects())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_projects(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.list_projects(),
+        }
+    }
+
+    pub fn upsert_workspace(&self, workspace: StoredWorkspace) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_workspace(workspace);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_workspace(&workspace)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert_workspace(&workspace)
+            }
+        }
+    }
+
+    pub fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_workspace(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_workspace(id),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.get_workspace(id),
+        }
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_workspaces())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_workspaces(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.list_workspaces(),
+        }
+    }
+
+    /// Resolve a workspace id to its full `tenant -> project -> workspace`
+    /// attribution chain. Returns `None` when the workspace does not exist.
+    pub fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceScope>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.resolve_workspace_scope(workspace_id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.resolve_workspace_scope(workspace_id)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.resolve_workspace_scope(workspace_id)
             }
         }
     }
@@ -5965,6 +6638,7 @@ mod tests {
                 allowed_models: vec!["fast-chat".into()],
                 allowed_providers: vec!["openai".into()],
                 tenant: TenantContext {
+                    workspace_id: None,
                     organization_id: Some("org".into()),
                     team_id: None,
                     project_id: Some("project".into()),
@@ -6179,6 +6853,7 @@ mod tests {
         let repositories =
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
         let tenant = TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -6231,6 +6906,7 @@ mod tests {
         let repositories =
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
         let tenant = TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -6383,6 +7059,7 @@ mod tests {
         let source =
             RuntimeStorageRepositories::in_memory(DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(), 10, 10);
         let tenant = TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
@@ -6526,6 +7203,7 @@ mod tests {
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
+            workspace_id: None,
             user_id: None,
             api_key_id: Some("key".into()),
         }
@@ -6896,5 +7574,149 @@ mod tests {
             })
             .unwrap();
         assert_eq!(repositories.usage_aggregates()[0].usage.total_tokens, 3);
+    }
+
+    fn memory_repositories() -> RuntimeStorageRepositories {
+        RuntimeStorageRepositories::in_memory(vec![StorageProviderKind::Memory], 0, 0)
+    }
+
+    fn sample_tenant(id: &str, slug: &str) -> StoredTenantAccount {
+        StoredTenantAccount {
+            id: id.into(),
+            name: format!("Tenant {id}"),
+            slug: slug.into(),
+            status: "active".into(),
+            created_at_unix: 100,
+            updated_at_unix: 100,
+        }
+    }
+
+    fn sample_project(id: &str, tenant_id: &str, slug: &str) -> StoredProject {
+        StoredProject {
+            id: id.into(),
+            tenant_id: tenant_id.into(),
+            name: format!("Project {id}"),
+            slug: slug.into(),
+            status: "active".into(),
+            created_at_unix: 100,
+            updated_at_unix: 100,
+        }
+    }
+
+    fn sample_workspace(id: &str, project_id: &str, tenant_id: &str, slug: &str) -> StoredWorkspace {
+        StoredWorkspace {
+            id: id.into(),
+            project_id: project_id.into(),
+            tenant_id: tenant_id.into(),
+            name: format!("Workspace {id}"),
+            slug: slug.into(),
+            environment: "dev".into(),
+            status: "active".into(),
+            created_at_unix: 100,
+            updated_at_unix: 100,
+        }
+    }
+
+    #[test]
+    fn hierarchy_upsert_get_list_roundtrip() {
+        let repositories = memory_repositories();
+
+        repositories
+            .upsert_tenant_account(sample_tenant("tenant-a", "tenant-a"))
+            .unwrap();
+        repositories
+            .upsert_project(sample_project("project-a", "tenant-a", "core"))
+            .unwrap();
+        repositories
+            .upsert_workspace(sample_workspace("ws-dev", "project-a", "tenant-a", "dev"))
+            .unwrap();
+
+        assert_eq!(
+            repositories.get_tenant_account("tenant-a").unwrap().unwrap().slug,
+            "tenant-a"
+        );
+        assert_eq!(
+            repositories.get_project("project-a").unwrap().unwrap().tenant_id,
+            "tenant-a"
+        );
+        let workspace = repositories.get_workspace("ws-dev").unwrap().unwrap();
+        assert_eq!(workspace.project_id, "project-a");
+        assert_eq!(workspace.tenant_id, "tenant-a");
+        assert_eq!(workspace.environment, "dev");
+
+        assert_eq!(repositories.list_tenant_accounts().unwrap().len(), 1);
+        assert_eq!(repositories.list_projects().unwrap().len(), 1);
+        assert_eq!(repositories.list_workspaces().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hierarchy_upsert_overwrites_existing_record() {
+        let repositories = memory_repositories();
+        repositories
+            .upsert_workspace(sample_workspace("ws-dev", "project-a", "tenant-a", "dev"))
+            .unwrap();
+        let mut updated = sample_workspace("ws-dev", "project-a", "tenant-a", "dev");
+        updated.name = "Renamed workspace".into();
+        updated.status = "disabled".into();
+        repositories.upsert_workspace(updated).unwrap();
+
+        let stored = repositories.get_workspace("ws-dev").unwrap().unwrap();
+        assert_eq!(stored.name, "Renamed workspace");
+        assert_eq!(stored.status, "disabled");
+        assert_eq!(repositories.list_workspaces().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolve_workspace_scope_returns_full_attribution_chain() {
+        let repositories = memory_repositories();
+        repositories
+            .upsert_tenant_account(sample_tenant("tenant-a", "tenant-a"))
+            .unwrap();
+        repositories
+            .upsert_project(sample_project("project-a", "tenant-a", "core"))
+            .unwrap();
+        repositories
+            .upsert_workspace(sample_workspace("ws-prod", "project-a", "tenant-a", "prod"))
+            .unwrap();
+
+        let scope = repositories
+            .resolve_workspace_scope("ws-prod")
+            .unwrap()
+            .expect("workspace resolves");
+        assert_eq!(scope.tenant_id, "tenant-a");
+        assert_eq!(scope.project_id, "project-a");
+        assert_eq!(scope.workspace_id, "ws-prod");
+
+        // A resolved scope backfills a TenantContext with the full chain.
+        let mut tenant = TenantContext::default();
+        scope.apply_to(&mut tenant);
+        assert_eq!(tenant.organization_id.as_deref(), Some("tenant-a"));
+        assert_eq!(tenant.project_id.as_deref(), Some("project-a"));
+        assert_eq!(tenant.workspace_id.as_deref(), Some("ws-prod"));
+    }
+
+    #[test]
+    fn resolve_workspace_scope_unknown_workspace_is_none() {
+        let repositories = memory_repositories();
+        assert!(repositories
+            .resolve_workspace_scope("missing")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn stored_workspace_deserializes_with_default_fields() {
+        // A minimal document (predating environment/status defaults) still loads.
+        let json = r#"{
+            "id": "ws-1",
+            "project_id": "project-1",
+            "tenant_id": "tenant-1",
+            "name": "Workspace 1",
+            "slug": "ws-1"
+        }"#;
+        let workspace: StoredWorkspace = serde_json::from_str(json).unwrap();
+        assert_eq!(workspace.environment, "default");
+        assert_eq!(workspace.status, "active");
+        assert_eq!(workspace.created_at_unix, 0);
     }
 }

@@ -63,6 +63,7 @@ fn in_memory_sink_records_billing_events() {
         cluster_id: None,
         node_id: None,
         tenant: TenantContext {
+            workspace_id: None,
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),

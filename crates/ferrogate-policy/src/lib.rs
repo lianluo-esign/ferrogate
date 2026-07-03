@@ -197,6 +197,7 @@ mod tests {
             route: Some("openai.chat.completions".into()),
             upstream: Some("openai".into()),
             tenant: TenantContext {
+                workspace_id: None,
                 organization_id: Some(organization_id.into()),
                 team_id: None,
                 project_id: Some(project_id.into()),

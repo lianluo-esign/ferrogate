@@ -62,6 +62,7 @@ impl AuthContext {
             organization_id: self.organization_id.clone(),
             team_id: self.team_id.clone(),
             project_id: self.project_id.clone(),
+            workspace_id: None,
             user_id: self.user_id.clone(),
             api_key_id: self.api_key_id.clone(),
         }

@@ -565,6 +565,51 @@ CREATE TABLE IF NOT EXISTS usage_aggregate_rollups (
 CREATE INDEX IF NOT EXISTS idx_usage_rollups_tenant_model_provider
     ON usage_aggregate_rollups(tenant_context_id, logical_model, provider);
 
+-- Multi-tenant hierarchy: Tenant -> Project -> Workspace.
+-- Virtual API keys (added in a later migration) bind to a workspace and resolve
+-- upward to project_id and tenant_id for routing, quota, metering, and audit.
+CREATE TABLE IF NOT EXISTS tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (tenant_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_tenant
+    ON projects(tenant_id);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    environment TEXT NOT NULL DEFAULT 'default',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (project_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_project
+    ON workspaces(project_id);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_tenant
+    ON workspaces(tenant_id);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -612,5 +657,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (8, '008_managed_worker_isolation_evidence')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (9, '009_multi_tenant_hierarchy')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

@@ -591,6 +591,7 @@ mod tests {
             cluster_id: Some("cluster-a".into()),
             node_id: Some("node-a".into()),
             tenant: ferrogate_core::TenantContext {
+                workspace_id: None,
                 organization_id: Some("org_demo".into()),
                 team_id: None,
                 project_id: Some("project_gateway".into()),

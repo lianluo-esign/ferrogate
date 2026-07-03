@@ -15,6 +15,7 @@ use proptest::prelude::*;
 fn request(org: &str, project: &str, key: &str) -> RequestContext {
     RequestContext {
         tenant: TenantContext {
+            workspace_id: None,
             organization_id: Some(org.to_string()),
             team_id: None,
             project_id: Some(project.to_string()),

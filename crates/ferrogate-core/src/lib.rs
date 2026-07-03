@@ -37,13 +37,53 @@ pub struct RequestContext {
 }
 
 /// Tenant fields resolved from virtual API keys or future admin control-plane data.
+///
+/// `organization_id` is the top-level tenant/billing boundary, `project_id` the
+/// business-line grouping, and `workspace_id` the environment (dev/staging/prod)
+/// that a virtual API key ultimately binds to. `workspace_id` is additive and
+/// `#[serde(default)]` so existing serialized contexts (which predate the
+/// multi-tenant hierarchy) still deserialize unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantContext {
     pub organization_id: Option<String>,
     pub team_id: Option<String>,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+}
+
+/// Fully resolved attribution chain for a workspace: the workspace itself plus the
+/// project and tenant it rolls up to. Produced when a virtual API key (bound to a
+/// workspace) is resolved, and reused for routing, quota, metering, and audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceScope {
+    pub tenant_id: String,
+    pub project_id: String,
+    pub workspace_id: String,
+}
+
+impl WorkspaceScope {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        project_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            project_id: project_id.into(),
+            workspace_id: workspace_id.into(),
+        }
+    }
+
+    /// Overlay this scope onto a [`TenantContext`], mapping the tenant to
+    /// `organization_id`, and filling `project_id` / `workspace_id`.
+    pub fn apply_to(&self, tenant: &mut TenantContext) {
+        tenant.organization_id = Some(self.tenant_id.clone());
+        tenant.project_id = Some(self.project_id.clone());
+        tenant.workspace_id = Some(self.workspace_id.clone());
+    }
 }
 
 /// Canonical tool definition shared by provider adapters.
@@ -86,5 +126,55 @@ impl GatewayError {
             code: code.into(),
             message: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenant_context_deserializes_legacy_payload_without_workspace_id() {
+        // Payload written before the multi-tenant hierarchy existed: no workspace_id.
+        let legacy = r#"{
+            "organization_id": "org-1",
+            "team_id": "team-1",
+            "project_id": "proj-1",
+            "user_id": "user-1",
+            "api_key_id": "key-1"
+        }"#;
+
+        let tenant: TenantContext = serde_json::from_str(legacy).expect("legacy payload deserializes");
+        assert_eq!(tenant.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(tenant.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(tenant.workspace_id, None);
+    }
+
+    #[test]
+    fn tenant_context_roundtrips_with_workspace_id() {
+        let tenant = TenantContext {
+            organization_id: Some("org-1".into()),
+            team_id: None,
+            project_id: Some("proj-1".into()),
+            workspace_id: Some("ws-1".into()),
+            user_id: None,
+            api_key_id: Some("key-1".into()),
+        };
+
+        let encoded = serde_json::to_string(&tenant).expect("serialize");
+        let decoded: TenantContext = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, tenant);
+        assert_eq!(decoded.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    #[test]
+    fn workspace_scope_applies_attribution_chain() {
+        let scope = WorkspaceScope::new("tenant-1", "project-1", "workspace-1");
+        let mut tenant = TenantContext::default();
+        scope.apply_to(&mut tenant);
+
+        assert_eq!(tenant.organization_id.as_deref(), Some("tenant-1"));
+        assert_eq!(tenant.project_id.as_deref(), Some("project-1"));
+        assert_eq!(tenant.workspace_id.as_deref(), Some("workspace-1"));
     }
 }

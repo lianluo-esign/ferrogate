@@ -1202,6 +1202,7 @@ mod tests {
             "fg-1",
             Some("trace-1".to_string()),
             TenantContext {
+                workspace_id: None,
                 organization_id: Some("org".to_string()),
                 team_id: None,
                 project_id: Some("project".to_string()),
@@ -1251,6 +1252,7 @@ mod tests {
             trace_id: Some("trace-1".to_string()),
             actor_api_key_id: Some("key".to_string()),
             tenant: TenantContext {
+                workspace_id: None,
                 organization_id: Some("tenant-1".to_string()),
                 team_id: None,
                 project_id: Some("workspace-1".to_string()),
