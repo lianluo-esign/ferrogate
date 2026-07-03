@@ -2884,88 +2884,6 @@ impl MySqlControlPlaneStore {
         })
     }
 
-    fn upsert_api_key_record(&self, api_key: &StoredApiKey) -> Result<(), StorageError> {
-        let scopes_json = serialize_storage_document(&api_key.scopes)?;
-        self.with_conn(|conn| {
-            conn.exec_drop(
-                "INSERT INTO api_keys \
-                 (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, \
-                  enabled, scopes_json, created_at_unix, updated_at_unix, rotated_at_unix, \
-                  expires_at_unix, revoked_at_unix) \
-                 VALUES (:id, :workspace_id, :tenant_id, :project_id, :name, :key_prefix, \
-                 :key_hash, :last4, :enabled, :scopes_json, :created_at_unix, :updated_at_unix, \
-                 :rotated_at_unix, :expires_at_unix, :revoked_at_unix) \
-                 ON DUPLICATE KEY UPDATE \
-                 workspace_id = VALUES(workspace_id), tenant_id = VALUES(tenant_id), \
-                 project_id = VALUES(project_id), name = VALUES(name), \
-                 key_prefix = VALUES(key_prefix), key_hash = VALUES(key_hash), \
-                 last4 = VALUES(last4), enabled = VALUES(enabled), \
-                 scopes_json = VALUES(scopes_json), updated_at_unix = VALUES(updated_at_unix), \
-                 rotated_at_unix = VALUES(rotated_at_unix), expires_at_unix = VALUES(expires_at_unix), \
-                 revoked_at_unix = VALUES(revoked_at_unix)",
-                params! {
-                    "id" => &api_key.id,
-                    "workspace_id" => &api_key.workspace_id,
-                    "tenant_id" => &api_key.tenant_id,
-                    "project_id" => &api_key.project_id,
-                    "name" => &api_key.name,
-                    "key_prefix" => &api_key.key_prefix,
-                    "key_hash" => &api_key.key_hash,
-                    "last4" => &api_key.last4,
-                    "enabled" => api_key.enabled,
-                    "scopes_json" => &scopes_json,
-                    "created_at_unix" => saturating_i64(api_key.created_at_unix),
-                    "updated_at_unix" => saturating_i64(api_key.updated_at_unix),
-                    "rotated_at_unix" => api_key.rotated_at_unix.map(saturating_i64),
-                    "expires_at_unix" => api_key.expires_at_unix.map(saturating_i64),
-                    "revoked_at_unix" => api_key.revoked_at_unix.map(saturating_i64),
-                },
-            )
-        })
-    }
-
-    fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
-        let row = self.with_conn(|conn| {
-            conn.exec_first::<mysql::Row, _, _>(
-                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
-                 last4, enabled, scopes_json, created_at_unix, updated_at_unix, \
-                 rotated_at_unix, expires_at_unix, revoked_at_unix \
-                 FROM api_keys WHERE id = :id",
-                params! { "id" => id },
-            )
-        })?;
-        row.map(api_key_from_mysql_row).transpose()
-    }
-
-    fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
-        let rows = self.with_conn(|conn| {
-            conn.exec::<mysql::Row, _, _>(
-                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
-                 last4, enabled, scopes_json, created_at_unix, updated_at_unix, \
-                 rotated_at_unix, expires_at_unix, revoked_at_unix \
-                 FROM api_keys ORDER BY id ASC",
-                (),
-            )
-        })?;
-        rows.into_iter().map(api_key_from_mysql_row).collect()
-    }
-
-    fn find_api_key_records_by_prefix(
-        &self,
-        key_prefix: &str,
-    ) -> Result<Vec<StoredApiKey>, StorageError> {
-        let rows = self.with_conn(|conn| {
-            conn.exec::<mysql::Row, _, _>(
-                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
-                 last4, enabled, scopes_json, created_at_unix, updated_at_unix, \
-                 rotated_at_unix, expires_at_unix, revoked_at_unix \
-                 FROM api_keys WHERE key_prefix = :key_prefix ORDER BY id ASC",
-                params! { "key_prefix" => key_prefix },
-            )
-        })?;
-        rows.into_iter().map(api_key_from_mysql_row).collect()
-    }
-
     fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
         self.with_conn(|conn| {
             conn.exec_drop(
@@ -3500,6 +3418,13 @@ fn deserialize_storage_document<T: for<'de> Deserialize<'de>>(
     serde_json::from_str(value).map_err(|error| StorageError::Serialization(error.to_string()))
 }
 
+fn api_key_records_supabase_only_error() -> StorageError {
+    StorageError::Runtime(
+        "virtual API key records are Supabase/Postgres-only; set storage.provider = supabase"
+            .into(),
+    )
+}
+
 fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
     StoredTenantAccount {
         id: row.get::<_, String>(0),
@@ -3579,62 +3504,6 @@ fn tenant_account_from_tuple(
         created_at_unix,
         updated_at_unix,
     }
-}
-
-fn api_key_from_mysql_row(row: mysql::Row) -> Result<StoredApiKey, StorageError> {
-    let id = mysql_string(&row, 0, "api_keys.id")?;
-    let workspace_id = mysql_string(&row, 1, "api_keys.workspace_id")?;
-    let tenant_id = mysql_string(&row, 2, "api_keys.tenant_id")?;
-    let project_id = mysql_string(&row, 3, "api_keys.project_id")?;
-    let name = mysql_string(&row, 4, "api_keys.name")?;
-    let key_prefix = mysql_string(&row, 5, "api_keys.key_prefix")?;
-    let key_hash = mysql_string(&row, 6, "api_keys.key_hash")?;
-    let last4 = mysql_string(&row, 7, "api_keys.last4")?;
-    let enabled = mysql_bool(&row, 8, "api_keys.enabled")?;
-    let scopes_json = mysql_string(&row, 9, "api_keys.scopes_json")?;
-    let created_at_unix = mysql_i64(&row, 10, "api_keys.created_at_unix")?;
-    let updated_at_unix = mysql_i64(&row, 11, "api_keys.updated_at_unix")?;
-    let rotated_at_unix = row.get::<Option<i64>, _>(12).flatten();
-    let expires_at_unix = row.get::<Option<i64>, _>(13).flatten();
-    let revoked_at_unix = row.get::<Option<i64>, _>(14).flatten();
-    let scopes = deserialize_storage_document(&scopes_json)?;
-    Ok(StoredApiKey {
-        tenant: api_key_tenant_context(&id, &tenant_id, &project_id, &workspace_id),
-        id,
-        workspace_id,
-        tenant_id,
-        project_id,
-        name,
-        key_prefix,
-        key_hash,
-        last4,
-        enabled,
-        scopes,
-        allowed_models: Vec::new(),
-        allowed_providers: Vec::new(),
-        monthly_token_budget: None,
-        request_limit_per_minute: None,
-        created_at_unix: nonnegative_u64(created_at_unix),
-        updated_at_unix: nonnegative_u64(updated_at_unix),
-        rotated_at_unix: rotated_at_unix.map(nonnegative_u64),
-        expires_at_unix: expires_at_unix.map(nonnegative_u64),
-        revoked_at_unix: revoked_at_unix.map(nonnegative_u64),
-    })
-}
-
-fn mysql_string(row: &mysql::Row, index: usize, column: &str) -> Result<String, StorageError> {
-    row.get::<String, _>(index)
-        .ok_or_else(|| StorageError::Mysql(format!("missing required column {column}")))
-}
-
-fn mysql_i64(row: &mysql::Row, index: usize, column: &str) -> Result<i64, StorageError> {
-    row.get::<i64, _>(index)
-        .ok_or_else(|| StorageError::Mysql(format!("missing required column {column}")))
-}
-
-fn mysql_bool(row: &mysql::Row, index: usize, column: &str) -> Result<bool, StorageError> {
-    row.get::<bool, _>(index)
-        .ok_or_else(|| StorageError::Mysql(format!("missing required column {column}")))
 }
 
 fn project_from_tuple(row: (String, String, String, String, String, i64, i64)) -> StoredProject {
@@ -5530,9 +5399,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_api_key_record(&api_key)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert_api_key_record(&api_key)
-            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
@@ -5545,9 +5412,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_api_key_record(id)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.get_api_key_record(id)
-            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
@@ -5560,9 +5425,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_api_key_records()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.list_api_key_records()
-            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
@@ -5578,9 +5441,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.find_api_key_records_by_prefix(key_prefix)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.find_api_key_records_by_prefix(key_prefix)
-            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
