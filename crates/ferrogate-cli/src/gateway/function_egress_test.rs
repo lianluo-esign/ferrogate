@@ -9,7 +9,8 @@
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -23,18 +24,47 @@ fn request_for(addr: &str, body: &str) -> EdgeFunctionHttpRequest {
     headers.insert("content-type".to_string(), "application/json".to_string());
     EdgeFunctionHttpRequest {
         method: "POST".to_string(),
-        url: format!("http://{addr}/functions/v1/charge-credits"),
+        url: format!("https://{addr}/functions/v1/charge-credits"),
         headers,
         body: body.to_string(),
     }
 }
 
+fn test_tls_config() -> Arc<rustls::ServerConfig> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        signing_key.serialize_der(),
+    ));
+    Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key)
+            .unwrap(),
+    )
+}
+
+fn accept_tls(
+    listener: TcpListener,
+    config: Arc<rustls::ServerConfig>,
+) -> rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    let (stream, _) = listener.accept().unwrap();
+    let connection = rustls::ServerConnection::new(config).unwrap();
+    rustls::StreamOwned::new(connection, stream)
+}
+
+fn localhost_addr(listener: &TcpListener) -> String {
+    format!("localhost:{}", listener.local_addr().unwrap().port())
+}
+
 #[tokio::test]
 async fn executes_post_and_returns_bounded_outcome() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
+    let addr = localhost_addr(&listener);
+    let config = test_tls_config();
     let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_tls(listener, config);
         let mut buffer = [0_u8; 2048];
         let read = stream.read(&mut buffer).unwrap();
         let received = String::from_utf8_lossy(&buffer[..read]).to_string();
@@ -72,9 +102,10 @@ async fn executes_post_and_returns_bounded_outcome() {
 #[tokio::test]
 async fn rejects_oversized_response_body() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
+    let addr = localhost_addr(&listener);
+    let config = test_tls_config();
     let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_tls(listener, config);
         let mut buffer = [0_u8; 2048];
         let _ = stream.read(&mut buffer).unwrap();
         // Content-Length declares a body larger than the caller's cap.
@@ -94,9 +125,69 @@ async fn rejects_oversized_response_body() {
 }
 
 #[tokio::test]
+async fn rejects_oversized_chunked_response_without_content_length() {
+    // No `Content-Length`: the upstream uses `Transfer-Encoding: chunked` and
+    // streams far more than the caller's cap. The content-length fast-reject
+    // cannot fire here, so only the streaming hard cap protects the gateway.
+    // The server sends the body in small chunks and never declares total size,
+    // yet the executor must reject before buffering the whole thing.
+    let cap = 16_usize;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = localhost_addr(&listener);
+    let config = test_tls_config();
+    let handle = thread::spawn(move || {
+        let mut stream = accept_tls(listener, config);
+        let mut buffer = [0_u8; 2048];
+        let _ = stream.read(&mut buffer).unwrap();
+        // Chunked transfer, no Content-Length header at all.
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .unwrap();
+        // Each chunk is 64 bytes ("40" hex); write many of them. Writes may
+        // start failing once the gateway aborts and drops the connection —
+        // that is expected, so ignore per-chunk write errors.
+        for _ in 0..64 {
+            if stream.write_all(b"40\r\n").is_err() {
+                break;
+            }
+            if stream.write_all(&[b'x'; 64]).is_err() {
+                break;
+            }
+            if stream.write_all(b"\r\n").is_err() {
+                break;
+            }
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+    });
+
+    let request = request_for(&addr, "{}");
+    let error =
+        execute_edge_function_request(&request, "charge-credits", Duration::from_secs(2), cap)
+            .await
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("too_large"),
+        "expected too_large rejection, got: {error}"
+    );
+    let _ = handle.join();
+}
+
+#[tokio::test]
 async fn rejects_unsupported_scheme() {
     let mut request = request_for("127.0.0.1:1", "{}");
     request.url = "ftp://example.com/functions/v1/x".to_string();
+    let error = execute_edge_function_request(&request, "x", Duration::from_secs(1), 1024)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unsupported function url scheme"));
+}
+
+#[tokio::test]
+async fn rejects_plaintext_http_scheme() {
+    let mut request = request_for("127.0.0.1:1", "{}");
+    request.url = "http://example.com/functions/v1/x".to_string();
     let error = execute_edge_function_request(&request, "x", Duration::from_secs(1), 1024)
         .await
         .unwrap_err();
@@ -155,9 +246,51 @@ fn broker_disabled_unless_secret_and_apikey_are_both_configured() {
 }
 
 #[test]
+fn broker_disabled_when_allowlist_spans_multiple_projects() {
+    // Two rules pointing at two distinct Supabase projects. The broker signs
+    // with one shared secret and sends one shared apikey, so it cannot serve
+    // both — it must fail closed (TOK-6) rather than silently misroute one.
+    let multi = r#"[
+        {"tenant":"org_a","base_url":"https://aaaa.supabase.co","function_slugs":["charge-credits"]},
+        {"tenant":"org_b","base_url":"https://bbbb.supabase.co","function_slugs":["charge-credits"]}
+    ]"#
+    .to_string();
+    assert!(FunctionEgressGatewayConfig::from_values(
+        Some("secret".into()),
+        Some("k".into()),
+        Some(multi)
+    )
+    .is_none());
+
+    // Same project listed twice (once with a trailing slash) is still single
+    // project after normalization → the broker stays enabled.
+    let single = r#"[
+        {"tenant":"org_a","base_url":"https://aaaa.supabase.co","function_slugs":["charge-credits"]},
+        {"tenant":"org_b","base_url":"https://aaaa.supabase.co/","function_slugs":["refund"]}
+    ]"#
+    .to_string();
+    assert!(FunctionEgressGatewayConfig::from_values(
+        Some("secret".into()),
+        Some("k".into()),
+        Some(single)
+    )
+    .is_some());
+}
+
+#[test]
+fn broker_disabled_when_allowlist_json_is_malformed() {
+    assert!(FunctionEgressGatewayConfig::from_values(
+        Some("secret".into()),
+        Some("k".into()),
+        Some(r#"{"tenant":"org_a""#.into())
+    )
+    .is_none());
+}
+
+#[test]
 fn prepare_builds_request_with_scoped_bearer_for_allowlisted_target() {
     let config = broker_config();
-    let (request, slug) = prepare_brokered_invocation(
+    let (request, slug, timeout_millis) = prepare_brokered_invocation(
         &config,
         "org_a",
         &invocation_request("charge-credits"),
@@ -165,6 +298,7 @@ fn prepare_builds_request_with_scoped_bearer_for_allowlisted_target() {
     )
     .unwrap();
     assert_eq!(slug, "charge-credits");
+    assert_eq!(timeout_millis, DEFAULT_EDGE_FUNCTION_TIMEOUT_MILLIS);
     assert_eq!(
         request.url,
         "https://aaaa.supabase.co/functions/v1/charge-credits"

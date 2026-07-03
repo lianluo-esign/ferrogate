@@ -32,7 +32,16 @@ pub struct SupabaseEdgeFunctionTarget {
     /// Function slug, e.g. `charge-credits`. Must be a single path segment.
     pub function_slug: String,
     /// Reference (id) of the stored secret that holds the bearer key; never the
-    /// raw key itself. Resolved from the tenant secret store at execution time.
+    /// raw key itself.
+    ///
+    /// **Reserved — not yet dereferenced.** The field is validated non-empty
+    /// (fail-closed, so a target without a reference is rejected), but the
+    /// broker does not currently resolve it: today the gateway sources the
+    /// bearer/apikey from its process-wide env config (`FG_FN_JWT_SECRET` +
+    /// `FG_FN_APIKEY`) — see `FunctionEgressGatewayConfig`. Wiring this to a
+    /// per-tenant secret store is deferred; it is coupled to the multi-project
+    /// credential work (single shared apikey/signing secret today). Until then,
+    /// treat this as a forward-looking placeholder, not a live lookup key.
     pub auth_key_ref: String,
 }
 
@@ -196,8 +205,10 @@ impl SupabaseEdgeFunctionInvocation {
 
     /// Build the governed HTTP request. `credential` carries the bearer token
     /// (a minted scoped JWT, or an interim static key) and the project apikey,
-    /// resolved from `target.auth_key_ref` at call time; they are injected into
-    /// the `Authorization`/`apikey` headers and never stored elsewhere.
+    /// supplied by the caller at call time; they are injected into the
+    /// `Authorization`/`apikey` headers and never stored elsewhere. The broker
+    /// mints/sources the credential from its process-wide config today;
+    /// `target.auth_key_ref` is reserved and not yet consulted (see its docs).
     pub fn build_http_request(
         &self,
         credential: &FunctionCredential,

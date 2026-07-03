@@ -89,15 +89,66 @@ impl FunctionEgressGatewayConfig {
         // would surface as a misleading per-call denial instead of a clear 503.
         let apikey = apikey.filter(|value| !value.trim().is_empty())?;
         let minter = FunctionTokenMinter::new(FUNCTION_TOKEN_ISSUER, signing_secret).ok()?;
-        let rules: Vec<FunctionEgressRule> = allowlist_json
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default();
+        let rules: Vec<FunctionEgressRule> = match allowlist_json {
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(rules) => rules,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "function egress broker disabled: FG_FN_ALLOWLIST is not valid JSON"
+                    );
+                    return None;
+                }
+            },
+            None => Vec::new(),
+        };
+        // Single-project enforcement (TOK-6). The broker signs every token with
+        // one process-wide `FG_FN_JWT_SECRET` and sends one process-wide
+        // `FG_FN_APIKEY`; both are per-Supabase-project. An allowlist that spans
+        // more than one distinct project `base_url` would silently hand the same
+        // apikey and same-secret-signed token to every project, and at most one
+        // could verify them. Rather than let that footgun be configured silently,
+        // refuse to enable the broker (fail-closed) until per-project credential
+        // resolution lands. See docs/design/function-egress-broker.md.
+        if !allowlist_is_single_project(&rules) {
+            tracing::warn!(
+                "function egress broker disabled: FG_FN_ALLOWLIST spans multiple project \
+                 base_urls but the broker uses a single shared apikey/JWT secret. List rules \
+                 for exactly one project base_url, or wait for per-project credentials (TOK-6)."
+            );
+            return None;
+        }
         Some(Self {
             allowlist: FunctionEgressAllowlist::new(rules),
             minter,
             apikey,
         })
     }
+}
+
+/// Normalize a project base URL for comparison, matching the allowlist's own
+/// normalization (trim surrounding whitespace and any trailing slash).
+fn normalize_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+/// True when the allowlist targets at most one distinct project `base_url`.
+///
+/// An empty allowlist is trivially single-project (the broker is deny-by-default
+/// and rejects every call anyway). Two or more distinct normalized base URLs mean
+/// the shared apikey/signing-secret model cannot serve them, so the broker must
+/// stay disabled.
+fn allowlist_is_single_project(rules: &[FunctionEgressRule]) -> bool {
+    let mut project: Option<String> = None;
+    for rule in rules {
+        let base = normalize_base_url(&rule.base_url);
+        match &project {
+            Some(existing) if existing != &base => return false,
+            Some(_) => {}
+            None => project = Some(base),
+        }
+    }
+    true
 }
 
 /// Process-wide broker config, resolved once from the environment.
@@ -116,7 +167,7 @@ pub(super) fn prepare_brokered_invocation(
     tenant: &str,
     request: &FunctionInvocationRequest,
     now_unix: u64,
-) -> Result<(EdgeFunctionHttpRequest, String), FunctionBrokerError> {
+) -> Result<(EdgeFunctionHttpRequest, String, u64), FunctionBrokerError> {
     config
         .allowlist
         .authorize(tenant, &request.target)
@@ -141,10 +192,11 @@ pub(super) fn prepare_brokered_invocation(
         body_json: request.body_json.clone(),
         timeout_millis: DEFAULT_EDGE_FUNCTION_TIMEOUT_MILLIS,
     };
+    let timeout_millis = invocation.timeout_millis;
     let http_request = invocation
         .build_http_request(&credential)
         .map_err(FunctionBrokerError::Build)?;
-    Ok((http_request, slug))
+    Ok((http_request, slug, timeout_millis))
 }
 
 /// Execute a brokered edge-function request and return a bounded outcome.
@@ -158,13 +210,12 @@ pub(super) async fn execute_edge_function_request(
         .with_context(|| format!("invalid function method: {}", request.method))?;
     let url = reqwest::Url::parse(&request.url)
         .with_context(|| format!("invalid function url: {}", request.url))?;
-    match url.scheme() {
-        "https" | "http" => {}
-        other => bail!("unsupported function url scheme: {other}"),
+    if url.scheme() != "https" {
+        bail!("unsupported function url scheme: {}", url.scheme());
     }
 
     let headers = build_headers(request)?;
-    let response = function_http_client()?
+    let mut response = function_http_client()?
         .request(method, url)
         .headers(headers)
         .timeout(timeout)
@@ -174,17 +225,26 @@ pub(super) async fn execute_edge_function_request(
         .context("edge-function request failed")?;
 
     let status_code = response.status().as_u16();
+    // Cheap early out when the upstream sends an honest `Content-Length`.
     if let Some(content_length) = response.content_length() {
         if content_length > max_body_bytes as u64 {
             bail!("edge_function_response_body_too_large: exceeds {max_body_bytes} bytes");
         }
     }
-    let body = response
-        .bytes()
+    // Stream the body chunk-by-chunk with a hard cap so a chunked or
+    // `Content-Length`-lying upstream cannot force us to buffer an arbitrarily
+    // large response: we abort as soon as the accumulated length would exceed
+    // the cap, never holding more than `max_body_bytes` + one chunk in memory.
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .context("failed to read edge-function response body")?;
-    if body.len() > max_body_bytes {
-        bail!("edge_function_response_body_too_large: exceeds {max_body_bytes} bytes");
+        .context("failed to read edge-function response body")?
+    {
+        if body.len() + chunk.len() > max_body_bytes {
+            bail!("edge_function_response_body_too_large: exceeds {max_body_bytes} bytes");
+        }
+        body.extend_from_slice(&chunk);
     }
 
     let body_excerpt = String::from_utf8_lossy(&body)
@@ -214,13 +274,14 @@ fn function_http_client() -> AnyResult<Client> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     let result = CLIENT.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        Client::builder()
+        let builder = Client::builder()
             .no_gzip()
             .no_brotli()
             .no_zstd()
-            .no_deflate()
-            .build()
-            .map_err(|error| error.to_string())
+            .no_deflate();
+        #[cfg(test)]
+        let builder = builder.danger_accept_invalid_certs(true);
+        builder.build().map_err(|error| error.to_string())
     });
     match result {
         Ok(client) => Ok(client.clone()),

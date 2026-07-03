@@ -68,6 +68,7 @@ use super::mcp_rpc;
 use super::{FerroGateway, ProxyContext};
 
 const PROVIDER_CATALOG_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
+const FUNCTION_EGRESS_RESPONSE_BODY_MAX_BYTES: usize = 256 * 1024;
 
 const SERVICE_NAME: &str = "ferrogate";
 const SKILL_PACKAGE_HEADER: &str = "x-ferrogate-skill-package";
@@ -2721,38 +2722,39 @@ impl FerroGateway {
             "supabase_edge_function:{}",
             request.target.function_slug.trim()
         );
-        let (http_request, slug) = match super::function_egress::prepare_brokered_invocation(
-            config,
-            &tenant_key,
-            &request,
-            now_unix,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                state.record_admin_audit_event(admin_audit_event_draft_for_target(
-                    ctx,
-                    &auth,
-                    "function.execute",
-                    audit_target,
-                    "denied",
-                    error.to_string(),
-                ));
-                return write_json_error(
-                    session,
-                    StatusCode::FORBIDDEN,
-                    "function_denied",
-                    error.to_string(),
-                    &ctx.request_id,
-                )
-                .await;
-            }
-        };
+        let (http_request, slug, timeout_millis) =
+            match super::function_egress::prepare_brokered_invocation(
+                config,
+                &tenant_key,
+                &request,
+                now_unix,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "function.execute",
+                        audit_target,
+                        "denied",
+                        error.to_string(),
+                    ));
+                    return write_json_error(
+                        session,
+                        StatusCode::FORBIDDEN,
+                        "function_denied",
+                        error.to_string(),
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            };
 
         let outcome = match super::function_egress::execute_edge_function_request(
             &http_request,
             &slug,
-            std::time::Duration::from_millis(30_000),
-            256 * 1024,
+            std::time::Duration::from_millis(timeout_millis),
+            FUNCTION_EGRESS_RESPONSE_BODY_MAX_BYTES,
         )
         .await
         {

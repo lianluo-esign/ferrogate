@@ -75,7 +75,34 @@ Decision: **both** worker types use gateway-brokered execution. No special case.
 5. **Request builder** (`ferrogate-runtime::supabase_edge_function`, landed in
    06b7f74): target validation (https-only, clean slug), `functions/v1/{slug}`
    URL, header injection, and a governed-action adapter carrying only a secret
-   *reference* — never key material.
+   *reference* (`auth_key_ref`) — never key material.
+
+> **Implementation status (2026-07-03).** The `auth_key_ref` on
+> `SupabaseEdgeFunctionTarget` is **reserved, not yet dereferenced**. It is
+> validated non-empty (fail-closed) but the broker does not resolve it against a
+> tenant secret store — no such store exists yet. Today the gateway sources the
+> apikey and JWT signing secret from process-wide environment config
+> (`FG_FN_APIKEY`, `FG_FN_JWT_SECRET`), so the broker is **single-project**: one
+> shared apikey and one shared signing secret for all allowlisted targets.
+> Per-tenant/per-project secret resolution (making `auth_key_ref` a live lookup)
+> is future work, coupled to the multi-project credential decision (TOK-6). The
+> step-4 "mint scoped JWT" flow above is implemented; the secret it signs with is
+> the shared env secret, not a per-project one.
+>
+> **Enforced (TOK-6):** because a single shared apikey/signing secret can only
+> serve one Supabase project, `FunctionEgressGatewayConfig::from_values` refuses
+> to enable the broker when `FG_FN_ALLOWLIST` lists rules spanning **more than
+> one distinct `base_url`** (after trailing-slash normalization). The broker
+> logs a warning and stays disabled (fail-closed 503) rather than silently
+> handing the wrong project's credentials to a call. To allowlist a second
+> project, run a separate gateway process with that project's `FG_FN_APIKEY` /
+> `FG_FN_JWT_SECRET`, or wait for per-project credential resolution.
+>
+> **Config parsing (TOK-7):** if `FG_FN_ALLOWLIST` is present but is not valid
+> JSON for the allowlist rule array, the broker logs a warning and stays
+> disabled. An absent allowlist still means an empty deny-by-default ruleset; a
+> malformed allowlist is treated as an operator error instead of silently
+> degrading into "deny everything".
 
 ## 6. Defense in depth
 
