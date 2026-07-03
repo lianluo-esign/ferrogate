@@ -150,6 +150,7 @@ pub struct ControlPlaneDocuments {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StorageMigrationSnapshot {
     pub control_plane: ControlPlaneDocuments,
+    pub api_key_records: Vec<StoredApiKey>,
     pub tool_approvals: Vec<(String, String)>,
     pub billing_events: Vec<BillingEvent>,
     pub usage_aggregates: Vec<StoredUsageAggregate>,
@@ -175,6 +176,7 @@ pub struct StorageMigrationSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageMigrationCounts {
     pub api_keys: usize,
+    pub api_key_records: usize,
     pub tenants: usize,
     pub policies: usize,
     pub gateway_configs: usize,
@@ -210,6 +212,7 @@ impl StorageMigrationSnapshot {
     pub fn counts(&self) -> StorageMigrationCounts {
         StorageMigrationCounts {
             api_keys: self.control_plane.api_keys.len(),
+            api_key_records: self.api_key_records.len(),
             tenants: self.control_plane.tenants.len(),
             policies: self.control_plane.policies.len(),
             gateway_configs: self.control_plane.gateway_configs.len(),
@@ -310,8 +313,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 9;
-const POSTGRES_SCHEMA_NAME: &str = "009_multi_tenant_hierarchy";
+const POSTGRES_SCHEMA_VERSION: u64 = 10;
+const POSTGRES_SCHEMA_NAME: &str = "010_virtual_api_keys";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -733,6 +736,7 @@ pub struct StoredSelfHostedRunDispatch {
 #[derive(Debug)]
 pub struct RuntimeControlPlaneState {
     api_keys: InMemoryRepository<StoredControlPlaneResource>,
+    api_key_records: InMemoryRepository<StoredApiKey>,
     tenants: InMemoryRepository<StoredControlPlaneResource>,
     policies: InMemoryRepository<StoredControlPlaneResource>,
     gateway_configs: InMemoryRepository<StoredControlPlaneResource>,
@@ -986,6 +990,92 @@ impl PostgresControlPlaneStore {
             )?;
             Ok(rows_changed > 0)
         })
+    }
+
+    fn upsert_api_key_record(&self, api_key: &StoredApiKey) -> Result<(), StorageError> {
+        let scopes_json = serialize_storage_document(&api_key.scopes)?;
+        let created_at_unix = saturating_i64(api_key.created_at_unix);
+        let updated_at_unix = saturating_i64(api_key.updated_at_unix);
+        let rotated_at_unix = api_key.rotated_at_unix.map(saturating_i64);
+        let expires_at_unix = api_key.expires_at_unix.map(saturating_i64);
+        let revoked_at_unix = api_key.revoked_at_unix.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO api_keys \
+                 (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, \
+                  enabled, scopes_json, created_at_unix, updated_at_unix, rotated_at_unix, \
+                  expires_at_unix, revoked_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::jsonb, $11, $12, $13, $14, $15) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 workspace_id = EXCLUDED.workspace_id, tenant_id = EXCLUDED.tenant_id, \
+                 project_id = EXCLUDED.project_id, name = EXCLUDED.name, \
+                 key_prefix = EXCLUDED.key_prefix, key_hash = EXCLUDED.key_hash, \
+                 last4 = EXCLUDED.last4, enabled = EXCLUDED.enabled, \
+                 scopes_json = EXCLUDED.scopes_json, updated_at_unix = EXCLUDED.updated_at_unix, \
+                 rotated_at_unix = EXCLUDED.rotated_at_unix, \
+                 expires_at_unix = EXCLUDED.expires_at_unix, revoked_at_unix = EXCLUDED.revoked_at_unix",
+                &[
+                    &api_key.id,
+                    &api_key.workspace_id,
+                    &api_key.tenant_id,
+                    &api_key.project_id,
+                    &api_key.name,
+                    &api_key.key_prefix,
+                    &api_key.key_hash,
+                    &api_key.last4,
+                    &api_key.enabled,
+                    &scopes_json,
+                    &created_at_unix,
+                    &updated_at_unix,
+                    &rotated_at_unix,
+                    &expires_at_unix,
+                    &revoked_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
+                 last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 FROM api_keys WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        row.as_ref().map(api_key_from_row).transpose()
+    }
+
+    fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
+                 last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 FROM api_keys ORDER BY id ASC",
+                &[],
+            )
+        })?;
+        rows.iter().map(api_key_from_row).collect()
+    }
+
+    fn find_api_key_records_by_prefix(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Vec<StoredApiKey>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
+                 last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 FROM api_keys WHERE key_prefix = $1 ORDER BY id ASC",
+                &[&key_prefix],
+            )
+        })?;
+        rows.iter().map(api_key_from_row).collect()
     }
 
     fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
@@ -2794,6 +2884,88 @@ impl MySqlControlPlaneStore {
         })
     }
 
+    fn upsert_api_key_record(&self, api_key: &StoredApiKey) -> Result<(), StorageError> {
+        let scopes_json = serialize_storage_document(&api_key.scopes)?;
+        self.with_conn(|conn| {
+            conn.exec_drop(
+                "INSERT INTO api_keys \
+                 (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, \
+                  enabled, scopes_json, created_at_unix, updated_at_unix, rotated_at_unix, \
+                  expires_at_unix, revoked_at_unix) \
+                 VALUES (:id, :workspace_id, :tenant_id, :project_id, :name, :key_prefix, \
+                 :key_hash, :last4, :enabled, :scopes_json, :created_at_unix, :updated_at_unix, \
+                 :rotated_at_unix, :expires_at_unix, :revoked_at_unix) \
+                 ON DUPLICATE KEY UPDATE \
+                 workspace_id = VALUES(workspace_id), tenant_id = VALUES(tenant_id), \
+                 project_id = VALUES(project_id), name = VALUES(name), \
+                 key_prefix = VALUES(key_prefix), key_hash = VALUES(key_hash), \
+                 last4 = VALUES(last4), enabled = VALUES(enabled), \
+                 scopes_json = VALUES(scopes_json), updated_at_unix = VALUES(updated_at_unix), \
+                 rotated_at_unix = VALUES(rotated_at_unix), expires_at_unix = VALUES(expires_at_unix), \
+                 revoked_at_unix = VALUES(revoked_at_unix)",
+                params! {
+                    "id" => &api_key.id,
+                    "workspace_id" => &api_key.workspace_id,
+                    "tenant_id" => &api_key.tenant_id,
+                    "project_id" => &api_key.project_id,
+                    "name" => &api_key.name,
+                    "key_prefix" => &api_key.key_prefix,
+                    "key_hash" => &api_key.key_hash,
+                    "last4" => &api_key.last4,
+                    "enabled" => api_key.enabled,
+                    "scopes_json" => &scopes_json,
+                    "created_at_unix" => saturating_i64(api_key.created_at_unix),
+                    "updated_at_unix" => saturating_i64(api_key.updated_at_unix),
+                    "rotated_at_unix" => api_key.rotated_at_unix.map(saturating_i64),
+                    "expires_at_unix" => api_key.expires_at_unix.map(saturating_i64),
+                    "revoked_at_unix" => api_key.revoked_at_unix.map(saturating_i64),
+                },
+            )
+        })
+    }
+
+    fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+        let row = self.with_conn(|conn| {
+            conn.exec_first::<mysql::Row, _, _>(
+                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
+                 last4, enabled, scopes_json, created_at_unix, updated_at_unix, \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 FROM api_keys WHERE id = :id",
+                params! { "id" => id },
+            )
+        })?;
+        row.map(api_key_from_mysql_row).transpose()
+    }
+
+    fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+        let rows = self.with_conn(|conn| {
+            conn.exec::<mysql::Row, _, _>(
+                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
+                 last4, enabled, scopes_json, created_at_unix, updated_at_unix, \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 FROM api_keys ORDER BY id ASC",
+                (),
+            )
+        })?;
+        rows.into_iter().map(api_key_from_mysql_row).collect()
+    }
+
+    fn find_api_key_records_by_prefix(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Vec<StoredApiKey>, StorageError> {
+        let rows = self.with_conn(|conn| {
+            conn.exec::<mysql::Row, _, _>(
+                "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
+                 last4, enabled, scopes_json, created_at_unix, updated_at_unix, \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 FROM api_keys WHERE key_prefix = :key_prefix ORDER BY id ASC",
+                params! { "key_prefix" => key_prefix },
+            )
+        })?;
+        rows.into_iter().map(api_key_from_mysql_row).collect()
+    }
+
     fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
         self.with_conn(|conn| {
             conn.exec_drop(
@@ -2939,9 +3111,8 @@ impl MySqlControlPlaneStore {
                 "SELECT tenant_id, project_id, id FROM workspaces WHERE id = :id",
                 params! { "id" => workspace_id },
             )?;
-            Ok(row.map(|(tenant_id, project_id, id)| {
-                WorkspaceScope::new(tenant_id, project_id, id)
-            }))
+            Ok(row
+                .map(|(tenant_id, project_id, id)| WorkspaceScope::new(tenant_id, project_id, id)))
         })
     }
 
@@ -3148,6 +3319,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "tenants",
         "projects",
         "workspaces",
+        "api_keys",
         "storage_schema_migrations",
     ];
     for table in TABLES {
@@ -3181,6 +3353,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         ("self_hosted_worker_checkpoints", "checkpoint_json"),
         ("request_logs", "request_json"),
         ("audit_events", "audit_json"),
+        ("api_keys", "scopes_json"),
     ];
     for (table, column) in JSONB_COLUMNS {
         let data_type = client
@@ -3250,6 +3423,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_metering_events_tenant_time",
         "idx_metering_event_routes_model_provider",
         "idx_usage_rollups_tenant_model_provider",
+        "idx_api_keys_workspace",
+        "idx_api_keys_tenant_project",
+        "idx_api_keys_prefix",
     ];
     for index in INDEXES {
         let count = client
@@ -3335,6 +3511,36 @@ fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
     }
 }
 
+fn api_key_from_row(row: &PostgresRow) -> Result<StoredApiKey, StorageError> {
+    let id = row.get::<_, String>(0);
+    let workspace_id = row.get::<_, String>(1);
+    let tenant_id = row.get::<_, String>(2);
+    let project_id = row.get::<_, String>(3);
+    let scopes = deserialize_storage_document(&row.get::<_, String>(9))?;
+    Ok(StoredApiKey {
+        id: id.clone(),
+        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id.clone(),
+        project_id: project_id.clone(),
+        name: row.get::<_, String>(4),
+        key_prefix: row.get::<_, String>(5),
+        key_hash: row.get::<_, String>(6),
+        last4: row.get::<_, String>(7),
+        enabled: row.get::<_, bool>(8),
+        scopes,
+        allowed_models: Vec::new(),
+        allowed_providers: Vec::new(),
+        tenant: api_key_tenant_context(&id, &tenant_id, &project_id, &workspace_id),
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        created_at_unix: nonnegative_u64(row.get::<_, i64>(10)),
+        updated_at_unix: nonnegative_u64(row.get::<_, i64>(11)),
+        rotated_at_unix: row.get::<_, Option<i64>>(12).map(nonnegative_u64),
+        expires_at_unix: row.get::<_, Option<i64>>(13).map(nonnegative_u64),
+        revoked_at_unix: row.get::<_, Option<i64>>(14).map(nonnegative_u64),
+    })
+}
+
 fn project_from_row(row: &PostgresRow) -> StoredProject {
     StoredProject {
         id: row.get::<_, String>(0),
@@ -3375,9 +3581,63 @@ fn tenant_account_from_tuple(
     }
 }
 
-fn project_from_tuple(
-    row: (String, String, String, String, String, i64, i64),
-) -> StoredProject {
+fn api_key_from_mysql_row(row: mysql::Row) -> Result<StoredApiKey, StorageError> {
+    let id = mysql_string(&row, 0, "api_keys.id")?;
+    let workspace_id = mysql_string(&row, 1, "api_keys.workspace_id")?;
+    let tenant_id = mysql_string(&row, 2, "api_keys.tenant_id")?;
+    let project_id = mysql_string(&row, 3, "api_keys.project_id")?;
+    let name = mysql_string(&row, 4, "api_keys.name")?;
+    let key_prefix = mysql_string(&row, 5, "api_keys.key_prefix")?;
+    let key_hash = mysql_string(&row, 6, "api_keys.key_hash")?;
+    let last4 = mysql_string(&row, 7, "api_keys.last4")?;
+    let enabled = mysql_bool(&row, 8, "api_keys.enabled")?;
+    let scopes_json = mysql_string(&row, 9, "api_keys.scopes_json")?;
+    let created_at_unix = mysql_i64(&row, 10, "api_keys.created_at_unix")?;
+    let updated_at_unix = mysql_i64(&row, 11, "api_keys.updated_at_unix")?;
+    let rotated_at_unix = row.get::<Option<i64>, _>(12).flatten();
+    let expires_at_unix = row.get::<Option<i64>, _>(13).flatten();
+    let revoked_at_unix = row.get::<Option<i64>, _>(14).flatten();
+    let scopes = deserialize_storage_document(&scopes_json)?;
+    Ok(StoredApiKey {
+        tenant: api_key_tenant_context(&id, &tenant_id, &project_id, &workspace_id),
+        id,
+        workspace_id,
+        tenant_id,
+        project_id,
+        name,
+        key_prefix,
+        key_hash,
+        last4,
+        enabled,
+        scopes,
+        allowed_models: Vec::new(),
+        allowed_providers: Vec::new(),
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        created_at_unix: nonnegative_u64(created_at_unix),
+        updated_at_unix: nonnegative_u64(updated_at_unix),
+        rotated_at_unix: rotated_at_unix.map(nonnegative_u64),
+        expires_at_unix: expires_at_unix.map(nonnegative_u64),
+        revoked_at_unix: revoked_at_unix.map(nonnegative_u64),
+    })
+}
+
+fn mysql_string(row: &mysql::Row, index: usize, column: &str) -> Result<String, StorageError> {
+    row.get::<String, _>(index)
+        .ok_or_else(|| StorageError::Mysql(format!("missing required column {column}")))
+}
+
+fn mysql_i64(row: &mysql::Row, index: usize, column: &str) -> Result<i64, StorageError> {
+    row.get::<i64, _>(index)
+        .ok_or_else(|| StorageError::Mysql(format!("missing required column {column}")))
+}
+
+fn mysql_bool(row: &mysql::Row, index: usize, column: &str) -> Result<bool, StorageError> {
+    row.get::<bool, _>(index)
+        .ok_or_else(|| StorageError::Mysql(format!("missing required column {column}")))
+}
+
+fn project_from_tuple(row: (String, String, String, String, String, i64, i64)) -> StoredProject {
     let (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) = row;
     StoredProject {
         id,
@@ -3391,11 +3651,30 @@ fn project_from_tuple(
 }
 
 /// MySQL row shape for the `workspaces` table, in SELECT column order.
-type WorkspaceRow = (String, String, String, String, String, String, String, i64, i64);
+type WorkspaceRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+);
 
 fn workspace_from_tuple(row: WorkspaceRow) -> StoredWorkspace {
-    let (id, project_id, tenant_id, name, slug, environment, status, created_at_unix, updated_at_unix) =
-        row;
+    let (
+        id,
+        project_id,
+        tenant_id,
+        name,
+        slug,
+        environment,
+        status,
+        created_at_unix,
+        updated_at_unix,
+    ) = row;
     StoredWorkspace {
         id,
         project_id,
@@ -3415,6 +3694,22 @@ fn resolve_scope_from_workspace(workspace: &StoredWorkspace) -> WorkspaceScope {
         workspace.project_id.clone(),
         workspace.id.clone(),
     )
+}
+
+fn api_key_tenant_context(
+    id: &str,
+    tenant_id: &str,
+    project_id: &str,
+    workspace_id: &str,
+) -> TenantContext {
+    TenantContext {
+        organization_id: Some(tenant_id.to_string()),
+        team_id: None,
+        project_id: Some(project_id.to_string()),
+        workspace_id: Some(workspace_id.to_string()),
+        user_id: None,
+        api_key_id: Some(id.to_string()),
+    }
 }
 
 fn tenant_storage_key(tenant: &TenantContext) -> String {
@@ -3891,6 +4186,7 @@ impl RuntimeControlPlaneState {
     pub fn new() -> Self {
         Self {
             api_keys: InMemoryRepository::new(),
+            api_key_records: InMemoryRepository::new(),
             tenants: InMemoryRepository::new(),
             policies: InMemoryRepository::new(),
             gateway_configs: InMemoryRepository::new(),
@@ -4088,6 +4384,26 @@ impl RuntimeControlPlaneState {
         self.api_keys.remove(id).is_some()
     }
 
+    pub fn upsert_api_key_record(&mut self, api_key: StoredApiKey) {
+        self.api_key_records.insert(api_key.id.clone(), api_key);
+    }
+
+    pub fn get_api_key_record(&self, id: &str) -> Option<StoredApiKey> {
+        self.api_key_records.get(id)
+    }
+
+    pub fn list_api_key_records(&self) -> Vec<StoredApiKey> {
+        self.api_key_records.list()
+    }
+
+    pub fn find_api_key_records_by_prefix(&self, key_prefix: &str) -> Vec<StoredApiKey> {
+        self.api_key_records
+            .list()
+            .into_iter()
+            .filter(|api_key| api_key.key_prefix == key_prefix)
+            .collect()
+    }
+
     pub fn upsert_tenant(&mut self, id: impl Into<String>, document_json: String) {
         let id = id.into();
         self.tenants.insert(
@@ -4279,16 +4595,41 @@ fn into_document_json(documents: Vec<(String, String)>) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiKey {
     pub id: String,
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub project_id: String,
     pub name: String,
+    #[serde(default)]
+    pub key_prefix: String,
     pub key_hash: String,
+    #[serde(default)]
+    pub last4: String,
     pub enabled: bool,
+    #[serde(default)]
     pub scopes: Vec<String>,
+    #[serde(default)]
     pub allowed_models: Vec<String>,
+    #[serde(default)]
     pub allowed_providers: Vec<String>,
+    #[serde(default)]
     pub tenant: TenantContext,
+    #[serde(default)]
     pub monthly_token_budget: Option<u64>,
+    #[serde(default)]
     pub request_limit_per_minute: Option<u64>,
+    #[serde(default)]
+    pub created_at_unix: u64,
+    #[serde(default)]
+    pub updated_at_unix: u64,
+    #[serde(default)]
+    pub rotated_at_unix: Option<u64>,
+    #[serde(default)]
     pub expires_at_unix: Option<u64>,
+    #[serde(default)]
+    pub revoked_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5045,6 +5386,7 @@ impl RuntimeStorageRepositories {
         };
         Ok(StorageMigrationSnapshot {
             control_plane,
+            api_key_records: self.list_api_key_records()?,
             tool_approvals: self.control_plane_tool_approval_documents()?,
             billing_events: self.billing_events(),
             usage_aggregates: self.usage_aggregates(),
@@ -5073,6 +5415,9 @@ impl RuntimeStorageRepositories {
         snapshot: StorageMigrationSnapshot,
     ) -> Result<(), StorageError> {
         self.replace_control_plane(snapshot.control_plane)?;
+        for api_key in snapshot.api_key_records {
+            self.upsert_api_key_record(api_key)?;
+        }
         for (id, document_json) in snapshot.tool_approvals {
             self.upsert_control_plane_tool_approval(id, document_json)?;
         }
@@ -5172,12 +5517,76 @@ impl RuntimeStorageRepositories {
         }
     }
 
+    // --- Durable virtual API keys bound to workspaces ---
+
+    pub fn upsert_api_key_record(&self, api_key: StoredApiKey) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_api_key_record(api_key);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_api_key_record(&api_key)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert_api_key_record(&api_key)
+            }
+        }
+    }
+
+    pub fn get_api_key_record(&self, id: &str) -> Result<Option<StoredApiKey>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_api_key_record(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_api_key_record(id)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.get_api_key_record(id)
+            }
+        }
+    }
+
+    pub fn list_api_key_records(&self) -> Result<Vec<StoredApiKey>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_api_key_records())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_api_key_records()
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.list_api_key_records()
+            }
+        }
+    }
+
+    pub fn find_api_key_records_by_prefix(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Vec<StoredApiKey>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.find_api_key_records_by_prefix(key_prefix))
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.find_api_key_records_by_prefix(key_prefix)
+            }
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.find_api_key_records_by_prefix(key_prefix)
+            }
+        }
+    }
+
     // --- Multi-tenant hierarchy: Tenant -> Project -> Workspace ---
 
-    pub fn upsert_tenant_account(
-        &self,
-        account: StoredTenantAccount,
-    ) -> Result<(), StorageError> {
+    pub fn upsert_tenant_account(&self, account: StoredTenantAccount) -> Result<(), StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -5221,7 +5630,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_tenant_accounts()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.list_tenant_accounts(),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.list_tenant_accounts()
+            }
         }
     }
 
@@ -5236,7 +5647,9 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_project(&project)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert_project(&project),
+            RuntimeControlPlaneBackend::Mysql(control_plane) => {
+                control_plane.upsert_project(&project)
+            }
         }
     }
 
@@ -6631,14 +7044,19 @@ mod tests {
             "key_dev",
             StoredApiKey {
                 id: "key_dev".into(),
+                workspace_id: "workspace_dev".into(),
+                tenant_id: "org".into(),
+                project_id: "project".into(),
                 name: "Development key".into(),
+                key_prefix: "fg_dev".into(),
                 key_hash: "blake2b:test".into(),
+                last4: "test".into(),
                 enabled: true,
                 scopes: vec!["chat.completions".into()],
                 allowed_models: vec!["fast-chat".into()],
                 allowed_providers: vec!["openai".into()],
                 tenant: TenantContext {
-                    workspace_id: None,
+                    workspace_id: Some("workspace_dev".into()),
                     organization_id: Some("org".into()),
                     team_id: None,
                     project_id: Some("project".into()),
@@ -6647,7 +7065,11 @@ mod tests {
                 },
                 monthly_token_budget: Some(1_000),
                 request_limit_per_minute: Some(60),
+                created_at_unix: 100,
+                updated_at_unix: 100,
+                rotated_at_unix: None,
                 expires_at_unix: None,
+                revoked_at_unix: None,
             },
         );
 
@@ -7603,7 +8025,12 @@ mod tests {
         }
     }
 
-    fn sample_workspace(id: &str, project_id: &str, tenant_id: &str, slug: &str) -> StoredWorkspace {
+    fn sample_workspace(
+        id: &str,
+        project_id: &str,
+        tenant_id: &str,
+        slug: &str,
+    ) -> StoredWorkspace {
         StoredWorkspace {
             id: id.into(),
             project_id: project_id.into(),
@@ -7614,6 +8041,38 @@ mod tests {
             status: "active".into(),
             created_at_unix: 100,
             updated_at_unix: 100,
+        }
+    }
+
+    fn sample_api_key(id: &str, prefix: &str) -> StoredApiKey {
+        StoredApiKey {
+            id: id.into(),
+            workspace_id: "ws-dev".into(),
+            tenant_id: "tenant-a".into(),
+            project_id: "project-a".into(),
+            name: format!("API key {id}"),
+            key_prefix: prefix.into(),
+            key_hash: format!("sha256:{id}"),
+            last4: "wxyz".into(),
+            enabled: true,
+            scopes: vec!["chat.completions".into()],
+            allowed_models: Vec::new(),
+            allowed_providers: Vec::new(),
+            tenant: TenantContext {
+                organization_id: Some("tenant-a".into()),
+                team_id: None,
+                project_id: Some("project-a".into()),
+                workspace_id: Some("ws-dev".into()),
+                user_id: None,
+                api_key_id: Some(id.into()),
+            },
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+            created_at_unix: 100,
+            updated_at_unix: 100,
+            rotated_at_unix: None,
+            expires_at_unix: None,
+            revoked_at_unix: None,
         }
     }
 
@@ -7632,11 +8091,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            repositories.get_tenant_account("tenant-a").unwrap().unwrap().slug,
+            repositories
+                .get_tenant_account("tenant-a")
+                .unwrap()
+                .unwrap()
+                .slug,
             "tenant-a"
         );
         assert_eq!(
-            repositories.get_project("project-a").unwrap().unwrap().tenant_id,
+            repositories
+                .get_project("project-a")
+                .unwrap()
+                .unwrap()
+                .tenant_id,
             "tenant-a"
         );
         let workspace = repositories.get_workspace("ws-dev").unwrap().unwrap();
@@ -7718,5 +8185,93 @@ mod tests {
         assert_eq!(workspace.environment, "default");
         assert_eq!(workspace.status, "active");
         assert_eq!(workspace.created_at_unix, 0);
+    }
+
+    #[test]
+    fn api_key_record_upsert_get_list_and_prefix_lookup_roundtrip() {
+        let repositories = memory_repositories();
+        repositories
+            .upsert_api_key_record(sample_api_key("key-a", "fg_live"))
+            .unwrap();
+        repositories
+            .upsert_api_key_record(sample_api_key("key-b", "fg_live"))
+            .unwrap();
+        repositories
+            .upsert_api_key_record(sample_api_key("key-c", "fg_test"))
+            .unwrap();
+
+        let key = repositories
+            .get_api_key_record("key-a")
+            .unwrap()
+            .expect("api key is stored");
+        assert_eq!(key.workspace_id, "ws-dev");
+        assert_eq!(key.tenant.organization_id.as_deref(), Some("tenant-a"));
+        assert_eq!(key.tenant.project_id.as_deref(), Some("project-a"));
+        assert_eq!(key.tenant.workspace_id.as_deref(), Some("ws-dev"));
+        assert_eq!(key.tenant.api_key_id.as_deref(), Some("key-a"));
+
+        assert_eq!(repositories.list_api_key_records().unwrap().len(), 3);
+        let live_candidates = repositories
+            .find_api_key_records_by_prefix("fg_live")
+            .unwrap();
+        assert_eq!(live_candidates.len(), 2);
+        assert!(live_candidates
+            .iter()
+            .all(|candidate| candidate.key_hash != "fg_live"));
+    }
+
+    #[test]
+    fn api_key_record_upsert_overwrites_lifecycle_state() {
+        let repositories = memory_repositories();
+        repositories
+            .upsert_api_key_record(sample_api_key("key-a", "fg_live"))
+            .unwrap();
+
+        let mut updated = sample_api_key("key-a", "fg_live");
+        updated.enabled = false;
+        updated.revoked_at_unix = Some(200);
+        updated.updated_at_unix = 200;
+        repositories.upsert_api_key_record(updated).unwrap();
+
+        let stored = repositories.get_api_key_record("key-a").unwrap().unwrap();
+        assert!(!stored.enabled);
+        assert_eq!(stored.revoked_at_unix, Some(200));
+        assert_eq!(repositories.list_api_key_records().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_snapshot_includes_api_key_records() {
+        let source = memory_repositories();
+        source
+            .upsert_api_key_record(sample_api_key("key-a", "fg_live"))
+            .unwrap();
+
+        let snapshot = source.export_migration_snapshot().unwrap();
+        assert_eq!(snapshot.counts().api_key_records, 1);
+
+        let target = memory_repositories();
+        target.import_migration_snapshot(snapshot).unwrap();
+        let stored = target.get_api_key_record("key-a").unwrap().unwrap();
+        assert_eq!(stored.key_prefix, "fg_live");
+        assert_eq!(stored.workspace_id, "ws-dev");
+    }
+
+    #[test]
+    fn stored_api_key_deserializes_legacy_payload_with_durable_defaults() {
+        let json = r#"{
+            "id": "key-dev",
+            "name": "Development key",
+            "key_hash": "sha256:stored",
+            "enabled": true
+        }"#;
+        let api_key: StoredApiKey = serde_json::from_str(json).unwrap();
+        assert_eq!(api_key.workspace_id, "");
+        assert_eq!(api_key.tenant_id, "");
+        assert_eq!(api_key.project_id, "");
+        assert_eq!(api_key.key_prefix, "");
+        assert_eq!(api_key.last4, "");
+        assert!(api_key.scopes.is_empty());
+        assert_eq!(api_key.created_at_unix, 0);
+        assert_eq!(api_key.revoked_at_unix, None);
     }
 }

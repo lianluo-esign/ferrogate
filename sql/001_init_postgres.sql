@@ -566,8 +566,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_rollups_tenant_model_provider
     ON usage_aggregate_rollups(tenant_context_id, logical_model, provider);
 
 -- Multi-tenant hierarchy: Tenant -> Project -> Workspace.
--- Virtual API keys (added in a later migration) bind to a workspace and resolve
--- upward to project_id and tenant_id for routing, quota, metering, and audit.
+-- Virtual API keys bind to a workspace and resolve upward to project_id and
+-- tenant_id for routing, quota, metering, and audit.
 CREATE TABLE IF NOT EXISTS tenants (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -609,6 +609,33 @@ CREATE INDEX IF NOT EXISTS idx_workspaces_project
 
 CREATE INDEX IF NOT EXISTS idx_workspaces_tenant
     ON workspaces(tenant_id);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    key_prefix TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    last4 TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    scopes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    rotated_at_unix BIGINT,
+    expires_at_unix BIGINT,
+    revoked_at_unix BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_workspace
+    ON api_keys(workspace_id);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_project
+    ON api_keys(tenant_id, project_id);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix
+    ON api_keys(key_prefix);
 
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
@@ -662,5 +689,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (9, '009_multi_tenant_hierarchy')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (10, '010_virtual_api_keys')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

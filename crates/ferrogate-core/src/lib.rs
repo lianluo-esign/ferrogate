@@ -144,7 +144,8 @@ mod tests {
             "api_key_id": "key-1"
         }"#;
 
-        let tenant: TenantContext = serde_json::from_str(legacy).expect("legacy payload deserializes");
+        let tenant: TenantContext =
+            serde_json::from_str(legacy).expect("legacy payload deserializes");
         assert_eq!(tenant.organization_id.as_deref(), Some("org-1"));
         assert_eq!(tenant.project_id.as_deref(), Some("proj-1"));
         assert_eq!(tenant.workspace_id, None);
