@@ -3471,6 +3471,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "projects",
         "workspaces",
         "api_keys",
+        "usage_monthly_rollups",
         "billing_ledger",
         "storage_schema_migrations",
     ];
@@ -3578,6 +3579,8 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_api_keys_workspace",
         "idx_api_keys_tenant_project",
         "idx_api_keys_prefix",
+        "idx_usage_monthly_rollups_scope",
+        "idx_usage_monthly_rollups_period",
         "idx_billing_ledger_tenant_time",
         "idx_billing_ledger_model_provider",
     ];

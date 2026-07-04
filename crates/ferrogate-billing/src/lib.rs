@@ -26,7 +26,7 @@ pub mod ledger;
 pub mod pricing;
 pub mod service;
 
-pub use ledger::{charge, InMemoryLedgerSink, LedgerEntry, LedgerSink, LedgerTotals};
+pub use ledger::{charge, CostSource, InMemoryLedgerSink, LedgerEntry, LedgerSink, LedgerTotals};
 pub use pricing::{PriceBook, PriceEntry, DEFAULT_CREDITS_PER_USD};
 pub use service::{serve, BillingServiceConfig};
 
@@ -49,6 +49,28 @@ impl TokenUsage {
     pub fn estimate_missing_total(mut self) -> Self {
         if self.total_tokens == 0 {
             self.total_tokens = self.prompt_tokens + self.completion_tokens;
+        }
+        self
+    }
+
+    /// Reconcile the prompt/completion split with `total_tokens` before pricing.
+    ///
+    /// Some providers report only a total, or omit one side of the split (e.g.
+    /// Gemini can return `promptTokenCount` + `totalTokenCount` without
+    /// `candidatesTokenCount`). Pricing by `prompt + completion` alone would
+    /// then bill the missing side at $0 (issue #140). This fills a missing
+    /// total from the split, and a missing split side from the total, so cost
+    /// estimation always sees a consistent breakdown.
+    pub fn reconcile_split(mut self) -> Self {
+        if self.total_tokens == 0 {
+            self.total_tokens = self.prompt_tokens.saturating_add(self.completion_tokens);
+        } else {
+            if self.completion_tokens == 0 && self.total_tokens > self.prompt_tokens {
+                self.completion_tokens = self.total_tokens - self.prompt_tokens;
+            }
+            if self.prompt_tokens == 0 && self.total_tokens > self.completion_tokens {
+                self.prompt_tokens = self.total_tokens - self.completion_tokens;
+            }
         }
         self
     }

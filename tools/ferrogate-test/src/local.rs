@@ -24,7 +24,10 @@ use std::{
     env,
     path::Path,
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -147,6 +150,9 @@ impl BillingHarness {
         let billing = Command::new(ferrogate_bin)
             .args(["billing", "serve", "--listen"])
             .arg(&billing_addr)
+            // Exercise the authenticated path (issue #136): the gateway config
+            // carries the matching token, and the harness sends it on reads.
+            .args(["--token", crate::constants::BILLING_SERVICE_TOKEN])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(
@@ -203,7 +209,7 @@ impl BillingHarness {
                 &self.billing_addr,
                 "GET",
                 "/v1/billing/ledger?limit=200",
-                &[],
+                &[crate::constants::BILLING_AUTH],
                 "",
             ) {
                 Ok(response) if response.status == 200 => {
@@ -241,6 +247,7 @@ pub(crate) struct LocalHarness {
     pub(crate) gateway_addr: String,
     gateway: Child,
     provider: Option<JoinHandle<Vec<String>>>,
+    provider_stop: Arc<AtomicBool>,
     mcp_server: Option<JoinHandle<Vec<String>>>,
     agent_server: Option<JoinHandle<Vec<String>>>,
     agent_addr: Option<String>,
@@ -322,8 +329,10 @@ impl LocalHarness {
         }
 
         let gateway_addr = free_addr()?;
+        let provider_stop = Arc::new(AtomicBool::new(false));
         let (provider_addr, provider) =
-            spawn_local_provider_upstream(expected_provider_requests).context("start provider")?;
+            spawn_local_provider_upstream(expected_provider_requests, provider_stop.clone())
+                .context("start provider")?;
         let (mcp_addr, mcp_server) = spawn_mock_mcp_server().context("start mcp provider")?;
         let (agent_addr, agent_server) = if include_agent {
             let (addr, server) = spawn_mock_agent_server().context("start agent provider")?;
@@ -384,6 +393,7 @@ impl LocalHarness {
             gateway_addr,
             gateway,
             provider: Some(provider),
+            provider_stop,
             mcp_server: Some(mcp_server),
             agent_server,
             agent_addr,
@@ -666,6 +676,9 @@ impl Drop for LocalHarness {
         let _ = self.gateway.kill();
         let _ = self.gateway.wait();
         if let Some(provider) = self.provider.take() {
+            // Signal the provider mock to stop waiting for more requests so a
+            // request-count mismatch does not block teardown up to 90s (#142).
+            self.provider_stop.store(true, Ordering::Relaxed);
             let _ = provider.join();
         }
         if let Some(mcp_server) = self.mcp_server.take() {

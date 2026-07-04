@@ -79,7 +79,9 @@ timeout_millis = 1000
 enabled = true
 endpoint = "http://{billing_addr}"
 timeout_millis = 2000
-"#
+token = "{token}"
+"#,
+                token = crate::constants::BILLING_SERVICE_TOKEN
             )
         })
         .unwrap_or_default();

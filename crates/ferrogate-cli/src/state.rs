@@ -3167,11 +3167,20 @@ impl AppState {
             .ok()
             .flatten()
             .map(Arc::new);
-        let billing_reporter = BillingReporter::from_config(&config.billing_service)
-            .map_err(|error| {
-                anyhow::anyhow!("failed to initialize billing service client: {error}")
-            })?
-            .map(Arc::new);
+        // Billing reporting is a non-blocking accounting side effect, so a
+        // misconfiguration (e.g. a missing token env) must NOT take the gateway
+        // offline — degrade to disabled with a warning, matching the metering
+        // exporter's fail-open behavior (issue #139).
+        let billing_reporter = match BillingReporter::from_config(&config.billing_service) {
+            Ok(reporter) => reporter.map(Arc::new),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "billing service client disabled: failed to initialize (accounting is non-blocking)"
+                );
+                None
+            }
+        };
         let cluster_counters = ClusterCounterBackend::from_config(&config);
         let self_hosted_dispatch = Arc::new(Mutex::new(SelfHostedWorkerDispatchRuntime::default()));
         {

@@ -28,6 +28,30 @@ use crate::{
 };
 use ferrogate_core::TenantContext;
 
+/// Where the settled `cost` on a [`LedgerEntry`] came from.
+///
+/// `GatewaySettled` means the gateway already priced the request from its
+/// configured route rates and enforced the monthly budget against that number,
+/// so the ledger honors it verbatim (single source of truth, issue #135).
+/// `BillingPriceBook` means the event carried no settled cost and the billing
+/// service priced it from its own rate card.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostSource {
+    GatewaySettled,
+    #[default]
+    BillingPriceBook,
+}
+
+impl CostSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CostSource::GatewaySettled => "gateway_settled",
+            CostSource::BillingPriceBook => "billing_price_book",
+        }
+    }
+}
+
 /// A settled charge derived from a single usage event. This is the output of
 /// the `POST /v1/billing/charge` endpoint and the row shape of the ledger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,8 +73,12 @@ pub struct LedgerEntry {
     pub cost: CostEstimate,
     /// Abstract credit/quota consumption (`total_cost_usd * credits_per_usd`).
     pub credits: f64,
-    /// The rate-card price that was applied.
+    /// The rate-card price that was applied (informational when
+    /// `cost_source == GatewaySettled`).
     pub unit_price: ModelPrice,
+    /// Whether `cost` is the gateway-settled figure or a billing re-price.
+    #[serde(default)]
+    pub cost_source: CostSource,
     #[serde(default)]
     pub occurred_at_unix: Option<u64>,
 }
@@ -66,27 +94,43 @@ pub fn ledger_entry_id(event: &BillingEvent) -> String {
         .unwrap_or_else(|| format!("ferrogate:{}", event.request_id))
 }
 
-/// Price a usage event against the rate card, producing a [`LedgerEntry`].
+/// Price a usage event into a [`LedgerEntry`].
 ///
-/// Fails closed with `price_not_found` when the `(provider, provider_model)`
-/// pair matches no rule in the book — the caller must reject the charge rather
-/// than bill zero.
+/// Source-of-truth rule (issue #135): if the event carries a gateway-settled
+/// `cost_usd`, that figure is authoritative — the gateway already priced the
+/// request from its configured route rates and enforced the monthly budget
+/// against it, so the ledger must record the same number rather than re-pricing
+/// and silently diverging. The `PriceBook` is consulted only for the
+/// input/output breakdown in that case.
+///
+/// When the event carries no settled cost, the billing service prices it from
+/// the rate card and fails closed with `price_not_found` when no rule matches
+/// (`(provider, provider_model)`), so it never bills zero.
 pub fn charge(book: &PriceBook, event: &BillingEvent) -> Result<LedgerEntry, BillingError> {
-    let price = book
-        .price_for(&event.provider, &event.provider_model)
-        .cloned()
-        .ok_or_else(|| {
-            BillingError::new(
-                "price_not_found",
-                format!(
-                    "no rate-card price configured for provider '{}' model '{}'",
-                    event.provider, event.provider_model
-                ),
-            )
-        })?;
+    let usage = event.usage.clone().reconcile_split();
+    let price_opt = book.price_for(&event.provider, &event.provider_model).cloned();
 
-    let usage = event.usage.clone().estimate_missing_total();
-    let cost = price.estimate(&usage);
+    let (cost, unit_price, cost_source) = match authoritative_cost(event) {
+        Some(total) => {
+            let cost = settled_breakdown(total, &usage, price_opt.as_ref());
+            let unit_price = price_opt.unwrap_or_else(|| ModelPrice::usd(0.0, 0.0));
+            (cost, unit_price, CostSource::GatewaySettled)
+        }
+        None => {
+            let price = price_opt.ok_or_else(|| {
+                BillingError::new(
+                    "price_not_found",
+                    format!(
+                        "no rate-card price for provider '{}' model '{}' and the event carried no settled cost",
+                        event.provider, event.provider_model
+                    ),
+                )
+            })?;
+            let cost = price.estimate(&usage);
+            (cost, price, CostSource::BillingPriceBook)
+        }
+    };
+
     let credits = book.credits_for_usd(cost.total_cost);
 
     Ok(LedgerEntry {
@@ -102,9 +146,47 @@ pub fn charge(book: &PriceBook, event: &BillingEvent) -> Result<LedgerEntry, Bil
         status_code: event.status_code,
         cost,
         credits,
-        unit_price: price,
+        unit_price,
+        cost_source,
         occurred_at_unix: event.occurred_at_unix,
     })
+}
+
+/// The gateway-settled cost, if the event carries a usable one.
+fn authoritative_cost(event: &BillingEvent) -> Option<f64> {
+    event
+        .cost_usd
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+}
+
+/// Break a gateway-settled total into input/output components for reporting.
+/// Uses the rate card's input/output ratio when a price is known, otherwise
+/// splits by token counts; either way `total_cost` equals the settled figure.
+fn settled_breakdown(total: f64, usage: &TokenUsage, price: Option<&ModelPrice>) -> CostEstimate {
+    if let Some(price) = price {
+        let est = price.estimate(usage);
+        if est.total_cost > 0.0 {
+            let scale = total / est.total_cost;
+            return CostEstimate {
+                input_cost: est.input_cost * scale,
+                output_cost: est.output_cost * scale,
+                total_cost: total,
+                currency: price.currency.clone(),
+            };
+        }
+    }
+    let denominator = usage.prompt_tokens.saturating_add(usage.completion_tokens) as f64;
+    let input_cost = if denominator > 0.0 {
+        total * usage.prompt_tokens as f64 / denominator
+    } else {
+        0.0
+    };
+    CostEstimate {
+        input_cost,
+        output_cost: total - input_cost,
+        total_cost: total,
+        currency: "USD".to_string(),
+    }
 }
 
 /// Persistence seam for settled ledger entries. Implementations must be
@@ -311,5 +393,42 @@ mod tests {
         assert_eq!(sink.list(0, 10).unwrap().len(), 1);
         assert_eq!(sink.get(&entry.id).unwrap().unwrap().request_id, "req-4");
         assert!(sink.get("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn charge_honors_gateway_settled_cost_over_pricebook() {
+        // Gateway already settled $0.01; the PriceBook would compute $0.035.
+        let mut e = event("req-5", "openai", "gpt-5.5");
+        e.cost_usd = Some(0.01);
+        let entry = charge(&book(), &e).unwrap();
+        assert_eq!(entry.cost_source, CostSource::GatewaySettled);
+        assert!((entry.cost.total_cost - 0.01).abs() < 1e-9);
+        // breakdown scales to the settled total
+        assert!((entry.cost.input_cost + entry.cost.output_cost - 0.01).abs() < 1e-9);
+        // credits follow the settled total, not the re-price
+        assert!((entry.credits - 10_000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn charge_honors_settled_cost_even_without_a_pricebook_entry() {
+        // Unknown provider/model: no PriceBook rule, but the gateway settled a
+        // cost, so the ledger records it instead of failing closed.
+        let mut e = event("req-6", "custom-vendor", "mystery-model");
+        e.cost_usd = Some(0.5);
+        let entry = charge(&book(), &e).unwrap();
+        assert_eq!(entry.cost_source, CostSource::GatewaySettled);
+        assert!((entry.cost.total_cost - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn charge_reconciles_missing_completion_split_before_pricing() {
+        // Provider reported prompt + total but omitted the completion split.
+        let mut e = event("req-7", "openai", "gpt-5.5");
+        e.usage = TokenUsage::new(1_000, 0, 3_000);
+        let entry = charge(&book(), &e).unwrap();
+        // completion derived as 3000 - 1000 = 2000, so output is billed
+        assert_eq!(entry.usage.completion_tokens, 2_000);
+        assert!((entry.cost.output_cost - 0.030).abs() < 1e-9);
+        assert!((entry.cost.total_cost - 0.035).abs() < 1e-9);
     }
 }

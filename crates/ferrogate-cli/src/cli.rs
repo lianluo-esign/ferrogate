@@ -195,6 +195,14 @@ pub(crate) struct BillingServeArgs {
     /// Overrides the value from the pricing file when set.
     #[arg(long, env = "FERROGATE_BILLING_CREDITS_PER_USD")]
     pub(crate) credits_per_usd: Option<f64>,
+    /// Shared secret required on charge/ledger requests (`Authorization: Bearer
+    /// <token>`). When set, unauthenticated requests are rejected; `/healthz`
+    /// stays open. Prefer `--token-env` to keep the secret out of argv.
+    #[arg(long, env = "FERROGATE_BILLING_TOKEN")]
+    pub(crate) token: Option<String>,
+    /// Environment variable name holding the billing shared secret.
+    #[arg(long, env = "FERROGATE_BILLING_TOKEN_ENV")]
+    pub(crate) token_env: Option<String>,
     /// Supabase PostgreSQL DSN for durable ledger persistence. When omitted,
     /// the ledger is kept in memory only.
     #[arg(long, env = "FERROGATE_BILLING_SUPABASE_DSN")]

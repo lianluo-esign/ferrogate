@@ -17,7 +17,11 @@
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use anyhow::{anyhow, Context};
@@ -34,6 +38,12 @@ use crate::{
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const DEFAULT_LEDGER_PAGE_LIMIT: usize = 100;
 const MAX_LEDGER_PAGE_LIMIT: usize = 1000;
+/// Read/write deadline per connection so a slow or idle client cannot park a
+/// handler thread forever (slowloris mitigation, issue #138).
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound on concurrently-served connections so an anonymous flood cannot
+/// exhaust threads/memory (issue #138).
+const MAX_CONCURRENT_CONNECTIONS: usize = 512;
 
 /// Runtime configuration for [`serve`]. Ownership of the rate card and the
 /// persistence sink is transferred to the service.
@@ -42,6 +52,11 @@ pub struct BillingServiceConfig {
     pub listen: String,
     pub price_book: PriceBook,
     pub sink: Arc<dyn LedgerSink>,
+    /// Optional shared secret for service-to-service auth (issue #136). When
+    /// set, charge/ledger requests must present `Authorization: Bearer <token>`;
+    /// `/healthz` stays open for readiness probes. When `None`, the service is
+    /// unauthenticated (only appropriate for a trusted loopback deployment).
+    pub token: Option<String>,
 }
 
 impl std::fmt::Debug for BillingServiceConfig {
@@ -52,6 +67,7 @@ impl std::fmt::Debug for BillingServiceConfig {
             .field("price_book_entries", &self.price_book.len())
             .field("credits_per_usd", &self.price_book.credits_per_usd)
             .field("sink", &"dyn LedgerSink")
+            .field("auth_required", &self.token.is_some())
             .finish()
     }
 }
@@ -60,6 +76,7 @@ impl std::fmt::Debug for BillingServiceConfig {
 struct BillingService {
     price_book: PriceBook,
     sink: Arc<dyn LedgerSink>,
+    token: Option<String>,
 }
 
 impl BillingService {
@@ -71,26 +88,47 @@ impl BillingService {
     }
 }
 
+/// RAII counter guard that decrements the live-connection count on drop.
+struct ConnectionGuard(Arc<AtomicUsize>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Bind and run the billing service until the process is terminated. Blocking.
 pub fn serve(config: BillingServiceConfig) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.listen)
         .with_context(|| format!("failed to bind ferrogate-billing on {}", config.listen))?;
+    let token = config.token.clone();
     let service = Arc::new(BillingService {
         price_book: config.price_book,
         sink: config.sink,
+        token: config.token,
     });
+    let live_connections = Arc::new(AtomicUsize::new(0));
     println!(
-        "ferrogate-billing listening on {} ({} price rules, {} credits/USD)",
+        "ferrogate-billing listening on {} ({} price rules, {} credits/USD, auth {})",
         config.listen,
         service.price_book.len(),
-        service.price_book.credits_per_usd
+        service.price_book.credits_per_usd,
+        if token.is_some() { "required" } else { "off" }
     );
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Shed load rather than spawn unbounded threads under a flood.
+                if live_connections.load(Ordering::SeqCst) >= MAX_CONCURRENT_CONNECTIONS {
+                    drop(stream);
+                    continue;
+                }
+                live_connections.fetch_add(1, Ordering::SeqCst);
+                let guard = ConnectionGuard(live_connections.clone());
                 let service = service.clone();
                 std::thread::spawn(move || {
+                    let _guard = guard;
                     if let Err(error) = handle_connection(stream, &service) {
                         eprintln!("ferrogate-billing request failed: {error:#}");
                     }
@@ -103,6 +141,12 @@ pub fn serve(config: BillingServiceConfig) -> anyhow::Result<()> {
 }
 
 fn handle_connection(mut stream: TcpStream, service: &BillingService) -> anyhow::Result<()> {
+    stream
+        .set_read_timeout(Some(CONNECTION_TIMEOUT))
+        .context("failed to set billing read timeout")?;
+    stream
+        .set_write_timeout(Some(CONNECTION_TIMEOUT))
+        .context("failed to set billing write timeout")?;
     let request = read_http_request(&mut stream)?;
     let response = route_request(service, &request);
     stream
@@ -111,6 +155,22 @@ fn handle_connection(mut stream: TcpStream, service: &BillingService) -> anyhow:
 }
 
 fn route_request(service: &BillingService, request: &HttpRequest) -> HttpResponse {
+    let is_health = matches!(
+        (request.method.as_str(), request.path.as_str()),
+        ("GET", "/healthz") | ("GET", "/v1/healthz")
+    );
+    // Every route except the readiness probe requires the shared secret when
+    // one is configured (issue #136).
+    if !is_health {
+        if let Some(expected) = service.token.as_deref() {
+            if !request_is_authorized(request, expected) {
+                return HttpResponse::json(
+                    401,
+                    json!({ "error": { "code": "unauthorized", "message": "missing or invalid bearer token" } }),
+                );
+            }
+        }
+    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") | ("GET", "/v1/healthz") => HttpResponse::json(
             200,
@@ -196,6 +256,7 @@ struct HttpRequest {
     method: String,
     path: String,
     query: String,
+    authorization: Option<String>,
     body: Vec<u8>,
 }
 
@@ -210,6 +271,30 @@ impl HttpRequest {
             }
         })
     }
+}
+
+/// Constant-time check that the request presents `Authorization: Bearer <expected>`.
+fn request_is_authorized(request: &HttpRequest, expected: &str) -> bool {
+    let Some(header) = request.authorization.as_deref() else {
+        return false;
+    };
+    let presented = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))
+        .unwrap_or("")
+        .trim();
+    constant_time_eq(presented.as_bytes(), expected.as_bytes())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
@@ -246,14 +331,32 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (raw_target.to_string(), String::new()),
     };
-    let content_length = lines
+    let header_fields: Vec<(&str, &str)> = lines
         .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim(), value.trim()))
+        .collect();
+    let content_length = header_fields
+        .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .and_then(|(_, value)| value.parse::<usize>().ok())
         .unwrap_or(0);
+    let authorization = header_fields
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.to_string());
 
+    // Bound the declared body length before using it as a slice index so a
+    // malformed/huge Content-Length cannot overflow or panic (issue #138).
+    if content_length > MAX_REQUEST_BYTES {
+        return Err(anyhow!(
+            "content-length {content_length} exceeds {MAX_REQUEST_BYTES} bytes"
+        ));
+    }
     let body_start = header_end + 4;
-    while buffer.len() < body_start + content_length {
+    let body_end = body_start
+        .checked_add(content_length)
+        .ok_or_else(|| anyhow!("content-length overflow"))?;
+    while buffer.len() < body_end {
         let read = stream
             .read(&mut chunk)
             .context("failed to read request body")?;
@@ -270,7 +373,8 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         method,
         path,
         query,
-        body: buffer[body_start..body_start + content_length].to_vec(),
+        authorization,
+        body: buffer[body_start..body_end].to_vec(),
     })
 }
 
@@ -297,6 +401,7 @@ impl HttpResponse {
         let status_text = match self.status {
             200 => "OK",
             400 => "Bad Request",
+            401 => "Unauthorized",
             404 => "Not Found",
             422 => "Unprocessable Entity",
             500 => "Internal Server Error",
@@ -320,6 +425,10 @@ mod tests {
     use ferrogate_core::TenantContext;
 
     fn service() -> BillingService {
+        service_with_token(None)
+    }
+
+    fn service_with_token(token: Option<&str>) -> BillingService {
         BillingService {
             price_book: PriceBook::new(vec![PriceEntry::new(
                 "openai",
@@ -327,6 +436,7 @@ mod tests {
                 ModelPrice::usd(5.0, 15.0),
             )]),
             sink: Arc::new(crate::ledger::InMemoryLedgerSink::default()),
+            token: token.map(str::to_string),
         }
     }
 
@@ -359,8 +469,21 @@ mod tests {
             method: method.into(),
             path: path.into(),
             query: query.into(),
+            authorization: None,
             body,
         }
+    }
+
+    fn authed_request(
+        method: &str,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        bearer: &str,
+    ) -> HttpRequest {
+        let mut request = request(method, path, query, body);
+        request.authorization = Some(format!("Bearer {bearer}"));
+        request
     }
 
     #[test]
@@ -431,5 +554,61 @@ mod tests {
         assert_eq!(req.query_param("offset"), Some(5));
         assert_eq!(req.query_param("limit"), Some(20));
         assert_eq!(req.query_param("missing"), None);
+    }
+
+    #[test]
+    fn auth_required_rejects_missing_or_wrong_token() {
+        let service = service_with_token(Some("s3cret"));
+        // No Authorization header.
+        let unauth = route_request(
+            &service,
+            &request("GET", "/v1/billing/ledger", "", Vec::new()),
+        );
+        assert_eq!(unauth.status, 401);
+        // Wrong token.
+        let wrong = route_request(
+            &service,
+            &authed_request("GET", "/v1/billing/ledger", "", Vec::new(), "nope"),
+        );
+        assert_eq!(wrong.status, 401);
+        // Charge is protected too.
+        let charge = route_request(
+            &service,
+            &request(
+                "POST",
+                "/v1/billing/charge",
+                "",
+                event_json("openai", "gpt-5.5"),
+            ),
+        );
+        assert_eq!(charge.status, 401);
+        // Nothing was recorded.
+        assert_eq!(service.sink.list(0, 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn auth_required_allows_correct_token_and_leaves_health_open() {
+        let service = service_with_token(Some("s3cret"));
+        let ok = route_request(
+            &service,
+            &authed_request(
+                "POST",
+                "/v1/billing/charge",
+                "",
+                event_json("openai", "gpt-5.5"),
+                "s3cret",
+            ),
+        );
+        assert_eq!(ok.status, 200);
+        // Readiness probe stays open even with auth configured.
+        let health = route_request(&service, &request("GET", "/healthz", "", Vec::new()));
+        assert_eq!(health.status, 200);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_equal_slices() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
     }
 }

@@ -25,12 +25,38 @@ pub(crate) fn execute_billing_serve(args: BillingServeArgs) -> anyhow::Result<()
         price_book.credits_per_usd = credits_per_usd;
     }
 
+    let token = resolve_token(&args)?;
     let sink = build_ledger_sink(&args)?;
     ferrogate_billing::serve(BillingServiceConfig {
         listen: args.listen,
         price_book,
         sink,
+        token,
     })
+}
+
+/// Resolve the optional server-side shared secret from an inline value or a
+/// named environment variable (issue #136).
+fn resolve_token(args: &BillingServeArgs) -> anyhow::Result<Option<String>> {
+    if let Some(token) = args.token.as_deref() {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Ok(Some(token.to_string()));
+        }
+    }
+    if let Some(env_name) = args.token_env.as_deref() {
+        let env_name = env_name.trim();
+        if !env_name.is_empty() {
+            let token = std::env::var(env_name).with_context(|| {
+                format!("failed to read billing token env {env_name}")
+            })?;
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Ok(Some(token));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Load the rate card from a JSON file, or fall back to the built-in default

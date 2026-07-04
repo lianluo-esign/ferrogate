@@ -3981,6 +3981,29 @@ pub(crate) fn run_gateway_billing_chain(local: &LocalArgs) -> Result<()> {
     let case =
         LocalHarness::start_with_billing_service(&local.ferrogate_bin, 2, &billing.billing_addr)?;
 
+    // The billing service requires the shared secret (issue #136): an
+    // unauthenticated ledger read is rejected, an authenticated one is allowed.
+    let unauth = crate::http::http_request_addr(
+        &billing.billing_addr,
+        "GET",
+        "/v1/billing/ledger",
+        &[],
+        "",
+    )?;
+    assert_eq!(
+        unauth.status, 401,
+        "unauthenticated billing read must be rejected: {}",
+        unauth.raw
+    );
+    let authed = crate::http::http_request_addr(
+        &billing.billing_addr,
+        "GET",
+        "/v1/billing/ledger",
+        &[crate::constants::BILLING_AUTH],
+        "",
+    )?;
+    assert_eq!(authed.status, 200, "authenticated billing read must pass");
+
     // Drive a gpt-5.5 request through the gateway to the upstream.
     case.expect_json(
         "POST",
@@ -4017,11 +4040,13 @@ pub(crate) fn run_gateway_billing_chain(local: &LocalArgs) -> Result<()> {
     assert_eq!(gpt55["tenant"]["project_id"], "project_gateway");
     assert_eq!(gpt55["usage"]["total_tokens"], 2);
     assert_eq!(gpt55["cost"]["currency"], "USD");
-    assert_eq!(gpt55["unit_price"]["input_price_per_1m"], 5.0);
+    // The ledger must honor the gateway-settled cost, not re-price (issue #135).
+    assert_eq!(gpt55["cost_source"], "gateway_settled");
     let cost = gpt55["cost"]["total_cost"].as_f64().unwrap_or_default();
+    // gpt-5.5 config price 5.0/15.0 per 1M, usage 1+1 tokens => 5e-6 + 15e-6.
     assert!(
-        cost > 0.0,
-        "expected positive settled cost, got {cost}: {gpt55}"
+        (cost - 0.000_02).abs() < 1e-9,
+        "expected gateway-settled gpt-5.5 cost 2e-5, got {cost}: {gpt55}"
     );
     let credits = gpt55["credits"].as_f64().unwrap_or_default();
     assert!(
@@ -4029,13 +4054,19 @@ pub(crate) fn run_gateway_billing_chain(local: &LocalArgs) -> Result<()> {
         "expected positive credit consumption, got {credits}: {gpt55}"
     );
 
-    // The fast-chat charge must also land, attributed to gpt-4o-mini.
+    // The fast-chat charge must also land, attributed to gpt-4o-mini. This is
+    // the divergence guard for #135: the gateway config prices fast-chat at
+    // 1.0/2.0 per 1M (settled cost 3e-6), while the billing default rate card
+    // would re-price gpt-4o-mini at 0.15/0.60 (0.75e-6). The ledger must record
+    // the gateway-settled 3e-6, proving a single source of truth.
     let fast = billing.wait_for_ledger_entry(|entry| {
         entry["logical_model"] == "fast-chat" && entry["provider_model"] == "gpt-4o-mini"
     })?;
+    assert_eq!(fast["cost_source"], "gateway_settled");
+    let fast_cost = fast["cost"]["total_cost"].as_f64().unwrap_or_default();
     assert!(
-        fast["cost"]["total_cost"].as_f64().unwrap_or_default() > 0.0,
-        "expected positive fast-chat cost: {fast}"
+        (fast_cost - 0.000_003).abs() < 1e-9,
+        "expected gateway-settled fast-chat cost 3e-6 (not the 0.75e-6 default re-price), got {fast_cost}: {fast}"
     );
 
     println!("gateway-billing-chain scenario passed");

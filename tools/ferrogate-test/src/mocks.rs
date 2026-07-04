@@ -10,7 +10,10 @@ use serde_json::Value;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -54,6 +57,7 @@ impl Drop for MockThirdPartyAuthServer {
 
 pub(crate) fn spawn_local_provider_upstream(
     expected_requests: usize,
+    stop: Arc<AtomicBool>,
 ) -> Result<(String, JoinHandle<Vec<String>>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
@@ -61,7 +65,14 @@ pub(crate) fn spawn_local_provider_upstream(
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
         let started = Instant::now();
-        while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(90) {
+        // Stop when the expected count is reached, on the safety cap, OR as soon
+        // as the harness signals teardown — so a request-count mismatch no
+        // longer stalls `Drop` for up to 90s before the real failure surfaces
+        // (issue #142).
+        while requests.len() < expected_requests
+            && started.elapsed() < Duration::from_secs(90)
+            && !stop.load(Ordering::Relaxed)
+        {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let request = match read_http_request(&mut stream) {
