@@ -313,8 +313,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 10;
-const POSTGRES_SCHEMA_NAME: &str = "010_virtual_api_keys";
+const POSTGRES_SCHEMA_VERSION: u64 = 11;
+const POSTGRES_SCHEMA_NAME: &str = "011_quota_policies";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -750,6 +750,7 @@ pub struct RuntimeControlPlaneState {
     tenant_accounts: InMemoryRepository<StoredTenantAccount>,
     projects: InMemoryRepository<StoredProject>,
     workspaces: InMemoryRepository<StoredWorkspace>,
+    quota_policies: InMemoryRepository<StoredQuotaPolicy>,
 }
 
 struct PostgresControlPlaneStore {
@@ -994,6 +995,10 @@ impl PostgresControlPlaneStore {
 
     fn upsert_api_key_record(&self, api_key: &StoredApiKey) -> Result<(), StorageError> {
         let scopes_json = serialize_storage_document(&api_key.scopes)?;
+        let allowed_models_json = serialize_storage_document(&api_key.allowed_models)?;
+        let allowed_providers_json = serialize_storage_document(&api_key.allowed_providers)?;
+        let monthly_token_budget = api_key.monthly_token_budget.map(saturating_i64);
+        let request_limit_per_minute = api_key.request_limit_per_minute.map(saturating_i64);
         let created_at_unix = saturating_i64(api_key.created_at_unix);
         let updated_at_unix = saturating_i64(api_key.updated_at_unix);
         let rotated_at_unix = api_key.rotated_at_unix.map(saturating_i64);
@@ -1003,15 +1008,22 @@ impl PostgresControlPlaneStore {
             client.execute(
                 "INSERT INTO api_keys \
                  (id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4, \
-                  enabled, scopes_json, created_at_unix, updated_at_unix, rotated_at_unix, \
-                  expires_at_unix, revoked_at_unix) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::jsonb, $11, $12, $13, $14, $15) \
+                  enabled, scopes_json, allowed_models_json, allowed_providers_json, \
+                  monthly_token_budget, request_limit_per_minute, created_at_unix, \
+                  updated_at_unix, rotated_at_unix, expires_at_unix, revoked_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::jsonb, $11::text::jsonb, \
+                 $12::text::jsonb, $13, $14, $15, $16, $17, $18, $19) \
                  ON CONFLICT (id) DO UPDATE SET \
                  workspace_id = EXCLUDED.workspace_id, tenant_id = EXCLUDED.tenant_id, \
                  project_id = EXCLUDED.project_id, name = EXCLUDED.name, \
                  key_prefix = EXCLUDED.key_prefix, key_hash = EXCLUDED.key_hash, \
                  last4 = EXCLUDED.last4, enabled = EXCLUDED.enabled, \
-                 scopes_json = EXCLUDED.scopes_json, updated_at_unix = EXCLUDED.updated_at_unix, \
+                 scopes_json = EXCLUDED.scopes_json, \
+                 allowed_models_json = EXCLUDED.allowed_models_json, \
+                 allowed_providers_json = EXCLUDED.allowed_providers_json, \
+                 monthly_token_budget = EXCLUDED.monthly_token_budget, \
+                 request_limit_per_minute = EXCLUDED.request_limit_per_minute, \
+                 updated_at_unix = EXCLUDED.updated_at_unix, \
                  rotated_at_unix = EXCLUDED.rotated_at_unix, \
                  expires_at_unix = EXCLUDED.expires_at_unix, revoked_at_unix = EXCLUDED.revoked_at_unix",
                 &[
@@ -1025,6 +1037,10 @@ impl PostgresControlPlaneStore {
                     &api_key.last4,
                     &api_key.enabled,
                     &scopes_json,
+                    &allowed_models_json,
+                    &allowed_providers_json,
+                    &monthly_token_budget,
+                    &request_limit_per_minute,
                     &created_at_unix,
                     &updated_at_unix,
                     &rotated_at_unix,
@@ -1041,7 +1057,8 @@ impl PostgresControlPlaneStore {
             client.query_opt(
                 "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
                  last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
-                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix, allowed_models_json::text, \
+                 allowed_providers_json::text, monthly_token_budget, request_limit_per_minute \
                  FROM api_keys WHERE id = $1",
                 &[&id],
             )
@@ -1054,7 +1071,8 @@ impl PostgresControlPlaneStore {
             client.query(
                 "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
                  last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
-                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix, allowed_models_json::text, \
+                 allowed_providers_json::text, monthly_token_budget, request_limit_per_minute \
                  FROM api_keys ORDER BY id ASC",
                 &[],
             )
@@ -1070,7 +1088,8 @@ impl PostgresControlPlaneStore {
             client.query(
                 "SELECT id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, \
                  last4, enabled, scopes_json::text, created_at_unix, updated_at_unix, \
-                 rotated_at_unix, expires_at_unix, revoked_at_unix \
+                 rotated_at_unix, expires_at_unix, revoked_at_unix, allowed_models_json::text, \
+                 allowed_providers_json::text, monthly_token_budget, request_limit_per_minute \
                  FROM api_keys WHERE key_prefix = $1 ORDER BY id ASC",
                 &[&key_prefix],
             )
@@ -1232,6 +1251,82 @@ impl PostgresControlPlaneStore {
                 )
             }))
         })
+    }
+
+    fn upsert_quota_policy(&self, policy: &StoredQuotaPolicy) -> Result<(), StorageError> {
+        let model_allowlist_json = serialize_storage_document(&policy.model_allowlist)?;
+        let rpm_limit = policy.rpm_limit.map(saturating_i64);
+        let tpm_limit = policy.tpm_limit.map(saturating_i64);
+        let created_at_unix = policy.created_at_unix;
+        let updated_at_unix = policy.updated_at_unix;
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO quota_policies \
+                 (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
+                  monthly_budget_usd, enabled, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10) \
+                 ON CONFLICT (scope_type, scope_id) DO UPDATE SET \
+                 model_allowlist_json = EXCLUDED.model_allowlist_json, \
+                 rpm_limit = EXCLUDED.rpm_limit, tpm_limit = EXCLUDED.tpm_limit, \
+                 monthly_budget_usd = EXCLUDED.monthly_budget_usd, \
+                 enabled = EXCLUDED.enabled, updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &policy.id,
+                    &policy.scope_type.as_str(),
+                    &policy.scope_id,
+                    &model_allowlist_json,
+                    &rpm_limit,
+                    &tpm_limit,
+                    &policy.monthly_budget_usd,
+                    &policy.enabled,
+                    &created_at_unix,
+                    &updated_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
+                 tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix \
+                 FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
+                &[&scope_type.as_str(), &scope_id],
+            )
+        })?;
+        row.as_ref().map(quota_policy_from_row).transpose()
+    }
+
+    fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
+                 tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix \
+                 FROM quota_policies ORDER BY id ASC",
+                &[],
+            )
+        })?;
+        rows.iter().map(quota_policy_from_row).collect()
+    }
+
+    fn delete_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<bool, StorageError> {
+        let affected = self.with_client(|client| {
+            client.execute(
+                "DELETE FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
+                &[&scope_type.as_str(), &scope_id],
+            )
+        })?;
+        Ok(affected > 0)
     }
 
     fn append_billing_event(&self, event: &BillingEvent) -> Result<bool, StorageError> {
@@ -3442,6 +3537,8 @@ fn api_key_from_row(row: &PostgresRow) -> Result<StoredApiKey, StorageError> {
     let tenant_id = row.get::<_, String>(2);
     let project_id = row.get::<_, String>(3);
     let scopes = deserialize_storage_document(&row.get::<_, String>(9))?;
+    let allowed_models = deserialize_storage_document(&row.get::<_, String>(15))?;
+    let allowed_providers = deserialize_storage_document(&row.get::<_, String>(16))?;
     Ok(StoredApiKey {
         id: id.clone(),
         workspace_id: workspace_id.clone(),
@@ -3453,11 +3550,11 @@ fn api_key_from_row(row: &PostgresRow) -> Result<StoredApiKey, StorageError> {
         last4: row.get::<_, String>(7),
         enabled: row.get::<_, bool>(8),
         scopes,
-        allowed_models: Vec::new(),
-        allowed_providers: Vec::new(),
+        allowed_models,
+        allowed_providers,
         tenant: api_key_tenant_context(&id, &tenant_id, &project_id, &workspace_id),
-        monthly_token_budget: None,
-        request_limit_per_minute: None,
+        monthly_token_budget: row.get::<_, Option<i64>>(17).map(nonnegative_u64),
+        request_limit_per_minute: row.get::<_, Option<i64>>(18).map(nonnegative_u64),
         created_at_unix: nonnegative_u64(row.get::<_, i64>(10)),
         updated_at_unix: nonnegative_u64(row.get::<_, i64>(11)),
         rotated_at_unix: row.get::<_, Option<i64>>(12).map(nonnegative_u64),
@@ -3490,6 +3587,34 @@ fn workspace_from_row(row: &PostgresRow) -> StoredWorkspace {
         created_at_unix: row.get::<_, i64>(7),
         updated_at_unix: row.get::<_, i64>(8),
     }
+}
+
+fn quota_policy_from_row(row: &PostgresRow) -> Result<StoredQuotaPolicy, StorageError> {
+    let scope_type_raw = row.get::<_, String>(1);
+    let scope_type = QuotaScopeKind::from_str_opt(&scope_type_raw).ok_or_else(|| {
+        StorageError::Runtime(format!(
+            "unknown quota_policies.scope_type {scope_type_raw}"
+        ))
+    })?;
+    let model_allowlist = deserialize_storage_document(&row.get::<_, String>(3))?;
+    Ok(StoredQuotaPolicy {
+        id: row.get::<_, String>(0),
+        scope_type,
+        scope_id: row.get::<_, String>(2),
+        model_allowlist,
+        rpm_limit: row.get::<_, Option<i64>>(4).map(nonnegative_u64),
+        tpm_limit: row.get::<_, Option<i64>>(5).map(nonnegative_u64),
+        monthly_budget_usd: row.get::<_, Option<f64>>(6),
+        enabled: row.get::<_, bool>(7),
+        created_at_unix: row.get::<_, i64>(8),
+        updated_at_unix: row.get::<_, i64>(9),
+    })
+}
+
+fn quota_policies_supabase_only_error() -> StorageError {
+    StorageError::Runtime(
+        "quota policy records are Supabase/Postgres-only; set storage.provider = supabase".into(),
+    )
 }
 
 fn tenant_account_from_tuple(
@@ -4069,6 +4194,7 @@ impl RuntimeControlPlaneState {
             tenant_accounts: InMemoryRepository::new(),
             projects: InMemoryRepository::new(),
             workspaces: InMemoryRepository::new(),
+            quota_policies: InMemoryRepository::new(),
         }
     }
 
@@ -4118,6 +4244,29 @@ impl RuntimeControlPlaneState {
 
     pub fn delete_workspace(&mut self, id: &str) -> bool {
         self.workspaces.remove(id).is_some()
+    }
+
+    pub fn upsert_quota_policy(&mut self, policy: StoredQuotaPolicy) {
+        self.quota_policies.insert(policy.id.clone(), policy);
+    }
+
+    pub fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Option<StoredQuotaPolicy> {
+        self.quota_policies
+            .get(&quota_policy_id(scope_type, scope_id))
+    }
+
+    pub fn list_quota_policies(&self) -> Vec<StoredQuotaPolicy> {
+        self.quota_policies.list()
+    }
+
+    pub fn delete_quota_policy(&mut self, scope_type: QuotaScopeKind, scope_id: &str) -> bool {
+        self.quota_policies
+            .remove(&quota_policy_id(scope_type, scope_id))
+            .is_some()
     }
 
     /// Resolve a workspace id to its full attribution chain using the workspace's
@@ -4564,6 +4713,75 @@ fn default_active_status() -> String {
 
 fn default_environment() -> String {
     "default".to_string()
+}
+
+/// A scope in the tenant -> project -> workspace -> key quota hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaScopeKind {
+    Tenant,
+    Project,
+    Workspace,
+    Key,
+}
+
+impl QuotaScopeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuotaScopeKind::Tenant => "tenant",
+            QuotaScopeKind::Project => "project",
+            QuotaScopeKind::Workspace => "workspace",
+            QuotaScopeKind::Key => "key",
+        }
+    }
+
+    pub fn from_str_opt(value: &str) -> Option<Self> {
+        match value {
+            "tenant" => Some(QuotaScopeKind::Tenant),
+            "project" => Some(QuotaScopeKind::Project),
+            "workspace" => Some(QuotaScopeKind::Workspace),
+            "key" => Some(QuotaScopeKind::Key),
+            _ => None,
+        }
+    }
+}
+
+/// Quota/rate-limit policy attached to one scope (tenant/project/workspace/
+/// key). Resolution merges key -> workspace -> project -> tenant: the
+/// nearest defined numeric value overrides, clamped to never exceed an
+/// ancestor's cap; `model_allowlist` is the intersection of every scope in
+/// the chain that defines a non-empty list. A missing policy at a scope
+/// means that scope does not restrict; `enabled = false` at any scope in the
+/// chain is a hard deny.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredQuotaPolicy {
+    pub id: String,
+    pub scope_type: QuotaScopeKind,
+    pub scope_id: String,
+    #[serde(default)]
+    pub model_allowlist: Vec<String>,
+    #[serde(default)]
+    pub rpm_limit: Option<u64>,
+    #[serde(default)]
+    pub tpm_limit: Option<u64>,
+    #[serde(default)]
+    pub monthly_budget_usd: Option<f64>,
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+/// Deterministic id for a quota policy so `upsert` is naturally idempotent
+/// per `(scope_type, scope_id)` without a separate lookup-then-insert step.
+pub fn quota_policy_id(scope_type: QuotaScopeKind, scope_id: &str) -> String {
+    format!("{}:{}", scope_type.as_str(), scope_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5592,6 +5810,70 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.resolve_workspace_scope(workspace_id)
             }
+        }
+    }
+
+    // --- Multi-level quota/rate-limit policies (tenant/project/workspace/key) ---
+
+    pub fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_quota_policy(policy);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_quota_policy(&policy)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
+        }
+    }
+
+    pub fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<Option<StoredQuotaPolicy>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_quota_policy(scope_type, scope_id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_quota_policy(scope_type, scope_id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
+        }
+    }
+
+    pub fn list_quota_policies(&self) -> Result<Vec<StoredQuotaPolicy>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_quota_policies())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_quota_policies()
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
+        }
+    }
+
+    pub fn delete_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_quota_policy(scope_type, scope_id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_quota_policy(scope_type, scope_id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
         }
     }
 
@@ -8098,6 +8380,108 @@ mod tests {
         assert!(!stored.enabled);
         assert_eq!(stored.revoked_at_unix, Some(200));
         assert_eq!(repositories.list_api_key_records().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn quota_policy_upsert_get_list_and_delete_roundtrip() {
+        let repositories = memory_repositories();
+        repositories
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: quota_policy_id(QuotaScopeKind::Tenant, "tenant-a"),
+                scope_type: QuotaScopeKind::Tenant,
+                scope_id: "tenant-a".into(),
+                model_allowlist: vec!["fast-chat".into(), "smart-chat".into()],
+                rpm_limit: Some(1_000),
+                tpm_limit: Some(500_000),
+                monthly_budget_usd: Some(250.0),
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+        repositories
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: quota_policy_id(QuotaScopeKind::Key, "key-a"),
+                scope_type: QuotaScopeKind::Key,
+                scope_id: "key-a".into(),
+                model_allowlist: vec!["fast-chat".into()],
+                rpm_limit: Some(60),
+                tpm_limit: None,
+                monthly_budget_usd: None,
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        let tenant_policy = repositories
+            .get_quota_policy(QuotaScopeKind::Tenant, "tenant-a")
+            .unwrap()
+            .expect("tenant policy is stored");
+        assert_eq!(tenant_policy.rpm_limit, Some(1_000));
+        assert_eq!(tenant_policy.monthly_budget_usd, Some(250.0));
+        assert_eq!(
+            tenant_policy.model_allowlist,
+            vec!["fast-chat", "smart-chat"]
+        );
+
+        assert!(repositories
+            .get_quota_policy(QuotaScopeKind::Workspace, "no-such-workspace")
+            .unwrap()
+            .is_none());
+        assert_eq!(repositories.list_quota_policies().unwrap().len(), 2);
+
+        assert!(repositories
+            .delete_quota_policy(QuotaScopeKind::Key, "key-a")
+            .unwrap());
+        assert_eq!(repositories.list_quota_policies().unwrap().len(), 1);
+        assert!(!repositories
+            .delete_quota_policy(QuotaScopeKind::Key, "key-a")
+            .unwrap());
+    }
+
+    #[test]
+    fn quota_policy_upsert_overwrites_existing_scope() {
+        let repositories = memory_repositories();
+        repositories
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: quota_policy_id(QuotaScopeKind::Workspace, "ws-a"),
+                scope_type: QuotaScopeKind::Workspace,
+                scope_id: "ws-a".into(),
+                model_allowlist: vec![],
+                rpm_limit: Some(100),
+                tpm_limit: None,
+                monthly_budget_usd: None,
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        repositories
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: quota_policy_id(QuotaScopeKind::Workspace, "ws-a"),
+                scope_type: QuotaScopeKind::Workspace,
+                scope_id: "ws-a".into(),
+                model_allowlist: vec!["fast-chat".into()],
+                rpm_limit: Some(50),
+                tpm_limit: Some(10_000),
+                monthly_budget_usd: Some(10.0),
+                enabled: false,
+                created_at_unix: 1,
+                updated_at_unix: 2,
+            })
+            .unwrap();
+
+        let policy = repositories
+            .get_quota_policy(QuotaScopeKind::Workspace, "ws-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.rpm_limit, Some(50));
+        assert_eq!(policy.tpm_limit, Some(10_000));
+        assert_eq!(policy.monthly_budget_usd, Some(10.0));
+        assert!(!policy.enabled);
+        assert_eq!(repositories.list_quota_policies().unwrap().len(), 1);
     }
 
     #[test]

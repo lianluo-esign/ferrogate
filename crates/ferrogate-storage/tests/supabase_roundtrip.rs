@@ -21,10 +21,12 @@ use std::{
 
 use ferrogate_core::TenantContext;
 use ferrogate_storage::{
-    ControlPlaneDocuments, PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories,
-    StorageMigrationSnapshot, StoredAgentWorkerInstance, StoredManagedWorkerIsolationEvidence,
-    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
-    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredManagedWorkerTemplate,
+    quota_policy_id, ControlPlaneDocuments, PostgresStorageConfig, PostgresTlsMode, QuotaScopeKind,
+    RuntimeStorageRepositories, StorageMigrationSnapshot, StoredAgentWorkerInstance, StoredApiKey,
+    StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
+    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
+    StoredManagedWorkerSession, StoredManagedWorkerTemplate, StoredProject, StoredQuotaPolicy,
+    StoredTenantAccount, StoredWorkspace,
 };
 
 const IMAGE: &str = "postgres:16-alpine";
@@ -410,4 +412,169 @@ fn control_plane_documents_round_trip_through_real_supabase() {
         reexported.control_plane.policies[0].0, "policy-rt",
         "policy id must survive a fresh connection"
     );
+}
+
+/// Regression coverage for a real bug: the Postgres/Supabase `api_keys` table
+/// shipped without `allowed_models`/`allowed_providers`/`monthly_token_budget`/
+/// `request_limit_per_minute` columns, so those fields silently reset to
+/// empty/`None` on every read-back against a real Postgres backend even
+/// though the in-memory backend (and every unit test) round-tripped them
+/// fine. This proves the fix against a real Postgres instance, not memory.
+#[test]
+fn virtual_api_key_governance_fields_round_trip_through_real_supabase() {
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping supabase round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    storage
+        .upsert_tenant_account(StoredTenantAccount {
+            id: "tenant-rt".into(),
+            name: "Tenant RT".into(),
+            slug: "tenant-rt".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        })
+        .expect("tenant upsert must succeed");
+    storage
+        .upsert_project(StoredProject {
+            id: "project-rt".into(),
+            tenant_id: "tenant-rt".into(),
+            name: "Project RT".into(),
+            slug: "project-rt".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        })
+        .expect("project upsert must succeed");
+    storage
+        .upsert_workspace(StoredWorkspace {
+            id: "workspace-rt".into(),
+            project_id: "project-rt".into(),
+            tenant_id: "tenant-rt".into(),
+            name: "Workspace RT".into(),
+            slug: "workspace-rt".into(),
+            environment: "prod".into(),
+            status: "active".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        })
+        .expect("workspace upsert must succeed");
+
+    let tenant = TenantContext {
+        organization_id: Some("tenant-rt".into()),
+        project_id: Some("project-rt".into()),
+        workspace_id: Some("workspace-rt".into()),
+        api_key_id: Some("vk-rt".into()),
+        ..TenantContext::default()
+    };
+    storage
+        .upsert_api_key_record(StoredApiKey {
+            id: "vk-rt".into(),
+            workspace_id: "workspace-rt".into(),
+            tenant_id: "tenant-rt".into(),
+            project_id: "project-rt".into(),
+            name: "Live key".into(),
+            key_prefix: "fg_live_rt_prefix".into(),
+            key_hash: "sha256:deadbeef".into(),
+            last4: "beef".into(),
+            enabled: true,
+            scopes: vec!["chat.completions".into()],
+            allowed_models: vec!["fast-chat".into(), "smart-chat".into()],
+            allowed_providers: vec!["openai".into()],
+            tenant,
+            monthly_token_budget: Some(500_000),
+            request_limit_per_minute: Some(120),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            rotated_at_unix: None,
+            expires_at_unix: None,
+            revoked_at_unix: None,
+        })
+        .expect("api key upsert must succeed");
+
+    // Fresh connection: proves the governance fields landed in Postgres
+    // columns, not just the process-local write path.
+    let reopened =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
+            .expect("re-open against existing schema must succeed");
+    let reread = reopened
+        .get_api_key_record("vk-rt")
+        .expect("get must succeed")
+        .expect("api key must exist after reconnect");
+
+    assert_eq!(reread.allowed_models, vec!["fast-chat", "smart-chat"]);
+    assert_eq!(reread.allowed_providers, vec!["openai"]);
+    assert_eq!(reread.monthly_token_budget, Some(500_000));
+    assert_eq!(reread.request_limit_per_minute, Some(120));
+
+    let by_prefix = reopened
+        .find_api_key_records_by_prefix("fg_live_rt_prefix")
+        .expect("prefix lookup must succeed");
+    assert_eq!(by_prefix.len(), 1);
+    assert_eq!(by_prefix[0].allowed_models, vec!["fast-chat", "smart-chat"]);
+}
+
+#[test]
+fn quota_policy_round_trips_through_real_supabase() {
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping supabase round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    storage
+        .upsert_quota_policy(StoredQuotaPolicy {
+            id: quota_policy_id(QuotaScopeKind::Tenant, "tenant-rt"),
+            scope_type: QuotaScopeKind::Tenant,
+            scope_id: "tenant-rt".into(),
+            model_allowlist: vec!["fast-chat".into(), "smart-chat".into()],
+            rpm_limit: Some(1_000),
+            tpm_limit: Some(500_000),
+            monthly_budget_usd: Some(250.5),
+            enabled: true,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        })
+        .expect("quota policy upsert must succeed");
+
+    // Overwrite via the same (scope_type, scope_id) to prove the UNIQUE
+    // constraint drives upsert semantics, not accumulation of duplicate rows.
+    storage
+        .upsert_quota_policy(StoredQuotaPolicy {
+            id: quota_policy_id(QuotaScopeKind::Tenant, "tenant-rt"),
+            scope_type: QuotaScopeKind::Tenant,
+            scope_id: "tenant-rt".into(),
+            model_allowlist: vec!["fast-chat".into()],
+            rpm_limit: Some(500),
+            tpm_limit: None,
+            monthly_budget_usd: None,
+            enabled: false,
+            created_at_unix: 1,
+            updated_at_unix: 2,
+        })
+        .expect("quota policy re-upsert must succeed");
+
+    let reopened =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
+            .expect("re-open against existing schema must succeed");
+    let policy = reopened
+        .get_quota_policy(QuotaScopeKind::Tenant, "tenant-rt")
+        .expect("get must succeed")
+        .expect("policy must exist after reconnect");
+
+    assert_eq!(policy.rpm_limit, Some(500));
+    assert_eq!(policy.tpm_limit, None);
+    assert_eq!(policy.monthly_budget_usd, None);
+    assert!(!policy.enabled);
+    assert_eq!(policy.model_allowlist, vec!["fast-chat"]);
+    assert_eq!(reopened.list_quota_policies().unwrap().len(), 1);
 }

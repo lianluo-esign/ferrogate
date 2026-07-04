@@ -42,6 +42,12 @@ pub(crate) struct AuthContext {
     pub(crate) user_id: Option<String>,
     pub(crate) log_bodies: bool,
     pub(crate) rbac_subject: Option<ferrogate_auth::PolicySubject>,
+    /// Resolved once per request in `finalize_auth`, merging every
+    /// `quota_policies` scope in the tenant/project/workspace/key chain
+    /// (P1-3). Model-allowlist and TPM checks that need the request body
+    /// (unavailable at header-parse time) consult this instead of
+    /// re-querying storage.
+    pub(crate) effective_quota: ferrogate_policy::EffectiveQuota,
 }
 
 impl AuthContext {
@@ -52,6 +58,7 @@ impl AuthContext {
     pub(crate) fn can_use_model(&self, model: &str) -> bool {
         !self.denied_models.contains(model)
             && (self.allowed_models.is_empty() || self.allowed_models.contains(model))
+            && self.effective_quota.allows_model(model)
     }
 
     pub(crate) fn can_use_provider(&self, provider: &str) -> bool {
@@ -105,6 +112,7 @@ pub(crate) fn authenticate(
             user_id: None,
             log_bodies: false,
             rbac_subject: None,
+            effective_quota: ferrogate_policy::EffectiveQuota::default(),
         });
     }
 
@@ -117,7 +125,8 @@ pub(crate) fn authenticate(
     };
 
     if state.config.auth_service.enabled {
-        return authenticate_external(state, &provided_key, required_scope, request_id);
+        let auth = authenticate_external(state, &provided_key, required_scope, request_id)?;
+        return finalize_auth(state, auth, request_id);
     }
 
     if let Some(auth) = authenticate_durable(state, &provided_key)? {
@@ -128,10 +137,7 @@ pub(crate) fn authenticate(
                 message: format!("API key does not have required scope {required_scope}"),
             });
         }
-        if let Some(limit) = auth.request_limit_per_minute {
-            require_request_budget(state, &auth, limit, request_id)?;
-        }
-        return Ok(auth);
+        return finalize_auth(state, auth, request_id);
     }
 
     for configured_key in &state.config.api_keys {
@@ -173,6 +179,7 @@ pub(crate) fn authenticate(
                 user_id: configured_key.user_id.clone(),
                 log_bodies: configured_key.log_bodies.unwrap_or(false),
                 rbac_subject: None,
+                effective_quota: ferrogate_policy::EffectiveQuota::default(),
             };
             if !auth.has_scope(required_scope) {
                 return Err(AuthError {
@@ -181,10 +188,7 @@ pub(crate) fn authenticate(
                     message: format!("API key does not have required scope {required_scope}"),
                 });
             }
-            if let Some(limit) = configured_key.request_limit_per_minute {
-                require_request_budget(state, &auth, limit, request_id)?;
-            }
-            return Ok(auth);
+            return finalize_auth(state, auth, request_id);
         }
     }
 
@@ -232,7 +236,54 @@ fn authenticate_durable(
         user_id: decision.tenant.user_id,
         log_bodies: false,
         rbac_subject: None,
+        effective_quota: ferrogate_policy::EffectiveQuota::default(),
     }))
+}
+
+/// Final, uniform governance step applied to every successfully identified
+/// `AuthContext`, regardless of which auth source produced it (durable,
+/// YAML, or external): resolve the multi-level `quota_policies` chain
+/// (P1-3), fail closed on a disabled scope or a storage error, and enforce
+/// one unified per-minute request budget that is the tighter of the key's
+/// own `request_limit_per_minute` (TOK-12) and the resolved quota's
+/// `rpm_limit` -- a single counter consumption per request either way.
+fn finalize_auth(
+    state: &AppState,
+    mut auth: AuthContext,
+    request_id: &str,
+) -> std::result::Result<AuthContext, AuthError> {
+    let quota = state
+        .resolve_effective_quota(&auth.tenant_context())
+        .map_err(|error| AuthError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "quota_resolution_unavailable",
+            message: format!("quota policy lookup failed: {error}"),
+        })?;
+    if let Some(denied_by) = quota.denied_by {
+        return Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "quota_scope_disabled",
+            message: format!(
+                "quota policy at scope {} disables this request's tenant/project/workspace/key chain",
+                denied_by.as_str()
+            ),
+        });
+    }
+    let rpm_limit = min_opt_u64(auth.request_limit_per_minute, quota.rpm_limit);
+    if let Some(limit) = rpm_limit {
+        require_request_budget(state, &auth, limit, request_id)?;
+    }
+    auth.effective_quota = quota;
+    Ok(auth)
+}
+
+fn min_opt_u64(existing: Option<u64>, next: Option<u64>) -> Option<u64> {
+    match (existing, next) {
+        (Some(existing), Some(next)) => Some(existing.min(next)),
+        (Some(existing), None) => Some(existing),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    }
 }
 
 fn require_request_budget(
@@ -325,6 +376,7 @@ fn authenticate_external(
         user_id: decision.tenant.user_id,
         log_bodies: false,
         rbac_subject: Some(decision.subject),
+        effective_quota: ferrogate_policy::EffectiveQuota::default(),
     };
     if !external_scope_allows(&auth.scopes, required_scope) {
         return Err(AuthError {
@@ -332,9 +384,6 @@ fn authenticate_external(
             code: "scope_denied",
             message: format!("API key does not have required scope {required_scope}"),
         });
-    }
-    if let Some(limit) = auth.request_limit_per_minute {
-        require_request_budget(state, &auth, limit, request_id)?;
     }
     Ok(auth)
 }
@@ -916,6 +965,107 @@ mod tests {
     }
 
     #[test]
+    fn quota_policy_disabled_at_any_scope_is_a_hard_deny() {
+        use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+        let secret = "fg_live_quota_deny_0123456789ab";
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+        seed_durable_virtual_key(&state, "vk-quota-deny", secret, |_| {});
+        state
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: "tenant:tenant-1".into(),
+                scope_type: QuotaScopeKind::Tenant,
+                scope_id: "tenant-1".into(),
+                model_allowlist: vec![],
+                rpm_limit: None,
+                tpm_limit: None,
+                monthly_budget_usd: None,
+                enabled: false,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        let error =
+            authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1").unwrap_err();
+        assert_eq!(error.code, "quota_scope_disabled");
+    }
+
+    #[test]
+    fn quota_policy_rpm_composes_with_the_keys_own_limit_as_a_single_counter() {
+        use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+        let secret = "fg_live_quota_rpm_0123456789ab";
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+        // Key's own RPM cap is generous (10); the tenant-level quota policy
+        // is much tighter (1) and must be the one that actually governs.
+        seed_durable_virtual_key(&state, "vk-quota-rpm", secret, |key| {
+            key.request_limit_per_minute = Some(10);
+        });
+        state
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: "tenant:tenant-1".into(),
+                scope_type: QuotaScopeKind::Tenant,
+                scope_id: "tenant-1".into(),
+                model_allowlist: vec![],
+                rpm_limit: Some(1),
+                tpm_limit: None,
+                monthly_budget_usd: None,
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        assert!(authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1").is_ok());
+        let error =
+            authenticate(&state, &bearer_headers(secret), "chat.completions", "req-2").unwrap_err();
+        assert_eq!(error.code, "rate_limit_exceeded");
+    }
+
+    #[test]
+    fn quota_policy_model_allowlist_intersects_with_the_keys_own_allowlist() {
+        use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+        let secret = "fg_live_quota_models_0123456789";
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+        seed_durable_virtual_key(&state, "vk-quota-models", secret, |key| {
+            key.allowed_models = vec!["fast-chat".into(), "smart-chat".into()];
+        });
+        state
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: "tenant:tenant-1".into(),
+                scope_type: QuotaScopeKind::Tenant,
+                scope_id: "tenant-1".into(),
+                model_allowlist: vec!["fast-chat".into()],
+                rpm_limit: None,
+                tpm_limit: None,
+                monthly_budget_usd: None,
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        let auth = authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1")
+            .expect("request should authenticate");
+        assert!(auth.can_use_model("fast-chat"));
+        assert!(
+            !auth.can_use_model("smart-chat"),
+            "tenant quota policy must narrow the key's own allowlist, not widen it"
+        );
+    }
+
+    #[test]
     fn extracts_bearer_and_x_api_key() {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
@@ -943,6 +1093,7 @@ mod tests {
             user_id: None,
             log_bodies: false,
             rbac_subject: None,
+            effective_quota: ferrogate_policy::EffectiveQuota::default(),
         };
         assert!(auth.can_use_model("fast-chat"));
         assert!(!auth.can_use_model("expensive-model"));
@@ -967,6 +1118,7 @@ mod tests {
             user_id: None,
             log_bodies: true,
             rbac_subject: None,
+            effective_quota: ferrogate_policy::EffectiveQuota::default(),
         };
         assert!(auth.can_use_provider("openai"));
         assert!(!auth.can_use_provider("anthropic"));
@@ -992,6 +1144,7 @@ mod tests {
             user_id: None,
             log_bodies: false,
             rbac_subject: None,
+            effective_quota: ferrogate_policy::EffectiveQuota::default(),
         };
 
         assert!(!auth.can_use_model("fast-chat"));

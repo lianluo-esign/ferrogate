@@ -1029,6 +1029,46 @@ pub(crate) struct AdminVirtualApiKeyMutationResponse {
     pub(crate) secret: Option<String>,
 }
 
+/// A quota/rate-limit policy at one scope (tenant/project/workspace/key) in
+/// the P1-3 multi-level hierarchy.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminQuotaPolicy {
+    pub(crate) id: String,
+    pub(crate) scope_type: String,
+    pub(crate) scope_id: String,
+    pub(crate) model_allowlist: Vec<String>,
+    pub(crate) rpm_limit: Option<u64>,
+    pub(crate) tpm_limit: Option<u64>,
+    pub(crate) monthly_budget_usd: Option<f64>,
+    pub(crate) enabled: bool,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminQuotaPolicyMutation {
+    #[serde(default)]
+    pub(crate) scope_type: Option<String>,
+    #[serde(default)]
+    pub(crate) scope_id: Option<String>,
+    #[serde(default)]
+    pub(crate) model_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) rpm_limit: Option<u64>,
+    #[serde(default)]
+    pub(crate) tpm_limit: Option<u64>,
+    #[serde(default)]
+    pub(crate) monthly_budget_usd: Option<f64>,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminQuotaPolicyMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) policy: AdminQuotaPolicy,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminMcpServerMutationResponse {
     pub(crate) object: &'static str,

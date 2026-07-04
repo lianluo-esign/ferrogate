@@ -14,6 +14,7 @@ mod handlers;
 mod local;
 mod mcp_rpc;
 mod proxy;
+mod quota_policies;
 mod responses_stream;
 mod virtual_keys;
 

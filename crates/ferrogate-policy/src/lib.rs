@@ -6,7 +6,10 @@
 
 //! Policy decision boundaries.
 
+mod quota;
+
 use ferrogate_core::{RequestContext, TenantContext};
+pub use quota::{resolve_effective_quota, EffectiveQuota, QuotaScopeChain};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {

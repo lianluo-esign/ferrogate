@@ -47,7 +47,8 @@ use ferrogate_observability::{
     GatewayMetricsSnapshot, ModelProviderMetricTotal, RequestStatusMetric, TokenMetricTotals,
 };
 use ferrogate_policy::{
-    BasicPolicyEngine, PolicyDecision, PolicyEngine, PolicyRule, PolicySubject,
+    resolve_effective_quota, BasicPolicyEngine, EffectiveQuota, PolicyDecision, PolicyEngine,
+    PolicyRule, PolicySubject, QuotaScopeChain,
 };
 use ferrogate_providers::{
     AdapterError, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry, ModelRegistryError,
@@ -61,12 +62,13 @@ use ferrogate_runtime::{
     SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{
-    ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
-    RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
-    StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
-    StoredApiKey, StoredAuditEvent, StoredManagedWorkerIsolationEvidence,
-    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
-    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredProject, StoredRequestLog,
+    ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, QuotaScopeKind,
+    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
+    RuntimeStorageRepositories, StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent,
+    StoredAgentWorkerInstance, StoredApiKey, StoredAuditEvent,
+    StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
+    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
+    StoredManagedWorkerSession, StoredProject, StoredQuotaPolicy, StoredRequestLog,
     StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
     StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
     StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredUsageAggregate,
@@ -4180,6 +4182,19 @@ impl AppState {
         self.cluster_counters.try_consume_request(api_key_id, limit)
     }
 
+    /// P1-3 tokens-per-minute (TPM) quota check, consulted at dispatch time
+    /// once the request's estimated token usage is known (unlike RPM, this
+    /// cannot be checked at header-parse time in `auth::authenticate`).
+    pub(crate) fn try_consume_api_key_tokens_per_minute(
+        &self,
+        api_key_id: &str,
+        limit: u64,
+        estimated_tokens: u64,
+    ) -> anyhow::Result<bool> {
+        self.cluster_counters
+            .try_consume_tokens_per_minute(api_key_id, limit, estimated_tokens)
+    }
+
     pub(crate) fn durable_api_key_authenticator(
         &self,
     ) -> &Arc<ferrogate_auth::StorageApiKeyAuthenticator> {
@@ -4240,6 +4255,68 @@ impl AppState {
 
     pub(crate) fn upsert_virtual_api_key(&self, key: StoredApiKey) -> anyhow::Result<()> {
         Ok(self.repositories.upsert_api_key_record(key)?)
+    }
+
+    // --- Multi-level quota/rate-limit policies (P1-3) ---
+
+    pub(crate) fn list_quota_policies(&self) -> anyhow::Result<Vec<StoredQuotaPolicy>> {
+        Ok(self.repositories.list_quota_policies()?)
+    }
+
+    pub(crate) fn get_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> anyhow::Result<Option<StoredQuotaPolicy>> {
+        Ok(self.repositories.get_quota_policy(scope_type, scope_id)?)
+    }
+
+    pub(crate) fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_quota_policy(policy)?)
+    }
+
+    pub(crate) fn delete_quota_policy(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .repositories
+            .delete_quota_policy(scope_type, scope_id)?)
+    }
+
+    /// Resolve the effective (merged, capped) quota for a request's tenant
+    /// attribution chain. Fetches at most 4 point-lookups (tenant/project/
+    /// workspace/key), one per non-empty scope in `tenant`; any storage
+    /// error here must be treated as fail-closed by the caller.
+    pub(crate) fn resolve_effective_quota(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+    ) -> anyhow::Result<EffectiveQuota> {
+        let scopes: [(QuotaScopeKind, Option<&str>); 4] = [
+            (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
+            (QuotaScopeKind::Project, tenant.project_id.as_deref()),
+            (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
+            (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
+        ];
+        let mut fetched: HashMap<(QuotaScopeKind, String), StoredQuotaPolicy> = HashMap::new();
+        for (scope_type, scope_id) in scopes {
+            let Some(scope_id) = scope_id else {
+                continue;
+            };
+            if let Some(policy) = self.repositories.get_quota_policy(scope_type, scope_id)? {
+                fetched.insert((scope_type, scope_id.to_string()), policy);
+            }
+        }
+        Ok(resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: tenant.organization_id.as_deref(),
+                project_id: tenant.project_id.as_deref(),
+                workspace_id: tenant.workspace_id.as_deref(),
+                key_id: tenant.api_key_id.as_deref(),
+            },
+            |scope_type, scope_id| fetched.get(&(scope_type, scope_id.to_string())).cloned(),
+        ))
     }
 
     pub(crate) fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
@@ -6610,10 +6687,46 @@ struct ApiKeyRequestWindowState {
     count: u64,
 }
 
+/// Fixed 60s window tracking total estimated tokens consumed, for the P1-3
+/// tokens-per-minute (TPM) quota. Structurally identical to
+/// `ApiKeyRequestWindow` except it sums a caller-supplied token count instead
+/// of incrementing by one per call.
+#[derive(Debug, Default)]
+struct ApiKeyTokenWindow {
+    state: Mutex<ApiKeyTokenWindowState>,
+}
+
+impl ApiKeyTokenWindow {
+    fn try_consume(&self, limit: u64, tokens: u64, now_unix_seconds: u64) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return true;
+        };
+
+        if now_unix_seconds.saturating_sub(state.window_started_at) >= 60 {
+            state.window_started_at = now_unix_seconds;
+            state.tokens_used = 0;
+        }
+
+        if state.tokens_used.saturating_add(tokens) > limit {
+            return false;
+        }
+
+        state.tokens_used = state.tokens_used.saturating_add(tokens);
+        true
+    }
+}
+
+#[derive(Debug, Default)]
+struct ApiKeyTokenWindowState {
+    window_started_at: u64,
+    tokens_used: u64,
+}
+
 #[derive(Debug)]
 enum ClusterCounterBackend {
     Local {
         request_windows: Arc<Mutex<HashMap<String, Arc<ApiKeyRequestWindow>>>>,
+        token_rate_windows: Arc<Mutex<HashMap<String, Arc<ApiKeyTokenWindow>>>>,
         token_reservations: Arc<Mutex<HashMap<String, u64>>>,
     },
     Redis(RedisCounterBackend),
@@ -6644,6 +6757,7 @@ impl ClusterCounterBackend {
             // enforcement also covers durable (Supabase-backed) virtual keys
             // that never appear in the static YAML key list.
             request_windows: Arc::new(Mutex::new(HashMap::new())),
+            token_rate_windows: Arc::new(Mutex::new(HashMap::new())),
             token_reservations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -6654,10 +6768,12 @@ impl ClusterCounterBackend {
                 Self::Local { .. },
                 Self::Local {
                     request_windows,
+                    token_rate_windows,
                     token_reservations,
                 },
             ) => Self::Local {
                 request_windows: Arc::clone(request_windows),
+                token_rate_windows: Arc::clone(token_rate_windows),
                 token_reservations: Arc::clone(token_reservations),
             },
             (next, _) => next,
@@ -6681,6 +6797,37 @@ impl ClusterCounterBackend {
                 Ok(window.try_consume(limit, now_unix_seconds().unwrap_or_default()))
             }
             Self::Redis(redis) => redis.try_consume_request(api_key_id, limit),
+        }
+    }
+
+    fn try_consume_tokens_per_minute(
+        &self,
+        api_key_id: &str,
+        limit: u64,
+        estimated_tokens: u64,
+    ) -> anyhow::Result<bool> {
+        match self {
+            Self::Local {
+                token_rate_windows, ..
+            } => {
+                let Ok(mut windows) = token_rate_windows.lock() else {
+                    return Ok(true);
+                };
+                let window = Arc::clone(
+                    windows
+                        .entry(api_key_id.to_string())
+                        .or_insert_with(|| Arc::new(ApiKeyTokenWindow::default())),
+                );
+                drop(windows);
+                Ok(window.try_consume(
+                    limit,
+                    estimated_tokens,
+                    now_unix_seconds().unwrap_or_default(),
+                ))
+            }
+            Self::Redis(redis) => {
+                redis.try_consume_tokens_per_minute(api_key_id, limit, estimated_tokens)
+            }
         }
     }
 
@@ -6813,6 +6960,37 @@ impl RedisCounterBackend {
                 .query(&mut connection)?;
         }
         Ok(count <= limit)
+    }
+
+    fn try_consume_tokens_per_minute(
+        &self,
+        api_key_id: &str,
+        limit: u64,
+        estimated_tokens: u64,
+    ) -> anyhow::Result<bool> {
+        let now = now_unix_seconds().unwrap_or_default();
+        let window = now / 60;
+        let key = format!("{}:tpm:{window}", self.api_key_prefix(api_key_id));
+        let script = redis::Script::new(
+            r#"
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local estimate = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+if current + estimate > limit then
+  return 0
+end
+redis.call('INCRBY', KEYS[1], estimate)
+redis.call('EXPIRE', KEYS[1], 120)
+return 1
+"#,
+        );
+        let mut connection = self.connection()?;
+        let allowed: u8 = script
+            .key(key)
+            .arg(estimated_tokens)
+            .arg(limit)
+            .invoke(&mut connection)?;
+        Ok(allowed == 1)
     }
 
     #[cfg(test)]

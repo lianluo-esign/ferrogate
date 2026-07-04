@@ -272,6 +272,7 @@ impl FerroGateway {
         let max_dispatch_retries = state.provider_dispatch_max_retries();
         let provider_response_body_max_bytes = state.provider_response_body_max_bytes();
         let mut token_reservation = None;
+        let mut tpm_checked = false;
 
         'routes: for (candidate_index, model_route) in routes.iter().enumerate() {
             let Some(provider) = state.providers.get(&model_route.provider) else {
@@ -545,6 +546,70 @@ impl FerroGateway {
                                 StatusCode::TOO_MANY_REQUESTS,
                                 "token_budget_exceeded",
                                 "API key token budget cannot cover the estimated request usage",
+                                &ctx.request_id,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            self.record_ai_error_log(
+                                endpoint,
+                                ctx,
+                                AiErrorLog {
+                                    tenant: policy_request.tenant.clone(),
+                                    logical_model: Some(&request.model),
+                                    provider: Some(&provider.name),
+                                    status: StatusCode::SERVICE_UNAVAILABLE,
+                                    error_code: "governance_counter_unavailable",
+                                },
+                            );
+                            write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "governance_counter_unavailable",
+                                format!("gateway counter backend is unavailable: {error}"),
+                                &ctx.request_id,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            // P1-3 tokens-per-minute quota: checked once per logical request
+            // (not once per fallback route candidate), using the effective
+            // quota resolved once in `auth::finalize_auth`. Independent of
+            // the monthly token budget above -- a key can have a TPM limit
+            // without a monthly budget, or vice versa.
+            if !tpm_checked {
+                tpm_checked = true;
+                if let (Some(api_key_id), Some(limit)) =
+                    (auth.api_key_id.as_deref(), auth.effective_quota.tpm_limit)
+                {
+                    match state.try_consume_api_key_tokens_per_minute(
+                        api_key_id,
+                        limit,
+                        estimated_usage.total_tokens,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            self.record_ai_error_log(
+                                endpoint,
+                                ctx,
+                                AiErrorLog {
+                                    tenant: policy_request.tenant.clone(),
+                                    logical_model: Some(&request.model),
+                                    provider: Some(&provider.name),
+                                    status: StatusCode::TOO_MANY_REQUESTS,
+                                    error_code: "tpm_limit_exceeded",
+                                },
+                            );
+                            write_json_error(
+                                session,
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "tpm_limit_exceeded",
+                                "quota policy tokens-per-minute limit is exhausted for this request",
                                 &ctx.request_id,
                             )
                             .await?;

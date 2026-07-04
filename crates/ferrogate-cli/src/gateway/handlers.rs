@@ -462,6 +462,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/quota-policies" || path.starts_with("/admin/v1/quota-policies/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_quota_policies(session, ctx, &headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/tenants" {
             let headers = req.headers.clone();
             self.handle_admin_tenants(session, ctx, &headers).await?;

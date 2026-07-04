@@ -17,6 +17,7 @@ authors.workspace = true
 
 [dependencies]
 ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-storage = { path = "../ferrogate-storage" }
 
 [dev-dependencies]
 proptest.workspace = true

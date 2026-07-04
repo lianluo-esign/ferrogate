@@ -628,6 +628,19 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked_at_unix BIGINT
 );
 
+-- Per-key allow-lists and budget/rate fields, added after the initial
+-- 010_virtual_api_keys migration shipped without them; the Rust
+-- `StoredApiKey` struct always carried these fields, but the Postgres/
+-- Supabase backend silently dropped them on every read-back until now.
+ALTER TABLE api_keys
+    ADD COLUMN IF NOT EXISTS allowed_models_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE api_keys
+    ADD COLUMN IF NOT EXISTS allowed_providers_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE api_keys
+    ADD COLUMN IF NOT EXISTS monthly_token_budget BIGINT;
+ALTER TABLE api_keys
+    ADD COLUMN IF NOT EXISTS request_limit_per_minute BIGINT;
+
 CREATE INDEX IF NOT EXISTS idx_api_keys_workspace
     ON api_keys(workspace_id);
 
@@ -636,6 +649,28 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_project
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix
     ON api_keys(key_prefix);
+
+-- Quota/rate-limit policy attached to a scope in the tenant -> project ->
+-- workspace -> key hierarchy. Resolution merges key -> workspace -> project
+-- -> tenant: the nearest defined value overrides, but may not exceed the
+-- cap set by an ancestor scope; model_allowlist is the intersection of every
+-- scope in the chain that defines one.
+CREATE TABLE IF NOT EXISTS quota_policies (
+    id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'project', 'workspace', 'key')),
+    scope_id TEXT NOT NULL,
+    model_allowlist_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    rpm_limit BIGINT,
+    tpm_limit BIGINT,
+    monthly_budget_usd DOUBLE PRECISION,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (scope_type, scope_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quota_policies_scope
+    ON quota_policies(scope_type, scope_id);
 
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
@@ -694,5 +729,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (10, '010_virtual_api_keys')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (11, '011_quota_policies')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;
