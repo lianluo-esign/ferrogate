@@ -15,6 +15,7 @@ mod local;
 mod mcp_rpc;
 mod proxy;
 mod responses_stream;
+mod virtual_keys;
 
 use anyhow::{Context, Result as AnyResult};
 use http::HeaderMap;

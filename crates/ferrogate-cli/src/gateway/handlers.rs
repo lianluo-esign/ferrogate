@@ -430,6 +430,38 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/tenant-accounts" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_tenant_accounts(session, ctx, &headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/projects" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_projects(session, ctx, &headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/workspaces" {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_workspaces(session, ctx, &headers, &method)
+                .await?;
+            return Ok(true);
+        }
+
+        if path == "/admin/v1/virtual-keys" || path.starts_with("/admin/v1/virtual-keys/") {
+            let headers = req.headers.clone();
+            let method = req.method.clone();
+            self.handle_admin_virtual_keys(session, ctx, &headers, &method, &path)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/admin/v1/tenants" {
             let headers = req.headers.clone();
             self.handle_admin_tenants(session, ctx, &headers).await?;

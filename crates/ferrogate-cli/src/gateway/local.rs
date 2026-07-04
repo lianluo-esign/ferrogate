@@ -9271,7 +9271,7 @@ fn admin_audit_event_draft_for_action(
     admin_audit_event_draft_for_target(ctx, auth, action, "candidate_config", outcome, message)
 }
 
-fn admin_audit_event_draft_for_target(
+pub(super) fn admin_audit_event_draft_for_target(
     ctx: &ProxyContext,
     auth: &crate::auth::AuthContext,
     action: impl Into<String>,

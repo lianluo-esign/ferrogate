@@ -112,6 +112,14 @@ pub struct AuthDecision {
     pub tenant: TenantContext,
     pub subject: PolicySubject,
     pub scopes: Vec<String>,
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub allowed_providers: Vec<String>,
+    #[serde(default)]
+    pub monthly_token_budget: Option<u64>,
+    #[serde(default)]
+    pub request_limit_per_minute: Option<u64>,
 }
 
 pub trait ApiKeyAuthenticator: Send + Sync {
@@ -207,6 +215,10 @@ impl ApiKeyAuthenticator for StorageApiKeyAuthenticator {
                     api_key_id: api_key.id.clone(),
                 },
                 scopes: api_key.scopes,
+                allowed_models: api_key.allowed_models,
+                allowed_providers: api_key.allowed_providers,
+                monthly_token_budget: api_key.monthly_token_budget,
+                request_limit_per_minute: api_key.request_limit_per_minute,
             })
         })
     }
@@ -272,6 +284,10 @@ impl ApiKeyAuthenticator for RbacAuthService {
                 api_key_id: api_key.id.clone(),
             },
             scopes: api_key.scopes.clone(),
+            allowed_models: Vec::new(),
+            allowed_providers: Vec::new(),
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
         })
     }
 }

@@ -891,6 +891,144 @@ pub(crate) struct AdminDeleteResponse {
     pub(crate) deleted: bool,
 }
 
+// --- Multi-tenant hierarchy + durable virtual API keys (TOK-11 / TOK-12) ---
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminTenantAccount {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) slug: String,
+    pub(crate) status: String,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminTenantAccountCreateRequest {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) slug: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminTenantAccountMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) tenant: AdminTenantAccount,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminProject {
+    pub(crate) id: String,
+    pub(crate) tenant_id: String,
+    pub(crate) name: String,
+    pub(crate) slug: String,
+    pub(crate) status: String,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminProjectCreateRequest {
+    pub(crate) id: Option<String>,
+    pub(crate) tenant_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) slug: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminProjectMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) project: AdminProject,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminWorkspace {
+    pub(crate) id: String,
+    pub(crate) project_id: String,
+    pub(crate) tenant_id: String,
+    pub(crate) name: String,
+    pub(crate) slug: String,
+    pub(crate) environment: String,
+    pub(crate) status: String,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminWorkspaceCreateRequest {
+    pub(crate) id: Option<String>,
+    pub(crate) project_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) slug: Option<String>,
+    #[serde(default)]
+    pub(crate) environment: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminWorkspaceMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) workspace: AdminWorkspace,
+}
+
+/// Redacted view of a durable Supabase-backed virtual API key: never carries
+/// `key_hash` or the plaintext secret.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminVirtualApiKey {
+    pub(crate) id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) tenant_id: String,
+    pub(crate) project_id: String,
+    pub(crate) name: String,
+    pub(crate) key_prefix: String,
+    pub(crate) last4: String,
+    pub(crate) enabled: bool,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) allowed_models: Vec<String>,
+    pub(crate) allowed_providers: Vec<String>,
+    pub(crate) monthly_token_budget: Option<u64>,
+    pub(crate) request_limit_per_minute: Option<u64>,
+    pub(crate) created_at_unix: u64,
+    pub(crate) updated_at_unix: u64,
+    pub(crate) rotated_at_unix: Option<u64>,
+    pub(crate) expires_at_unix: Option<u64>,
+    pub(crate) revoked_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminVirtualApiKeyCreateRequest {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) workspace_id: Option<String>,
+    #[serde(default)]
+    pub(crate) scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) allowed_providers: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) monthly_token_budget: Option<u64>,
+    #[serde(default)]
+    pub(crate) request_limit_per_minute: Option<u64>,
+    #[serde(default)]
+    pub(crate) expires_at_unix: Option<u64>,
+}
+
+/// `secret` is populated only in the response to create/rotate; every other
+/// read of a virtual key (list/get/enable/disable/revoke) omits it.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminVirtualApiKeyMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) key: AdminVirtualApiKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) secret: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminMcpServerMutationResponse {
     pub(crate) object: &'static str,

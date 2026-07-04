@@ -17,6 +17,7 @@ use std::{
 };
 
 use crate::{config::ApiKey, state::AppState};
+use ferrogate_auth::ApiKeyAuthenticator;
 use ferrogate_core::TenantContext;
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,7 @@ pub(crate) struct AuthContext {
     pub(crate) team_id: Option<String>,
     #[allow(dead_code)]
     pub(crate) project_id: Option<String>,
+    pub(crate) workspace_id: Option<String>,
     #[allow(dead_code)]
     pub(crate) user_id: Option<String>,
     pub(crate) log_bodies: bool,
@@ -62,7 +64,7 @@ impl AuthContext {
             organization_id: self.organization_id.clone(),
             team_id: self.team_id.clone(),
             project_id: self.project_id.clone(),
-            workspace_id: None,
+            workspace_id: self.workspace_id.clone(),
             user_id: self.user_id.clone(),
             api_key_id: self.api_key_id.clone(),
         }
@@ -99,6 +101,7 @@ pub(crate) fn authenticate(
             organization_id: None,
             team_id: None,
             project_id: None,
+            workspace_id: None,
             user_id: None,
             log_bodies: false,
             rbac_subject: None,
@@ -115,6 +118,20 @@ pub(crate) fn authenticate(
 
     if state.config.auth_service.enabled {
         return authenticate_external(state, &provided_key, required_scope, request_id);
+    }
+
+    if let Some(auth) = authenticate_durable(state, &provided_key)? {
+        if !auth.has_scope(required_scope) {
+            return Err(AuthError {
+                status: StatusCode::FORBIDDEN,
+                code: "scope_denied",
+                message: format!("API key does not have required scope {required_scope}"),
+            });
+        }
+        if let Some(limit) = auth.request_limit_per_minute {
+            require_request_budget(state, &auth, limit, request_id)?;
+        }
+        return Ok(auth);
     }
 
     for configured_key in &state.config.api_keys {
@@ -152,6 +169,7 @@ pub(crate) fn authenticate(
                 organization_id: configured_key.organization_id.clone(),
                 team_id: configured_key.team_id.clone(),
                 project_id: configured_key.project_id.clone(),
+                workspace_id: None,
                 user_id: configured_key.user_id.clone(),
                 log_bodies: configured_key.log_bodies.unwrap_or(false),
                 rbac_subject: None,
@@ -164,25 +182,7 @@ pub(crate) fn authenticate(
                 });
             }
             if let Some(limit) = configured_key.request_limit_per_minute {
-                match state.try_consume_api_key_request(&configured_key.id, limit) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Err(AuthError {
-                            status: StatusCode::TOO_MANY_REQUESTS,
-                            code: "rate_limit_exceeded",
-                            message: format!(
-                                "API key request rate limit is exhausted for request {request_id}"
-                            ),
-                        });
-                    }
-                    Err(error) => {
-                        return Err(AuthError {
-                            status: StatusCode::SERVICE_UNAVAILABLE,
-                            code: "governance_counter_unavailable",
-                            message: format!("gateway counter backend is unavailable: {error}"),
-                        });
-                    }
-                }
+                require_request_budget(state, &auth, limit, request_id)?;
             }
             return Ok(auth);
         }
@@ -193,6 +193,70 @@ pub(crate) fn authenticate(
         code: "invalid_api_key",
         message: "invalid API key".into(),
     })
+}
+
+/// Resolve `presented_key` against the durable Supabase-backed virtual key
+/// storage (`ferrogate-storage` / TOK-12). This is the primary key source;
+/// the YAML `config.api_keys` loop above only runs as a compatibility
+/// fallback when no durable key matches.
+fn authenticate_durable(
+    state: &AppState,
+    provided_key: &str,
+) -> std::result::Result<Option<AuthContext>, AuthError> {
+    let Some(decision) = state
+        .durable_api_key_authenticator()
+        .authenticate(provided_key)
+    else {
+        return Ok(None);
+    };
+    if decision.monthly_token_budget == Some(0) {
+        return Err(AuthError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "token_budget_exceeded",
+            message: "API key token budget is exhausted".into(),
+        });
+    }
+    Ok(Some(AuthContext {
+        api_key_id: decision.tenant.api_key_id.clone(),
+        scopes: decision.scopes.into_iter().collect(),
+        allowed_models: decision.allowed_models.into_iter().collect(),
+        denied_models: HashSet::new(),
+        allowed_providers: decision.allowed_providers.into_iter().collect(),
+        denied_providers: HashSet::new(),
+        monthly_token_budget: decision.monthly_token_budget,
+        request_limit_per_minute: decision.request_limit_per_minute,
+        organization_id: decision.tenant.organization_id,
+        team_id: decision.tenant.team_id,
+        project_id: decision.tenant.project_id,
+        workspace_id: decision.tenant.workspace_id,
+        user_id: decision.tenant.user_id,
+        log_bodies: false,
+        rbac_subject: None,
+    }))
+}
+
+fn require_request_budget(
+    state: &AppState,
+    auth: &AuthContext,
+    limit: u64,
+    request_id: &str,
+) -> std::result::Result<(), AuthError> {
+    let Some(api_key_id) = auth.api_key_id.as_deref() else {
+        return Ok(());
+    };
+    match state.try_consume_api_key_request(api_key_id, limit) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AuthError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limit_exceeded",
+            message: format!("API key request rate limit is exhausted for request {request_id}"),
+        }),
+        Err(error) => Err(AuthError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "governance_counter_unavailable",
+            message: format!("gateway counter backend is unavailable: {error}"),
+        }),
+    }
 }
 
 pub(crate) fn authorize_external_rbac(
@@ -248,15 +312,16 @@ fn authenticate_external(
     let auth = AuthContext {
         api_key_id: decision.tenant.api_key_id.clone(),
         scopes: decision.scopes.into_iter().collect(),
-        allowed_models: HashSet::new(),
+        allowed_models: decision.allowed_models.into_iter().collect(),
         denied_models: HashSet::new(),
-        allowed_providers: HashSet::new(),
+        allowed_providers: decision.allowed_providers.into_iter().collect(),
         denied_providers: HashSet::new(),
-        monthly_token_budget: None,
-        request_limit_per_minute: None,
+        monthly_token_budget: decision.monthly_token_budget,
+        request_limit_per_minute: decision.request_limit_per_minute,
         organization_id: decision.tenant.organization_id,
         team_id: decision.tenant.team_id,
         project_id: decision.tenant.project_id,
+        workspace_id: decision.tenant.workspace_id,
         user_id: decision.tenant.user_id,
         log_bodies: false,
         rbac_subject: Some(decision.subject),
@@ -267,6 +332,9 @@ fn authenticate_external(
             code: "scope_denied",
             message: format!("API key does not have required scope {required_scope}"),
         });
+    }
+    if let Some(limit) = auth.request_limit_per_minute {
+        require_request_budget(state, &auth, limit, request_id)?;
     }
     Ok(auth)
 }
@@ -576,6 +644,276 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use ferrogate_storage::{StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace};
+
+    fn decoy_yaml_key() -> ApiKey {
+        ApiKey {
+            id: "decoy".into(),
+            name: "Decoy key".into(),
+            key_env: None,
+            key: Some("decoy-secret".into()),
+            key_hash: None,
+            enabled: true,
+            scopes: vec![],
+            allowed_models: vec![],
+            denied_models: vec![],
+            allowed_providers: vec![],
+            denied_providers: vec![],
+            organization_id: None,
+            team_id: None,
+            project_id: None,
+            user_id: None,
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+            expires_at_unix: None,
+            log_bodies: None,
+            cache_enabled: None,
+        }
+    }
+
+    /// Seeds a tenant -> project -> workspace chain and a durable virtual key
+    /// bound to it, returning the plaintext secret. Mirrors exactly what the
+    /// `/admin/v1/virtual-keys` create handler persists.
+    fn seed_durable_virtual_key(
+        state: &AppState,
+        key_id: &str,
+        secret: &str,
+        mutate: impl FnOnce(&mut StoredApiKey),
+    ) {
+        state
+            .upsert_tenant_account(StoredTenantAccount {
+                id: "tenant-1".into(),
+                name: "Tenant 1".into(),
+                slug: "tenant-1".into(),
+                status: "active".into(),
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+        state
+            .upsert_project(StoredProject {
+                id: "project-1".into(),
+                tenant_id: "tenant-1".into(),
+                name: "Project 1".into(),
+                slug: "project-1".into(),
+                status: "active".into(),
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+        state
+            .upsert_workspace(StoredWorkspace {
+                id: "workspace-1".into(),
+                project_id: "project-1".into(),
+                tenant_id: "tenant-1".into(),
+                name: "Workspace 1".into(),
+                slug: "workspace-1".into(),
+                environment: "prod".into(),
+                status: "active".into(),
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        let scope = ferrogate_core::WorkspaceScope::new("tenant-1", "project-1", "workspace-1");
+        let mut tenant = TenantContext::default();
+        scope.apply_to(&mut tenant);
+        tenant.api_key_id = Some(key_id.into());
+        let material = ferrogate_auth::virtual_api_key_material(secret).unwrap();
+        let mut key = StoredApiKey {
+            id: key_id.into(),
+            workspace_id: scope.workspace_id,
+            tenant_id: scope.tenant_id,
+            project_id: scope.project_id,
+            name: "Live key".into(),
+            key_prefix: material.key_prefix,
+            key_hash: material.key_hash,
+            last4: material.last4,
+            enabled: true,
+            scopes: vec![],
+            allowed_models: vec![],
+            allowed_providers: vec![],
+            tenant,
+            monthly_token_budget: None,
+            request_limit_per_minute: None,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            rotated_at_unix: None,
+            expires_at_unix: None,
+            revoked_at_unix: None,
+        };
+        mutate(&mut key);
+        state.upsert_virtual_api_key(key).unwrap();
+    }
+
+    fn bearer_headers(secret: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {secret}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn durable_virtual_key_authenticates_ahead_of_yaml_fallback_and_carries_attribution() {
+        let secret = "fg_live_e2e_0123456789abcdef";
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+        seed_durable_virtual_key(&state, "vk-1", secret, |key| {
+            key.allowed_models = vec!["fast-chat".into()];
+            key.monthly_token_budget = Some(500);
+        });
+
+        let auth = authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1")
+            .expect("durable key should authenticate");
+
+        assert_eq!(auth.api_key_id.as_deref(), Some("vk-1"));
+        assert_eq!(auth.organization_id.as_deref(), Some("tenant-1"));
+        assert_eq!(auth.project_id.as_deref(), Some("project-1"));
+        assert_eq!(auth.workspace_id.as_deref(), Some("workspace-1"));
+        assert_eq!(auth.monthly_token_budget, Some(500));
+        assert!(auth.can_use_model("fast-chat"));
+        assert!(!auth.can_use_model("unlisted-model"));
+        assert!(auth.tenant_context().workspace_id.as_deref() == Some("workspace-1"));
+    }
+
+    #[test]
+    fn yaml_fallback_still_authenticates_when_no_durable_key_matches() {
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+        // No durable key seeded at all; the decoy YAML key must still work.
+        let auth = authenticate(
+            &state,
+            &bearer_headers("decoy-secret"),
+            "chat.completions",
+            "req-1",
+        )
+        .expect("yaml fallback should authenticate");
+        assert_eq!(auth.api_key_id.as_deref(), Some("decoy"));
+    }
+
+    #[test]
+    fn durable_virtual_key_rotation_invalidates_previous_secret() {
+        let old_secret = "fg_live_rotate_old_0123456789";
+        let new_secret = "fg_live_rotate_new_9876543210";
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+        seed_durable_virtual_key(&state, "vk-rotate", old_secret, |_| {});
+
+        assert!(authenticate(
+            &state,
+            &bearer_headers(old_secret),
+            "chat.completions",
+            "req-1"
+        )
+        .is_ok());
+
+        // Simulate the admin rotate handler: same id, freshly derived material.
+        let mut key = state.get_virtual_api_key("vk-rotate").unwrap().unwrap();
+        let material = ferrogate_auth::virtual_api_key_material(new_secret).unwrap();
+        key.key_prefix = material.key_prefix;
+        key.key_hash = material.key_hash;
+        key.last4 = material.last4;
+        key.rotated_at_unix = Some(2);
+        state.upsert_virtual_api_key(key).unwrap();
+
+        assert!(authenticate(
+            &state,
+            &bearer_headers(old_secret),
+            "chat.completions",
+            "req-1"
+        )
+        .is_err());
+        assert!(authenticate(
+            &state,
+            &bearer_headers(new_secret),
+            "chat.completions",
+            "req-1"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn durable_virtual_key_rejects_disabled_revoked_expired_and_exhausted_budget() {
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+
+        let disabled_secret = "fg_live_disabled_0123456789ab";
+        seed_durable_virtual_key(&state, "vk-disabled", disabled_secret, |key| {
+            key.enabled = false;
+        });
+        assert!(authenticate(
+            &state,
+            &bearer_headers(disabled_secret),
+            "chat.completions",
+            "req-1"
+        )
+        .is_err());
+
+        let revoked_secret = "fg_live_revoked_0123456789ab";
+        seed_durable_virtual_key(&state, "vk-revoked", revoked_secret, |key| {
+            key.revoked_at_unix = Some(1);
+        });
+        assert!(authenticate(
+            &state,
+            &bearer_headers(revoked_secret),
+            "chat.completions",
+            "req-1"
+        )
+        .is_err());
+
+        let expired_secret = "fg_live_expired_0123456789ab";
+        seed_durable_virtual_key(&state, "vk-expired", expired_secret, |key| {
+            key.expires_at_unix = Some(0);
+        });
+        assert!(authenticate(
+            &state,
+            &bearer_headers(expired_secret),
+            "chat.completions",
+            "req-1"
+        )
+        .is_err());
+
+        let exhausted_secret = "fg_live_exhausted_0123456789";
+        seed_durable_virtual_key(&state, "vk-exhausted", exhausted_secret, |key| {
+            key.monthly_token_budget = Some(0);
+        });
+        let error = authenticate(
+            &state,
+            &bearer_headers(exhausted_secret),
+            "chat.completions",
+            "req-1",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "token_budget_exceeded");
+    }
+
+    #[test]
+    fn durable_virtual_key_enforces_its_own_request_rate_limit() {
+        let secret = "fg_live_rpm_0123456789abcdef01";
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            ..Config::default()
+        });
+        seed_durable_virtual_key(&state, "vk-rpm", secret, |key| {
+            key.request_limit_per_minute = Some(1);
+        });
+
+        assert!(authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1").is_ok());
+        let error =
+            authenticate(&state, &bearer_headers(secret), "chat.completions", "req-2").unwrap_err();
+        assert_eq!(error.code, "rate_limit_exceeded");
+    }
 
     #[test]
     fn extracts_bearer_and_x_api_key() {
@@ -601,6 +939,7 @@ mod tests {
             organization_id: None,
             team_id: None,
             project_id: None,
+            workspace_id: None,
             user_id: None,
             log_bodies: false,
             rbac_subject: None,
@@ -624,6 +963,7 @@ mod tests {
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
+            workspace_id: None,
             user_id: None,
             log_bodies: true,
             rbac_subject: None,
@@ -648,6 +988,7 @@ mod tests {
             organization_id: None,
             team_id: None,
             project_id: None,
+            workspace_id: None,
             user_id: None,
             log_bodies: false,
             rbac_subject: None,

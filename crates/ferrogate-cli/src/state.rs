@@ -39,7 +39,7 @@ use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
     TokenUsage as BillingTokenUsage,
 };
-use ferrogate_core::RequestContext;
+use ferrogate_core::{RequestContext, WorkspaceScope};
 use ferrogate_mcp::{
     McpExecutionError, McpManager, McpServerStatus, McpToolExecutionRequest, McpToolExecutionResult,
 };
@@ -64,12 +64,13 @@ use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, RuntimeControlPlaneState,
     RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
     StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance,
-    StoredAuditEvent, StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
-    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
-    StoredManagedWorkerSession, StoredRequestLog, StoredSelfHostedRunDispatch,
-    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    StoredApiKey, StoredAuditEvent, StoredManagedWorkerIsolationEvidence,
+    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
+    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredProject, StoredRequestLog,
+    StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
     StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
-    StoredSelfHostedWorkerTelemetryEvent, StoredUsageAggregate,
+    StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredUsageAggregate,
+    StoredWorkspace,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -896,6 +897,7 @@ pub(crate) struct AppState {
     metering_events: Arc<InMemoryBillingEventSink>,
     metering_exporter: Option<Arc<MeteringExporter>>,
     repositories: Arc<RuntimeStorageRepositories>,
+    durable_api_key_authenticator: Arc<ferrogate_auth::StorageApiKeyAuthenticator>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     observability_export: Arc<Mutex<ObservabilityExportRuntime>>,
     analytics_export: Arc<Mutex<ObservabilityExportRuntime>>,
@@ -3082,6 +3084,9 @@ impl AppState {
                 analytics.billing_event_retention_records,
             )),
             metering_exporter,
+            durable_api_key_authenticator: Arc::new(
+                ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::clone(&repositories)),
+            ),
             repositories,
             metrics: Arc::new(Mutex::new(GatewayMetricsAccumulator::default())),
             observability_export: Arc::new(Mutex::new(ObservabilityExportRuntime::default())),
@@ -3507,6 +3512,9 @@ impl AppState {
         next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
         next.metering_events = Arc::clone(&self.metering_events);
         next.repositories = Arc::clone(&self.repositories);
+        next.durable_api_key_authenticator = Arc::new(
+            ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::clone(&next.repositories)),
+        );
         next.metrics = Arc::clone(&self.metrics);
         next.analytics_export = Arc::clone(&self.analytics_export);
         next.response_cache = Arc::clone(&self.response_cache);
@@ -4170,6 +4178,68 @@ impl AppState {
         limit: u64,
     ) -> anyhow::Result<bool> {
         self.cluster_counters.try_consume_request(api_key_id, limit)
+    }
+
+    pub(crate) fn durable_api_key_authenticator(
+        &self,
+    ) -> &Arc<ferrogate_auth::StorageApiKeyAuthenticator> {
+        &self.durable_api_key_authenticator
+    }
+
+    // --- Multi-tenant hierarchy + durable virtual API keys (TOK-11 / TOK-12) ---
+
+    pub(crate) fn list_tenant_accounts(&self) -> anyhow::Result<Vec<StoredTenantAccount>> {
+        Ok(self.repositories.list_tenant_accounts()?)
+    }
+
+    pub(crate) fn get_tenant_account(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<StoredTenantAccount>> {
+        Ok(self.repositories.get_tenant_account(id)?)
+    }
+
+    pub(crate) fn upsert_tenant_account(&self, account: StoredTenantAccount) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_tenant_account(account)?)
+    }
+
+    pub(crate) fn list_projects(&self) -> anyhow::Result<Vec<StoredProject>> {
+        Ok(self.repositories.list_projects()?)
+    }
+
+    pub(crate) fn get_project(&self, id: &str) -> anyhow::Result<Option<StoredProject>> {
+        Ok(self.repositories.get_project(id)?)
+    }
+
+    pub(crate) fn upsert_project(&self, project: StoredProject) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_project(project)?)
+    }
+
+    pub(crate) fn list_workspaces(&self) -> anyhow::Result<Vec<StoredWorkspace>> {
+        Ok(self.repositories.list_workspaces()?)
+    }
+
+    pub(crate) fn upsert_workspace(&self, workspace: StoredWorkspace) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_workspace(workspace)?)
+    }
+
+    pub(crate) fn resolve_workspace_scope(
+        &self,
+        workspace_id: &str,
+    ) -> anyhow::Result<Option<WorkspaceScope>> {
+        Ok(self.repositories.resolve_workspace_scope(workspace_id)?)
+    }
+
+    pub(crate) fn list_virtual_api_keys(&self) -> anyhow::Result<Vec<StoredApiKey>> {
+        Ok(self.repositories.list_api_key_records()?)
+    }
+
+    pub(crate) fn get_virtual_api_key(&self, id: &str) -> anyhow::Result<Option<StoredApiKey>> {
+        Ok(self.repositories.get_api_key_record(id)?)
+    }
+
+    pub(crate) fn upsert_virtual_api_key(&self, key: StoredApiKey) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_api_key_record(key)?)
     }
 
     pub(crate) fn api_key_total_tokens_used(&self, api_key_id: &str) -> u64 {
@@ -6543,7 +6613,7 @@ struct ApiKeyRequestWindowState {
 #[derive(Debug)]
 enum ClusterCounterBackend {
     Local {
-        request_windows: HashMap<String, ApiKeyRequestWindow>,
+        request_windows: Arc<Mutex<HashMap<String, Arc<ApiKeyRequestWindow>>>>,
         token_reservations: Arc<Mutex<HashMap<String, u64>>>,
     },
     Redis(RedisCounterBackend),
@@ -6569,12 +6639,11 @@ impl ClusterCounterBackend {
         }
 
         Self::Local {
-            request_windows: config
-                .api_keys
-                .iter()
-                .filter(|key| key.request_limit_per_minute.is_some())
-                .map(|key| (key.id.clone(), ApiKeyRequestWindow::default()))
-                .collect(),
+            // Windows are created lazily on first use (see `try_consume_request`)
+            // rather than pre-seeded from `config.api_keys`, so request-limit
+            // enforcement also covers durable (Supabase-backed) virtual keys
+            // that never appear in the static YAML key list.
+            request_windows: Arc::new(Mutex::new(HashMap::new())),
             token_reservations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -6582,14 +6651,13 @@ impl ClusterCounterBackend {
     fn from_reloaded_config(config: &Config, previous: &Arc<Self>) -> Self {
         match (Self::from_config(config), previous.as_ref()) {
             (
+                Self::Local { .. },
                 Self::Local {
-                    request_windows, ..
-                },
-                Self::Local {
-                    token_reservations, ..
+                    request_windows,
+                    token_reservations,
                 },
             ) => Self::Local {
-                request_windows,
+                request_windows: Arc::clone(request_windows),
                 token_reservations: Arc::clone(token_reservations),
             },
             (next, _) => next,
@@ -6600,9 +6668,18 @@ impl ClusterCounterBackend {
         match self {
             Self::Local {
                 request_windows, ..
-            } => Ok(request_windows.get(api_key_id).is_none_or(|window| {
-                window.try_consume(limit, now_unix_seconds().unwrap_or_default())
-            })),
+            } => {
+                let Ok(mut windows) = request_windows.lock() else {
+                    return Ok(true);
+                };
+                let window = Arc::clone(
+                    windows
+                        .entry(api_key_id.to_string())
+                        .or_insert_with(|| Arc::new(ApiKeyRequestWindow::default())),
+                );
+                drop(windows);
+                Ok(window.try_consume(limit, now_unix_seconds().unwrap_or_default()))
+            }
             Self::Redis(redis) => redis.try_consume_request(api_key_id, limit),
         }
     }
