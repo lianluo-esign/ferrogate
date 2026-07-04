@@ -65,12 +65,13 @@ use ferrogate_runtime::{
 use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, QuotaScopeKind,
     RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
-    RuntimeStorageRepositories, StorageBackendEvidence, StoredAgentRun, StoredAgentRunEvent,
-    StoredAgentWorkerInstance, StoredApiKey, StoredAuditEvent,
-    StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
-    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
-    StoredManagedWorkerSession, StoredProject, StoredQuotaPolicy, StoredRequestLog,
-    StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    RuntimeStorageRepositories, StorageBackendEvidence, StorageError, StoredAgentRun,
+    StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAuditEvent,
+    StoredBillingReportOutboxEntry, StoredManagedWorkerIsolationEvidence,
+    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
+    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredProject,
+    StoredQuotaPolicy, StoredRequestLog, StoredSelfHostedRunDispatch,
+    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
     StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
     StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredUsageAggregate,
     StoredUsageMonthlyRollup, StoredWorkspace,
@@ -2038,6 +2039,9 @@ struct GatewayMetricsAccumulator {
     guardrail_denial_total: u64,
     guardrail_redaction_total: u64,
     billing_event_total: u64,
+    /// Failures durably enqueueing a settled usage event for delivery to the
+    /// billing service (issue #151).
+    billing_report_enqueue_failure_total: u64,
     token_totals: TokenMetricTotals,
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
     tool_call_total: u64,
@@ -2302,6 +2306,11 @@ impl GatewayMetricsAccumulator {
         total.total_tokens += event.usage.total_tokens;
     }
 
+    fn record_billing_report_enqueue_failure(&mut self) {
+        self.billing_report_enqueue_failure_total =
+            self.billing_report_enqueue_failure_total.saturating_add(1);
+    }
+
     fn record_cache_hit(&mut self) {
         self.cache_hits_total = self.cache_hits_total.saturating_add(1);
     }
@@ -2346,6 +2355,7 @@ impl GatewayMetricsAccumulator {
             guardrail_denial_total: self.guardrail_denial_total,
             guardrail_redaction_total: self.guardrail_redaction_total,
             billing_event_total: self.billing_event_total,
+            billing_report_enqueue_failure_total: self.billing_report_enqueue_failure_total,
             tool_call_total: self.tool_call_total,
             tool_latency_ms_total: self.tool_latency_ms_total,
             token_totals: self.token_totals.clone(),
@@ -4751,7 +4761,14 @@ impl AppState {
         &self,
         draft: BillingTokenUsageDraft<'_>,
     ) -> Result<(), ferrogate_billing::BillingError> {
-        let usage = draft.usage.clone().estimate_missing_total();
+        // Reconcile a missing prompt/completion split against total_tokens
+        // before pricing (issue #145): some providers report only a total, and
+        // pricing prompt/completion directly without this would settle
+        // cost_usd = Some(0.0) for real usage, which the ledger then honors
+        // verbatim as authoritative (issue #135). reconcile_split() is a
+        // superset of estimate_missing_total() (it also fills a missing total
+        // from the split), so a single call covers both directions.
+        let usage = draft.usage.clone().reconcile_split();
         let cost_usd = settled_cost_usd(
             &self.model_registry,
             draft.logical_model,
@@ -4775,43 +4792,68 @@ impl AppState {
             usage: usage.clone(),
             usage_source: draft.usage_source,
             status_code: draft.status_code,
-            occurred_at_unix: None,
+            // Stamp the actual settlement time (issue #153): leaving this None
+            // meant every billing_ledger row had a NULL occurred_at_unix,
+            // making idx_billing_ledger_tenant_time unusable for time-scoped
+            // tenant queries/reporting.
+            occurred_at_unix: now_unix_seconds(),
             cost_usd,
             latency_ms: draft.latency_ms,
         };
         self.metering_events.record(event.clone())?;
-        let recorded = self
-            .repositories
-            .append_billing_event(event.clone())
-            .map_err(|error| {
-                ferrogate_billing::BillingError::new(
-                    "billing_persistence_failed",
-                    format!("failed to persist billing event: {error}"),
-                )
-            })?;
-        if !recorded {
-            return Ok(());
-        }
-        self.record_billing_metrics(&event);
-        if let Some(exporter) = &self.metering_exporter {
-            exporter.export_event(event.clone());
-        }
         // Durably enqueue the settled usage for delivery to the standalone
-        // billing service (issues #131/#137). Rather than a fire-and-forget POST
-        // that would be lost if billing is unavailable, the event is written to
-        // a persistent outbox and a background sweeper delivers it (idempotent
+        // billing service (issues #131/#137) in the SAME call as the metering
+        // write rather than a second sequential synchronous round-trip (issue
+        // #150): `append_billing_event_with_outbox_enqueue` commits both in one
+        // Postgres transaction. Rather than a fire-and-forget POST that would
+        // be lost if billing is unavailable, the event is written to a
+        // persistent outbox and a background sweeper delivers it (idempotent
         // on the ledger entry id), so a charge survives a billing outage or a
         // gateway restart.
-        if self.billing_reporter.is_some() {
+        let recorded = if self.billing_reporter.is_some() {
             let entry_id = ferrogate_billing::ledger::ledger_entry_id(&event);
             let now = now_unix_seconds().unwrap_or_default() as i64;
-            if let Err(error) = self.repositories.enqueue_billing_report(&entry_id, &event, now) {
+            let outcome = self
+                .repositories
+                .append_billing_event_with_outbox_enqueue(event.clone(), &entry_id, now)
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist billing event: {error}"),
+                    )
+                })?;
+            if let Some(error) = outcome.enqueue_error {
+                // Distinguishable from a successful enqueue (issue #151): this
+                // is the narrow window where the charge is lost despite the
+                // durable-outbox design, since nothing retries the enqueue
+                // write itself. Surface it as a counter (not just a log line)
+                // so operators can alert on it.
+                if let Ok(mut metrics) = self.metrics.lock() {
+                    metrics.record_billing_report_enqueue_failure();
+                }
                 warn!(
                     request_id = %event.request_id,
                     error = %error,
                     "failed to enqueue billing report for durable delivery"
                 );
             }
+            outcome.recorded
+        } else {
+            self.repositories
+                .append_billing_event(event.clone())
+                .map_err(|error| {
+                    ferrogate_billing::BillingError::new(
+                        "billing_persistence_failed",
+                        format!("failed to persist billing event: {error}"),
+                    )
+                })?
+        };
+        if !recorded {
+            return Ok(());
+        }
+        self.record_billing_metrics(&event);
+        if let Some(exporter) = &self.metering_exporter {
+            exporter.export_event(event.clone());
         }
         if let Some(api_key_id) = &draft.request.tenant.api_key_id {
             if let Err(error) = self
@@ -4829,16 +4871,13 @@ impl AppState {
         Ok(())
     }
 
-    /// Whether durable billing report delivery is enabled (used to decide
-    /// whether to spawn the background outbox sweeper).
-    pub(crate) fn billing_reporting_enabled(&self) -> bool {
-        self.billing_reporter.is_some()
-    }
-
     /// Deliver one batch of pending billing reports from the durable outbox to
     /// the billing service (issue #137): delete rows that deliver successfully
-    /// and reschedule failures with capped exponential backoff. Idempotent on
-    /// the billing side, so replay never double-bills. A no-op when billing
+    /// and reschedule failures with capped exponential backoff. After
+    /// [`MAX_BILLING_OUTBOX_ATTEMPTS`] failures, a report is dead-lettered
+    /// instead of retried forever (issue #143) — it stops consuming sweeper
+    /// batch capacity but is kept for operator inspection. Idempotent on the
+    /// billing side, so replay never double-bills. A no-op when billing
     /// reporting is disabled.
     pub(crate) fn sweep_billing_outbox_once(&self) {
         let Some(reporter) = self.billing_reporter.clone() else {
@@ -4863,6 +4902,21 @@ impl AppState {
                     }
                 }
                 Err(error) => {
+                    let attempts_after = entry.attempts.saturating_add(1);
+                    if attempts_after >= MAX_BILLING_OUTBOX_ATTEMPTS {
+                        if let Err(dead_letter_error) =
+                            self.repositories.dead_letter_billing_report(&entry.id, now)
+                        {
+                            warn!(id = %entry.id, error = %dead_letter_error, "failed to dead-letter billing report");
+                        }
+                        warn!(
+                            id = %entry.id,
+                            attempts = attempts_after,
+                            error = %error,
+                            "billing report delivery failed permanently; dead-lettering after max attempts"
+                        );
+                        continue;
+                    }
                     let next = now.saturating_add(billing_outbox_backoff_secs(entry.attempts));
                     if let Err(reschedule_error) =
                         self.repositories.reschedule_billing_report(&entry.id, next)
@@ -4878,6 +4932,14 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// List dead-lettered billing outbox entries for operator inspection
+    /// (issue #143).
+    pub(crate) fn billing_outbox_dead_letters(
+        &self,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        self.repositories.list_dead_lettered_billing_reports(500)
     }
 
     #[cfg(test)]
@@ -5069,6 +5131,7 @@ impl AppState {
                 guardrail_denial_total: 0,
                 guardrail_redaction_total: 0,
                 billing_event_total: 0,
+                billing_report_enqueue_failure_total: 0,
                 tool_call_total: 0,
                 tool_latency_ms_total: 0,
                 token_totals: TokenMetricTotals::default(),
@@ -7714,6 +7777,14 @@ fn now_unix_seconds() -> Option<u64> {
 
 /// Max billing-report outbox rows delivered per sweep (issue #137).
 const BILLING_OUTBOX_BATCH: usize = 100;
+
+/// After this many failed delivery attempts, a report is dead-lettered
+/// instead of rescheduled forever (issue #143). With the backoff sequence
+/// below this is roughly 15 minutes of retries — long enough to ride out a
+/// billing-service restart or a brief network blip, short enough that a
+/// permanently-undeliverable event (e.g. a 422 from a rate-card mismatch)
+/// doesn't retry indefinitely and starve the sweeper batch.
+const MAX_BILLING_OUTBOX_ATTEMPTS: i64 = 20;
 
 /// Capped exponential backoff (seconds) for a failed billing report, by prior
 /// attempt count: 1, 2, 4, 8, 16, 32, 60, 60, ...
@@ -11100,3 +11171,7 @@ mod tests {
 #[cfg(test)]
 #[path = "state_self_hosted_security_test.rs"]
 mod state_self_hosted_security_test;
+
+#[cfg(test)]
+#[path = "state_billing_outbox_test.rs"]
+mod state_billing_outbox_test;

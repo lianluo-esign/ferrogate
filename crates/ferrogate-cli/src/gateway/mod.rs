@@ -5,6 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 mod agent_runs;
+mod billing_outbox;
 mod body;
 mod chat;
 mod dispatch;
@@ -332,7 +333,7 @@ fn start_mcp_health_scheduler_with_interval(
 }
 
 /// Background sweeper that durably delivers queued billing reports to the
-/// billing service (issue #137). Runs only when billing reporting is enabled.
+/// billing service (issue #137).
 struct BillingOutboxSweeperHandle {
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
@@ -347,10 +348,16 @@ impl Drop for BillingOutboxSweeperHandle {
     }
 }
 
-fn start_billing_outbox_sweeper(state: &SharedAppState) -> Option<BillingOutboxSweeperHandle> {
-    if !state.current().billing_reporting_enabled() {
-        return None;
-    }
+/// Always spawns the sweeper thread, unconditionally, regardless of whether
+/// billing reporting is enabled in the boot-time config snapshot (issue #144):
+/// checking whether billing was enabled only once before deciding whether to
+/// spawn meant enabling `billing_service` later via the admin hot config-reload
+/// path never started a drain thread, silently stranding enqueued reports.
+/// `sweep_billing_outbox_once` re-reads `state.current()` and no-ops when
+/// billing is disabled, so this thread costs one 1s sleep-wake per tick and
+/// picks up a config change on the very next tick with no extra logic needed
+/// here.
+fn start_billing_outbox_sweeper(state: &SharedAppState) -> BillingOutboxSweeperHandle {
     let state = state.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
@@ -363,10 +370,10 @@ fn start_billing_outbox_sweeper(state: &SharedAppState) -> Option<BillingOutboxS
             state.current().sweep_billing_outbox_once();
         }
     });
-    Some(BillingOutboxSweeperHandle {
+    BillingOutboxSweeperHandle {
         stop,
         handle: Some(handle),
-    })
+    }
 }
 
 fn start_acme_renewal_if_configured(

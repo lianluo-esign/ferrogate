@@ -313,8 +313,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 14;
-const POSTGRES_SCHEMA_NAME: &str = "014_billing_report_outbox";
+const POSTGRES_SCHEMA_VERSION: u64 = 15;
+const POSTGRES_SCHEMA_NAME: &str = "015_billing_report_outbox_dead_letter";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -1417,16 +1417,32 @@ impl PostgresControlPlaneStore {
         Ok(inserted > 0)
     }
 
+    /// Issue #149: the tenant filter is pushed into the WHERE clause itself
+    /// (via the `$n::text IS NULL OR column = $n` idiom, so a single fixed
+    /// query serves both the unfiltered and per-tenant cases) rather than
+    /// fetching an unfiltered page and discarding rows in application code —
+    /// otherwise a scoped page could silently come back empty/incomplete in a
+    /// busy, multi-tenant ledger, and the tenant-time index would go unused.
     fn list_billing_ledger_entries(
         &self,
+        filter: &ferrogate_billing::LedgerListFilter,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
         let rows = self.with_client(|client| {
             client.query(
                 "SELECT entry_json::text FROM billing_ledger \
-                 ORDER BY created_at_unix ASC, id ASC OFFSET $1 LIMIT $2",
-                &[&offset, &limit],
+                 WHERE ($1::text IS NULL OR organization_id = $1) \
+                   AND ($2::text IS NULL OR project_id = $2) \
+                   AND ($3::text IS NULL OR api_key_id = $3) \
+                 ORDER BY created_at_unix ASC, id ASC OFFSET $4 LIMIT $5",
+                &[
+                    &filter.organization_id,
+                    &filter.project_id,
+                    &filter.api_key_id,
+                    &offset,
+                    &limit,
+                ],
             )
         })?;
         rows.iter().map(ledger_entry_from_row).collect()
@@ -1472,8 +1488,9 @@ impl PostgresControlPlaneStore {
     ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
         let rows = self.with_client(|client| {
             client.query(
-                "SELECT id, event_json::text, attempts, next_attempt_unix \
-                 FROM billing_report_outbox WHERE next_attempt_unix <= $1 \
+                "SELECT id, event_json::text, attempts, next_attempt_unix, dead_lettered_at_unix \
+                 FROM billing_report_outbox \
+                 WHERE next_attempt_unix <= $1 AND dead_lettered_at_unix IS NULL \
                  ORDER BY next_attempt_unix ASC LIMIT $2",
                 &[&now_unix, &limit],
             )
@@ -1498,6 +1515,37 @@ impl PostgresControlPlaneStore {
         })
     }
 
+    /// Mark a permanently-failing report dead-lettered (issue #143) instead of
+    /// rescheduling it forever. The row is kept for operator inspection and
+    /// excluded from `list_due_billing_reports`.
+    fn dead_letter_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        let now = saturating_i64(now_unix_seconds());
+        self.with_client(|client| {
+            client.execute(
+                "UPDATE billing_report_outbox \
+                 SET dead_lettered_at_unix = $2, updated_at_unix = $2 \
+                 WHERE id = $1",
+                &[&id, &now],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn list_dead_lettered_billing_reports(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, event_json::text, attempts, next_attempt_unix, dead_lettered_at_unix \
+                 FROM billing_report_outbox WHERE dead_lettered_at_unix IS NOT NULL \
+                 ORDER BY dead_lettered_at_unix DESC LIMIT $1",
+                &[&limit],
+            )
+        })?;
+        rows.iter().map(billing_report_outbox_from_row).collect()
+    }
+
     fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
         self.with_client(|client| {
             client.execute("DELETE FROM billing_report_outbox WHERE id = $1", &[&id])?;
@@ -1506,6 +1554,34 @@ impl PostgresControlPlaneStore {
     }
 
     fn append_billing_event(&self, event: &BillingEvent) -> Result<bool, StorageError> {
+        self.append_billing_event_impl(event, None)
+    }
+
+    /// Combines the metering write with the durable billing-report outbox
+    /// enqueue (issue #150) into a single transaction/round-trip, instead of
+    /// two sequential synchronous writes on the request-response hot path.
+    ///
+    /// Tradeoff, documented deliberately: because both inserts share one
+    /// transaction, a failure of the (normally trivial) outbox insert now
+    /// fails the whole call, same as a metering-write failure already did —
+    /// there is no partial-success case to reconcile. This is judged
+    /// acceptable because both writes target the same database, so a real
+    /// outage fails both anyway; the common (all-success) case is what
+    /// benefits from dropping the second round-trip.
+    fn append_billing_event_with_outbox_enqueue(
+        &self,
+        event: &BillingEvent,
+        outbox_id: &str,
+        outbox_next_attempt_unix: i64,
+    ) -> Result<bool, StorageError> {
+        self.append_billing_event_impl(event, Some((outbox_id, outbox_next_attempt_unix)))
+    }
+
+    fn append_billing_event_impl(
+        &self,
+        event: &BillingEvent,
+        outbox_enqueue: Option<(&str, i64)>,
+    ) -> Result<bool, StorageError> {
         let tenant_context_id = tenant_storage_key(&event.tenant);
         let occurred_at_unix = event.occurred_at_unix.unwrap_or_else(now_unix_seconds);
         let workflow_version = event.workflow_version.map(|value| value as i32);
@@ -1517,6 +1593,10 @@ impl PostgresControlPlaneStore {
         let latency_ms = event.latency_ms.map(saturating_i64);
         let is_error = event.status_code >= 400;
         let period_month = period_month_from_unix(saturating_i64(occurred_at_unix));
+        let outbox_event_json = outbox_enqueue
+            .is_some()
+            .then(|| serialize_storage_document(event))
+            .transpose()?;
         self.with_client(|client| {
             let mut transaction = client.transaction()?;
             upsert_tenant_context(&mut transaction, &tenant_context_id, &event.tenant)?;
@@ -1589,6 +1669,18 @@ impl PostgresControlPlaneStore {
                         is_error,
                     },
                 )?;
+                if let (Some((outbox_id, next_attempt_unix)), Some(event_json)) =
+                    (outbox_enqueue, outbox_event_json.as_ref())
+                {
+                    let created_at_unix = saturating_i64(now_unix_seconds());
+                    transaction.execute(
+                        "INSERT INTO billing_report_outbox \
+                         (id, event_json, attempts, next_attempt_unix, created_at_unix, updated_at_unix) \
+                         VALUES ($1, $2::text::jsonb, 0, $3, $4, $4) \
+                         ON CONFLICT (id) DO NOTHING",
+                        &[&outbox_id, event_json, &next_attempt_unix, &created_at_unix],
+                    )?;
+                }
             }
             transaction.commit()?;
             Ok(inserted == 1)
@@ -3646,6 +3738,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_billing_ledger_tenant_time",
         "idx_billing_ledger_model_provider",
         "idx_billing_report_outbox_due",
+        "idx_billing_report_outbox_dead_lettered",
     ];
     for index in INDEXES {
         let count = client
@@ -3844,13 +3937,33 @@ fn billing_ledger_supabase_only_error() -> StorageError {
 }
 
 /// A pending gateway→billing usage report awaiting durable delivery (issue #137).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredBillingReportOutboxEntry {
     /// Ledger entry id (idempotency key) of the usage report.
     pub id: String,
     pub event: ferrogate_billing::BillingEvent,
     pub attempts: i64,
     pub next_attempt_unix: i64,
+    /// When this entry was given up on and dead-lettered (issue #143).
+    /// `None` while the entry is still eligible for delivery attempts.
+    pub dead_lettered_at_unix: Option<i64>,
+}
+
+/// Outcome of [`RuntimeStorageRepositories::append_billing_event_with_outbox_enqueue`]
+/// (issue #150).
+#[derive(Debug)]
+pub struct BillingEventAppendOutcome {
+    /// Same semantics as the plain `append_billing_event` bool: `false` when
+    /// the event was already recorded (idempotent no-op on `request_id`).
+    pub recorded: bool,
+    /// Set only on backends where the metering write and outbox enqueue are
+    /// NOT committed atomically (Memory/Mysql) and the enqueue step
+    /// specifically failed after a successful metering write — non-fatal,
+    /// mirroring how a standalone `enqueue_billing_report` failure was always
+    /// treated as a warning rather than an aborting error. Always `None` on
+    /// Postgres, where both writes commit in one transaction: a failure there
+    /// fails the whole call instead of surfacing here.
+    pub enqueue_error: Option<StorageError>,
 }
 
 fn billing_report_outbox_from_row(
@@ -3862,6 +3975,7 @@ fn billing_report_outbox_from_row(
         // `attempts` is SQL INTEGER (i32); widen to i64 for the domain type.
         attempts: i64::from(row.get::<_, i32>(2)),
         next_attempt_unix: row.get::<_, i64>(3),
+        dead_lettered_at_unix: row.get::<_, Option<i64>>(4),
     })
 }
 
@@ -3910,11 +4024,12 @@ impl ferrogate_billing::LedgerSink for StorageLedgerSink {
 
     fn list(
         &self,
+        filter: &ferrogate_billing::LedgerListFilter,
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, ferrogate_billing::BillingError> {
         self.repositories
-            .list_billing_ledger_entries(offset, limit)
+            .list_billing_ledger_entries(filter, offset, limit)
             .map_err(ledger_storage_error)
     }
 
@@ -4782,6 +4897,7 @@ impl RuntimeControlPlaneState {
                     event: event.clone(),
                     attempts: 0,
                     next_attempt_unix,
+                    dead_lettered_at_unix: None,
                 },
             );
         }
@@ -4796,7 +4912,7 @@ impl RuntimeControlPlaneState {
             .billing_report_outbox
             .list()
             .into_iter()
-            .filter(|entry| entry.next_attempt_unix <= now_unix)
+            .filter(|entry| entry.next_attempt_unix <= now_unix && entry.dead_lettered_at_unix.is_none())
             .collect();
         due.sort_by(|a, b| {
             a.next_attempt_unix
@@ -4813,6 +4929,30 @@ impl RuntimeControlPlaneState {
             entry.next_attempt_unix = next_attempt_unix;
             self.billing_report_outbox.insert(id, entry);
         }
+    }
+
+    /// Mark a permanently-failing report dead-lettered (issue #143) instead of
+    /// rescheduling it forever.
+    pub fn dead_letter_billing_report(&mut self, id: &str, dead_lettered_at_unix: i64) {
+        if let Some(mut entry) = self.billing_report_outbox.get(id) {
+            entry.dead_lettered_at_unix = Some(dead_lettered_at_unix);
+            self.billing_report_outbox.insert(id, entry);
+        }
+    }
+
+    pub fn list_dead_lettered_billing_reports(
+        &self,
+        limit: usize,
+    ) -> Vec<StoredBillingReportOutboxEntry> {
+        let mut dead: Vec<StoredBillingReportOutboxEntry> = self
+            .billing_report_outbox
+            .list()
+            .into_iter()
+            .filter(|entry| entry.dead_lettered_at_unix.is_some())
+            .collect();
+        dead.sort_by(|a, b| b.dead_lettered_at_unix.cmp(&a.dead_lettered_at_unix));
+        dead.truncate(limit);
+        dead
     }
 
     pub fn delete_billing_report(&mut self, id: &str) {
@@ -6540,15 +6680,18 @@ impl RuntimeStorageRepositories {
         }
     }
 
-    /// List settled ledger entries, oldest first, paginated. Supabase-only.
+    /// List settled ledger entries matching `filter`, oldest first, paginated.
+    /// Supabase-only. The filter is pushed into the SQL query (issue #149).
     pub fn list_billing_ledger_entries(
         &self,
+        filter: &ferrogate_billing::LedgerListFilter,
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .list_billing_ledger_entries(
+                    filter,
                     saturating_i64(offset as u64),
                     saturating_i64(limit as u64),
                 ),
@@ -6633,6 +6776,50 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.reschedule_billing_report(id, next_attempt_unix)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_report_outbox_supabase_only_error())
+            }
+        }
+    }
+
+    /// Mark a permanently-failing report dead-lettered (issue #143) instead of
+    /// rescheduling it forever. The row is kept for operator inspection via
+    /// [`list_dead_lettered_billing_reports`](Self::list_dead_lettered_billing_reports)
+    /// and excluded from [`list_due_billing_reports`](Self::list_due_billing_reports).
+    pub fn dead_letter_billing_report(
+        &self,
+        id: &str,
+        dead_lettered_at_unix: i64,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.dead_letter_billing_report(id, dead_lettered_at_unix);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.dead_letter_billing_report(id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_report_outbox_supabase_only_error())
+            }
+        }
+    }
+
+    /// List dead-lettered billing reports, most recently given-up-on first.
+    pub fn list_dead_lettered_billing_reports(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_dead_lettered_billing_reports(limit))
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_dead_lettered_billing_reports(saturating_i64(limit as u64))
             }
             RuntimeControlPlaneBackend::Mysql(_) => {
                 Err(billing_report_outbox_supabase_only_error())
@@ -7050,6 +7237,48 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Mysql(_) => {
                 self.upsert_in_memory_usage_aggregate(&event);
                 Ok(true)
+            }
+        }
+    }
+
+    /// Append a billing event and durably enqueue it for delivery to the
+    /// billing service in as few round-trips as the backend allows (issue
+    /// #150). On Postgres both writes commit in a single transaction. On
+    /// Memory/Mysql (no real round-trip to save) this simply calls
+    /// [`append_billing_event`](Self::append_billing_event) followed by
+    /// [`enqueue_billing_report`](Self::enqueue_billing_report), preserving
+    /// their prior non-fatal enqueue-failure semantics via
+    /// [`BillingEventAppendOutcome::enqueue_error`].
+    pub fn append_billing_event_with_outbox_enqueue(
+        &self,
+        event: BillingEvent,
+        outbox_id: &str,
+        outbox_next_attempt_unix: i64,
+    ) -> Result<BillingEventAppendOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                let recorded = control_plane.append_billing_event_with_outbox_enqueue(
+                    &event,
+                    outbox_id,
+                    outbox_next_attempt_unix,
+                )?;
+                Ok(BillingEventAppendOutcome {
+                    recorded,
+                    enqueue_error: None,
+                })
+            }
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
+                let recorded = self.append_billing_event(event.clone())?;
+                let enqueue_error = if recorded {
+                    self.enqueue_billing_report(outbox_id, &event, outbox_next_attempt_unix)
+                        .err()
+                } else {
+                    None
+                };
+                Ok(BillingEventAppendOutcome {
+                    recorded,
+                    enqueue_error,
+                })
             }
         }
     }

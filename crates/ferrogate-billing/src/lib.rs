@@ -26,7 +26,10 @@ pub mod ledger;
 pub mod pricing;
 pub mod service;
 
-pub use ledger::{charge, CostSource, InMemoryLedgerSink, LedgerEntry, LedgerSink, LedgerTotals};
+pub use ledger::{
+    charge, CostSource, InMemoryLedgerSink, LedgerEntry, LedgerListFilter, LedgerSink,
+    LedgerTotals,
+};
 pub use pricing::{PriceBook, PriceEntry, DEFAULT_CREDITS_PER_USD};
 pub use service::{serve, BillingServiceConfig};
 

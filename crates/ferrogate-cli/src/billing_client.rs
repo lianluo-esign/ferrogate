@@ -57,19 +57,8 @@ impl BillingReporter {
 }
 
 fn resolve_token(config: &BillingServiceConfig) -> anyhow::Result<String> {
-    if let Some(token) = config.token.as_deref() {
-        let token = token.trim();
-        if !token.is_empty() {
-            return Ok(token.to_string());
-        }
-    }
-    if let Some(env_name) = config.token_env.as_deref() {
-        let env_name = env_name.trim();
-        if !env_name.is_empty() {
-            return std::env::var(env_name).map_err(|_| {
-                anyhow::anyhow!("failed to read billing service token env {env_name}")
-            });
-        }
-    }
-    Ok(String::new())
+    Ok(
+        crate::service_storage::resolve_secret(config.token.as_deref(), config.token_env.as_deref())?
+            .unwrap_or_default(),
+    )
 }

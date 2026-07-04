@@ -23,12 +23,22 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const VIRTUAL_API_KEY_PREFIX_CHARS: usize = 16;
+/// Read/write deadline per connection so a slow or idle client cannot park a
+/// handler thread forever (slowloris mitigation, issue #147 — ported from the
+/// billing service's #138 fix).
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound on concurrently-served connections so an anonymous flood
+/// cannot exhaust threads/memory (issue #147).
+const MAX_CONCURRENT_CONNECTIONS: usize = 512;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthServiceData {
@@ -365,6 +375,16 @@ impl std::fmt::Debug for AuthServiceConfig {
     }
 }
 
+/// RAII counter guard that decrements the live-connection count on drop
+/// (ported from the billing service's #138 fix for issue #147).
+struct ConnectionGuard(Arc<AtomicUsize>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub fn serve(config: AuthServiceConfig) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.listen)
         .with_context(|| format!("failed to bind ferrogate-auth on {}", config.listen))?;
@@ -374,13 +394,23 @@ pub fn serve(config: AuthServiceConfig) -> anyhow::Result<()> {
         }
         None => AuthService::from_data(config.data),
     });
+    let live_connections = Arc::new(AtomicUsize::new(0));
     println!("ferrogate-auth listening on {}", config.listen);
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Shed load rather than spawn unbounded threads under a flood
+                // (issue #147).
+                if live_connections.load(Ordering::SeqCst) >= MAX_CONCURRENT_CONNECTIONS {
+                    drop(stream);
+                    continue;
+                }
+                live_connections.fetch_add(1, Ordering::SeqCst);
+                let guard = ConnectionGuard(live_connections.clone());
                 let service = service.clone();
                 std::thread::spawn(move || {
+                    let _guard = guard;
                     if let Err(error) = handle_connection(stream, &service) {
                         eprintln!("ferrogate-auth request failed: {error:#}");
                     }
@@ -413,6 +443,12 @@ pub struct AuthorizationDecision {
 }
 
 fn handle_connection(mut stream: TcpStream, service: &AuthService) -> anyhow::Result<()> {
+    stream
+        .set_read_timeout(Some(CONNECTION_TIMEOUT))
+        .context("failed to set auth service read timeout")?;
+    stream
+        .set_write_timeout(Some(CONNECTION_TIMEOUT))
+        .context("failed to set auth service write timeout")?;
     let request = read_http_request(&mut stream)?;
     let response = route_request(service, request);
     stream
@@ -527,7 +563,8 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         .unwrap_or(0);
 
     let body_start = header_end + 4;
-    while buffer.len() < body_start + content_length {
+    let body_end = bounded_body_end(body_start, content_length, MAX_REQUEST_BYTES)?;
+    while buffer.len() < body_end {
         let read = stream
             .read(&mut chunk)
             .context("failed to read request body")?;
@@ -543,12 +580,31 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
     Ok(HttpRequest {
         method,
         path,
-        body: buffer[body_start..body_start + content_length].to_vec(),
+        body: buffer[body_start..body_end].to_vec(),
     })
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+/// Bound a declared `Content-Length` before it is used as a slice index, so a
+/// malformed/huge header cannot overflow the `body_start + content_length`
+/// addition or produce a `start > end` slice panic (issue #147, ported from
+/// the billing service's #138 fix). Pure and independently testable.
+fn bounded_body_end(
+    body_start: usize,
+    content_length: usize,
+    max_request_bytes: usize,
+) -> anyhow::Result<usize> {
+    if content_length > max_request_bytes {
+        return Err(anyhow!(
+            "content-length {content_length} exceeds {max_request_bytes} bytes"
+        ));
+    }
+    body_start
+        .checked_add(content_length)
+        .ok_or_else(|| anyhow!("content-length overflow"))
 }
 
 #[derive(Debug)]
@@ -896,3 +952,7 @@ mod tests {
         key
     }
 }
+
+#[cfg(test)]
+#[path = "hardening_test.rs"]
+mod hardening_test;

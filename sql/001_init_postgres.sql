@@ -765,8 +765,21 @@ CREATE TABLE IF NOT EXISTS billing_report_outbox (
     updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
 );
 
+-- dead_lettered_at_unix (issue #143): a permanently-failing delivery (e.g. the
+-- billing service's rate card has no rule for the event's model, a 4xx that
+-- can never succeed on retry) is marked here after MAX_BILLING_OUTBOX_ATTEMPTS
+-- instead of being rescheduled forever. The row is kept (not deleted) for
+-- operator inspection via the dead-letter admin API, and excluded from
+-- `list_due_billing_reports` so it stops consuming sweeper batch capacity.
+ALTER TABLE billing_report_outbox
+    ADD COLUMN IF NOT EXISTS dead_lettered_at_unix BIGINT;
+
 CREATE INDEX IF NOT EXISTS idx_billing_report_outbox_due
     ON billing_report_outbox(next_attempt_unix);
+
+CREATE INDEX IF NOT EXISTS idx_billing_report_outbox_dead_lettered
+    ON billing_report_outbox(dead_lettered_at_unix)
+    WHERE dead_lettered_at_unix IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
@@ -845,5 +858,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (14, '014_billing_report_outbox')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (15, '015_billing_report_outbox_dead_letter')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

@@ -69,6 +69,32 @@ pub(crate) fn build_supabase_repositories(
     .context("supabase side-service storage")
 }
 
+/// Resolve a secret from an inline value or a named environment variable,
+/// trimming both consistently. Returns `Ok(None)` when neither source yields a
+/// non-empty value.
+///
+/// This is the single shared implementation for the "inline value, else env
+/// var" pattern used by both the auth and billing side-service token
+/// resolution (issue #154 — two independent hand-rolled copies had drifted,
+/// with only one of them trimming the env-sourced value).
+pub(crate) fn resolve_secret(
+    inline: Option<&str>,
+    env_name: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    if let Some(value) = inline.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(Some(value.to_string()));
+    }
+    if let Some(env_name) = env_name.map(str::trim).filter(|value| !value.is_empty()) {
+        let value = std::env::var(env_name)
+            .with_context(|| format!("failed to read secret env {env_name}"))?;
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(Some(value.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn parse_postgres_tls_mode(value: &str) -> anyhow::Result<PostgresTlsMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "disable" => Ok(PostgresTlsMode::Disable),

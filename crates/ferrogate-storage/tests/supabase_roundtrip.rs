@@ -738,9 +738,82 @@ fn billing_ledger_round_trips_through_real_supabase() {
     assert!((fetched.credits - 570.0).abs() < 1e-6);
     assert_eq!(fetched.tenant.organization_id.as_deref(), Some("org_demo"));
     assert_eq!(
-        reopened.list_billing_ledger_entries(0, 10).unwrap().len(),
+        reopened
+            .list_billing_ledger_entries(&ferrogate_billing::LedgerListFilter::default(), 0, 10)
+            .unwrap()
+            .len(),
         1
     );
+}
+
+#[test]
+fn billing_ledger_tenant_filter_is_pushed_into_the_query_through_real_supabase() {
+    // Issue #149: the tenant filter narrows the SQL query itself, so a scoped
+    // page correctly returns only that tenant's rows against a real Postgres.
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping billing ledger tenant-filter round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    let price_book = ferrogate_billing::PriceBook::new(vec![ferrogate_billing::PriceEntry::new(
+        "token4ai",
+        "gpt-5.5",
+        ferrogate_billing::ModelPrice::usd(5.0, 15.0),
+    )]);
+
+    for org in ["org-a", "org-b"] {
+        let event = ferrogate_billing::BillingEvent {
+            request_id: format!("req-{org}"),
+            trace_id: Some(format!("trace-{org}")),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: TenantContext {
+                organization_id: Some(org.into()),
+                ..TenantContext::default()
+            },
+            logical_model: "gpt-5.5".into(),
+            provider: "token4ai".into(),
+            provider_model: "gpt-5.5".into(),
+            usage: ferrogate_billing::TokenUsage::new(10, 20, 30),
+            usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+            status_code: 200,
+            occurred_at_unix: Some(1_800_000_000),
+            cost_usd: None,
+            latency_ms: None,
+        };
+        let entry = ferrogate_billing::charge(&price_book, &event).expect("must price");
+        storage
+            .append_billing_ledger_entry(&entry)
+            .expect("ledger insert must succeed");
+    }
+
+    // Unfiltered: both rows.
+    let all = storage
+        .list_billing_ledger_entries(&ferrogate_billing::LedgerListFilter::default(), 0, 10)
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    // Scoped to org-a: only that tenant's row, straight from the SQL query.
+    let scoped = storage
+        .list_billing_ledger_entries(
+            &ferrogate_billing::LedgerListFilter {
+                organization_id: Some("org-a".into()),
+                ..Default::default()
+            },
+            0,
+            10,
+        )
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].tenant.organization_id.as_deref(), Some("org-a"));
 }
 
 #[test]
@@ -809,4 +882,120 @@ fn billing_report_outbox_round_trips_through_real_supabase() {
         .list_due_billing_reports(1_000_000, 10)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn billing_report_dead_letter_round_trips_through_real_supabase() {
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping billing report dead-letter round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    let event = ferrogate_billing::BillingEvent {
+        request_id: "req-dead-letter-rt".into(),
+        trace_id: Some("trace-dead-letter-rt".into()),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: TenantContext {
+            organization_id: Some("org_demo".into()),
+            ..TenantContext::default()
+        },
+        logical_model: "mystery-model".into(),
+        provider: "unpriced-vendor".into(),
+        provider_model: "mystery-model".into(),
+        usage: ferrogate_billing::TokenUsage::new(10, 20, 30),
+        usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+        status_code: 200,
+        occurred_at_unix: Some(1_800_000_000),
+        cost_usd: None,
+        latency_ms: None,
+    };
+    let id = "ferrogate:trace-dead-letter-rt:req-dead-letter-rt";
+    storage
+        .enqueue_billing_report(id, &event, 100)
+        .expect("enqueue must succeed");
+
+    // Dead-lettering removes the entry from the due queue...
+    storage
+        .dead_letter_billing_report(id, 200)
+        .expect("dead-letter must succeed");
+    assert!(storage.list_due_billing_reports(1_000_000, 10).unwrap().is_empty());
+
+    // ...but keeps the row visible for operator inspection.
+    let reopened =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
+            .expect("re-open against existing schema must succeed");
+    let dead_lettered = reopened.list_dead_lettered_billing_reports(10).unwrap();
+    assert_eq!(dead_lettered.len(), 1);
+    assert_eq!(dead_lettered[0].id, id);
+    assert_eq!(dead_lettered[0].event.provider_model, "mystery-model");
+}
+
+#[test]
+fn append_billing_event_with_outbox_enqueue_commits_both_writes_atomically() {
+    // Issue #150: the metering write and the durable outbox enqueue land in a
+    // single transaction/round-trip rather than two sequential ones.
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping combined billing append round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    let event = ferrogate_billing::BillingEvent {
+        request_id: "req-combined-rt".into(),
+        trace_id: Some("trace-combined-rt".into()),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: TenantContext {
+            organization_id: Some("org_demo".into()),
+            ..TenantContext::default()
+        },
+        logical_model: "gpt-5.5".into(),
+        provider: "token4ai".into(),
+        provider_model: "gpt-5.5".into(),
+        usage: ferrogate_billing::TokenUsage::new(10, 20, 30),
+        usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+        status_code: 200,
+        occurred_at_unix: Some(1_800_000_000),
+        cost_usd: Some(0.02),
+        latency_ms: None,
+    };
+    let outbox_id = "ferrogate:trace-combined-rt:req-combined-rt";
+
+    let outcome = storage
+        .append_billing_event_with_outbox_enqueue(event.clone(), outbox_id, 100)
+        .expect("combined append must succeed");
+    assert!(outcome.recorded);
+    assert!(outcome.enqueue_error.is_none());
+
+    // Both the metering event and the outbox row exist from one call.
+    assert_eq!(storage.billing_events().len(), 1);
+    let due = storage.list_due_billing_reports(100, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, outbox_id);
+    assert_eq!(due[0].event.request_id, "req-combined-rt");
+
+    // A retry (same request_id) is idempotent: no duplicate metering event or
+    // outbox row, and `recorded` reports the no-op.
+    let retry = storage
+        .append_billing_event_with_outbox_enqueue(event, outbox_id, 100)
+        .expect("idempotent retry must succeed");
+    assert!(!retry.recorded);
+    assert_eq!(storage.billing_events().len(), 1);
+    assert_eq!(storage.list_due_billing_reports(100, 10).unwrap().len(), 1);
 }

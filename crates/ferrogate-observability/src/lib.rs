@@ -349,6 +349,10 @@ pub struct GatewayMetricsSnapshot {
     pub guardrail_denial_total: u64,
     pub guardrail_redaction_total: u64,
     pub billing_event_total: u64,
+    /// Failures durably enqueueing a settled usage event for delivery to the
+    /// billing service (issue #151) — distinguishable from successful
+    /// enqueues so operators can alert on silently dropped reports.
+    pub billing_report_enqueue_failure_total: u64,
     pub tool_call_total: u64,
     pub tool_latency_ms_total: u64,
     pub token_totals: TokenMetricTotals,
@@ -432,6 +436,17 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_billing_events_total {}\n",
         snapshot.billing_event_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_billing_report_enqueue_failures_total",
+        "Total failures durably enqueueing a settled usage event for delivery to the billing service (issue #151).",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_billing_report_enqueue_failures_total {}\n",
+        snapshot.billing_report_enqueue_failure_total
     ));
 
     push_help(
@@ -1124,6 +1139,7 @@ mod tests {
             guardrail_denial_total: 1,
             guardrail_redaction_total: 1,
             billing_event_total: 1,
+            billing_report_enqueue_failure_total: 1,
             tool_call_total: 2,
             tool_latency_ms_total: 17,
             token_totals: TokenMetricTotals {
@@ -1148,6 +1164,7 @@ mod tests {
         assert!(text.contains("ferrogate_guardrail_matches_total 2"));
         assert!(text.contains("ferrogate_guardrail_denials_total 1"));
         assert!(text.contains("ferrogate_guardrail_redactions_total 1"));
+        assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));
         assert!(text.contains("ferrogate_mcp_tool_calls_total 2"));
         assert!(text.contains("ferrogate_mcp_tool_latency_ms_total 17"));
         assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));

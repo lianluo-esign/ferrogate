@@ -75,6 +75,10 @@ impl WorkerType {
     }
 }
 
+#[cfg(test)]
+#[path = "worker_type_test.rs"]
+mod worker_type_test;
+
 #[derive(Debug, Parser)]
 #[command(name = "agent-worker")]
 #[command(about = "Standalone FerroGate agent-worker process boundary")]
@@ -269,6 +273,27 @@ fn print_worker_type(worker_type: WorkerType) -> Result<()> {
     Ok(())
 }
 
+/// Self-hosted execution is a policy toggle in name only today: no
+/// subcommand's capability gate (`validate_managed_worker_session`) or
+/// management-serving path implements report-only, non-enforced execution
+/// yet — only event/evidence *labeling* does. Rather than silently accepting
+/// `--worker-type self-hosted` and running every real subcommand as if it
+/// were `cloud` anyway (issue #148), fail closed here with an explicit,
+/// actionable error. The one exception is the `worker-type` diagnostic
+/// itself, which only ever prints the resolved policy and never executes
+/// anything.
+fn reject_unsupported_self_hosted_execution(
+    worker_type: WorkerType,
+    command: &Command,
+) -> Result<()> {
+    if worker_type == WorkerType::SelfHosted && !matches!(command, Command::WorkerType) {
+        bail!(
+            "--worker-type self-hosted is not yet implemented for `{command:?}`: this build only tags events/evidence as self-hosted, it does not run any subcommand in a report-only, non-enforced mode. Use --worker-type cloud (the default), or run `agent-worker worker-type --worker-type self-hosted` to inspect the resolved policy without executing anything (see issue #148)."
+        );
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.ferrogate_guest_agent_probe && cli.ferrogate_guest_agent_start {
@@ -283,6 +308,8 @@ fn main() -> Result<()> {
     let Some(command) = cli.command else {
         bail!("no agent-worker command provided");
     };
+    reject_unsupported_self_hosted_execution(cli.worker_type, &command)?;
+    let worker_mode = cli.worker_type.framework_adapter_mode();
     match command {
         Command::WorkerType => print_worker_type(cli.worker_type),
         Command::ProtocolSmoke => management::protocol_smoke(),
@@ -310,49 +337,56 @@ fn main() -> Result<()> {
             timeout_millis,
             prompt,
         } => handlers::smoke_handler_task_command(&adapter, timeout_millis, &prompt),
-        Command::ExternalActionSmoke => external_actions::external_action_smoke_command(),
+        Command::ExternalActionSmoke => {
+            external_actions::external_action_smoke_command(worker_mode)
+        }
         Command::AcceptExternalActionJson => {
             external_actions::accept_external_action_json_command()
         }
         Command::ExternalActionUnixTransportSmoke => {
-            external_actions::external_action_unix_transport_smoke_command()
+            external_actions::external_action_unix_transport_smoke_command(worker_mode)
         }
         Command::ExternalActionHttpTransportSmoke {
             gateway_authorizer_http_endpoint,
         } => external_actions::external_action_http_transport_smoke_command(
             gateway_authorizer_http_endpoint,
+            worker_mode,
         ),
         Command::GovernedCliExecutionSmoke => {
-            external_actions::governed_cli_execution_smoke_command()
+            external_actions::governed_cli_execution_smoke_command(worker_mode)
         }
-        Command::GovernedCliTimeoutSmoke => external_actions::governed_cli_timeout_smoke_command(),
-        Command::GovernedCliCancelSmoke => external_actions::governed_cli_cancel_smoke_command(),
+        Command::GovernedCliTimeoutSmoke => {
+            external_actions::governed_cli_timeout_smoke_command(worker_mode)
+        }
+        Command::GovernedCliCancelSmoke => {
+            external_actions::governed_cli_cancel_smoke_command(worker_mode)
+        }
         Command::GovernedToolExecutionSmoke => {
-            external_actions::governed_tool_execution_smoke_command()
+            external_actions::governed_tool_execution_smoke_command(worker_mode)
         }
         Command::GovernedMcpToolExecutionSmoke => {
-            external_actions::governed_mcp_tool_execution_smoke_command()
+            external_actions::governed_mcp_tool_execution_smoke_command(worker_mode)
         }
         Command::GovernedSkillExecutionSmoke => {
-            external_actions::governed_skill_execution_smoke_command()
+            external_actions::governed_skill_execution_smoke_command(worker_mode)
         }
         Command::GovernedMemoryExecutionSmoke => {
-            external_actions::governed_memory_execution_smoke_command()
+            external_actions::governed_memory_execution_smoke_command(worker_mode)
         }
         Command::GovernedSecretExecutionSmoke => {
-            external_actions::governed_secret_execution_smoke_command()
+            external_actions::governed_secret_execution_smoke_command(worker_mode)
         }
         Command::GovernedNetworkEgressExecutionSmoke => {
-            external_actions::governed_network_egress_execution_smoke_command()
+            external_actions::governed_network_egress_execution_smoke_command(worker_mode)
         }
         Command::GovernedBrowserExecutionSmoke => {
-            external_actions::governed_browser_execution_smoke_command()
+            external_actions::governed_browser_execution_smoke_command(worker_mode)
         }
         Command::GovernedRestExecutionSmoke => {
-            external_actions::governed_rest_execution_smoke_command()
+            external_actions::governed_rest_execution_smoke_command(worker_mode)
         }
         Command::GovernedFilesystemExecutionSmoke => {
-            external_actions::governed_filesystem_execution_smoke_command()
+            external_actions::governed_filesystem_execution_smoke_command(worker_mode)
         }
         Command::AcceptManagementJson {
             key_id,

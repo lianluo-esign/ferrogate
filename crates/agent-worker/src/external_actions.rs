@@ -358,8 +358,8 @@ where
     })
 }
 
-pub(crate) fn external_action_smoke_command() -> Result<()> {
-    let decision = external_action_smoke()?;
+pub(crate) fn external_action_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
+    let decision = external_action_smoke(mode)?;
     println!("{}", decision.event.canonical_json());
     Ok(())
 }
@@ -380,7 +380,9 @@ pub(crate) fn accept_external_action_json_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn external_action_unix_transport_smoke_command() -> Result<()> {
+pub(crate) fn external_action_unix_transport_smoke_command(
+    mode: FrameworkAdapterMode,
+) -> Result<()> {
     let socket_path = std::env::temp_dir().join(format!(
         "ferrogate-agent-worker-external-action-{}-{}.sock",
         std::process::id(),
@@ -407,7 +409,7 @@ pub(crate) fn external_action_unix_transport_smoke_command() -> Result<()> {
     let decision = authorize_handler_external_action(
         Some(&client),
         ExternalActionGateRequest {
-            session: smoke_session(),
+            session: smoke_session(mode),
             action: ManagedExternalAction::Tool(ManagedToolAction {
                 tool_name: "native.echo".to_string(),
                 arguments_policy: "redacted_json".to_string(),
@@ -422,12 +424,15 @@ pub(crate) fn external_action_unix_transport_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn external_action_http_transport_smoke_command(endpoint: SocketAddr) -> Result<()> {
+pub(crate) fn external_action_http_transport_smoke_command(
+    endpoint: SocketAddr,
+    mode: FrameworkAdapterMode,
+) -> Result<()> {
     let client = HttpGatewayExternalActionAuthorizer::new(endpoint);
     let decision = authorize_handler_external_action(
         Some(&client),
         ExternalActionGateRequest {
-            session: smoke_session(),
+            session: smoke_session(mode),
             action: ManagedExternalAction::Tool(ManagedToolAction {
                 tool_name: "native.echo".to_string(),
                 arguments_policy: "redacted_json".to_string(),
@@ -439,7 +444,7 @@ pub(crate) fn external_action_http_transport_smoke_command(endpoint: SocketAddr)
     Ok(())
 }
 
-pub(crate) fn governed_cli_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_cli_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let action = ManagedCliAction {
         command: "/bin/sh".to_string(),
         args: vec![
@@ -459,7 +464,7 @@ pub(crate) fn governed_cli_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_cli_action(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_cli_action(&gate, smoke_session(mode), action, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -472,7 +477,7 @@ pub(crate) fn governed_cli_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_cli_timeout_smoke_command() -> Result<()> {
+pub(crate) fn governed_cli_timeout_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let action = ManagedCliAction {
         command: "/bin/sh".to_string(),
         args: vec!["-c".to_string(), "sleep 1".to_string()],
@@ -489,8 +494,12 @@ pub(crate) fn governed_cli_timeout_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events =
-        execute_governed_cli_action_with_failure_evidence(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_cli_action_with_failure_evidence(
+        &gate,
+        smoke_session(mode),
+        action,
+        false,
+    )?;
     println!(
         "{}",
         serde_json::to_string(
@@ -503,7 +512,7 @@ pub(crate) fn governed_cli_timeout_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_cli_cancel_smoke_command() -> Result<()> {
+pub(crate) fn governed_cli_cancel_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let action = ManagedCliAction {
         command: "/bin/sh".to_string(),
         args: vec!["-c".to_string(), "sleep 5".to_string()],
@@ -520,8 +529,12 @@ pub(crate) fn governed_cli_cancel_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events =
-        execute_governed_cli_action_with_cancel_evidence(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_cli_action_with_cancel_evidence(
+        &gate,
+        smoke_session(mode),
+        action,
+        false,
+    )?;
     println!(
         "{}",
         serde_json::to_string(
@@ -534,7 +547,7 @@ pub(crate) fn governed_cli_cancel_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_tool_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_tool_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let action = ManagedToolAction {
         tool_name: "native.echo".to_string(),
         arguments_policy: "smoke_literal:ferrogate governed tool smoke".to_string(),
@@ -545,7 +558,7 @@ pub(crate) fn governed_tool_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_tool_action(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_tool_action(&gate, smoke_session(mode), action, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -558,7 +571,7 @@ pub(crate) fn governed_tool_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_mcp_tool_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_mcp_tool_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let action = ManagedMcpToolAction {
         server_name: "local-smoke".to_string(),
         tool_name: "echo".to_string(),
@@ -570,7 +583,7 @@ pub(crate) fn governed_mcp_tool_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_mcp_tool_action(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_mcp_tool_action(&gate, smoke_session(mode), action, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -583,7 +596,7 @@ pub(crate) fn governed_mcp_tool_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_skill_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_skill_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let action = ManagedSkillAction {
         skill_id: "builtin.skill.echo".to_string(),
         declared_capabilities: vec!["tools".to_string(), "memory.read".to_string()],
@@ -594,7 +607,7 @@ pub(crate) fn governed_skill_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_skill_action(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_skill_action(&gate, smoke_session(mode), action, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -607,7 +620,7 @@ pub(crate) fn governed_skill_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_memory_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_memory_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let mut store = BTreeMap::new();
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
@@ -621,7 +634,7 @@ pub(crate) fn governed_memory_execution_smoke_command() -> Result<()> {
     let mut events = Vec::new();
     events.extend(execute_governed_memory_action(
         &gate,
-        smoke_session(),
+        smoke_session(mode),
         ManagedMemoryAction {
             access: ManagedMemoryAccess::Write,
             namespace: "session".to_string(),
@@ -632,7 +645,7 @@ pub(crate) fn governed_memory_execution_smoke_command() -> Result<()> {
     )?);
     events.extend(execute_governed_memory_action(
         &gate,
-        smoke_session(),
+        smoke_session(mode),
         ManagedMemoryAction {
             access: ManagedMemoryAccess::Read,
             namespace: "session".to_string(),
@@ -653,7 +666,7 @@ pub(crate) fn governed_memory_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_secret_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_secret_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let secrets = BTreeMap::from([(
         "openai-api-key".to_string(),
         "ferrogate governed secret smoke".to_string(),
@@ -668,7 +681,8 @@ pub(crate) fn governed_secret_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_secret_action(&gate, smoke_session(), action, &secrets, false)?;
+    let events =
+        execute_governed_secret_action(&gate, smoke_session(mode), action, &secrets, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -681,7 +695,9 @@ pub(crate) fn governed_secret_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_network_egress_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_network_egress_execution_smoke_command(
+    mode: FrameworkAdapterMode,
+) -> Result<()> {
     let server = spawn_one_shot_network_egress_smoke_server();
     let action = ManagedNetworkEgressAction {
         host: "127.0.0.1".to_string(),
@@ -695,7 +711,8 @@ pub(crate) fn governed_network_egress_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_network_egress_action(&gate, smoke_session(), action, false)?;
+    let events =
+        execute_governed_network_egress_action(&gate, smoke_session(mode), action, false)?;
     let received_payload = server.join()?;
     let output = serde_json::json!({
         "events": events
@@ -708,7 +725,7 @@ pub(crate) fn governed_network_egress_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_browser_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_browser_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let action = ManagedBrowserAction {
         operation: ManagedBrowserOperation::Navigate,
         url: "about:blank".to_string(),
@@ -720,7 +737,7 @@ pub(crate) fn governed_browser_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_browser_action(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_browser_action(&gate, smoke_session(mode), action, false)?;
     println!(
         "{}",
         serde_json::to_string(
@@ -733,7 +750,7 @@ pub(crate) fn governed_browser_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_rest_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_rest_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let server = spawn_one_shot_rest_smoke_server();
     let action = ManagedRestAction {
         method: "GET".to_string(),
@@ -749,7 +766,7 @@ pub(crate) fn governed_rest_execution_smoke_command() -> Result<()> {
             ..CapabilityPolicy::default()
         },
     ));
-    let events = execute_governed_rest_action(&gate, smoke_session(), action, false)?;
+    let events = execute_governed_rest_action(&gate, smoke_session(mode), action, false)?;
     let served_request = server.join()?;
     let output = serde_json::json!({
         "events": events
@@ -762,7 +779,9 @@ pub(crate) fn governed_rest_execution_smoke_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn governed_filesystem_execution_smoke_command() -> Result<()> {
+pub(crate) fn governed_filesystem_execution_smoke_command(
+    mode: FrameworkAdapterMode,
+) -> Result<()> {
     let workspace = std::env::temp_dir().join(format!(
         "ferrogate-agent-worker-filesystem-smoke-{}-{}",
         std::process::id(),
@@ -783,8 +802,13 @@ pub(crate) fn governed_filesystem_execution_smoke_command() -> Result<()> {
                 ..CapabilityPolicy::default()
             },
         ));
-        let events =
-            execute_governed_filesystem_action(&gate, smoke_session(), action, &workspace, false)?;
+        let events = execute_governed_filesystem_action(
+            &gate,
+            smoke_session(mode),
+            action,
+            &workspace,
+            false,
+        )?;
         println!(
             "{}",
             serde_json::to_string(
@@ -1187,7 +1211,7 @@ where
     }
 }
 
-fn external_action_smoke() -> Result<ExternalActionGateDecision> {
+fn external_action_smoke(mode: FrameworkAdapterMode) -> Result<ExternalActionGateDecision> {
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
@@ -1197,7 +1221,7 @@ fn external_action_smoke() -> Result<ExternalActionGateDecision> {
     authorize_handler_external_action(
         Some(&gate),
         ExternalActionGateRequest {
-            session: smoke_session(),
+            session: smoke_session(mode),
             action: ManagedExternalAction::Tool(ManagedToolAction {
                 tool_name: "native.echo".to_string(),
                 arguments_policy: "redacted_json".to_string(),
@@ -2523,7 +2547,7 @@ fn spawn_one_shot_network_egress_smoke_server() -> NetworkEgressSmokeServer {
     NetworkEgressSmokeServer { endpoint, handle }
 }
 
-fn smoke_session() -> FrameworkAdapterSession {
+fn smoke_session(mode: FrameworkAdapterMode) -> FrameworkAdapterSession {
     FrameworkAdapterSession {
         session_id: "agent-worker-external-action-smoke-session".to_string(),
         run_id: "agent-worker-external-action-smoke-run".to_string(),
@@ -2534,7 +2558,7 @@ fn smoke_session() -> FrameworkAdapterSession {
         adapter_name: "native-harness".to_string(),
         adapter_version: env!("CARGO_PKG_VERSION").to_string(),
         framework: SupportedFramework::NativeHarness,
-        mode: FrameworkAdapterMode::Managed,
+        mode,
     }
 }
 
@@ -3655,7 +3679,7 @@ mod tests {
 
     #[test]
     fn external_action_smoke_emits_allowed_gateway_capability_event() {
-        let decision = external_action_smoke().unwrap();
+        let decision = external_action_smoke(FrameworkAdapterMode::Managed).unwrap();
         let json = decision.event.canonical_json();
 
         assert_eq!(json["kind"], "capability.allowed");
@@ -4606,3 +4630,7 @@ mod tests {
         .canonical_json()
     }
 }
+
+#[cfg(test)]
+#[path = "external_actions_worker_type_test.rs"]
+mod external_actions_worker_type_test;

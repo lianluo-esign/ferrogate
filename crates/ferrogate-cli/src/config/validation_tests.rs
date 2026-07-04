@@ -181,6 +181,68 @@ fn rejects_model_lowest_cost_strategy_without_prices() {
 }
 
 #[test]
+fn accepts_model_without_prices_when_billing_service_disabled() {
+    // billing_service defaults to disabled, so a priceless model is fine —
+    // matches every other test in this file that uses the bare model().
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_model_without_prices_when_billing_service_enabled() {
+    // Issue #146: a model with no gateway-side price settles cost_usd = None,
+    // so its real spend never counts against the monthly budget even though
+    // the standalone billing service (its own, separately-configured rate
+    // card) may still price and record it in the ledger. Fail closed here
+    // instead of letting the two systems silently diverge at runtime.
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        billing_service: crate::config::BillingServiceConfig {
+            enabled: true,
+            ..crate::config::BillingServiceConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("billing_service.enabled requires input_price_per_1m and output_price_per_1m"));
+}
+
+#[test]
+fn rejects_fallback_route_without_prices_when_billing_service_enabled() {
+    let mut model = model();
+    model.input_price_per_1m = Some(1.0);
+    model.output_price_per_1m = Some(2.0);
+    model.fallbacks.push(ModelFallback {
+        provider: "openai".into(),
+        provider_model: "gpt-4o".into(),
+        input_price_per_1m: None,
+        output_price_per_1m: None,
+        priority: Some(0),
+        weight: Some(1),
+        enabled: true,
+    });
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model],
+        billing_service: crate::config::BillingServiceConfig {
+            enabled: true,
+            ..crate::config::BillingServiceConfig::default()
+        },
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("fallbacks[0]: billing_service.enabled requires input_price_per_1m and output_price_per_1m"));
+}
+
+#[test]
 fn accepts_agent_workflow_policy_with_model_graph() {
     let config = Config {
         providers: vec![provider()],

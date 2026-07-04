@@ -935,6 +935,23 @@ impl Config {
                     "field models[{index}].routing_strategy: lowest_cost requires input_price_per_1m and output_price_per_1m on the primary model"
                 );
             }
+            // Issue #146: when the standalone billing service is enabled, the
+            // gateway's own route price is what feeds monthly budget
+            // enforcement (settled_cost_usd -> usage_monthly_rollups.cost_usd).
+            // A model with no gateway-side price settles cost_usd = None, so
+            // that model's real spend never counts against the budget even
+            // though the billing service (with its own, separately-configured
+            // rate card) may still price and record it in the ledger. Fail
+            // closed at config-validation time instead of letting the two
+            // systems silently diverge at runtime.
+            if self.billing_service.enabled
+                && (model.input_price_per_1m.is_none() || model.output_price_per_1m.is_none())
+            {
+                bail!(
+                    "field models[{index}]: billing_service.enabled requires input_price_per_1m and output_price_per_1m on every model, so monthly budget enforcement never diverges from the billing service's ledger (model {})",
+                    model.name
+                );
+            }
             for (fallback_index, fallback) in model.fallbacks.iter().enumerate() {
                 if !fallback.enabled {
                     continue;
@@ -957,6 +974,18 @@ impl Config {
                 {
                     bail!(
                         "field models[{index}].fallbacks[{fallback_index}]: lowest_cost requires input_price_per_1m and output_price_per_1m"
+                    );
+                }
+                // Issue #146: same fail-closed rule as the primary model above
+                // — a fallback route can be selected at request time, so it
+                // needs a gateway-side price too whenever billing reporting is
+                // enabled.
+                if self.billing_service.enabled
+                    && (fallback.input_price_per_1m.is_none()
+                        || fallback.output_price_per_1m.is_none())
+                {
+                    bail!(
+                        "field models[{index}].fallbacks[{fallback_index}]: billing_service.enabled requires input_price_per_1m and output_price_per_1m on every fallback route"
                     );
                 }
                 if fallback.weight == Some(0) {

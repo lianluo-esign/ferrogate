@@ -514,6 +514,13 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/billing-outbox-dead-letters" {
+            let headers = req.headers.clone();
+            self.handle_admin_billing_outbox_dead_letters(session, ctx, &headers)
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/metrics" {
             let headers = req.headers.clone();
             self.handle_metrics(session, ctx, &headers).await?;

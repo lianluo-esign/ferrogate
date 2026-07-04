@@ -20,6 +20,7 @@ ferrogate-core = { path = "../ferrogate-core" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

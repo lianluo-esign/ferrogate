@@ -112,6 +112,28 @@ pub fn charge(book: &PriceBook, event: &BillingEvent) -> Result<LedgerEntry, Bil
 
     let (cost, unit_price, cost_source) = match authoritative_cost(event) {
         Some(total) => {
+            // Restore visibility into gateway/PriceBook rate-card drift (issue
+            // #152): #135 made the gateway-settled cost authoritative (so the
+            // two systems stop silently diverging in the ledger), but that also
+            // meant the billing service could no longer catch a misconfigured
+            // gateway price. Log — never reject or override — when the two
+            // disagree beyond tolerance, so the drift stays visible without
+            // reopening #135's single-source-of-truth guarantee.
+            if let Some(price) = price_opt.as_ref() {
+                let expected = price.estimate(&usage).total_cost;
+                if cost_diverges(total, expected) {
+                    tracing::warn!(
+                        request_id = %event.request_id,
+                        provider = %event.provider,
+                        provider_model = %event.provider_model,
+                        gateway_settled_cost_usd = total,
+                        price_book_estimate_usd = expected,
+                        "gateway-settled cost diverges from the billing service's rate card; \
+                         honoring the gateway-settled figure (issue #135), but the rate cards \
+                         may be out of sync"
+                    );
+                }
+            }
             let cost = settled_breakdown(total, &usage, price_opt.as_ref());
             let unit_price = price_opt.unwrap_or_else(|| ModelPrice::usd(0.0, 0.0));
             (cost, unit_price, CostSource::GatewaySettled)
@@ -152,6 +174,25 @@ pub fn charge(book: &PriceBook, event: &BillingEvent) -> Result<LedgerEntry, Bil
     })
 }
 
+/// Relative tolerance (issue #152): flag divergence beyond 5% of the expected
+/// PriceBook cost.
+const COST_DIVERGENCE_RELATIVE_TOLERANCE: f64 = 0.05;
+/// Absolute floor (issue #152): below this, relative-percentage noise on
+/// near-zero costs is not worth a warning.
+const COST_DIVERGENCE_ABSOLUTE_FLOOR_USD: f64 = 0.0001;
+
+/// Whether a gateway-settled cost materially diverges from what the rate card
+/// would have computed for the same usage. Pure and independently testable so
+/// the tolerance logic can be pinned without a tracing subscriber.
+fn cost_diverges(settled: f64, expected: f64) -> bool {
+    let diff = (settled - expected).abs();
+    if diff < COST_DIVERGENCE_ABSOLUTE_FLOOR_USD {
+        return false;
+    }
+    let relative_base = expected.abs().max(COST_DIVERGENCE_ABSOLUTE_FLOOR_USD);
+    diff / relative_base > COST_DIVERGENCE_RELATIVE_TOLERANCE
+}
+
 /// The gateway-settled cost, if the event carries a usable one.
 fn authoritative_cost(event: &BillingEvent) -> Option<f64> {
     event
@@ -189,14 +230,53 @@ fn settled_breakdown(total: f64, usage: &TokenUsage, price: Option<&ModelPrice>)
     }
 }
 
+/// Optional tenant scoping for [`LedgerSink::list`] (issue #149). When any
+/// field is set, only entries matching it are returned. Implementations
+/// should push this into the storage query itself (not filter a fetched page
+/// after the fact) so pagination operates on the already-scoped result set —
+/// otherwise a scoped page can silently come back empty or incomplete in a
+/// busy, multi-tenant ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LedgerListFilter {
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+    pub api_key_id: Option<String>,
+}
+
+impl LedgerListFilter {
+    pub fn is_empty(&self) -> bool {
+        self.organization_id.is_none() && self.project_id.is_none() && self.api_key_id.is_none()
+    }
+
+    /// Whether a tenant matches this filter (used by the in-memory sink,
+    /// which has no separate query layer to push the filter into).
+    pub fn matches(&self, tenant: &TenantContext) -> bool {
+        Self::field_matches(self.organization_id.as_deref(), tenant.organization_id.as_deref())
+            && Self::field_matches(self.project_id.as_deref(), tenant.project_id.as_deref())
+            && Self::field_matches(self.api_key_id.as_deref(), tenant.api_key_id.as_deref())
+    }
+
+    fn field_matches(filter: Option<&str>, actual: Option<&str>) -> bool {
+        match filter {
+            Some(expected) => actual == Some(expected),
+            None => true,
+        }
+    }
+}
+
 /// Persistence seam for settled ledger entries. Implementations must be
 /// idempotent on [`LedgerEntry::id`] so a retried charge does not double-bill.
 pub trait LedgerSink: Send + Sync {
     /// Persist a settled entry. Returns `true` if newly recorded, `false` if a
     /// prior entry with the same id already existed (idempotent no-op).
     fn record(&self, entry: &LedgerEntry) -> Result<bool, BillingError>;
-    /// List recorded entries, newest last, paginated.
-    fn list(&self, offset: usize, limit: usize) -> Result<Vec<LedgerEntry>, BillingError>;
+    /// List recorded entries matching `filter`, newest last, paginated.
+    fn list(
+        &self,
+        filter: &LedgerListFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LedgerEntry>, BillingError>;
     /// Fetch a single entry by its idempotency id.
     fn get(&self, id: &str) -> Result<Option<LedgerEntry>, BillingError>;
 }
@@ -295,11 +375,17 @@ impl LedgerSink for InMemoryLedgerSink {
         Ok(true)
     }
 
-    fn list(&self, offset: usize, limit: usize) -> Result<Vec<LedgerEntry>, BillingError> {
+    fn list(
+        &self,
+        filter: &LedgerListFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LedgerEntry>, BillingError> {
         let state = self.inner.lock().map_err(|_| poisoned())?;
         Ok(state
             .entries
             .iter()
+            .filter(|entry| filter.matches(&entry.tenant))
             .skip(offset)
             .take(limit)
             .cloned()
@@ -313,122 +399,5 @@ impl LedgerSink for InMemoryLedgerSink {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::pricing::{PriceBook, PriceEntry};
-
-    fn event(request_id: &str, provider: &str, model: &str) -> BillingEvent {
-        BillingEvent {
-            request_id: request_id.into(),
-            trace_id: Some(format!("trace-{request_id}")),
-            agent_run_id: None,
-            workflow_id: None,
-            workflow_version: None,
-            workflow_node_id: None,
-            cluster_id: None,
-            node_id: None,
-            tenant: TenantContext {
-                organization_id: Some("org".into()),
-                api_key_id: Some("key".into()),
-                ..TenantContext::default()
-            },
-            logical_model: "fast-chat".into(),
-            provider: provider.into(),
-            provider_model: model.into(),
-            usage: TokenUsage::new(1_000, 2_000, 0),
-            usage_source: BillingUsageSource::ProviderUsage,
-            status_code: 200,
-            occurred_at_unix: Some(1_800_000_000),
-            cost_usd: None,
-            latency_ms: None,
-        }
-    }
-
-    fn book() -> PriceBook {
-        PriceBook::new(vec![PriceEntry::new(
-            "openai",
-            "gpt-5.5",
-            ModelPrice::usd(5.0, 15.0),
-        )])
-    }
-
-    #[test]
-    fn charge_prices_usage_and_credits() {
-        let entry = charge(&book(), &event("req-1", "openai", "gpt-5.5")).unwrap();
-        // input: 1000 * 5 / 1e6 = 0.005 ; output: 2000 * 15 / 1e6 = 0.030
-        assert!((entry.cost.input_cost - 0.005).abs() < 1e-9);
-        assert!((entry.cost.output_cost - 0.030).abs() < 1e-9);
-        assert!((entry.cost.total_cost - 0.035).abs() < 1e-9);
-        // default 1e6 credits per usd
-        assert!((entry.credits - 35_000.0).abs() < 1e-3);
-        // total was 0 -> derived to 3000
-        assert_eq!(entry.usage.total_tokens, 3_000);
-        assert_eq!(entry.id, "ferrogate:trace-req-1:req-1");
-    }
-
-    #[test]
-    fn charge_fails_closed_on_missing_price() {
-        let error = charge(&book(), &event("req-2", "anthropic", "claude")).unwrap_err();
-        assert_eq!(error.code, "price_not_found");
-    }
-
-    #[test]
-    fn sink_is_idempotent_on_id() {
-        let sink = InMemoryLedgerSink::default();
-        let entry = charge(&book(), &event("req-3", "openai", "gpt-5.5")).unwrap();
-        assert!(sink.record(&entry).unwrap());
-        assert!(!sink.record(&entry).unwrap());
-        assert_eq!(sink.len(), 1);
-        assert_eq!(sink.recorded_total(), 1);
-        let totals = sink.totals();
-        assert_eq!(totals.entries, 1);
-        assert!((totals.total_cost_usd - 0.035).abs() < 1e-9);
-    }
-
-    #[test]
-    fn sink_lists_and_gets() {
-        let sink = InMemoryLedgerSink::default();
-        let entry = charge(&book(), &event("req-4", "openai", "gpt-5.5")).unwrap();
-        sink.record(&entry).unwrap();
-        assert_eq!(sink.list(0, 10).unwrap().len(), 1);
-        assert_eq!(sink.get(&entry.id).unwrap().unwrap().request_id, "req-4");
-        assert!(sink.get("missing").unwrap().is_none());
-    }
-
-    #[test]
-    fn charge_honors_gateway_settled_cost_over_pricebook() {
-        // Gateway already settled $0.01; the PriceBook would compute $0.035.
-        let mut e = event("req-5", "openai", "gpt-5.5");
-        e.cost_usd = Some(0.01);
-        let entry = charge(&book(), &e).unwrap();
-        assert_eq!(entry.cost_source, CostSource::GatewaySettled);
-        assert!((entry.cost.total_cost - 0.01).abs() < 1e-9);
-        // breakdown scales to the settled total
-        assert!((entry.cost.input_cost + entry.cost.output_cost - 0.01).abs() < 1e-9);
-        // credits follow the settled total, not the re-price
-        assert!((entry.credits - 10_000.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn charge_honors_settled_cost_even_without_a_pricebook_entry() {
-        // Unknown provider/model: no PriceBook rule, but the gateway settled a
-        // cost, so the ledger records it instead of failing closed.
-        let mut e = event("req-6", "custom-vendor", "mystery-model");
-        e.cost_usd = Some(0.5);
-        let entry = charge(&book(), &e).unwrap();
-        assert_eq!(entry.cost_source, CostSource::GatewaySettled);
-        assert!((entry.cost.total_cost - 0.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn charge_reconciles_missing_completion_split_before_pricing() {
-        // Provider reported prompt + total but omitted the completion split.
-        let mut e = event("req-7", "openai", "gpt-5.5");
-        e.usage = TokenUsage::new(1_000, 0, 3_000);
-        let entry = charge(&book(), &e).unwrap();
-        // completion derived as 3000 - 1000 = 2000, so output is billed
-        assert_eq!(entry.usage.completion_tokens, 2_000);
-        assert!((entry.cost.output_cost - 0.030).abs() < 1e-9);
-        assert!((entry.cost.total_cost - 0.035).abs() < 1e-9);
-    }
-}
+#[path = "ledger_test.rs"]
+mod tests;
