@@ -7,6 +7,8 @@
 mod acme;
 mod approval;
 mod auth;
+mod billing;
+mod billing_client;
 mod cli;
 mod config;
 mod dashboard;
@@ -18,6 +20,7 @@ mod responses;
 mod routing;
 #[cfg(test)]
 mod routing_tests;
+mod service_storage;
 mod state;
 mod storage;
 mod telemetry;
@@ -26,14 +29,17 @@ use anyhow::Result as AnyResult;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use std::sync::Arc;
+
 use crate::{
-    cli::{AuthCommands, Cli, Commands},
+    cli::{AuthCommands, BillingCommands, Cli, Commands},
     config::Config,
     gateway::serve,
     lifecycle::{
         execute_admin_reload, execute_graceful_upgrade_reload, format_reload_report,
         format_validate_report,
     },
+    service_storage::{build_supabase_repositories, SupabaseConnection},
 };
 
 fn main() -> AnyResult<()> {
@@ -49,12 +55,34 @@ fn main() -> AnyResult<()> {
                     Some(path) => ferrogate_auth::AuthServiceData::load_yaml(path)?,
                     None => ferrogate_auth::AuthServiceData::default(),
                 };
+                // When a Supabase DSN is provided, resolve hashed durable
+                // virtual API keys against storage; otherwise fall back to the
+                // YAML/in-memory RBAC authenticator.
+                let api_key_authenticator = match args.supabase_dsn.as_deref().map(str::trim) {
+                    Some(dsn) if !dsn.is_empty() => {
+                        let repositories = build_supabase_repositories(SupabaseConnection {
+                            dsn,
+                            tls_mode: &args.supabase_tls_mode,
+                            schema: args.supabase_schema.as_deref(),
+                            init_schema: args.supabase_init_schema,
+                        })?;
+                        let authenticator: Arc<dyn ferrogate_auth::ApiKeyAuthenticator> =
+                            Arc::new(ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::new(
+                                repositories,
+                            )));
+                        Some(authenticator)
+                    }
+                    _ => None,
+                };
                 ferrogate_auth::serve(ferrogate_auth::AuthServiceConfig {
                     listen: args.listen,
                     data,
-                    api_key_authenticator: None,
+                    api_key_authenticator,
                 })
             }
+        },
+        Commands::Billing(args) => match args.command {
+            BillingCommands::Serve(args) => billing::execute_billing_serve(args),
         },
         Commands::Storage(args) => storage::execute_storage_command(args.command),
         Commands::Validate(args) => {

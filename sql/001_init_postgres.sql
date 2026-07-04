@@ -711,6 +711,44 @@ CREATE TABLE IF NOT EXISTS quota_policies (
 CREATE INDEX IF NOT EXISTS idx_quota_policies_scope
     ON quota_policies(scope_type, scope_id);
 
+-- billing_ledger: the settled money/credit flow produced by the standalone
+-- billing microservice (issue #129). Each row is one priced charge derived
+-- from a single usage event. `entry_json` carries the full LedgerEntry for
+-- fidelity; the flattened numeric columns exist for aggregation/reporting.
+-- Append-only and idempotent on `id` (the request/trace-derived key) so a
+-- retried charge never double-bills.
+CREATE TABLE IF NOT EXISTS billing_ledger (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    trace_id TEXT,
+    organization_id TEXT,
+    project_id TEXT,
+    workspace_id TEXT,
+    api_key_id TEXT,
+    logical_model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_model TEXT NOT NULL,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    usage_source TEXT NOT NULL DEFAULT 'provider_usage',
+    status_code INTEGER NOT NULL DEFAULT 0,
+    input_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+    output_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+    total_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    credits DOUBLE PRECISION NOT NULL DEFAULT 0,
+    entry_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    occurred_at_unix BIGINT,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_tenant_time
+    ON billing_ledger(organization_id, project_id, occurred_at_unix);
+
+CREATE INDEX IF NOT EXISTS idx_billing_ledger_model_provider
+    ON billing_ledger(provider, provider_model);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -778,5 +816,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (12, '012_usage_cost_accounting')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (13, '013_billing_ledger')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

@@ -1,0 +1,125 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+#
+# Example FerroGate gateway config for the token4ai.cloud upstream serving
+# gpt-5.5, with the standalone billing service wired in over REST (issues
+# #129/#131/#133). Launch the services from the single `ferrogate` binary:
+#
+#   FERROGATE_BILLING_LISTEN=127.0.0.1:8092 ferrogate billing serve
+#   TOKEN4AI_API_KEY=sk-... ferrogate gateway --config config/ferrogate.token4ai.example.toml
+#
+# Then call the gateway:
+#   curl -s http://127.0.0.1:8080/v1/chat/completions \
+#     -H 'authorization: Bearer client-secret' -H 'content-type: application/json' \
+#     -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}'
+#
+# The gateway reports settled usage to `ferrogate billing serve`, which prices
+# it against its rate card and records a ledger entry:
+#   curl -s http://127.0.0.1:8092/v1/billing/ledger
+
+listen = "127.0.0.1:8080"
+
+[cluster]
+enabled = true
+cluster_id = "ferrogate-token4ai"
+node_id = "node-a"
+state_backend = "local"
+counter_backend = "local"
+
+[reliability]
+# gpt-5.x reasoning models can take longer than the default dispatch budget.
+provider_dispatch_timeout_secs = 120
+provider_dispatch_max_retries = 0
+
+# The gateway reports each settled usage event to the standalone billing
+# service over REST (fire-and-forget; never blocks the request hot path).
+[billing_service]
+enabled = true
+endpoint = "http://127.0.0.1:8092"
+timeout_millis = 5000
+
+# ---------------------------------------------------------------------------
+# Upstreams. token4ai.cloud is OpenAI-compatible, so `kind = "openai"` serves
+# gpt-5.5 and every other gpt-5.x model with no adapter changes. The other
+# vendors below show how to add Anthropic/Gemini/Grok/DeepSeek upstreams; each
+# api key is read from the named environment variable, never stored in config.
+# ---------------------------------------------------------------------------
+[[providers]]
+name = "token4ai"
+kind = "openai"
+base_url = "https://api.token4ai.cloud/v1"
+api_key_env = "TOKEN4AI_API_KEY"
+
+# [[providers]]
+# name = "anthropic"
+# kind = "anthropic"
+# base_url = "https://api.anthropic.com/v1"
+# api_key_env = "ANTHROPIC_API_KEY"
+#
+# [[providers]]
+# name = "gemini"
+# kind = "gemini"
+# base_url = "https://generativelanguage.googleapis.com/v1beta"
+# api_key_env = "GEMINI_API_KEY"
+#
+# [[providers]]
+# name = "grok"
+# kind = "grok"
+# base_url = "https://api.x.ai/v1"
+# api_key_env = "XAI_API_KEY"
+#
+# [[providers]]
+# name = "deepseek"
+# kind = "openai"
+# base_url = "https://api.deepseek.com/v1"
+# api_key_env = "DEEPSEEK_API_KEY"
+
+[[models]]
+name = "gpt-5.5"
+provider = "token4ai"
+provider_model = "gpt-5.5"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 5.0
+output_price_per_1m = 15.0
+
+[[models]]
+name = "gpt-5"
+provider = "token4ai"
+provider_model = "gpt-5"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 5.0
+output_price_per_1m = 15.0
+
+# [[models]]
+# name = "claude-sonnet"
+# provider = "anthropic"
+# provider_model = "claude-sonnet-4"
+# capabilities = ["chat", "streaming"]
+#
+# [[models]]
+# name = "gemini-pro"
+# provider = "gemini"
+# provider_model = "gemini-2.5-pro"
+# capabilities = ["chat", "streaming"]
+#
+# [[models]]
+# name = "deepseek-chat"
+# provider = "deepseek"
+# provider_model = "deepseek-chat"
+# capabilities = ["chat", "streaming"]
+
+[[api_keys]]
+id = "client"
+name = "Client"
+key = "client-secret"
+scopes = ["models.read", "chat.completions", "responses.create"]
+allowed_models = ["gpt-5.5", "gpt-5"]
+organization_id = "org_demo"
+project_id = "project_gateway"
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]

@@ -126,6 +126,114 @@ impl Drop for AuthHarness {
     }
 }
 
+/// A real `ferrogate billing serve` child process for the billing-chain E2E
+/// (issues #129/#131/#134). Uses the built-in default rate card and an
+/// in-memory ledger; a durable-Supabase variant can pass `--supabase-dsn`.
+pub(crate) struct BillingHarness {
+    pub(crate) billing_addr: String,
+    billing: Child,
+}
+
+impl BillingHarness {
+    pub(crate) fn start(ferrogate_bin: &Path) -> Result<Self> {
+        if !ferrogate_bin.exists() {
+            bail!(
+                "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
+                ferrogate_bin.display()
+            );
+        }
+
+        let billing_addr = free_addr()?;
+        let billing = Command::new(ferrogate_bin)
+            .args(["billing", "serve", "--listen"])
+            .arg(&billing_addr)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(
+                if env::var("FERROGATE_TEST_DEBUG_STDERR").is_ok_and(|value| value == "1") {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                },
+            )
+            .spawn()
+            .with_context(|| format!("failed to start {} billing serve", ferrogate_bin.display()))?;
+
+        let mut harness = Self {
+            billing_addr,
+            billing,
+        };
+        harness.wait_for_billing()?;
+        Ok(harness)
+    }
+
+    fn wait_for_billing(&mut self) -> Result<()> {
+        let started = Instant::now();
+        let mut last = String::new();
+        while started.elapsed() < Duration::from_secs(20) {
+            if let Some(status) = self.billing.try_wait()? {
+                bail!("ferrogate-billing process exited before readiness check: {status}");
+            }
+            match http_request_addr(&self.billing_addr, "GET", "/healthz", &[], "") {
+                Ok(response) if response.status == 200 => return Ok(()),
+                Ok(response) => last = response.raw,
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!(
+            "timed out waiting for ferrogate-billing on {}; last response: {last}",
+            self.billing_addr
+        );
+    }
+
+    /// Poll `GET /v1/billing/ledger` until an entry matching `matches` appears,
+    /// returning that entry. The gateway reports usage fire-and-forget, so this
+    /// tolerates the asynchronous settle by polling with a timeout.
+    pub(crate) fn wait_for_ledger_entry<F>(&self, matches: F) -> Result<Value>
+    where
+        F: Fn(&Value) -> bool,
+    {
+        let started = Instant::now();
+        let mut last = String::new();
+        while started.elapsed() < Duration::from_secs(10) {
+            match http_request_addr(
+                &self.billing_addr,
+                "GET",
+                "/v1/billing/ledger?limit=200",
+                &[],
+                "",
+            ) {
+                Ok(response) if response.status == 200 => {
+                    let body: Value = serde_json::from_str(&response.body).with_context(|| {
+                        format!("failed to parse billing ledger body: {}", response.body)
+                    })?;
+                    if let Some(entries) = body["entries"].as_array() {
+                        if let Some(entry) = entries.iter().find(|entry| matches(entry)) {
+                            return Ok(entry.clone());
+                        }
+                    }
+                    last = response.body;
+                }
+                Ok(response) => last = response.raw,
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        bail!(
+            "timed out waiting for a matching billing ledger entry on {}; last ledger: {last}",
+            self.billing_addr
+        );
+    }
+}
+
+impl Drop for BillingHarness {
+    fn drop(&mut self) {
+        let _ = self.billing.kill();
+        let _ = self.billing.wait();
+    }
+}
+
 pub(crate) struct LocalHarness {
     _dir: tempfile::TempDir,
     pub(crate) gateway_addr: String,
@@ -140,7 +248,14 @@ pub(crate) struct LocalHarness {
 
 impl LocalHarness {
     pub(crate) fn start(ferrogate_bin: &Path, expected_provider_requests: usize) -> Result<Self> {
-        Self::start_inner(ferrogate_bin, expected_provider_requests, None, None, false)
+        Self::start_inner(
+            ferrogate_bin,
+            expected_provider_requests,
+            None,
+            None,
+            false,
+            None,
+        )
     }
 
     pub(crate) fn start_with_billing_and_agent(
@@ -155,6 +270,7 @@ impl LocalHarness {
             Some(billing),
             None,
             true,
+            None,
         )
     }
 
@@ -169,6 +285,22 @@ impl LocalHarness {
             None,
             Some(auth_addr),
             false,
+            None,
+        )
+    }
+
+    pub(crate) fn start_with_billing_service(
+        ferrogate_bin: &Path,
+        expected_provider_requests: usize,
+        billing_service_addr: &str,
+    ) -> Result<Self> {
+        Self::start_inner(
+            ferrogate_bin,
+            expected_provider_requests,
+            None,
+            None,
+            false,
+            Some(billing_service_addr),
         )
     }
 
@@ -178,6 +310,7 @@ impl LocalHarness {
         billing: Option<MockBillingServer>,
         auth_addr: Option<&str>,
         include_agent: bool,
+        billing_service_addr: Option<&str>,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
             bail!(
@@ -213,6 +346,7 @@ impl LocalHarness {
                 billing: billing.as_ref(),
                 observability: Some(&observability),
                 auth_addr,
+                billing_service_addr,
             }),
         )?;
 

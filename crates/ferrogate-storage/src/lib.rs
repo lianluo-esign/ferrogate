@@ -313,8 +313,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 12;
-const POSTGRES_SCHEMA_NAME: &str = "012_usage_cost_accounting";
+const POSTGRES_SCHEMA_VERSION: u64 = 13;
+const POSTGRES_SCHEMA_NAME: &str = "013_billing_ledger";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -1361,6 +1361,87 @@ impl PostgresControlPlaneStore {
             )
         })?;
         rows.iter().map(usage_monthly_rollup_from_row).collect()
+    }
+
+    fn append_billing_ledger_entry(
+        &self,
+        entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, StorageError> {
+        let entry_json = serialize_storage_document(entry)?;
+        let prompt_tokens = saturating_i64(entry.usage.prompt_tokens);
+        let completion_tokens = saturating_i64(entry.usage.completion_tokens);
+        let total_tokens = saturating_i64(entry.usage.total_tokens);
+        let status_code = i32::from(entry.status_code);
+        let usage_source = entry.usage_source.as_str();
+        let occurred_at_unix = entry.occurred_at_unix.map(saturating_i64);
+        let created_at_unix = saturating_i64(now_unix_seconds());
+        let inserted = self.with_client(|client| {
+            client.execute(
+                "INSERT INTO billing_ledger \
+                 (id, request_id, trace_id, organization_id, project_id, workspace_id, \
+                  api_key_id, logical_model, provider, provider_model, prompt_tokens, \
+                  completion_tokens, total_tokens, usage_source, status_code, input_cost, \
+                  output_cost, total_cost, currency, credits, entry_json, occurred_at_unix, \
+                  created_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
+                  $16, $17, $18, $19, $20, $21::text::jsonb, $22, $23) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &entry.id,
+                    &entry.request_id,
+                    &entry.trace_id,
+                    &entry.tenant.organization_id,
+                    &entry.tenant.project_id,
+                    &entry.tenant.workspace_id,
+                    &entry.tenant.api_key_id,
+                    &entry.logical_model,
+                    &entry.provider,
+                    &entry.provider_model,
+                    &prompt_tokens,
+                    &completion_tokens,
+                    &total_tokens,
+                    &usage_source,
+                    &status_code,
+                    &entry.cost.input_cost,
+                    &entry.cost.output_cost,
+                    &entry.cost.total_cost,
+                    &entry.cost.currency,
+                    &entry.credits,
+                    &entry_json,
+                    &occurred_at_unix,
+                    &created_at_unix,
+                ],
+            )
+        })?;
+        Ok(inserted > 0)
+    }
+
+    fn list_billing_ledger_entries(
+        &self,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT entry_json::text FROM billing_ledger \
+                 ORDER BY created_at_unix ASC, id ASC OFFSET $1 LIMIT $2",
+                &[&offset, &limit],
+            )
+        })?;
+        rows.iter().map(ledger_entry_from_row).collect()
+    }
+
+    fn get_billing_ledger_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT entry_json::text FROM billing_ledger WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        row.as_ref().map(ledger_entry_from_row).transpose()
     }
 
     fn append_billing_event(&self, event: &BillingEvent) -> Result<bool, StorageError> {
@@ -3390,6 +3471,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "projects",
         "workspaces",
         "api_keys",
+        "billing_ledger",
         "storage_schema_migrations",
     ];
     for table in TABLES {
@@ -3496,6 +3578,8 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_api_keys_workspace",
         "idx_api_keys_tenant_project",
         "idx_api_keys_prefix",
+        "idx_billing_ledger_tenant_time",
+        "idx_billing_ledger_model_provider",
     ];
     for index in INDEXES {
         let count = client
@@ -3679,6 +3763,77 @@ fn usage_monthly_rollups_supabase_only_error() -> StorageError {
         "usage monthly rollup records are Supabase/Postgres-only; set storage.provider = supabase"
             .into(),
     )
+}
+
+fn ledger_entry_from_row(
+    row: &PostgresRow,
+) -> Result<ferrogate_billing::LedgerEntry, StorageError> {
+    deserialize_storage_document(&row.get::<_, String>(0))
+}
+
+fn billing_ledger_supabase_only_error() -> StorageError {
+    StorageError::Runtime(
+        "billing ledger entries are Supabase/Postgres-only; start `ferrogate billing serve` with a Supabase DSN".into(),
+    )
+}
+
+/// A durable [`ferrogate_billing::LedgerSink`] backed by Supabase/Postgres.
+///
+/// This is the storage-side half of the billing service's persistence seam:
+/// `ferrogate-billing` defines the `LedgerSink` trait and stays storage-free,
+/// while this crate (which already depends on it) supplies the concrete
+/// Supabase-backed sink. The `ferrogate billing serve` subcommand injects one
+/// of these when started with a Supabase DSN.
+pub struct StorageLedgerSink {
+    repositories: Arc<RuntimeStorageRepositories>,
+}
+
+impl StorageLedgerSink {
+    pub fn new(repositories: Arc<RuntimeStorageRepositories>) -> Self {
+        Self { repositories }
+    }
+}
+
+impl std::fmt::Debug for StorageLedgerSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StorageLedgerSink")
+            .finish_non_exhaustive()
+    }
+}
+
+fn ledger_storage_error(error: StorageError) -> ferrogate_billing::BillingError {
+    ferrogate_billing::BillingError::new("billing_ledger_storage_error", error.to_string())
+}
+
+impl ferrogate_billing::LedgerSink for StorageLedgerSink {
+    fn record(
+        &self,
+        entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, ferrogate_billing::BillingError> {
+        self.repositories
+            .append_billing_ledger_entry(entry)
+            .map_err(ledger_storage_error)
+    }
+
+    fn list(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, ferrogate_billing::BillingError> {
+        self.repositories
+            .list_billing_ledger_entries(offset, limit)
+            .map_err(ledger_storage_error)
+    }
+
+    fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, ferrogate_billing::BillingError> {
+        self.repositories
+            .billing_ledger_entry(id)
+            .map_err(ledger_storage_error)
+    }
 }
 
 fn tenant_account_from_tuple(
@@ -6219,6 +6374,52 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Mysql(_) => {
                 Err(usage_monthly_rollups_supabase_only_error())
+            }
+        }
+    }
+
+    /// Persist a settled billing ledger entry (issue #129). Idempotent on the
+    /// entry id; returns `true` when newly inserted. Supabase/Postgres-only.
+    pub fn append_billing_ledger_entry(
+        &self,
+        entry: &ferrogate_billing::LedgerEntry,
+    ) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.append_billing_ledger_entry(entry)
+            }
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_ledger_supabase_only_error())
+            }
+        }
+    }
+
+    /// List settled ledger entries, oldest first, paginated. Supabase-only.
+    pub fn list_billing_ledger_entries(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .list_billing_ledger_entries(saturating_i64(offset as u64), saturating_i64(limit as u64)),
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_ledger_supabase_only_error())
+            }
+        }
+    }
+
+    /// Fetch a single settled ledger entry by id. Supabase-only.
+    pub fn billing_ledger_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<ferrogate_billing::LedgerEntry>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_billing_ledger_entry(id)
+            }
+            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_ledger_supabase_only_error())
             }
         }
     }

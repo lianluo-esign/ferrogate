@@ -148,14 +148,73 @@ pub(crate) struct AuthServeArgs {
     /// Optional YAML data file with tenants, API keys, roles, and bindings.
     #[arg(long, env = "FERROGATE_AUTH_DATA")]
     pub(crate) data: Option<PathBuf>,
+    /// Supabase PostgreSQL DSN for durable hashed virtual API key resolution.
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_DSN")]
+    pub(crate) supabase_dsn: Option<String>,
+    /// Supabase/PostgreSQL TLS mode for durable virtual API key resolution.
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_TLS_MODE", default_value = "require")]
+    pub(crate) supabase_tls_mode: String,
+    /// Optional PostgreSQL schema containing the FerroGate control-plane tables.
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_SCHEMA")]
+    pub(crate) supabase_schema: Option<String>,
+    /// Initialize missing Supabase schema objects before serving.
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_INIT_SCHEMA")]
+    pub(crate) supabase_init_schema: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BillingArgs {
+    #[command(subcommand)]
+    pub(crate) command: BillingCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum BillingCommands {
+    /// Run the token-usage billing REST service.
+    Serve(BillingServeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BillingServeArgs {
+    /// Address for the billing REST API service.
+    #[arg(
+        long,
+        env = "FERROGATE_BILLING_LISTEN",
+        default_value = "127.0.0.1:8092"
+    )]
+    pub(crate) listen: String,
+    /// Optional JSON rate-card file (array of price entries or a full price
+    /// book object). When omitted, a built-in default rate card is used.
+    #[arg(long, env = "FERROGATE_BILLING_PRICING")]
+    pub(crate) pricing: Option<PathBuf>,
+    /// Credits charged per settled USD (`credits = total_cost_usd * this`).
+    /// Overrides the value from the pricing file when set.
+    #[arg(long, env = "FERROGATE_BILLING_CREDITS_PER_USD")]
+    pub(crate) credits_per_usd: Option<f64>,
+    /// Supabase PostgreSQL DSN for durable ledger persistence. When omitted,
+    /// the ledger is kept in memory only.
+    #[arg(long, env = "FERROGATE_BILLING_SUPABASE_DSN")]
+    pub(crate) supabase_dsn: Option<String>,
+    /// Supabase/PostgreSQL TLS mode for durable ledger persistence.
+    #[arg(long, env = "FERROGATE_BILLING_SUPABASE_TLS_MODE", default_value = "require")]
+    pub(crate) supabase_tls_mode: String,
+    /// Optional PostgreSQL schema containing the FerroGate control-plane tables.
+    #[arg(long, env = "FERROGATE_BILLING_SUPABASE_SCHEMA")]
+    pub(crate) supabase_schema: Option<String>,
+    /// Initialize missing Supabase schema objects before serving.
+    #[arg(long, env = "FERROGATE_BILLING_SUPABASE_INIT_SCHEMA")]
+    pub(crate) supabase_init_schema: bool,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
-    /// Run the FerroGate Pingora gateway server.
+    /// Run the FerroGate Pingora gateway server (alias: `gateway`).
+    #[command(alias = "gateway")]
     Run(RunArgs),
-    /// Run FerroGate side services.
+    /// Run the tenant and RBAC auth REST service.
     Auth(AuthArgs),
+    /// Run the token-usage billing REST service.
+    Billing(BillingArgs),
     /// Operate durable storage and migration tooling.
     Storage(Box<StorageArgs>),
     /// Validate configuration and print a summary.

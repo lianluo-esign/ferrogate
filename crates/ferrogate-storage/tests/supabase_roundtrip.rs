@@ -665,3 +665,79 @@ fn usage_cost_accounting_round_trips_through_real_supabase() {
         assert!((rollup.cost_usd - 0.015).abs() < 1e-9);
     }
 }
+
+/// Proves the standalone billing service's ledger persistence (issue #129)
+/// against a real Postgres instance: a settled usage event is priced into a
+/// `LedgerEntry` exactly as `ferrogate billing serve` does, written once
+/// (idempotent on retry), and read back correctly after a fresh reconnect.
+#[test]
+fn billing_ledger_round_trips_through_real_supabase() {
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping billing ledger round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    // Price a usage event into a ledger entry exactly as the billing service does.
+    let price_book = ferrogate_billing::PriceBook::new(vec![ferrogate_billing::PriceEntry::new(
+        "token4ai",
+        "gpt-5.5",
+        ferrogate_billing::ModelPrice::usd(5.0, 15.0),
+    )]);
+    let event = ferrogate_billing::BillingEvent {
+        request_id: "req-ledger-rt".into(),
+        trace_id: Some("trace-ledger-rt".into()),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: TenantContext {
+            organization_id: Some("org_demo".into()),
+            project_id: Some("project_gateway".into()),
+            api_key_id: Some("client".into()),
+            ..TenantContext::default()
+        },
+        logical_model: "gpt-5.5".into(),
+        provider: "token4ai".into(),
+        provider_model: "gpt-5.5".into(),
+        usage: ferrogate_billing::TokenUsage::new(24, 30, 54),
+        usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+        status_code: 200,
+        occurred_at_unix: Some(1_800_000_000),
+        cost_usd: None,
+        latency_ms: None,
+    };
+    let entry = ferrogate_billing::charge(&price_book, &event).expect("charge must price the event");
+
+    // First write inserts; a retry is an idempotent no-op on the entry id.
+    assert!(storage
+        .append_billing_ledger_entry(&entry)
+        .expect("ledger insert must succeed"));
+    assert!(!storage
+        .append_billing_ledger_entry(&entry)
+        .expect("ledger re-insert must be idempotent"));
+
+    let reopened =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
+            .expect("re-open against existing schema must succeed");
+    let fetched = reopened
+        .billing_ledger_entry(&entry.id)
+        .expect("get must succeed")
+        .expect("ledger entry must exist after reconnect");
+
+    assert_eq!(fetched.provider, "token4ai");
+    assert_eq!(fetched.provider_model, "gpt-5.5");
+    assert_eq!(fetched.usage.total_tokens, 54);
+    assert!((fetched.cost.total_cost - 0.00057).abs() < 1e-9);
+    assert!((fetched.credits - 570.0).abs() < 1e-6);
+    assert_eq!(
+        fetched.tenant.organization_id.as_deref(),
+        Some("org_demo")
+    );
+    assert_eq!(reopened.list_billing_ledger_entries(0, 10).unwrap().len(), 1);
+}

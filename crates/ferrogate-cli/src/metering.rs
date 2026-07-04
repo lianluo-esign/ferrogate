@@ -297,7 +297,12 @@ fn now_unix_seconds() -> u64 {
         .unwrap_or_default()
 }
 
-fn post_json(endpoint: &str, bearer_token: &str, body: &[u8], timeout: Duration) -> AnyResult<()> {
+pub(crate) fn post_json(
+    endpoint: &str,
+    bearer_token: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> AnyResult<()> {
     let target = parse_target(endpoint)?;
     let mut stream = connect(&target, timeout)?;
     match target.scheme {

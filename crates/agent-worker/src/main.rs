@@ -41,6 +41,40 @@ mod test_support {
     }
 }
 
+/// The worker deployment type this shared `agent-worker` binary runs as.
+///
+/// Cloud (FerroGate-managed) vs self-hosted (customer-operated) is a
+/// trust/enforcement POLICY toggle, not a different program: both share the
+/// same isolation backends, framework-handler adapters, and normalized event
+/// schema. FerroGate therefore ships ONE `agent-worker` binary and selects the
+/// type with `--worker-type` (which maps to `FrameworkAdapterMode`), rather
+/// than building two separate binaries (issue #132).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum WorkerType {
+    /// FerroGate-hosted managed runtime; capability actions are enforced.
+    Cloud,
+    /// Customer self-hosted worker; capability actions are report-only and
+    /// identity expiry is stamped by the server clock (security boundary).
+    #[value(name = "self-hosted")]
+    SelfHosted,
+}
+
+impl WorkerType {
+    fn framework_adapter_mode(self) -> ferrogate_runtime::FrameworkAdapterMode {
+        match self {
+            WorkerType::Cloud => ferrogate_runtime::FrameworkAdapterMode::Managed,
+            WorkerType::SelfHosted => ferrogate_runtime::FrameworkAdapterMode::SelfHosted,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            WorkerType::Cloud => "cloud",
+            WorkerType::SelfHosted => "self-hosted",
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "agent-worker")]
 #[command(about = "Standalone FerroGate agent-worker process boundary")]
@@ -52,12 +86,19 @@ struct Cli {
     /// Hidden compatibility entrypoint used by Firecracker guest-agent start RPC.
     #[arg(long = "ferrogate-guest-agent-start", hide = true)]
     ferrogate_guest_agent_start: bool,
+    /// Worker deployment type for this shared binary: `cloud` (FerroGate-managed
+    /// runtime) or `self-hosted` (customer-operated). One binary, mode-selected
+    /// (issue #132).
+    #[arg(long, value_enum, default_value = "cloud", global = true)]
+    worker_type: WorkerType,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Print the resolved worker type and its trust/enforcement semantics.
+    WorkerType,
     /// Run a local management protocol smoke test without starting Firecracker.
     ProtocolSmoke,
     /// Probe framework handler readiness inside the agent-worker process.
@@ -207,6 +248,27 @@ enum Command {
     },
 }
 
+fn print_worker_type(worker_type: WorkerType) -> Result<()> {
+    let mode = worker_type.framework_adapter_mode();
+    let evidence = serde_json::json!({
+        "binary": "agent-worker",
+        "shared_binary": true,
+        "worker_type": worker_type.as_str(),
+        "framework_adapter_mode": mode.as_str(),
+        "capability_enforcement": match worker_type {
+            WorkerType::Cloud => "enforced",
+            WorkerType::SelfHosted => "reported",
+        },
+        "identity_expiry_clock": match worker_type {
+            WorkerType::Cloud => "not_applicable",
+            WorkerType::SelfHosted => "server",
+        },
+        "note": "cloud vs self-hosted is a policy toggle on one shared binary (issue #132)",
+    });
+    println!("{}", serde_json::to_string_pretty(&evidence)?);
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.ferrogate_guest_agent_probe && cli.ferrogate_guest_agent_start {
@@ -222,6 +284,7 @@ fn main() -> Result<()> {
         bail!("no agent-worker command provided");
     };
     match command {
+        Command::WorkerType => print_worker_type(cli.worker_type),
         Command::ProtocolSmoke => management::protocol_smoke(),
         Command::ProbeHandlers => handlers::probe_handlers_command(),
         Command::FirecrackerPreparePlan => backends::firecracker_prepare_plan_command(),

@@ -25,6 +25,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) auth_service: AuthServiceConfig,
     #[serde(default)]
+    pub(crate) billing_service: BillingServiceConfig,
+    #[serde(default)]
     pub(crate) providers: Vec<Provider>,
     #[serde(default)]
     pub(crate) models: Vec<Model>,
@@ -92,6 +94,46 @@ pub(crate) struct AuthServiceConfig {
     pub(crate) max_retries: u32,
     #[serde(default = "default_auth_service_retry_backoff_millis")]
     pub(crate) retry_backoff_millis: u64,
+}
+
+/// Gateway-side client config for the standalone billing service (issue #131).
+/// When `enabled`, the gateway reports each settled usage event to the billing
+/// service's `POST /v1/billing/charge` over REST (fire-and-forget, so the hot
+/// path is never blocked on the billing round-trip).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct BillingServiceConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_billing_service_endpoint")]
+    pub(crate) endpoint: String,
+    #[serde(default = "default_billing_service_timeout_millis")]
+    pub(crate) timeout_millis: u64,
+    /// Optional service-to-service bearer token sent to the billing service.
+    #[serde(default)]
+    pub(crate) token: Option<String>,
+    /// Optional env var name holding the billing service bearer token.
+    #[serde(default)]
+    pub(crate) token_env: Option<String>,
+}
+
+impl Default for BillingServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_billing_service_endpoint(),
+            timeout_millis: default_billing_service_timeout_millis(),
+            token: None,
+            token_env: None,
+        }
+    }
+}
+
+fn default_billing_service_endpoint() -> String {
+    "http://127.0.0.1:8092".to_string()
+}
+
+fn default_billing_service_timeout_millis() -> u64 {
+    1_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1559,6 +1601,7 @@ impl Default for Config {
             admin: AdminConfig::default(),
             tls: TlsConfig::default(),
             auth_service: AuthServiceConfig::default(),
+            billing_service: BillingServiceConfig::default(),
             providers: Vec::new(),
             models: Vec::new(),
             api_keys: Vec::new(),

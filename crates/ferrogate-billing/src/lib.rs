@@ -5,6 +5,14 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 //! Token usage metering and local event retention boundaries.
+//!
+//! Beyond raw metering, this crate hosts the standalone billing microservice
+//! (issue #129): a [`pricing::PriceBook`] rate card, a [`ledger::charge`]
+//! function that turns a [`BillingEvent`] into a priced [`ledger::LedgerEntry`],
+//! a [`ledger::LedgerSink`] persistence seam, and an HTTP [`service::serve`]
+//! entrypoint. The crate stays free of any storage dependency (the durable
+//! `LedgerSink` lives in `ferrogate-storage`, which already depends on this
+//! crate) so the dependency graph stays acyclic.
 
 use std::{
     collections::VecDeque,
@@ -13,6 +21,14 @@ use std::{
 
 use ferrogate_core::TenantContext;
 use serde::{Deserialize, Serialize};
+
+pub mod ledger;
+pub mod pricing;
+pub mod service;
+
+pub use ledger::{charge, InMemoryLedgerSink, LedgerEntry, LedgerSink, LedgerTotals};
+pub use pricing::{PriceBook, PriceEntry, DEFAULT_CREDITS_PER_USD};
+pub use service::{serve, BillingServiceConfig};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {

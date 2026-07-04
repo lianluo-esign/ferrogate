@@ -33,6 +33,7 @@ use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
     ToolExecutionResponse,
 };
+use crate::billing_client::BillingReporter;
 use crate::metering::{MeteringExportStatus, MeteringExporter};
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
@@ -898,6 +899,7 @@ pub(crate) struct AppState {
     cluster_counters: Arc<ClusterCounterBackend>,
     metering_events: Arc<InMemoryBillingEventSink>,
     metering_exporter: Option<Arc<MeteringExporter>>,
+    billing_reporter: Option<Arc<BillingReporter>>,
     repositories: Arc<RuntimeStorageRepositories>,
     durable_api_key_authenticator: Arc<ferrogate_auth::StorageApiKeyAuthenticator>,
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
@@ -3165,6 +3167,11 @@ impl AppState {
             .ok()
             .flatten()
             .map(Arc::new);
+        let billing_reporter = BillingReporter::from_config(&config.billing_service)
+            .map_err(|error| {
+                anyhow::anyhow!("failed to initialize billing service client: {error}")
+            })?
+            .map(Arc::new);
         let cluster_counters = ClusterCounterBackend::from_config(&config);
         let self_hosted_dispatch = Arc::new(Mutex::new(SelfHostedWorkerDispatchRuntime::default()));
         {
@@ -3206,6 +3213,7 @@ impl AppState {
                 analytics.billing_event_retention_records,
             )),
             metering_exporter,
+            billing_reporter,
             durable_api_key_authenticator: Arc::new(
                 ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::clone(&repositories)),
             ),
@@ -4778,6 +4786,13 @@ impl AppState {
         self.record_billing_metrics(&event);
         if let Some(exporter) = &self.metering_exporter {
             exporter.export_event(event.clone());
+        }
+        // Report the settled usage to the standalone billing service so it can
+        // price the charge and persist the ledger entry (issue #131). This is
+        // an isolated microservice call over REST, decoupled from the metering
+        // export above, and fire-and-forget so it never blocks the hot path.
+        if let Some(reporter) = &self.billing_reporter {
+            reporter.report(event.clone());
         }
         if let Some(api_key_id) = &draft.request.tenant.api_key_id {
             if let Err(error) = self

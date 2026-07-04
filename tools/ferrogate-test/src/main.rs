@@ -20,7 +20,7 @@ mod storage;
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use scenarios::{
     run_admin_api, run_auth_api, run_function_egress_api, run_gateway_api,
-    run_gateway_external_auth_api, run_gateway_third_party_auth_api,
+    run_gateway_billing_chain, run_gateway_external_auth_api, run_gateway_third_party_auth_api,
 };
 use storage::{
     run_mysql_restart, run_mysql_tls_restart, run_postgres_restart, run_postgres_tls_restart,
@@ -33,6 +33,7 @@ fn main() -> Result<()> {
         admin: run_admin_api,
         auth: run_auth_api,
         gateway: run_gateway_api,
+        gateway_billing_chain: run_gateway_billing_chain,
         function_egress: run_function_egress_api,
         supabase_restart: run_supabase_restart,
         supabase_live_smoke: run_supabase_live_smoke,
@@ -61,6 +62,7 @@ fn main() -> Result<()> {
             run_gateway_external_auth_api(local, auth)?;
             run_gateway_third_party_auth_api(local)?;
             run_gateway_api(local)?;
+            run_gateway_billing_chain(local)?;
             run_function_egress_api(local)?;
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;

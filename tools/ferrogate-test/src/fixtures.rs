@@ -16,6 +16,9 @@ pub(crate) struct LocalGatewayConfig<'a> {
     pub(crate) billing: Option<&'a MockBillingServer>,
     pub(crate) observability: Option<&'a MockOtlpServer>,
     pub(crate) auth_addr: Option<&'a str>,
+    /// Address of a running `ferrogate billing serve` process. When set, the
+    /// gateway reports settled usage to it over REST (issue #131).
+    pub(crate) billing_service_addr: Option<&'a str>,
 }
 
 pub(crate) fn local_gateway_config(config: LocalGatewayConfig<'_>) -> String {
@@ -67,6 +70,19 @@ timeout_millis = 1000
             )
         })
         .unwrap_or_default();
+    let billing_service = config
+        .billing_service_addr
+        .map(|billing_addr| {
+            format!(
+                r#"
+[billing_service]
+enabled = true
+endpoint = "http://{billing_addr}"
+timeout_millis = 2000
+"#
+            )
+        })
+        .unwrap_or_default();
     let gateway_addr = config.gateway_addr;
     let provider_addr = config.provider_addr;
     let mcp_addr = config.mcp_addr;
@@ -86,6 +102,7 @@ counter_backend = "local"
 {metering}
 {observability}
 {auth_service}
+{billing_service}
 
 [telemetry]
 service_name = "ferrogate-test"
@@ -206,12 +223,20 @@ capabilities = ["chat"]
 input_price_per_1m = 1.0
 output_price_per_1m = 2.0
 
+[[models]]
+name = "gpt-5.5-chat"
+provider = "openai"
+provider_model = "gpt-5.5"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 5.0
+output_price_per_1m = 15.0
+
 [[api_keys]]
 id = "client"
 name = "Client"
 key = "client-secret"
 scopes = ["models.read", "chat.completions", "responses.create", "agent.runs.create", "admin.read", "agents.read", "agents.invoke", "tools.read", "tools.execute", "functions.execute"]
-allowed_models = ["fast-chat", "fallback-chat"]
+allowed_models = ["fast-chat", "fallback-chat", "gpt-5.5-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
 log_bodies = true

@@ -11,7 +11,7 @@ use crate::{
         ADMIN_AUTH, AUTH_TEST_CLIENT_2, CLIENT_AUTH, JSON_CONTENT, OBSERVER_AUTH,
         SELF_HOSTED_MTLS_HEADER, SELF_HOSTED_SYMMETRIC_AEAD_HEADER, SUPPORT_SKILL_HEADER,
     },
-    local::{AuthHarness, LocalHarness},
+    local::{AuthHarness, BillingHarness, LocalHarness},
     mocks::spawn_mock_third_party_auth_server,
 };
 use anyhow::{Context, Result};
@@ -3966,6 +3966,75 @@ pub(crate) fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthA
     )?;
 
     println!("gateway-external-auth-api scenario passed");
+    Ok(())
+}
+
+/// End-to-end billing chain (issues #129/#131/#133/#134): boot the standalone
+/// `ferrogate billing serve` process, then a gateway wired to report settled
+/// usage to it over REST, drive a gpt-5.5 request through the gateway to the
+/// (mock) upstream, and assert a priced ledger entry — money and credits —
+/// lands in the billing service. This proves the whole inter-service link
+/// deterministically; the live-Supabase/Token4AI variant reuses the same
+/// billing service against a real gpt-5.5 upstream.
+pub(crate) fn run_gateway_billing_chain(local: &LocalArgs) -> Result<()> {
+    let billing = BillingHarness::start(&local.ferrogate_bin)?;
+    let case = LocalHarness::start_with_billing_service(&local.ferrogate_bin, 2, &billing.billing_addr)?;
+
+    // Drive a gpt-5.5 request through the gateway to the upstream.
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"gpt-5.5-chat","messages":[{"role":"user","content":"billing chain gpt-5.5"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            assert_eq!(body["usage"]["total_tokens"], 2);
+            Ok(())
+        },
+    )?;
+    // A second model proves multi-model ledger attribution.
+    case.expect_json(
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        r#"{"model":"fast-chat","messages":[{"role":"user","content":"billing chain fast-chat"}]}"#,
+        200,
+        |body| {
+            assert_eq!(body["object"], "chat.completion");
+            Ok(())
+        },
+    )?;
+
+    // The gateway reports usage fire-and-forget; poll the ledger for the
+    // settled gpt-5.5 charge and assert it was priced in money and credits.
+    let gpt55 = billing.wait_for_ledger_entry(|entry| {
+        entry["logical_model"] == "gpt-5.5-chat" && entry["provider_model"] == "gpt-5.5"
+    })?;
+    assert_eq!(gpt55["provider"], "openai");
+    assert_eq!(gpt55["tenant"]["organization_id"], "org_demo");
+    assert_eq!(gpt55["tenant"]["project_id"], "project_gateway");
+    assert_eq!(gpt55["usage"]["total_tokens"], 2);
+    assert_eq!(gpt55["cost"]["currency"], "USD");
+    assert_eq!(gpt55["unit_price"]["input_price_per_1m"], 5.0);
+    let cost = gpt55["cost"]["total_cost"].as_f64().unwrap_or_default();
+    assert!(cost > 0.0, "expected positive settled cost, got {cost}: {gpt55}");
+    let credits = gpt55["credits"].as_f64().unwrap_or_default();
+    assert!(
+        credits > 0.0,
+        "expected positive credit consumption, got {credits}: {gpt55}"
+    );
+
+    // The fast-chat charge must also land, attributed to gpt-4o-mini.
+    let fast = billing.wait_for_ledger_entry(|entry| {
+        entry["logical_model"] == "fast-chat" && entry["provider_model"] == "gpt-4o-mini"
+    })?;
+    assert!(
+        fast["cost"]["total_cost"].as_f64().unwrap_or_default() > 0.0,
+        "expected positive fast-chat cost: {fast}"
+    );
+
+    println!("gateway-billing-chain scenario passed");
     Ok(())
 }
 
