@@ -6402,7 +6402,10 @@ impl RuntimeStorageRepositories {
     ) -> Result<Vec<ferrogate_billing::LedgerEntry>, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
-                .list_billing_ledger_entries(saturating_i64(offset as u64), saturating_i64(limit as u64)),
+                .list_billing_ledger_entries(
+                    saturating_i64(offset as u64),
+                    saturating_i64(limit as u64),
+                ),
             RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
                 Err(billing_ledger_supabase_only_error())
             }

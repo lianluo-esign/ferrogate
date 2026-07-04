@@ -712,7 +712,8 @@ fn billing_ledger_round_trips_through_real_supabase() {
         cost_usd: None,
         latency_ms: None,
     };
-    let entry = ferrogate_billing::charge(&price_book, &event).expect("charge must price the event");
+    let entry =
+        ferrogate_billing::charge(&price_book, &event).expect("charge must price the event");
 
     // First write inserts; a retry is an idempotent no-op on the entry id.
     assert!(storage
@@ -735,9 +736,9 @@ fn billing_ledger_round_trips_through_real_supabase() {
     assert_eq!(fetched.usage.total_tokens, 54);
     assert!((fetched.cost.total_cost - 0.00057).abs() < 1e-9);
     assert!((fetched.credits - 570.0).abs() < 1e-6);
+    assert_eq!(fetched.tenant.organization_id.as_deref(), Some("org_demo"));
     assert_eq!(
-        fetched.tenant.organization_id.as_deref(),
-        Some("org_demo")
+        reopened.list_billing_ledger_entries(0, 10).unwrap().len(),
+        1
     );
-    assert_eq!(reopened.list_billing_ledger_entries(0, 10).unwrap().len(), 1);
 }

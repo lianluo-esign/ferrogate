@@ -116,14 +116,15 @@ fn route_request(service: &BillingService, request: &HttpRequest) -> HttpRespons
             200,
             json!({ "service": "ferrogate-billing", "status": "ok" }),
         ),
-        ("POST", "/v1/billing/charge") => match serde_json::from_slice::<BillingEvent>(&request.body)
-        {
-            Ok(event) => match service.charge_and_record(&event) {
-                Ok(entry) => HttpResponse::json(200, entry),
-                Err(error) => billing_error_response(&error),
-            },
-            Err(error) => bad_request(&error.to_string()),
-        },
+        ("POST", "/v1/billing/charge") => {
+            match serde_json::from_slice::<BillingEvent>(&request.body) {
+                Ok(event) => match service.charge_and_record(&event) {
+                    Ok(entry) => HttpResponse::json(200, entry),
+                    Err(error) => billing_error_response(&error),
+                },
+                Err(error) => bad_request(&error.to_string()),
+            }
+        }
         ("GET", "/v1/billing/ledger") => {
             let offset = request.query_param("offset").unwrap_or(0);
             let limit = request
@@ -230,7 +231,9 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
 
     let headers = String::from_utf8_lossy(&buffer[..header_end]);
     let mut lines = headers.lines();
-    let request_line = lines.next().ok_or_else(|| anyhow!("missing request line"))?;
+    let request_line = lines
+        .next()
+        .ok_or_else(|| anyhow!("missing request line"))?;
     let mut request_parts = request_line.split_whitespace();
     let method = request_parts
         .next()
@@ -345,6 +348,8 @@ mod tests {
             usage_source: BillingUsageSource::ProviderUsage,
             status_code: 200,
             occurred_at_unix: Some(1),
+            cost_usd: None,
+            latency_ms: None,
         })
         .unwrap()
     }
@@ -363,7 +368,12 @@ mod tests {
         let service = service();
         let response = route_request(
             &service,
-            &request("POST", "/v1/billing/charge", "", event_json("openai", "gpt-5.5")),
+            &request(
+                "POST",
+                "/v1/billing/charge",
+                "",
+                event_json("openai", "gpt-5.5"),
+            ),
         );
         assert_eq!(response.status, 200);
         let entry: LedgerEntry = serde_json::from_slice(&response.body).unwrap();
@@ -375,7 +385,12 @@ mod tests {
     fn charge_route_fails_closed_with_422() {
         let response = route_request(
             &service(),
-            &request("POST", "/v1/billing/charge", "", event_json("mystery", "model")),
+            &request(
+                "POST",
+                "/v1/billing/charge",
+                "",
+                event_json("mystery", "model"),
+            ),
         );
         assert_eq!(response.status, 422);
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
@@ -387,9 +402,17 @@ mod tests {
         let service = service();
         route_request(
             &service,
-            &request("POST", "/v1/billing/charge", "", event_json("openai", "gpt-5.5")),
+            &request(
+                "POST",
+                "/v1/billing/charge",
+                "",
+                event_json("openai", "gpt-5.5"),
+            ),
         );
-        let response = route_request(&service, &request("GET", "/v1/billing/ledger", "limit=10", Vec::new()));
+        let response = route_request(
+            &service,
+            &request("GET", "/v1/billing/ledger", "limit=10", Vec::new()),
+        );
         assert_eq!(response.status, 200);
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["entries"].as_array().unwrap().len(), 1);

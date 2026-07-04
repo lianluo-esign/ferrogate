@@ -152,7 +152,11 @@ pub(crate) struct AuthServeArgs {
     #[arg(long, env = "FERROGATE_AUTH_SUPABASE_DSN")]
     pub(crate) supabase_dsn: Option<String>,
     /// Supabase/PostgreSQL TLS mode for durable virtual API key resolution.
-    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_TLS_MODE", default_value = "require")]
+    #[arg(
+        long,
+        env = "FERROGATE_AUTH_SUPABASE_TLS_MODE",
+        default_value = "require"
+    )]
     pub(crate) supabase_tls_mode: String,
     /// Optional PostgreSQL schema containing the FerroGate control-plane tables.
     #[arg(long, env = "FERROGATE_AUTH_SUPABASE_SCHEMA")]
@@ -196,7 +200,11 @@ pub(crate) struct BillingServeArgs {
     #[arg(long, env = "FERROGATE_BILLING_SUPABASE_DSN")]
     pub(crate) supabase_dsn: Option<String>,
     /// Supabase/PostgreSQL TLS mode for durable ledger persistence.
-    #[arg(long, env = "FERROGATE_BILLING_SUPABASE_TLS_MODE", default_value = "require")]
+    #[arg(
+        long,
+        env = "FERROGATE_BILLING_SUPABASE_TLS_MODE",
+        default_value = "require"
+    )]
     pub(crate) supabase_tls_mode: String,
     /// Optional PostgreSQL schema containing the FerroGate control-plane tables.
     #[arg(long, env = "FERROGATE_BILLING_SUPABASE_SCHEMA")]

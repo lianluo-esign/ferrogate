@@ -157,7 +157,9 @@ impl BillingHarness {
                 },
             )
             .spawn()
-            .with_context(|| format!("failed to start {} billing serve", ferrogate_bin.display()))?;
+            .with_context(|| {
+                format!("failed to start {} billing serve", ferrogate_bin.display())
+            })?;
 
         let mut harness = Self {
             billing_addr,

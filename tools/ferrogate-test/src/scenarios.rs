@@ -3978,7 +3978,8 @@ pub(crate) fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthA
 /// billing service against a real gpt-5.5 upstream.
 pub(crate) fn run_gateway_billing_chain(local: &LocalArgs) -> Result<()> {
     let billing = BillingHarness::start(&local.ferrogate_bin)?;
-    let case = LocalHarness::start_with_billing_service(&local.ferrogate_bin, 2, &billing.billing_addr)?;
+    let case =
+        LocalHarness::start_with_billing_service(&local.ferrogate_bin, 2, &billing.billing_addr)?;
 
     // Drive a gpt-5.5 request through the gateway to the upstream.
     case.expect_json(
@@ -4018,7 +4019,10 @@ pub(crate) fn run_gateway_billing_chain(local: &LocalArgs) -> Result<()> {
     assert_eq!(gpt55["cost"]["currency"], "USD");
     assert_eq!(gpt55["unit_price"]["input_price_per_1m"], 5.0);
     let cost = gpt55["cost"]["total_cost"].as_f64().unwrap_or_default();
-    assert!(cost > 0.0, "expected positive settled cost, got {cost}: {gpt55}");
+    assert!(
+        cost > 0.0,
+        "expected positive settled cost, got {cost}: {gpt55}"
+    );
     let credits = gpt55["credits"].as_f64().unwrap_or_default();
     assert!(
         credits > 0.0,

@@ -66,10 +66,9 @@ fn main() -> AnyResult<()> {
                             schema: args.supabase_schema.as_deref(),
                             init_schema: args.supabase_init_schema,
                         })?;
-                        let authenticator: Arc<dyn ferrogate_auth::ApiKeyAuthenticator> =
-                            Arc::new(ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::new(
-                                repositories,
-                            )));
+                        let authenticator: Arc<dyn ferrogate_auth::ApiKeyAuthenticator> = Arc::new(
+                            ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::new(repositories)),
+                        );
                         Some(authenticator)
                     }
                     _ => None,

@@ -40,11 +40,7 @@ pub struct PriceEntry {
 }
 
 impl PriceEntry {
-    pub fn new(
-        provider: impl Into<String>,
-        model: impl Into<String>,
-        price: ModelPrice,
-    ) -> Self {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>, price: ModelPrice) -> Self {
         Self {
             provider: provider.into(),
             model: model.into(),

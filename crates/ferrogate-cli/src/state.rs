@@ -22,6 +22,7 @@ use crate::approval::{
     ApprovalDecisionError, ApprovalRegistry, ApprovalStatus, ApprovalWaitError,
     ToolApprovalDecisionRequest, ToolApprovalDraft, ToolApprovalRecord,
 };
+use crate::billing_client::BillingReporter;
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, AgentWorkflowPolicy,
     AnalyticsConfig, AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect,
@@ -33,7 +34,6 @@ use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
     ToolExecutionResponse,
 };
-use crate::billing_client::BillingReporter;
 use crate::metering::{MeteringExportStatus, MeteringExporter};
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
