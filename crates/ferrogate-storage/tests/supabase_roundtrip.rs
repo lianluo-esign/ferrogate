@@ -742,3 +742,71 @@ fn billing_ledger_round_trips_through_real_supabase() {
         1
     );
 }
+
+#[test]
+fn billing_report_outbox_round_trips_through_real_supabase() {
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping billing report outbox round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    let event = ferrogate_billing::BillingEvent {
+        request_id: "req-outbox-rt".into(),
+        trace_id: Some("trace-outbox-rt".into()),
+        agent_run_id: None,
+        workflow_id: None,
+        workflow_version: None,
+        workflow_node_id: None,
+        cluster_id: None,
+        node_id: None,
+        tenant: TenantContext {
+            organization_id: Some("org_demo".into()),
+            ..TenantContext::default()
+        },
+        logical_model: "gpt-5.5".into(),
+        provider: "token4ai".into(),
+        provider_model: "gpt-5.5".into(),
+        usage: ferrogate_billing::TokenUsage::new(10, 20, 30),
+        usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+        status_code: 200,
+        occurred_at_unix: Some(1_800_000_000),
+        cost_usd: Some(0.01),
+        latency_ms: None,
+    };
+
+    // Enqueue is idempotent on the id; due at t=100.
+    storage
+        .enqueue_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", &event, 100)
+        .expect("enqueue must succeed");
+    storage
+        .enqueue_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", &event, 999)
+        .expect("re-enqueue must be a no-op");
+
+    // Not due before its time; due at/after 100.
+    assert!(storage.list_due_billing_reports(50, 10).unwrap().is_empty());
+    let due = storage.list_due_billing_reports(100, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].event.provider_model, "gpt-5.5");
+    assert_eq!(due[0].attempts, 0);
+
+    // A failed delivery reschedules with a bumped attempt count.
+    storage
+        .reschedule_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", 5_000)
+        .expect("reschedule must succeed");
+    assert!(storage.list_due_billing_reports(100, 10).unwrap().is_empty());
+    let rescheduled = storage.list_due_billing_reports(5_000, 10).unwrap();
+    assert_eq!(rescheduled[0].attempts, 1);
+
+    // A delivered report is deleted and no longer appears.
+    storage
+        .delete_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt")
+        .expect("delete must succeed");
+    assert!(storage
+        .list_due_billing_reports(1_000_000, 10)
+        .unwrap()
+        .is_empty());
+}

@@ -167,6 +167,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
         start_acme_renewal_if_configured(&tls, resolved_tls.as_ref(), acme_renewal_state, &state);
     let _mcp_health = start_mcp_health_scheduler(&state);
     let _external_action_authorizer = start_external_action_authorizer_if_configured(&state);
+    let _billing_outbox_sweeper = start_billing_outbox_sweeper(&state);
     let gateway = FerroGateway { state };
 
     let pingora_opt = PingoraOpt {
@@ -328,6 +329,44 @@ fn start_mcp_health_scheduler_with_interval(
         stop,
         handle: Some(handle),
     }
+}
+
+/// Background sweeper that durably delivers queued billing reports to the
+/// billing service (issue #137). Runs only when billing reporting is enabled.
+struct BillingOutboxSweeperHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for BillingOutboxSweeperHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn start_billing_outbox_sweeper(state: &SharedAppState) -> Option<BillingOutboxSweeperHandle> {
+    if !state.current().billing_reporting_enabled() {
+        return None;
+    }
+    let state = state.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(1));
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            state.current().sweep_billing_outbox_once();
+        }
+    });
+    Some(BillingOutboxSweeperHandle {
+        stop,
+        handle: Some(handle),
+    })
 }
 
 fn start_acme_renewal_if_configured(

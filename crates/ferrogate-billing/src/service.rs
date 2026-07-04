@@ -193,6 +193,10 @@ fn route_request(service: &BillingService, request: &HttpRequest) -> HttpRespons
                 .clamp(1, MAX_LEDGER_PAGE_LIMIT);
             match service.sink.list(offset, limit) {
                 Ok(entries) => {
+                    // Optional per-tenant scoping (issue #136): callers can
+                    // narrow the page to one org/project/api-key. Filtering is
+                    // applied within the returned page.
+                    let entries = filter_by_tenant(entries, request);
                     let totals = ledger_totals(&entries);
                     HttpResponse::json(200, json!({ "entries": entries, "page_totals": totals }))
                 }
@@ -262,14 +266,41 @@ struct HttpRequest {
 
 impl HttpRequest {
     fn query_param(&self, key: &str) -> Option<usize> {
+        self.query_str(key).and_then(|value| value.parse::<usize>().ok())
+    }
+
+    fn query_str(&self, key: &str) -> Option<&str> {
         self.query.split('&').find_map(|pair| {
             let (name, value) = pair.split_once('=')?;
-            if name == key {
-                value.parse::<usize>().ok()
-            } else {
-                None
-            }
+            (name == key).then_some(value)
         })
+    }
+}
+
+/// Narrow a ledger page to the tenant identifiers present in the query string.
+/// Any of `organization_id` / `project_id` / `api_key_id` may be supplied; an
+/// absent filter matches everything (issue #136).
+fn filter_by_tenant(entries: Vec<LedgerEntry>, request: &HttpRequest) -> Vec<LedgerEntry> {
+    let organization_id = request.query_str("organization_id");
+    let project_id = request.query_str("project_id");
+    let api_key_id = request.query_str("api_key_id");
+    if organization_id.is_none() && project_id.is_none() && api_key_id.is_none() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| {
+            tenant_field_matches(organization_id, entry.tenant.organization_id.as_deref())
+                && tenant_field_matches(project_id, entry.tenant.project_id.as_deref())
+                && tenant_field_matches(api_key_id, entry.tenant.api_key_id.as_deref())
+        })
+        .collect()
+}
+
+fn tenant_field_matches(filter: Option<&str>, actual: Option<&str>) -> bool {
+    match filter {
+        Some(expected) => actual == Some(expected),
+        None => true,
     }
 }
 
@@ -610,5 +641,31 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn ledger_read_scopes_by_tenant_query() {
+        let service = service();
+        for org in ["org-a", "org-b"] {
+            let mut event: BillingEvent =
+                serde_json::from_slice(&event_json("openai", "gpt-5.5")).unwrap();
+            event.request_id = format!("req-{org}");
+            event.trace_id = Some(format!("trace-{org}"));
+            event.tenant.organization_id = Some(org.into());
+            service.charge_and_record(&event).unwrap();
+        }
+        // Unfiltered: both orgs.
+        let all = route_request(&service, &request("GET", "/v1/billing/ledger", "", Vec::new()));
+        let all: serde_json::Value = serde_json::from_slice(&all.body).unwrap();
+        assert_eq!(all["entries"].as_array().unwrap().len(), 2);
+        // Scoped to org-a: only that tenant's row.
+        let scoped = route_request(
+            &service,
+            &request("GET", "/v1/billing/ledger", "organization_id=org-a", Vec::new()),
+        );
+        let scoped: serde_json::Value = serde_json::from_slice(&scoped.body).unwrap();
+        let entries = scoped["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["tenant"]["organization_id"], "org-a");
     }
 }

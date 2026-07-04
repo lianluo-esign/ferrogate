@@ -313,8 +313,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 13;
-const POSTGRES_SCHEMA_NAME: &str = "013_billing_ledger";
+const POSTGRES_SCHEMA_VERSION: u64 = 14;
+const POSTGRES_SCHEMA_NAME: &str = "014_billing_report_outbox";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -752,6 +752,7 @@ pub struct RuntimeControlPlaneState {
     workspaces: InMemoryRepository<StoredWorkspace>,
     quota_policies: InMemoryRepository<StoredQuotaPolicy>,
     usage_monthly_rollups: InMemoryRepository<StoredUsageMonthlyRollup>,
+    billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
 }
 
 struct PostgresControlPlaneStore {
@@ -1442,6 +1443,66 @@ impl PostgresControlPlaneStore {
             )
         })?;
         row.as_ref().map(ledger_entry_from_row).transpose()
+    }
+
+    fn enqueue_billing_report(
+        &self,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        let event_json = serialize_storage_document(event)?;
+        let created_at_unix = saturating_i64(now_unix_seconds());
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO billing_report_outbox \
+                 (id, event_json, attempts, next_attempt_unix, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2::text::jsonb, 0, $3, $4, $4) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[&id, &event_json, &next_attempt_unix, &created_at_unix],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn list_due_billing_reports(
+        &self,
+        now_unix: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, event_json::text, attempts, next_attempt_unix \
+                 FROM billing_report_outbox WHERE next_attempt_unix <= $1 \
+                 ORDER BY next_attempt_unix ASC LIMIT $2",
+                &[&now_unix, &limit],
+            )
+        })?;
+        rows.iter().map(billing_report_outbox_from_row).collect()
+    }
+
+    fn reschedule_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        let updated_at_unix = saturating_i64(now_unix_seconds());
+        self.with_client(|client| {
+            client.execute(
+                "UPDATE billing_report_outbox \
+                 SET attempts = attempts + 1, next_attempt_unix = $2, updated_at_unix = $3 \
+                 WHERE id = $1",
+                &[&id, &next_attempt_unix, &updated_at_unix],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute("DELETE FROM billing_report_outbox WHERE id = $1", &[&id])?;
+            Ok(())
+        })
     }
 
     fn append_billing_event(&self, event: &BillingEvent) -> Result<bool, StorageError> {
@@ -3473,6 +3534,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "api_keys",
         "usage_monthly_rollups",
         "billing_ledger",
+        "billing_report_outbox",
         "storage_schema_migrations",
     ];
     for table in TABLES {
@@ -3583,6 +3645,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_usage_monthly_rollups_period",
         "idx_billing_ledger_tenant_time",
         "idx_billing_ledger_model_provider",
+        "idx_billing_report_outbox_due",
     ];
     for index in INDEXES {
         let count = client
@@ -3778,6 +3841,32 @@ fn billing_ledger_supabase_only_error() -> StorageError {
     StorageError::Runtime(
         "billing ledger entries are Supabase/Postgres-only; start `ferrogate billing serve` with a Supabase DSN".into(),
     )
+}
+
+/// A pending gateway→billing usage report awaiting durable delivery (issue #137).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredBillingReportOutboxEntry {
+    /// Ledger entry id (idempotency key) of the usage report.
+    pub id: String,
+    pub event: ferrogate_billing::BillingEvent,
+    pub attempts: i64,
+    pub next_attempt_unix: i64,
+}
+
+fn billing_report_outbox_from_row(
+    row: &PostgresRow,
+) -> Result<StoredBillingReportOutboxEntry, StorageError> {
+    Ok(StoredBillingReportOutboxEntry {
+        id: row.get::<_, String>(0),
+        event: deserialize_storage_document(&row.get::<_, String>(1))?,
+        // `attempts` is SQL INTEGER (i32); widen to i64 for the domain type.
+        attempts: i64::from(row.get::<_, i32>(2)),
+        next_attempt_unix: row.get::<_, i64>(3),
+    })
+}
+
+fn billing_report_outbox_supabase_only_error() -> StorageError {
+    StorageError::Runtime("billing report outbox requires Supabase/Postgres or in-memory storage".into())
 }
 
 /// A durable [`ferrogate_billing::LedgerSink`] backed by Supabase/Postgres.
@@ -4536,6 +4625,7 @@ impl RuntimeControlPlaneState {
             workspaces: InMemoryRepository::new(),
             quota_policies: InMemoryRepository::new(),
             usage_monthly_rollups: InMemoryRepository::new(),
+            billing_report_outbox: InMemoryRepository::new(),
         }
     }
 
@@ -4674,6 +4764,59 @@ impl RuntimeControlPlaneState {
 
     pub fn list_usage_monthly_rollups(&self) -> Vec<StoredUsageMonthlyRollup> {
         self.usage_monthly_rollups.list()
+    }
+
+    pub fn enqueue_billing_report(
+        &mut self,
+        id: &str,
+        event: &BillingEvent,
+        next_attempt_unix: i64,
+    ) {
+        // Idempotent: keep the earliest enqueue for an id (matching the
+        // Postgres `ON CONFLICT DO NOTHING`).
+        if self.billing_report_outbox.get(id).is_none() {
+            self.billing_report_outbox.insert(
+                id,
+                StoredBillingReportOutboxEntry {
+                    id: id.to_string(),
+                    event: event.clone(),
+                    attempts: 0,
+                    next_attempt_unix,
+                },
+            );
+        }
+    }
+
+    pub fn list_due_billing_reports(
+        &self,
+        now_unix: i64,
+        limit: usize,
+    ) -> Vec<StoredBillingReportOutboxEntry> {
+        let mut due: Vec<StoredBillingReportOutboxEntry> = self
+            .billing_report_outbox
+            .list()
+            .into_iter()
+            .filter(|entry| entry.next_attempt_unix <= now_unix)
+            .collect();
+        due.sort_by(|a, b| {
+            a.next_attempt_unix
+                .cmp(&b.next_attempt_unix)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        due.truncate(limit);
+        due
+    }
+
+    pub fn reschedule_billing_report(&mut self, id: &str, next_attempt_unix: i64) {
+        if let Some(mut entry) = self.billing_report_outbox.get(id) {
+            entry.attempts += 1;
+            entry.next_attempt_unix = next_attempt_unix;
+            self.billing_report_outbox.insert(id, entry);
+        }
+    }
+
+    pub fn delete_billing_report(&mut self, id: &str) {
+        self.billing_report_outbox.remove(id);
     }
 
     /// Resolve a workspace id to its full attribution chain using the workspace's
@@ -6426,6 +6569,91 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
                 Err(billing_ledger_supabase_only_error())
+            }
+        }
+    }
+
+    /// Enqueue a gateway→billing usage report for durable delivery (issue #137).
+    /// Idempotent on `id` (the ledger entry id). Supported on Postgres and the
+    /// in-memory backend so the sweeper works in both production and tests.
+    pub fn enqueue_billing_report(
+        &self,
+        id: &str,
+        event: &ferrogate_billing::BillingEvent,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.enqueue_billing_report(id, event, next_attempt_unix);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.enqueue_billing_report(id, event, next_attempt_unix)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_report_outbox_supabase_only_error())
+            }
+        }
+    }
+
+    /// List billing report outbox entries whose `next_attempt_unix <= now`.
+    pub fn list_due_billing_reports(
+        &self,
+        now_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredBillingReportOutboxEntry>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_due_billing_reports(now_unix, limit))
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_due_billing_reports(now_unix, saturating_i64(limit as u64))
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_report_outbox_supabase_only_error())
+            }
+        }
+    }
+
+    /// Bump the attempt count and next-attempt time of a pending report.
+    pub fn reschedule_billing_report(
+        &self,
+        id: &str,
+        next_attempt_unix: i64,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.reschedule_billing_report(id, next_attempt_unix);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.reschedule_billing_report(id, next_attempt_unix)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_report_outbox_supabase_only_error())
+            }
+        }
+    }
+
+    /// Delete a delivered report from the outbox.
+    pub fn delete_billing_report(&self, id: &str) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.delete_billing_report(id);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_billing_report(id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => {
+                Err(billing_report_outbox_supabase_only_error())
             }
         }
     }

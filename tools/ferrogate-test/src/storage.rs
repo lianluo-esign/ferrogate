@@ -1160,6 +1160,7 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "metering_event_usage",
         "usage_aggregate_rollups",
         "billing_ledger",
+        "billing_report_outbox",
         "storage_schema_migrations",
     ];
     for table in expected_tables {

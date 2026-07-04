@@ -749,6 +749,25 @@ CREATE INDEX IF NOT EXISTS idx_billing_ledger_tenant_time
 CREATE INDEX IF NOT EXISTS idx_billing_ledger_model_provider
     ON billing_ledger(provider, provider_model);
 
+-- billing_report_outbox: durable delivery queue for gateway -> billing service
+-- usage reports (issue #137). Every settled request is enqueued here in the
+-- same path that persists the metering event; a background sweeper drains it,
+-- POSTs each event to the billing service (idempotent on the ledger entry id),
+-- and deletes the row on success — so a charge survives a billing outage or a
+-- gateway restart rather than being lost by a fire-and-forget POST. `id` is the
+-- ledger entry id so re-enqueue is naturally idempotent.
+CREATE TABLE IF NOT EXISTS billing_report_outbox (
+    id TEXT PRIMARY KEY,
+    event_json JSONB NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_unix BIGINT NOT NULL,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_report_outbox_due
+    ON billing_report_outbox(next_attempt_unix);
+
 CREATE TABLE IF NOT EXISTS storage_schema_migrations (
     version BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -821,5 +840,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (13, '013_billing_ledger')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (14, '014_billing_report_outbox')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

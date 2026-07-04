@@ -4796,12 +4796,22 @@ impl AppState {
         if let Some(exporter) = &self.metering_exporter {
             exporter.export_event(event.clone());
         }
-        // Report the settled usage to the standalone billing service so it can
-        // price the charge and persist the ledger entry (issue #131). This is
-        // an isolated microservice call over REST, decoupled from the metering
-        // export above, and fire-and-forget so it never blocks the hot path.
-        if let Some(reporter) = &self.billing_reporter {
-            reporter.report(event.clone());
+        // Durably enqueue the settled usage for delivery to the standalone
+        // billing service (issues #131/#137). Rather than a fire-and-forget POST
+        // that would be lost if billing is unavailable, the event is written to
+        // a persistent outbox and a background sweeper delivers it (idempotent
+        // on the ledger entry id), so a charge survives a billing outage or a
+        // gateway restart.
+        if self.billing_reporter.is_some() {
+            let entry_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+            let now = now_unix_seconds().unwrap_or_default() as i64;
+            if let Err(error) = self.repositories.enqueue_billing_report(&entry_id, &event, now) {
+                warn!(
+                    request_id = %event.request_id,
+                    error = %error,
+                    "failed to enqueue billing report for durable delivery"
+                );
+            }
         }
         if let Some(api_key_id) = &draft.request.tenant.api_key_id {
             if let Err(error) = self
@@ -4817,6 +4827,57 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    /// Whether durable billing report delivery is enabled (used to decide
+    /// whether to spawn the background outbox sweeper).
+    pub(crate) fn billing_reporting_enabled(&self) -> bool {
+        self.billing_reporter.is_some()
+    }
+
+    /// Deliver one batch of pending billing reports from the durable outbox to
+    /// the billing service (issue #137): delete rows that deliver successfully
+    /// and reschedule failures with capped exponential backoff. Idempotent on
+    /// the billing side, so replay never double-bills. A no-op when billing
+    /// reporting is disabled.
+    pub(crate) fn sweep_billing_outbox_once(&self) {
+        let Some(reporter) = self.billing_reporter.clone() else {
+            return;
+        };
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        let due = match self
+            .repositories
+            .list_due_billing_reports(now, BILLING_OUTBOX_BATCH)
+        {
+            Ok(entries) => entries,
+            Err(error) => {
+                warn!(error = %error, "failed to list due billing reports");
+                return;
+            }
+        };
+        for entry in due {
+            match reporter.deliver_once(&entry.event) {
+                Ok(()) => {
+                    if let Err(error) = self.repositories.delete_billing_report(&entry.id) {
+                        warn!(id = %entry.id, error = %error, "failed to delete delivered billing report");
+                    }
+                }
+                Err(error) => {
+                    let next = now.saturating_add(billing_outbox_backoff_secs(entry.attempts));
+                    if let Err(reschedule_error) =
+                        self.repositories.reschedule_billing_report(&entry.id, next)
+                    {
+                        warn!(id = %entry.id, error = %reschedule_error, "failed to reschedule billing report");
+                    }
+                    warn!(
+                        id = %entry.id,
+                        attempts = entry.attempts,
+                        error = %error,
+                        "billing report delivery failed; will retry"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -7649,6 +7710,16 @@ fn now_unix_seconds() -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs())
+}
+
+/// Max billing-report outbox rows delivered per sweep (issue #137).
+const BILLING_OUTBOX_BATCH: usize = 100;
+
+/// Capped exponential backoff (seconds) for a failed billing report, by prior
+/// attempt count: 1, 2, 4, 8, 16, 32, 60, 60, ...
+fn billing_outbox_backoff_secs(attempts: i64) -> i64 {
+    let shift = attempts.clamp(0, 6) as u32;
+    (1i64 << shift).min(60)
 }
 
 fn sampled_request_id(request_id: &str, sample_rate: u64) -> bool {
