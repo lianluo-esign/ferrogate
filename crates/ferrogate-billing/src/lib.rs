@@ -114,6 +114,15 @@ pub struct BillingEvent {
     pub usage_source: BillingUsageSource,
     pub status_code: u16,
     pub occurred_at_unix: Option<u64>,
+    /// Settled cost in USD, computed from the route's `ModelPrice` at
+    /// request-completion time. `None` when no pricing is configured for
+    /// the model/provider (P1-4).
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Wall-clock duration of the request as observed by the gateway,
+    /// dispatch-start to response-settlement (P1-4).
+    #[serde(default)]
+    pub latency_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -31,6 +31,8 @@ fn event(request_id: &str) -> BillingEvent {
         usage_source: BillingUsageSource::ProviderUsage,
         status_code: 200,
         occurred_at_unix: None,
+        cost_usd: None,
+        latency_ms: None,
     }
 }
 

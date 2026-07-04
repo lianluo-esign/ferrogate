@@ -26,6 +26,8 @@ fn test_event(request_id: &str) -> BillingEvent {
         usage_source: BillingUsageSource::ProviderUsage,
         status_code: 200,
         occurred_at_unix: None,
+        cost_usd: None,
+        latency_ms: None,
     }
 }
 
@@ -77,6 +79,8 @@ fn in_memory_sink_records_billing_events() {
         usage_source: BillingUsageSource::ProviderUsage,
         status_code: 200,
         occurred_at_unix: Some(1),
+        cost_usd: Some(0.001),
+        latency_ms: Some(120),
     })
     .unwrap();
 
@@ -107,6 +111,8 @@ fn in_memory_sink_enforces_retention_limit() {
             usage_source: BillingUsageSource::ProviderUsage,
             status_code: 200,
             occurred_at_unix: None,
+            cost_usd: None,
+            latency_ms: None,
         })
         .unwrap();
     }

@@ -507,6 +507,12 @@ CREATE TABLE IF NOT EXISTS tenant_contexts (
     api_key_id TEXT
 );
 
+-- Added after the multi-tenant hierarchy (TOK-11) introduced workspace_id on
+-- the Rust TenantContext struct; this column was missing here, so every
+-- metering event silently dropped workspace attribution when persisted.
+ALTER TABLE tenant_contexts
+    ADD COLUMN IF NOT EXISTS workspace_id TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_tenant_contexts_org_project
     ON tenant_contexts(organization_id, project_id);
 
@@ -526,6 +532,12 @@ CREATE TABLE IF NOT EXISTS metering_events (
     status_code INTEGER NOT NULL,
     occurred_at_unix BIGINT NOT NULL
 );
+
+-- P1-4: settled cost and request latency, added alongside usage_monthly_rollups.
+ALTER TABLE metering_events
+    ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
+ALTER TABLE metering_events
+    ADD COLUMN IF NOT EXISTS latency_ms BIGINT;
 
 CREATE INDEX IF NOT EXISTS idx_metering_events_tenant_time
     ON metering_events(tenant_context_id, occurred_at_unix DESC);
@@ -564,6 +576,33 @@ CREATE TABLE IF NOT EXISTS usage_aggregate_rollups (
 
 CREATE INDEX IF NOT EXISTS idx_usage_rollups_tenant_model_provider
     ON usage_aggregate_rollups(tenant_context_id, logical_model, provider);
+
+-- P1-4: per-scope, per-calendar-month cost/usage rollup across the same
+-- tenant/project/workspace/key hierarchy P1-3's quota_policies uses
+-- (scope_type reuses that enum). One row per (period_month, scope_type,
+-- scope_id); incremented on every settled request. This is the read side of
+-- "current month cumulative cost for scope X" for monthly budget
+-- enforcement, and the source for the usage/cost report API.
+CREATE TABLE IF NOT EXISTS usage_monthly_rollups (
+    id TEXT PRIMARY KEY,
+    period_month TEXT NOT NULL,
+    scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'project', 'workspace', 'key')),
+    scope_id TEXT NOT NULL,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    request_count BIGINT NOT NULL DEFAULT 0,
+    error_count BIGINT NOT NULL DEFAULT 0,
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (period_month, scope_type, scope_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_monthly_rollups_scope
+    ON usage_monthly_rollups(scope_type, scope_id, period_month);
+
+CREATE INDEX IF NOT EXISTS idx_usage_monthly_rollups_period
+    ON usage_monthly_rollups(period_month);
 
 -- Multi-tenant hierarchy: Tenant -> Project -> Workspace.
 -- Virtual API keys bind to a workspace and resolve upward to project_id and
@@ -734,5 +773,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (11, '011_quota_policies')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (12, '012_usage_cost_accounting')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

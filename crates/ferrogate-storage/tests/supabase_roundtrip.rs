@@ -19,6 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ferrogate_billing::{BillingEvent, BillingUsageSource, TokenUsage};
 use ferrogate_core::TenantContext;
 use ferrogate_storage::{
     quota_policy_id, ControlPlaneDocuments, PostgresStorageConfig, PostgresTlsMode, QuotaScopeKind,
@@ -577,4 +578,90 @@ fn quota_policy_round_trips_through_real_supabase() {
     assert!(!policy.enabled);
     assert_eq!(policy.model_allowlist, vec!["fast-chat"]);
     assert_eq!(reopened.list_quota_policies().unwrap().len(), 1);
+}
+
+/// P1-4: proves append_billing_event's settled cost/latency and the
+/// tenant/project/workspace/key monthly rollup fan-out against a real
+/// Postgres instance, including that workspace_id (previously dropped by
+/// tenant_contexts missing that column) now survives a fresh reconnect.
+#[test]
+fn usage_cost_accounting_round_trips_through_real_supabase() {
+    let Some(container) = PgContainer::start() else {
+        eprintln!("skipping supabase round-trip: docker daemon not available");
+        return;
+    };
+
+    let storage =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), true, true)
+            .expect("supabase migration connect + schema init must succeed");
+
+    let tenant = TenantContext {
+        organization_id: Some("tenant-cost-rt".into()),
+        team_id: None,
+        project_id: Some("project-cost-rt".into()),
+        workspace_id: Some("workspace-cost-rt".into()),
+        user_id: None,
+        api_key_id: Some("key-cost-rt".into()),
+    };
+
+    let recorded = storage
+        .append_billing_event(BillingEvent {
+            request_id: "req-cost-rt-1".into(),
+            trace_id: None,
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            cluster_id: None,
+            node_id: None,
+            tenant: tenant.clone(),
+            logical_model: "fast-chat".into(),
+            provider: "openai".into(),
+            provider_model: "gpt-4o-mini".into(),
+            usage: TokenUsage::new(100, 50, 150),
+            usage_source: BillingUsageSource::ProviderUsage,
+            status_code: 200,
+            occurred_at_unix: Some(1_783_036_800), // 2026-07
+            cost_usd: Some(0.015),
+            latency_ms: Some(240),
+        })
+        .expect("append_billing_event must succeed");
+    assert!(
+        recorded,
+        "first insert of a new request_id must be recorded"
+    );
+
+    // Fresh connection: proves workspace attribution and settled cost/
+    // latency landed in Postgres columns, not just the process-local path.
+    let reopened =
+        RuntimeStorageRepositories::supabase_for_migration(container.config(), false, true)
+            .expect("re-open against existing schema must succeed");
+
+    let events = reopened.billing_events();
+    let event = events
+        .iter()
+        .find(|event| event.request_id == "req-cost-rt-1")
+        .expect("billing event must exist after reconnect");
+    assert_eq!(
+        event.tenant.workspace_id.as_deref(),
+        Some("workspace-cost-rt")
+    );
+    assert_eq!(event.cost_usd, Some(0.015));
+    assert_eq!(event.latency_ms, Some(240));
+
+    for (scope_type, scope_id) in [
+        (QuotaScopeKind::Tenant, "tenant-cost-rt"),
+        (QuotaScopeKind::Project, "project-cost-rt"),
+        (QuotaScopeKind::Workspace, "workspace-cost-rt"),
+        (QuotaScopeKind::Key, "key-cost-rt"),
+    ] {
+        let rollup = reopened
+            .get_usage_monthly_rollup(scope_type, scope_id, "2026-07")
+            .expect("get_usage_monthly_rollup must succeed")
+            .unwrap_or_else(|| panic!("rollup missing for {scope_type:?}/{scope_id}"));
+        assert_eq!(rollup.total_tokens, 150);
+        assert_eq!(rollup.request_count, 1);
+        assert_eq!(rollup.error_count, 0);
+        assert!((rollup.cost_usd - 0.015).abs() < 1e-9);
+    }
 }
