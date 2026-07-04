@@ -72,7 +72,7 @@ use ferrogate_storage::{
     StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
     StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
     StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredUsageAggregate,
-    StoredWorkspace,
+    StoredUsageMonthlyRollup, StoredWorkspace,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -1803,6 +1803,126 @@ impl AgentRunFilter {
         }
         filter
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UsageReportGroupBy {
+    /// Aggregate every period_month into one row per (scope_type, scope_id).
+    Scope,
+    /// Aggregate every scope into one row per period_month.
+    PeriodMonth,
+}
+
+/// Query filter for the P1-4 `/admin/v1/usage-reports` surface, built on top
+/// of the `usage_monthly_rollups` table populated alongside every settled
+/// billing event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UsageReportFilter {
+    pub(crate) scope_type: Option<QuotaScopeKind>,
+    pub(crate) scope_id: Option<String>,
+    pub(crate) from_month: Option<String>,
+    pub(crate) to_month: Option<String>,
+    pub(crate) group_by: Option<UsageReportGroupBy>,
+}
+
+impl UsageReportFilter {
+    pub(crate) fn from_query(query: Option<&str>) -> Self {
+        let mut filter = Self::default();
+        let Some(query) = query else {
+            return filter;
+        };
+        for (name, value) in query_pairs(query) {
+            match name.as_str() {
+                "scope_type" => filter.scope_type = QuotaScopeKind::from_str_opt(&value),
+                "scope_id" => filter.scope_id = non_empty(value),
+                "period_month" => {
+                    if let Some(month) = non_empty(value) {
+                        filter.from_month = Some(month.clone());
+                        filter.to_month = Some(month);
+                    }
+                }
+                "from_month" => filter.from_month = non_empty(value),
+                "to_month" => filter.to_month = non_empty(value),
+                "group_by" => {
+                    filter.group_by = match value.as_str() {
+                        "scope" => Some(UsageReportGroupBy::Scope),
+                        "period_month" | "month" => Some(UsageReportGroupBy::PeriodMonth),
+                        _ => None,
+                    }
+                }
+                _ => {}
+            }
+        }
+        filter
+    }
+
+    fn matches(&self, rollup: &StoredUsageMonthlyRollup) -> bool {
+        if let Some(scope_type) = self.scope_type {
+            if rollup.scope_type != scope_type {
+                return false;
+            }
+        }
+        if let Some(scope_id) = &self.scope_id {
+            if &rollup.scope_id != scope_id {
+                return false;
+            }
+        }
+        if let Some(from_month) = &self.from_month {
+            if rollup.period_month < *from_month {
+                return false;
+            }
+        }
+        if let Some(to_month) = &self.to_month {
+            if rollup.period_month > *to_month {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn usage_report_row_raw(rollup: StoredUsageMonthlyRollup) -> crate::responses::AdminUsageReportRow {
+    crate::responses::AdminUsageReportRow {
+        period_month: Some(rollup.period_month),
+        scope_type: Some(rollup.scope_type.as_str().to_string()),
+        scope_id: Some(rollup.scope_id),
+        prompt_tokens: rollup.prompt_tokens,
+        completion_tokens: rollup.completion_tokens,
+        total_tokens: rollup.total_tokens,
+        cost_usd: rollup.cost_usd,
+        request_count: rollup.request_count,
+        error_count: rollup.error_count,
+    }
+}
+
+fn usage_report_row_zero(
+    scope_type: Option<QuotaScopeKind>,
+    scope_id: Option<&str>,
+    period_month: Option<&str>,
+) -> crate::responses::AdminUsageReportRow {
+    crate::responses::AdminUsageReportRow {
+        period_month: period_month.map(ToOwned::to_owned),
+        scope_type: scope_type.map(|scope_type| scope_type.as_str().to_string()),
+        scope_id: scope_id.map(ToOwned::to_owned),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost_usd: 0.0,
+        request_count: 0,
+        error_count: 0,
+    }
+}
+
+fn accumulate_usage_report_row(
+    row: &mut crate::responses::AdminUsageReportRow,
+    rollup: &StoredUsageMonthlyRollup,
+) {
+    row.prompt_tokens += rollup.prompt_tokens;
+    row.completion_tokens += rollup.completion_tokens;
+    row.total_tokens += rollup.total_tokens;
+    row.cost_usd += rollup.cost_usd;
+    row.request_count += rollup.request_count;
+    row.error_count += rollup.error_count;
 }
 
 fn agent_run_matches_filter(
@@ -4285,6 +4405,131 @@ impl AppState {
             .delete_quota_policy(scope_type, scope_id)?)
     }
 
+    // --- P1-4 usage/cost monthly rollups ---
+
+    pub(crate) fn list_usage_monthly_rollups(
+        &self,
+    ) -> anyhow::Result<Vec<StoredUsageMonthlyRollup>> {
+        Ok(self.repositories.list_usage_monthly_rollups()?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_usage_monthly_rollup(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+    ) -> anyhow::Result<Option<StoredUsageMonthlyRollup>> {
+        Ok(self
+            .repositories
+            .get_usage_monthly_rollup(scope_type, scope_id, period_month)?)
+    }
+
+    /// The current UTC calendar month in `YYYY-MM` form, for monthly-budget
+    /// checks and default report windows.
+    pub(crate) fn current_period_month(&self) -> String {
+        ferrogate_storage::period_month_from_unix(now_unix_seconds().unwrap_or_default() as i64)
+    }
+
+    /// Checks a P1-3 `EffectiveQuota.monthly_budget_usd` cap (the tightest
+    /// budget defined anywhere in the tenant/project/workspace/key chain)
+    /// against real accumulated spend for the current calendar month,
+    /// closing the loop P1-3 deferred to P1-4.
+    ///
+    /// Known simplification: the cap is a single merged number without
+    /// tracking which scope level contributed it, so this checks it against
+    /// the *most specific* scope present in `tenant` (key, else workspace,
+    /// else project, else tenant) rather than checking every scope that
+    /// defines a budget against its own independent spend. In the common
+    /// case (a budget set at the same scope as the tightest cap) this is
+    /// exact; in the mixed case (e.g. a looser tenant-level budget alongside
+    /// a tighter key-level one) it still fails closed on the cap that
+    /// actually governs, just measured against the nearest scope's spend.
+    pub(crate) fn monthly_budget_exceeded(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        budget_usd: f64,
+    ) -> anyhow::Result<bool> {
+        let Some((scope_type, scope_id)) = [
+            (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
+            (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
+            (QuotaScopeKind::Project, tenant.project_id.as_deref()),
+            (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
+        ]
+        .into_iter()
+        .find_map(|(scope_type, scope_id)| scope_id.map(|scope_id| (scope_type, scope_id))) else {
+            // No attribution at all to check spend against; nothing to fail
+            // closed on, so let quota model_allowlist/rpm/tpm/disabled checks
+            // (which already ran) be the only governance for this request.
+            return Ok(false);
+        };
+        let period_month = self.current_period_month();
+        let spent = self
+            .repositories
+            .get_usage_monthly_rollup(scope_type, scope_id, &period_month)?
+            .map(|rollup| rollup.cost_usd)
+            .unwrap_or(0.0);
+        Ok(spent >= budget_usd)
+    }
+
+    /// Filters (and optionally aggregates) the P1-4 monthly usage/cost
+    /// rollups for the `/admin/v1/usage-reports` surface. `YYYY-MM` period
+    /// strings sort and compare lexicographically, so `from_month`/
+    /// `to_month` range bounds are plain string comparisons.
+    pub(crate) fn usage_report(
+        &self,
+        filter: &UsageReportFilter,
+    ) -> anyhow::Result<Vec<crate::responses::AdminUsageReportRow>> {
+        let rollups: Vec<StoredUsageMonthlyRollup> = self
+            .list_usage_monthly_rollups()?
+            .into_iter()
+            .filter(|rollup| filter.matches(rollup))
+            .collect();
+        Ok(match filter.group_by {
+            None => rollups.into_iter().map(usage_report_row_raw).collect(),
+            Some(UsageReportGroupBy::Scope) => {
+                let mut groups: std::collections::BTreeMap<
+                    (String, String),
+                    crate::responses::AdminUsageReportRow,
+                > = std::collections::BTreeMap::new();
+                for rollup in rollups {
+                    let key = (
+                        rollup.scope_type.as_str().to_string(),
+                        rollup.scope_id.clone(),
+                    );
+                    accumulate_usage_report_row(
+                        groups.entry(key).or_insert_with(|| {
+                            usage_report_row_zero(
+                                Some(rollup.scope_type),
+                                Some(&rollup.scope_id),
+                                None,
+                            )
+                        }),
+                        &rollup,
+                    );
+                }
+                groups.into_values().collect()
+            }
+            Some(UsageReportGroupBy::PeriodMonth) => {
+                let mut groups: std::collections::BTreeMap<
+                    String,
+                    crate::responses::AdminUsageReportRow,
+                > = std::collections::BTreeMap::new();
+                for rollup in rollups {
+                    accumulate_usage_report_row(
+                        groups
+                            .entry(rollup.period_month.clone())
+                            .or_insert_with(|| {
+                                usage_report_row_zero(None, None, Some(&rollup.period_month))
+                            }),
+                        &rollup,
+                    );
+                }
+                groups.into_values().collect()
+            }
+        })
+    }
+
     /// Resolve the effective (merged, capped) quota for a request's tenant
     /// attribution chain. Fetches at most 4 point-lookups (tenant/project/
     /// workspace/key), one per non-empty scope in `tenant`; any storage
@@ -4447,12 +4692,8 @@ impl AppState {
 
     pub(crate) fn record_billing_event(
         &self,
-        request: &RequestContext,
-        logical_model: &str,
-        provider: &str,
-        provider_model: &str,
+        draft: BillingEventDraft<'_>,
         usage: &ProviderUsage,
-        status_code: u16,
     ) -> Result<(), ferrogate_billing::BillingError> {
         let usage = BillingTokenUsage::new(
             usage.prompt_tokens.unwrap_or_default(),
@@ -4461,33 +4702,31 @@ impl AppState {
         )
         .estimate_missing_total();
         self.record_billing_token_usage(BillingTokenUsageDraft {
-            request,
-            logical_model,
-            provider,
-            provider_model,
+            request: draft.request,
+            logical_model: draft.logical_model,
+            provider: draft.provider,
+            provider_model: draft.provider_model,
             usage: &usage,
             usage_source: BillingUsageSource::ProviderUsage,
-            status_code,
+            status_code: draft.status_code,
+            latency_ms: draft.latency_ms,
         })
     }
 
     pub(crate) fn record_estimated_billing_event(
         &self,
-        request: &RequestContext,
-        logical_model: &str,
-        provider: &str,
-        provider_model: &str,
+        draft: BillingEventDraft<'_>,
         usage: &BillingTokenUsage,
-        status_code: u16,
     ) -> Result<(), ferrogate_billing::BillingError> {
         self.record_billing_token_usage(BillingTokenUsageDraft {
-            request,
-            logical_model,
-            provider,
-            provider_model,
+            request: draft.request,
+            logical_model: draft.logical_model,
+            provider: draft.provider,
+            provider_model: draft.provider_model,
             usage,
             usage_source: BillingUsageSource::GatewayEstimate,
-            status_code,
+            status_code: draft.status_code,
+            latency_ms: draft.latency_ms,
         })
     }
 
@@ -4496,6 +4735,13 @@ impl AppState {
         draft: BillingTokenUsageDraft<'_>,
     ) -> Result<(), ferrogate_billing::BillingError> {
         let usage = draft.usage.clone().estimate_missing_total();
+        let cost_usd = settled_cost_usd(
+            &self.model_registry,
+            draft.logical_model,
+            draft.provider,
+            draft.provider_model,
+            &usage,
+        );
         let event = BillingEvent {
             request_id: draft.request.request_id.clone(),
             trace_id: draft.request.trace_id.clone(),
@@ -4513,6 +4759,8 @@ impl AppState {
             usage_source: draft.usage_source,
             status_code: draft.status_code,
             occurred_at_unix: None,
+            cost_usd,
+            latency_ms: draft.latency_ms,
         };
         self.metering_events.record(event.clone())?;
         let recorded = self
@@ -4708,6 +4956,8 @@ impl AppState {
             usage_source: BillingUsageSource::GatewayEstimate,
             status_code,
             occurred_at_unix: now_unix_seconds(),
+            cost_usd: None,
+            latency_ms: Some(latency_ms),
         };
         let _ = self.metering_events.record(event.clone());
         self.record_billing_metrics(&event);
@@ -6467,6 +6717,47 @@ struct BillingTokenUsageDraft<'a> {
     usage: &'a BillingTokenUsage,
     usage_source: BillingUsageSource,
     status_code: u16,
+    latency_ms: Option<u64>,
+}
+
+/// Everything about a settled request needed to record a billing event,
+/// except the token usage itself -- callers hold either a provider-reported
+/// [`ProviderUsage`] ([`AppState::record_billing_event`]) or a gateway
+/// [`BillingTokenUsage`] estimate ([`AppState::record_estimated_billing_event`]),
+/// so usage stays a separate parameter rather than living in this struct.
+#[derive(Debug)]
+pub(crate) struct BillingEventDraft<'a> {
+    pub(crate) request: &'a RequestContext,
+    pub(crate) logical_model: &'a str,
+    pub(crate) provider: &'a str,
+    pub(crate) provider_model: &'a str,
+    pub(crate) status_code: u16,
+    pub(crate) latency_ms: Option<u64>,
+}
+
+/// Settled cost in USD for one request, looked up from the model registry's
+/// configured pricing for whichever route (primary or fallback) actually
+/// served `provider`/`provider_model`. `None` when the model is unknown or
+/// has no configured price on that route (P1-4: cost is only ever computed
+/// from real configuration, never silently guessed).
+fn settled_cost_usd(
+    model_registry: &ModelRegistry,
+    logical_model: &str,
+    provider: &str,
+    provider_model: &str,
+    usage: &BillingTokenUsage,
+) -> Option<f64> {
+    let resolved = model_registry.resolve(logical_model).ok()?;
+    let route = std::iter::once(&resolved.primary)
+        .chain(resolved.fallbacks.iter())
+        .find(|route| route.provider == provider && route.provider_model == provider_model)?;
+    let input_price = route.input_price_per_1m?;
+    let output_price = route.output_price_per_1m?;
+    Some(
+        ModelPrice::usd(input_price, output_price)
+            .estimate(usage)
+            .total_cost,
+    )
 }
 
 #[derive(Debug)]
@@ -8582,7 +8873,7 @@ mod tests {
     }
 
     #[test]
-    fn records_token_metering_event_without_gateway_cost() {
+    fn records_token_metering_event_with_settled_gateway_cost() {
         let config = Config {
             providers: vec![Provider {
                 name: "openai".into(),
@@ -8632,16 +8923,19 @@ mod tests {
 
         state
             .record_billing_event(
-                &request,
-                "fast-chat",
-                "openai",
-                "gpt-4o-mini",
+                BillingEventDraft {
+                    request: &request,
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code: 200,
+                    latency_ms: Some(120),
+                },
                 &ProviderUsage {
                     prompt_tokens: Some(3),
                     completion_tokens: Some(5),
                     total_tokens: Some(8),
                 },
-                200,
             )
             .unwrap();
 
@@ -8650,6 +8944,9 @@ mod tests {
         assert_eq!(events[0].tenant.organization_id.as_deref(), Some("org"));
         assert_eq!(events[0].usage.total_tokens, 8);
         assert_eq!(events[0].usage_source, BillingUsageSource::ProviderUsage);
+        // 3 prompt tokens @ $1.00/1M + 5 completion tokens @ $2.00/1M.
+        assert!((events[0].cost_usd.unwrap() - 0.000_013).abs() < 1e-9);
+        assert_eq!(events[0].latency_ms, Some(120));
 
         let aggregates = state.usage_aggregates();
         assert_eq!(aggregates.len(), 1);
@@ -8659,6 +8956,60 @@ mod tests {
         assert_eq!(aggregates[0].logical_model, "fast-chat");
         assert_eq!(aggregates[0].provider, "openai");
         assert_eq!(aggregates[0].usage.total_tokens, 8);
+
+        let rollup = state
+            .get_usage_monthly_rollup(
+                ferrogate_storage::QuotaScopeKind::Key,
+                "key_dev",
+                &state.current_period_month(),
+            )
+            .unwrap()
+            .expect("monthly rollup for the api key must exist");
+        assert_eq!(rollup.total_tokens, 8);
+        assert_eq!(rollup.request_count, 1);
+        assert_eq!(rollup.error_count, 0);
+        assert!((rollup.cost_usd - 0.000_013).abs() < 1e-9);
+    }
+
+    #[test]
+    fn records_no_cost_when_model_has_no_configured_pricing() {
+        let state = AppState::new(Config::default());
+        let request = RequestContext {
+            request_id: "fg-no-price".into(),
+            trace_id: None,
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            route: None,
+            upstream: None,
+            tenant: ferrogate_core::TenantContext::default(),
+        };
+
+        state
+            .record_billing_event(
+                BillingEventDraft {
+                    request: &request,
+                    logical_model: "unknown-model",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code: 200,
+                    latency_ms: None,
+                },
+                &ProviderUsage {
+                    prompt_tokens: Some(3),
+                    completion_tokens: Some(5),
+                    total_tokens: Some(8),
+                },
+            )
+            .unwrap();
+
+        let events = state.billing_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].cost_usd, None,
+            "an unregistered model must not produce a fabricated cost"
+        );
     }
 
     #[test]
@@ -8685,12 +9036,15 @@ mod tests {
 
         state
             .record_estimated_billing_event(
-                &request,
-                "fast-chat",
-                "openai",
-                "gpt-4o-mini",
+                BillingEventDraft {
+                    request: &request,
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code: 200,
+                    latency_ms: Some(95),
+                },
                 &BillingTokenUsage::new(2, 6, 8),
-                200,
             )
             .unwrap();
 
@@ -8699,6 +9053,150 @@ mod tests {
         assert_eq!(events[0].usage_source, BillingUsageSource::GatewayEstimate);
         assert_eq!(events[0].usage.total_tokens, 8);
         assert_eq!(state.api_key_total_tokens_used("key_dev"), 8);
+    }
+
+    #[test]
+    fn usage_report_filter_parses_scope_period_and_group_by_from_query() {
+        let filter = UsageReportFilter::from_query(Some(
+            "scope_type=workspace&scope_id=ws-1&from_month=2026-01&to_month=2026-03&group_by=period_month",
+        ));
+        assert_eq!(filter.scope_type, Some(QuotaScopeKind::Workspace));
+        assert_eq!(filter.scope_id.as_deref(), Some("ws-1"));
+        assert_eq!(filter.from_month.as_deref(), Some("2026-01"));
+        assert_eq!(filter.to_month.as_deref(), Some("2026-03"));
+        assert_eq!(filter.group_by, Some(UsageReportGroupBy::PeriodMonth));
+
+        // `period_month` is a convenience alias that pins both bounds to the
+        // same exact month.
+        let exact = UsageReportFilter::from_query(Some("period_month=2026-05"));
+        assert_eq!(exact.from_month.as_deref(), Some("2026-05"));
+        assert_eq!(exact.to_month.as_deref(), Some("2026-05"));
+
+        assert_eq!(
+            UsageReportFilter::from_query(None),
+            UsageReportFilter::default()
+        );
+    }
+
+    #[test]
+    fn usage_report_filters_by_scope_and_aggregates_with_group_by() {
+        let config = Config {
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10002/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: Some(1.0),
+                output_price_per_1m: Some(2.0),
+                enabled: true,
+                cache_enabled: None,
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        let request_for = |api_key_id: &str| RequestContext {
+            request_id: format!("fg-{api_key_id}"),
+            trace_id: None,
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            route: Some("openai.chat.completions".into()),
+            upstream: Some("openai".into()),
+            tenant: ferrogate_core::TenantContext {
+                workspace_id: None,
+                organization_id: Some("org-shared".into()),
+                team_id: None,
+                project_id: None,
+                user_id: None,
+                api_key_id: Some(api_key_id.into()),
+            },
+        };
+
+        for api_key_id in ["key-a", "key-b"] {
+            state
+                .record_billing_event(
+                    BillingEventDraft {
+                        request: &request_for(api_key_id),
+                        logical_model: "fast-chat",
+                        provider: "openai",
+                        provider_model: "gpt-4o-mini",
+                        status_code: 200,
+                        latency_ms: Some(10),
+                    },
+                    &ProviderUsage {
+                        prompt_tokens: Some(1000),
+                        completion_tokens: Some(1000),
+                        total_tokens: Some(2000),
+                    },
+                )
+                .unwrap();
+        }
+
+        // Scoped to a single key: exactly one row, matching that key's own spend.
+        let key_a_rows = state
+            .usage_report(&UsageReportFilter {
+                scope_type: Some(QuotaScopeKind::Key),
+                scope_id: Some("key-a".into()),
+                ..UsageReportFilter::default()
+            })
+            .unwrap();
+        assert_eq!(key_a_rows.len(), 1);
+        assert_eq!(key_a_rows[0].scope_id.as_deref(), Some("key-a"));
+        assert!((key_a_rows[0].cost_usd - 0.003).abs() < 1e-9);
+        assert_eq!(key_a_rows[0].request_count, 1);
+
+        // Both keys roll up into a single tenant-scope row.
+        let tenant_rows = state
+            .usage_report(&UsageReportFilter {
+                scope_type: Some(QuotaScopeKind::Tenant),
+                scope_id: Some("org-shared".into()),
+                ..UsageReportFilter::default()
+            })
+            .unwrap();
+        assert_eq!(tenant_rows.len(), 1);
+        assert!((tenant_rows[0].cost_usd - 0.006).abs() < 1e-9);
+        assert_eq!(tenant_rows[0].request_count, 2);
+
+        // A future-only window excludes every real (current-month) row.
+        let out_of_range = state
+            .usage_report(&UsageReportFilter {
+                scope_type: Some(QuotaScopeKind::Key),
+                from_month: Some("9999-12".into()),
+                ..UsageReportFilter::default()
+            })
+            .unwrap();
+        assert!(out_of_range.is_empty());
+
+        // group_by=period_month sums both key-scope rows (same real month)
+        // into a single row, dropping the per-scope identity.
+        let grouped = state
+            .usage_report(&UsageReportFilter {
+                scope_type: Some(QuotaScopeKind::Key),
+                group_by: Some(UsageReportGroupBy::PeriodMonth),
+                ..UsageReportFilter::default()
+            })
+            .unwrap();
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].scope_type, None);
+        assert_eq!(grouped[0].scope_id, None);
+        assert!((grouped[0].cost_usd - 0.006).abs() < 1e-9);
+        assert_eq!(grouped[0].request_count, 2);
     }
 
     #[test]
@@ -10194,22 +10692,25 @@ mod tests {
             });
             state
                 .record_estimated_billing_event(
-                    &RequestContext {
-                        request_id: format!("fg-{index}"),
-                        trace_id: None,
-                        agent_run_id: None,
-                        workflow_id: None,
-                        workflow_version: None,
-                        workflow_node_id: None,
-                        route: None,
-                        upstream: None,
-                        tenant: ferrogate_core::TenantContext::default(),
+                    BillingEventDraft {
+                        request: &RequestContext {
+                            request_id: format!("fg-{index}"),
+                            trace_id: None,
+                            agent_run_id: None,
+                            workflow_id: None,
+                            workflow_version: None,
+                            workflow_node_id: None,
+                            route: None,
+                            upstream: None,
+                            tenant: ferrogate_core::TenantContext::default(),
+                        },
+                        logical_model: "fast-chat",
+                        provider: "openai",
+                        provider_model: "gpt-4o-mini",
+                        status_code,
+                        latency_ms: None,
                     },
-                    "fast-chat",
-                    "openai",
-                    "gpt-4o-mini",
                     &BillingTokenUsage::new(index, index, index * 2),
-                    status_code,
                 )
                 .unwrap();
         }
@@ -10351,30 +10852,36 @@ mod tests {
         });
         state
             .record_billing_event(
-                &request,
-                "fast-chat",
-                "openai",
-                "gpt-4o-mini",
+                BillingEventDraft {
+                    request: &request,
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code: 200,
+                    latency_ms: None,
+                },
                 &ProviderUsage {
                     prompt_tokens: Some(3),
                     completion_tokens: Some(5),
                     total_tokens: Some(8),
                 },
-                200,
             )
             .unwrap();
         state
             .record_billing_event(
-                &request,
-                "fast-chat",
-                "openai",
-                "gpt-4o-mini",
+                BillingEventDraft {
+                    request: &request,
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code: 200,
+                    latency_ms: None,
+                },
                 &ProviderUsage {
                     prompt_tokens: Some(7),
                     completion_tokens: Some(11),
                     total_tokens: Some(18),
                 },
-                200,
             )
             .unwrap();
 

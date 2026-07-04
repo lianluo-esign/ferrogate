@@ -22,7 +22,10 @@ use crate::{
         write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         write_streaming_bytes_response, write_streaming_response,
     },
-    state::{AppState, GatewayConfigResolveError, GatewayConfigUse, ToolInjectionContext},
+    state::{
+        AppState, BillingEventDraft, GatewayConfigResolveError, GatewayConfigUse,
+        ToolInjectionContext,
+    },
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
@@ -207,6 +210,10 @@ impl FerroGateway {
             body_text,
         } = request_plan;
         let request_started_at_unix = now_unix_seconds();
+        // Monotonic timer for P1-4 latency_ms; `request_started_at_unix` above
+        // is second-granularity (used for StoredRequestLog timestamps) and too
+        // coarse for a field named `latency_ms`.
+        let request_started_at = std::time::Instant::now();
         let workflow_provider_constraint = match enforce_ai_workflow_policy(
             &state,
             AiWorkflowRequestContext {
@@ -815,12 +822,17 @@ impl FerroGateway {
 
                             state.record_provider_success(&provider.name);
                             if let Err(error) = state.record_estimated_billing_event(
-                                &policy_request,
-                                &request.model,
-                                &provider.name,
-                                &model_route.provider_model,
+                                BillingEventDraft {
+                                    request: &policy_request,
+                                    logical_model: &request.model,
+                                    provider: &provider.name,
+                                    provider_model: &model_route.provider_model,
+                                    status_code: response.status.as_u16(),
+                                    latency_ms: Some(
+                                        request_started_at.elapsed().as_millis() as u64
+                                    ),
+                                },
                                 &estimated_usage,
-                                response.status.as_u16(),
                             ) {
                                 warn!(
                                     request_id = %ctx.request_id,
@@ -1180,12 +1192,17 @@ impl FerroGateway {
                                 "provider usage extracted"
                             );
                             if let Err(error) = state.record_billing_event(
-                                &policy_request,
-                                &request.model,
-                                &provider.name,
-                                &model_route.provider_model,
+                                BillingEventDraft {
+                                    request: &policy_request,
+                                    logical_model: &request.model,
+                                    provider: &provider.name,
+                                    provider_model: &model_route.provider_model,
+                                    status_code: response.status.as_u16(),
+                                    latency_ms: Some(
+                                        request_started_at.elapsed().as_millis() as u64
+                                    ),
+                                },
                                 &usage,
-                                response.status.as_u16(),
                             ) {
                                 warn!(
                                     request_id = %ctx.request_id,
@@ -1206,12 +1223,15 @@ impl FerroGateway {
                                 return Ok(());
                             }
                         } else if let Err(error) = state.record_estimated_billing_event(
-                            &policy_request,
-                            &request.model,
-                            &provider.name,
-                            &model_route.provider_model,
+                            BillingEventDraft {
+                                request: &policy_request,
+                                logical_model: &request.model,
+                                provider: &provider.name,
+                                provider_model: &model_route.provider_model,
+                                status_code: response.status.as_u16(),
+                                latency_ms: Some(request_started_at.elapsed().as_millis() as u64),
+                            },
                             &estimated_usage,
-                            response.status.as_u16(),
                         ) {
                             warn!(
                                 request_id = %ctx.request_id,

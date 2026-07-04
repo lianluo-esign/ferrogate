@@ -269,6 +269,25 @@ fn finalize_auth(
             ),
         });
     }
+    if let Some(budget) = quota.monthly_budget_usd {
+        match state.monthly_budget_exceeded(&auth.tenant_context(), budget) {
+            Ok(true) => {
+                return Err(AuthError {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    code: "monthly_budget_exceeded",
+                    message: "quota policy monthly budget has been exhausted for this scope".into(),
+                });
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return Err(AuthError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "quota_resolution_unavailable",
+                    message: format!("monthly budget lookup failed: {error}"),
+                });
+            }
+        }
+    }
     let rpm_limit = min_opt_u64(auth.request_limit_per_minute, quota.rpm_limit);
     if let Some(limit) = rpm_limit {
         require_request_budget(state, &auth, limit, request_id)?;
@@ -1063,6 +1082,108 @@ mod tests {
             !auth.can_use_model("smart-chat"),
             "tenant quota policy must narrow the key's own allowlist, not widen it"
         );
+    }
+
+    #[test]
+    fn quota_policy_monthly_budget_exceeded_hard_denies_further_requests() {
+        use crate::config::{Model, Provider};
+        use ferrogate_core::RequestContext;
+        use ferrogate_providers::{ProviderUsage, RoutingStrategy};
+        use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+
+        let secret = "fg_live_quota_budget_0123456789";
+        let state = AppState::new(Config {
+            api_keys: vec![decoy_yaml_key()],
+            providers: vec![Provider {
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: Some(1.0),
+                output_price_per_1m: Some(2.0),
+                enabled: true,
+                cache_enabled: None,
+            }],
+            ..Config::default()
+        });
+        seed_durable_virtual_key(&state, "vk-quota-budget", secret, |_| {});
+        state
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: "tenant:tenant-1".into(),
+                scope_type: QuotaScopeKind::Tenant,
+                scope_id: "tenant-1".into(),
+                model_allowlist: vec![],
+                rpm_limit: None,
+                tpm_limit: None,
+                monthly_budget_usd: Some(0.001),
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        assert!(
+            authenticate(&state, &bearer_headers(secret), "chat.completions", "req-1").is_ok(),
+            "no spend has been recorded yet; the budget must not trip prematurely"
+        );
+
+        // Settle a real billing event against the key's own tenant/project/
+        // workspace/key attribution so the P1-4 monthly rollup accumulates
+        // enough cost ($0.003 at the configured $1/$2 per-1M pricing) to
+        // exceed the $0.001 tenant-level budget cap.
+        let request = RequestContext {
+            request_id: "fg-budget-spend".into(),
+            trace_id: None,
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            route: Some("openai.chat.completions".into()),
+            upstream: Some("openai".into()),
+            tenant: TenantContext {
+                organization_id: Some("tenant-1".into()),
+                team_id: None,
+                project_id: Some("project-1".into()),
+                workspace_id: Some("workspace-1".into()),
+                user_id: None,
+                api_key_id: Some("vk-quota-budget".into()),
+            },
+        };
+        state
+            .record_billing_event(
+                crate::state::BillingEventDraft {
+                    request: &request,
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code: 200,
+                    latency_ms: Some(10),
+                },
+                &ProviderUsage {
+                    prompt_tokens: Some(1000),
+                    completion_tokens: Some(1000),
+                    total_tokens: Some(2000),
+                },
+            )
+            .unwrap();
+
+        let error =
+            authenticate(&state, &bearer_headers(secret), "chat.completions", "req-2").unwrap_err();
+        assert_eq!(error.code, "monthly_budget_exceeded");
     }
 
     #[test]

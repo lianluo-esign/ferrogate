@@ -16,6 +16,7 @@ mod mcp_rpc;
 mod proxy;
 mod quota_policies;
 mod responses_stream;
+mod usage_reports;
 mod virtual_keys;
 
 use anyhow::{Context, Result as AnyResult};

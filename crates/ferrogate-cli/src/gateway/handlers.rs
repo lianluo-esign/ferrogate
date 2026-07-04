@@ -506,6 +506,14 @@ impl FerroGateway {
             return Ok(true);
         }
 
+        if path == "/admin/v1/usage-reports" {
+            let headers = req.headers.clone();
+            let query = req.uri.query().map(str::to_string);
+            self.handle_admin_usage_reports(session, ctx, &headers, query.as_deref())
+                .await?;
+            return Ok(true);
+        }
+
         if path == "/metrics" {
             let headers = req.headers.clone();
             self.handle_metrics(session, ctx, &headers).await?;

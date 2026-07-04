@@ -1069,6 +1069,26 @@ pub(crate) struct AdminQuotaPolicyMutationResponse {
     pub(crate) policy: AdminQuotaPolicy,
 }
 
+/// One row of the P1-4 usage/cost report: either a raw per-scope-per-month
+/// rollup, or (when `group_by` is requested) a sum across every rollup
+/// sharing that row's `scope_type`/`scope_id`/`period_month` key -- whichever
+/// of those three the request did not group by is reported as `None`.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminUsageReportRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) period_month: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scope_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scope_id: Option<String>,
+    pub(crate) prompt_tokens: u64,
+    pub(crate) completion_tokens: u64,
+    pub(crate) total_tokens: u64,
+    pub(crate) cost_usd: f64,
+    pub(crate) request_count: u64,
+    pub(crate) error_count: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminMcpServerMutationResponse {
     pub(crate) object: &'static str,

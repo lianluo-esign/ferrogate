@@ -571,6 +571,8 @@ mod tests {
             usage_source: BillingUsageSource::GatewayEstimate,
             status_code: 200,
             occurred_at_unix: None,
+            cost_usd: None,
+            latency_ms: None,
         };
 
         assert_eq!(
@@ -605,6 +607,8 @@ mod tests {
             usage_source: BillingUsageSource::ProviderUsage,
             status_code: 200,
             occurred_at_unix: Some(1_800_000_000),
+            cost_usd: Some(0.0012),
+            latency_ms: Some(430),
         }
     }
 }
