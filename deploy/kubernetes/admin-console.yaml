@@ -1,0 +1,102 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-11
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+#
+# Admin console frontend (issue #158/#159): a static SPA served by nginx,
+# deployed as its own workload -- no secrets, no PVCs, no /metrics. It calls
+# the ferrogate-auth and ferrogate Services cross-origin, so both of those
+# need CORS configured for this Ingress host (ferrogate-auth's
+# --cors-allowed-origin / FERROGATE_AUTH_CORS_ALLOWED_ORIGIN, and the
+# gateway's admin.cors_allowed_origin config field).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ferrogate-admin-console
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate-admin-console
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferrogate-admin-console
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferrogate-admin-console
+    spec:
+      containers:
+        - name: admin-console
+          image: ghcr.io/lianluo-esign/ferrogate-admin-console:v2026.06.07
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: AUTH_BASE_URL
+              value: https://auth.ferrogate.example.com
+            - name: GATEWAY_ADMIN_BASE_URL
+              value: https://ferrogate.example.com
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ferrogate-admin-console
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate-admin-console
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: ferrogate-admin-console
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ferrogate-admin-console
+  namespace: ferrogate
+  labels:
+    app.kubernetes.io/name: ferrogate-admin-console
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - admin.ferrogate.example.com
+      secretName: ferrogate-admin-console-tls
+  rules:
+    - host: admin.ferrogate.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ferrogate-admin-console
+                port:
+                  name: http

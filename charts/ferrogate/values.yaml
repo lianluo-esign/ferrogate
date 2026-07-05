@@ -61,6 +61,41 @@ persistence:
       - ReadWriteOnce
     storageClassName: ""
 
+# Standalone admin console frontend (issue #158/#159): a static SPA served
+# by nginx, disabled by default since it's optional like the rest of this
+# chart. It calls ferrogate-auth and the gateway cross-origin, so both need
+# CORS configured for whatever host adminConsole.ingress uses.
+adminConsole:
+  enabled: false
+  replicaCount: 2
+  image:
+    repository: ghcr.io/lianluo-esign/ferrogate-admin-console
+    tag: v2026.06.07
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  ingress:
+    enabled: false
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: admin.ferrogate.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  # Rendered as container env vars AUTH_BASE_URL / GATEWAY_ADMIN_BASE_URL,
+  # which the image's nginx entrypoint turns into env-config.js at
+  # container start -- see admin-console/render-env-config.sh.
+  env:
+    authBaseUrl: "https://auth.ferrogate.example.com"
+    gatewayAdminBaseUrl: "https://ferrogate.example.com"
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 podAnnotations: {}
 podLabels: {}
 

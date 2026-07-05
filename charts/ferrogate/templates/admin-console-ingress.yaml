@@ -1,0 +1,41 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-06-11
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+{{- if and .Values.adminConsole.enabled .Values.adminConsole.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "ferrogate.adminConsoleName" . }}
+  labels:
+    {{- include "ferrogate.adminConsoleLabels" . | nindent 4 }}
+  {{- with .Values.adminConsole.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.adminConsole.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.adminConsole.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.adminConsole.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "ferrogate.adminConsoleName" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

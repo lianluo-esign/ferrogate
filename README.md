@@ -272,6 +272,15 @@ curl -s http://127.0.0.1:8092/v1/billing/ledger
 Note that `GET /v1/billing/ledger` belongs to the standalone billing service's
 own port (`8092` above), not to the gateway's `/admin` or `/v1` surface.
 
+The admin console (`admin-console/`) is a fourth, standalone deployable: a
+static React SPA, not a `ferrogate` subcommand. It calls `ferrogate auth
+serve`'s `/v1/admin/*` endpoints for login/registration and the gateway's
+`/admin/v1/*` for everything else, both cross-origin, so both need CORS
+configured for whatever origin the console is served from (the auth
+service's `--cors-allowed-origin` / `FERROGATE_AUTH_CORS_ALLOWED_ORIGIN`, and
+the gateway's `admin.cors_allowed_origin` config field). See
+[`admin-console/README.md`](admin-console/README.md) to run it locally.
+
 ## Core Modules
 
 ```text
@@ -302,6 +311,10 @@ crates/
 tools/
   ferrogate-test            End-to-end test harness driving admin/auth/gateway/
                              billing/storage scenarios locally and via Docker
+
+admin-console/               Standalone admin console frontend (Vite + React +
+                             TypeScript + Tailwind + shadcn/ui), covering the
+                             full Admin API surface; not a `ferrogate` subcommand
 ```
 
 ## Docker And Deployment
@@ -338,6 +351,34 @@ billing serve` / `ferrogate auth serve`, see
 are not yet templated as sibling deployments — run them as their own
 workloads pointed at the gateway's `[billing_service]` config and auth
 contract until that lands.
+
+### Admin console
+
+The admin console frontend ships as its own image, built from
+`admin-console/Dockerfile` (a static SPA served by nginx — not part of the
+main `ferrogate` image):
+
+```bash
+docker build -t ferrogate-admin-console admin-console/
+docker run --rm -p 8081:8080 \
+  -e AUTH_BASE_URL=https://auth.ferrogate.example.com \
+  -e GATEWAY_ADMIN_BASE_URL=https://ferrogate.example.com \
+  ferrogate-admin-console
+```
+
+`AUTH_BASE_URL`/`GATEWAY_ADMIN_BASE_URL` are rendered into `env-config.js` by
+the image's nginx entrypoint at container start (see
+[`admin-console/README.md`](admin-console/README.md)), so the same image
+works across environments without a rebuild — unlike the Vite
+`VITE_AUTH_BASE_URL`/`VITE_GATEWAY_ADMIN_BASE_URL` build-time env vars used
+for local `npm run dev`.
+
+It has its own Kubernetes manifest
+([`deploy/kubernetes/admin-console.yaml`](deploy/kubernetes/admin-console.yaml))
+and an optional, disabled-by-default Helm component (`adminConsole.enabled:
+true` in [`charts/ferrogate/values.yaml`](charts/ferrogate/values.yaml)) —
+both covered by the same `scripts/check-kubernetes-examples.sh` / `helm
+template` validation above.
 
 ## Admin API
 

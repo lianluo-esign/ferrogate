@@ -7,6 +7,13 @@ Cargo.lock.bak
 .references/
 perf-reports/
 
+# JS/TS build artifacts (any package in the repo, not just admin-console/ --
+# admin-console/.gitignore already covers that directory specifically)
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+
 # Wiki build outputs
 ferrogate-wiki/wiki-site/node_modules/
 ferrogate-wiki/wiki-site/public/

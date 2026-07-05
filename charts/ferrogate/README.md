@@ -33,3 +33,23 @@ helm upgrade --install ferrogate charts/ferrogate \
 ```
 
 Do not leave the default placeholder secret values in a production namespace.
+
+## Admin console (optional)
+
+The admin console frontend is an optional, disabled-by-default component
+(`adminConsole.enabled: false`) since it's a separate deployable, not part of
+the gateway process:
+
+```bash
+helm upgrade --install ferrogate charts/ferrogate \
+  --set adminConsole.enabled=true \
+  --set adminConsole.ingress.enabled=true \
+  --set adminConsole.env.authBaseUrl=https://auth.ferrogate.example.com \
+  --set adminConsole.env.gatewayAdminBaseUrl=https://ferrogate.example.com
+```
+
+It has no secrets, PVCs, or `/metrics` — just a stateless Deployment/Service
+health-checked at `/healthz`, and its own optional Ingress
+(`adminConsole.ingress.*`) on a distinct host, since it calls the gateway and
+auth service Services cross-origin (both need CORS configured for that
+host).

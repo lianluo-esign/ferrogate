@@ -35,3 +35,26 @@ browser is allowed to call `/admin/v1/*` cross-origin.
 ```bash
 npm run build   # tsc -b && vite build, output in dist/
 ```
+
+## Docker / production
+
+```bash
+docker build -t ferrogate-admin-console .
+docker run --rm -p 8081:8080 \
+  -e AUTH_BASE_URL=https://auth.ferrogate.example.com \
+  -e GATEWAY_ADMIN_BASE_URL=https://ferrogate.example.com \
+  ferrogate-admin-console
+```
+
+The dev-server env vars above (`VITE_AUTH_BASE_URL`/`VITE_GATEWAY_ADMIN_BASE_URL`)
+are Vite build-time values, baked into the JS bundle by `npm run build` --
+they can't be changed without a rebuild. The Docker image instead reads plain
+`AUTH_BASE_URL`/`GATEWAY_ADMIN_BASE_URL` container env vars and renders them
+into `/env-config.js` at container start (`render-env-config.sh`, installed
+as an nginx `docker-entrypoint.d/` hook), which `index.html` loads before the
+app bundle and `src/lib/config.ts` prefers over the Vite build-time value.
+This lets the same image serve dev/staging/prod with different backend URLs.
+
+Kubernetes: [`deploy/kubernetes/admin-console.yaml`](../deploy/kubernetes/admin-console.yaml)
+or the optional `adminConsole.*` Helm values in
+[`charts/ferrogate`](../charts/ferrogate).

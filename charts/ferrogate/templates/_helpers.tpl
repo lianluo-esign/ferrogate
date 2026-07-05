@@ -43,3 +43,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "ferrogate.redisName" -}}
 {{- printf "%s-redis" (include "ferrogate.fullname" .) -}}
 {{- end -}}
+
+{{- define "ferrogate.adminConsoleName" -}}
+{{- printf "%s-admin-console" (include "ferrogate.fullname" .) -}}
+{{- end -}}
+
+{{- define "ferrogate.adminConsoleSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "ferrogate.adminConsoleName" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{- define "ferrogate.adminConsoleLabels" -}}
+{{ include "ferrogate.labels" . }}
+app.kubernetes.io/component: admin-console
+{{- end -}}

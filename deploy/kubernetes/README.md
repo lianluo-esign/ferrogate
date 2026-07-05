@@ -42,3 +42,10 @@ Vector observability examples live under `deploy/vector/`:
 ACME storage is mounted at `/var/lib/ferrogate/acme`. The example keeps ACME
 disabled in `ferrogate.toml`; enable it only after mounting durable storage and
 setting real domains, email, and DNS provider credentials.
+
+`admin-console.yaml` deploys the admin console frontend as a separate,
+stateless workload: no secrets, no PVCs, no `/metrics` (it's a static SPA
+served by nginx, health-checked at `/healthz`). It has its own Ingress on a
+distinct host (`admin.ferrogate.example.com` by default) since it calls the
+`ferrogate` and `ferrogate-auth` Services cross-origin — both of those need
+CORS configured for that host before the console will work.
