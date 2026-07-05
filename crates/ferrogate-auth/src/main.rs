@@ -44,8 +44,11 @@ struct ServeArgs {
         default_value = "require"
     )]
     supabase_tls_mode: String,
-    /// Optional PostgreSQL schema containing the FerroGate control-plane tables.
-    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_SCHEMA")]
+    /// PostgreSQL schema holding the auth service's own tenant/RBAC tables.
+    /// Dedicated by default so this service never shares a namespace with the
+    /// gateway's own `ferrogate_control` schema or the billing service's
+    /// schema in the same Supabase project (issue #156).
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_SCHEMA", default_value = "auth")]
     supabase_schema: Option<String>,
     /// Optional comma-separated PostgreSQL search path for Supabase.
     #[arg(

@@ -158,8 +158,11 @@ pub(crate) struct AuthServeArgs {
         default_value = "require"
     )]
     pub(crate) supabase_tls_mode: String,
-    /// Optional PostgreSQL schema containing the FerroGate control-plane tables.
-    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_SCHEMA")]
+    /// PostgreSQL schema holding the auth service's own tenant/RBAC tables.
+    /// Dedicated by default so this service never shares a namespace with the
+    /// gateway's own `ferrogate_control` schema or the billing service's
+    /// schema in the same Supabase project (issue #156).
+    #[arg(long, env = "FERROGATE_AUTH_SUPABASE_SCHEMA", default_value = "auth")]
     pub(crate) supabase_schema: Option<String>,
     /// Initialize missing Supabase schema objects before serving.
     #[arg(long, env = "FERROGATE_AUTH_SUPABASE_INIT_SCHEMA")]
@@ -214,8 +217,15 @@ pub(crate) struct BillingServeArgs {
         default_value = "require"
     )]
     pub(crate) supabase_tls_mode: String,
-    /// Optional PostgreSQL schema containing the FerroGate control-plane tables.
-    #[arg(long, env = "FERROGATE_BILLING_SUPABASE_SCHEMA")]
+    /// PostgreSQL schema holding the billing service's own ledger/outbox
+    /// tables. Dedicated by default so this service never shares a namespace
+    /// with the gateway's own `ferrogate_control` schema or the auth
+    /// service's schema in the same Supabase project (issue #156).
+    #[arg(
+        long,
+        env = "FERROGATE_BILLING_SUPABASE_SCHEMA",
+        default_value = "billing"
+    )]
     pub(crate) supabase_schema: Option<String>,
     /// Initialize missing Supabase schema objects before serving.
     #[arg(long, env = "FERROGATE_BILLING_SUPABASE_INIT_SCHEMA")]
