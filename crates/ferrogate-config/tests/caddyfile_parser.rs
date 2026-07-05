@@ -14,19 +14,22 @@ fn parses_minimal_site_block_from_ferrogate_caddyfile() {
 
     assert_eq!(config.listen, "0.0.0.0:8080");
     assert_eq!(config.admin.as_deref(), Some("localhost:2019"));
-    assert_eq!(config.upstreams.len(), 1);
-    assert_eq!(
-        config
-            .routes
-            .iter()
-            .filter(|route| route.upstream.is_some())
-            .count(),
-        1
-    );
     assert!(config
         .routes
         .iter()
         .any(|route| route.static_response.is_some()));
+    assert_eq!(config.providers.len(), 1);
+    assert_eq!(config.providers[0].base_url, "https://api.openai.com/v1");
+    assert_eq!(
+        config.providers[0].api_key_env.as_deref(),
+        Some("OPENAI_API_KEY")
+    );
+    assert_eq!(config.models.len(), 1);
+    assert_eq!(config.models[0].name, "fast-chat");
+    assert_eq!(config.models[0].provider_model, "gpt-4o-mini");
+    assert_eq!(config.api_keys.len(), 1);
+    assert_eq!(config.api_keys[0].key.as_deref(), Some("dev-secret"));
+    assert_eq!(config.api_keys[0].allowed_models, ["fast-chat"]);
 }
 
 #[test]

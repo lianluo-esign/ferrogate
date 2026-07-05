@@ -14,9 +14,25 @@
 
     respond /healthz "ok" 200
 
-    route /v1/* {
-        reverse_proxy https://api.openai.com {
-            header_up Authorization "Bearer {env.OPENAI_API_KEY}"
+    ai_gateway {
+        provider openai {
+            kind openai-compatible
+            base_url https://api.openai.com/v1
+            api_key {env.OPENAI_API_KEY}
+        }
+
+        model fast-chat -> openai:gpt-4o-mini {
+            capabilities chat streaming
+            input_price_per_1m 0.15
+            output_price_per_1m 0.60
+        }
+
+        # Development-only inline key. Prefer key_env outside local development.
+        api_key key_dev {
+            key dev-secret
+            scopes models.read chat.completions responses.create admin.read
+            allowed_models fast-chat
+            allowed_providers openai
         }
     }
 }

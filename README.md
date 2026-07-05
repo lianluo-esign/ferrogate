@@ -59,11 +59,22 @@ Prerequisites:
 - `cmake`, `g++`, `make`, and `pkg-config` for Pingora's native dependency
   chain.
 
+`ferrogate` is one binary whose subcommand selects which service process
+runs. `run` (below) starts the AI gateway itself; the standalone `auth serve`
+and `billing serve` services are covered under
+[Service Decomposition](#service-decomposition).
+
 Run the default development gateway:
 
 ```bash
 cargo run -- run --config Ferrogate/Caddyfile
 ```
+
+`Ferrogate/Caddyfile` ships with one model (`fast-chat` → OpenAI's
+`gpt-4o-mini`) and one development API key (`dev-secret`, real request
+auth — a wrong key is rejected). Set `OPENAI_API_KEY` first if you want an
+actual completion; without it, requests still route correctly and fail with
+a clean 401 from OpenAI.
 
 Validate configuration:
 
@@ -76,7 +87,6 @@ Probe the gateway:
 
 ```bash
 curl http://127.0.0.1:8080/healthz
-curl http://127.0.0.1:8080/proxy/httpbin/get
 curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/v1/models
 ```
 
