@@ -80,6 +80,14 @@ pub(crate) struct Config {
 pub(crate) struct AdminConfig {
     #[serde(default)]
     pub(crate) listen: Option<String>,
+    /// Origin reflected back as `Access-Control-Allow-Origin` on every
+    /// locally-handled admin API response (including an `OPTIONS` preflight),
+    /// so a separately-deployed admin console frontend can call `/admin/v1/*`
+    /// cross-origin without an Ingress/reverse-proxy CORS layer in front.
+    /// Unset disables CORS headers entirely. Applied once at process start;
+    /// changing it requires a restart (not picked up by `/admin/v1/config/reload`).
+    #[serde(default)]
+    pub(crate) cors_allowed_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

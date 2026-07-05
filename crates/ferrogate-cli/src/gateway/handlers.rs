@@ -8,7 +8,7 @@ use http::{header, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 
 use crate::{
-    responses::write_json_error,
+    responses::{cors_allowed_origin, write_cors_preflight_response, write_json_error},
     routing::{build_target_uri, normalize_host},
 };
 
@@ -28,6 +28,14 @@ impl FerroGateway {
         ctx.traceparent = trace.traceparent;
         ctx.tracestate = trace.tracestate;
         let path = req.uri.path().to_string();
+
+        if req.method == http::Method::OPTIONS
+            && path.starts_with("/admin/")
+            && cors_allowed_origin().is_some()
+        {
+            write_cors_preflight_response(session).await?;
+            return Ok(true);
+        }
 
         if let Err(error) = state.run_pre_request_hooks(&ctx.request_id, &path) {
             write_json_error(

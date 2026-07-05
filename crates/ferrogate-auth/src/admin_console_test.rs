@@ -297,3 +297,30 @@ fn options_preflight_gets_a_no_content_response_for_any_path() {
     assert_eq!(response.status, 204);
     assert!(response.body.is_empty());
 }
+
+#[test]
+fn slugify_with_suffix_differs_across_ids_sharing_a_pid_suffix() {
+    // Regression for a bug where the suffix was the *last 8 characters* of
+    // the tenant_id string ("tenant-{nanos}-{pid}"), which lands on the
+    // constant `pid` segment rather than the per-call `nanos` segment --
+    // every registration reusing an organization name within one process
+    // lifetime collided on the identical slug.
+    let seed_a = "tenant-1111111111111111111-42";
+    let seed_b = "tenant-2222222222222222222-42";
+    let slug_a = slugify_with_suffix("Acme Inc", seed_a);
+    let slug_b = slugify_with_suffix("Acme Inc", seed_b);
+    assert_ne!(slug_a, slug_b);
+    assert!(slug_a.starts_with("acme-inc-"));
+    assert!(slug_b.starts_with("acme-inc-"));
+}
+
+#[test]
+fn register_allows_reusing_an_organization_name() {
+    let console = console();
+    let first = register(&console, "first@example.com", "supersecret1");
+    assert_eq!(first.status, 201);
+    // Same organization_name ("Acme Corp", per the register() helper) as the
+    // first call -- must not collide on tenants.slug.
+    let second = register(&console, "second@example.com", "supersecret2");
+    assert_eq!(second.status, 201);
+}

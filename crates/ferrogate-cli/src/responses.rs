@@ -10,8 +10,54 @@ use pingora::{http::ResponseHeader, proxy::Session, ErrorType, OrErr, Result as 
 use serde::{Deserialize, Serialize};
 
 use ferrogate_runtime::SelfHostedWorkerIdentity;
-use std::{collections::BTreeMap, io::Read};
+use std::{collections::BTreeMap, io::Read, sync::OnceLock};
 use tokio::{sync::mpsc, task};
+
+/// Origin reflected as `Access-Control-Allow-Origin` on every locally-handled
+/// response (config.admin.cors_allowed_origin), set once at process start by
+/// `gateway::serve`. A `OnceLock` rather than threading the value through
+/// every `write_json_response`-family call site (500+ of them) keeps this a
+/// self-contained, centralized change; the tradeoff is that it does not pick
+/// up `/admin/v1/config/reload` changes without a restart.
+static CORS_ALLOWED_ORIGIN: OnceLock<Option<String>> = OnceLock::new();
+
+pub(crate) fn set_cors_allowed_origin(origin: Option<String>) {
+    let _ = CORS_ALLOWED_ORIGIN.set(origin);
+}
+
+pub(crate) fn cors_allowed_origin() -> Option<&'static str> {
+    CORS_ALLOWED_ORIGIN.get().and_then(|o| o.as_deref())
+}
+
+fn apply_cors_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
+    if let Some(origin) = cors_allowed_origin() {
+        response.insert_header("access-control-allow-origin", origin)?;
+        response.insert_header("vary", "origin")?;
+    }
+    Ok(())
+}
+
+/// Answers a CORS `OPTIONS` preflight for a locally-handled admin route.
+/// Only called when `cors_allowed_origin()` is set; the caller is expected to
+/// gate on that first.
+pub(crate) async fn write_cors_preflight_response(session: &mut Session) -> PingoraResult<()> {
+    let mut response = ResponseHeader::build(StatusCode::NO_CONTENT, Some(3))?;
+    response.insert_header(header::CONTENT_LENGTH, "0")?;
+    apply_cors_headers(&mut response)?;
+    response.insert_header(
+        "access-control-allow-methods",
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    )?;
+    response.insert_header(
+        "access-control-allow-headers",
+        "authorization, content-type, x-api-key",
+    )?;
+    response.insert_header("access-control-max-age", "600")?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(None, true).await
+}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct HealthResponse<'a> {
@@ -1221,6 +1267,7 @@ pub(crate) async fn write_json_response<T: Serialize>(
     response.insert_header("x-request-id", request_id)?;
     response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(&mut response)?;
     session
         .write_response_header(Box::new(response), false)
         .await?;
@@ -1239,6 +1286,7 @@ pub(crate) async fn write_empty_response(
     response.insert_header("x-request-id", request_id)?;
     response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(&mut response)?;
     session
         .write_response_header(Box::new(response), false)
         .await?;
@@ -1258,6 +1306,7 @@ pub(crate) async fn write_raw_response(
     response.insert_header("x-request-id", request_id)?;
     response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(&mut response)?;
     session
         .write_response_header(Box::new(response), false)
         .await?;
@@ -1277,6 +1326,7 @@ pub(crate) async fn write_streaming_response<R: Read + Send + 'static>(
     response.insert_header("x-request-id", request_id)?;
     response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(&mut response)?;
     session
         .write_response_header(Box::new(response), false)
         .await?;
@@ -1315,6 +1365,7 @@ pub(crate) async fn write_streaming_bytes_response(
     response.insert_header("x-request-id", request_id)?;
     response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(&mut response)?;
     session
         .write_response_header(Box::new(response), false)
         .await?;
@@ -1391,6 +1442,7 @@ pub(crate) async fn write_json_error_and_close(
     response.insert_header("x-request-id", request_id)?;
     response.insert_header("x-trace-id", request_id)?;
     response.insert_header("x-ferrogate-runtime", "pingora")?;
+    apply_cors_headers(&mut response)?;
     session
         .write_response_header(Box::new(response), false)
         .await?;

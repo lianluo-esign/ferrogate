@@ -74,6 +74,7 @@ impl Config {
             listen: config.listen,
             admin: AdminConfig {
                 listen: config.admin,
+                cors_allowed_origin: None,
             },
             auth_service: crate::config::AuthServiceConfig::default(),
             billing_service: crate::config::BillingServiceConfig::default(),

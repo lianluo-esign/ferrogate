@@ -12,6 +12,7 @@ fn config_model_supports_serde_roundtrip() {
         listen: "127.0.0.1:9090".into(),
         admin: AdminConfig {
             listen: Some("localhost:2019".into()),
+            cors_allowed_origin: Some("https://admin.example.com".into()),
         },
         cluster: ClusterConfig {
             enabled: true,

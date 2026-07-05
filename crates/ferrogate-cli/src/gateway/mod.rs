@@ -158,6 +158,7 @@ pub(crate) struct FerroGateway {
 pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool) -> AnyResult<()> {
     let listen = config.listen.clone();
     let tls = config.tls.clone();
+    crate::responses::set_cors_allowed_origin(config.admin.cors_allowed_origin.clone());
     write_runtime_pid_file(&config)?;
     let server_conf = pingora_server_conf(&config);
     let resolved_tls = resolve_tls_certificate_paths(&tls)?;

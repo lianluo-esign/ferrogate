@@ -1210,6 +1210,7 @@ fn rejects_invalid_admin_listen_address_with_field_name() {
     let config = Config {
         admin: AdminConfig {
             listen: Some("not-an-admin-address".into()),
+            cors_allowed_origin: None,
         },
         ..Config::default()
     };

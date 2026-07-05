@@ -1278,6 +1278,13 @@ fn next_id(kind: &str) -> String {
 /// Derive a URL-safe slug from an operator-supplied organization name, with a
 /// short unique suffix appended so it satisfies the `tenants.slug` UNIQUE
 /// constraint without a create-then-retry-on-conflict loop.
+///
+/// The suffix is a hash of `unique_seed` rather than a positional substring
+/// of it: `unique_seed` is normally a `next_id()`-style
+/// `"{kind}-{nanos}-{pid}"` string, and naively slicing its last N characters
+/// lands on the constant `pid` segment (not the per-call `nanos` segment),
+/// so every registration sharing an organization name within one process
+/// lifetime collided on the exact same slug and got a permanent 409/503.
 fn slugify_with_suffix(name: &str, unique_seed: &str) -> String {
     let normalized: String = name
         .trim()
@@ -1301,14 +1308,9 @@ fn slugify_with_suffix(name: &str, unique_seed: &str) -> String {
     } else {
         base
     };
-    let suffix: String = unique_seed
-        .chars()
-        .rev()
-        .take(8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(unique_seed, &mut hasher);
+    let suffix = format!("{:016x}", std::hash::Hasher::finish(&hasher));
     format!("{base}-{suffix}")
 }
 
