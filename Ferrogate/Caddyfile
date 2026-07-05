@@ -14,6 +14,12 @@
 
     respond /healthz "ok" 200
 
+    # handle_path strips its matched prefix before forwarding upstream
+    # (issue #155), so /proxy/httpbin/get reaches https://httpbin.org/get.
+    handle_path /proxy/httpbin/* {
+        reverse_proxy https://httpbin.org
+    }
+
     ai_gateway {
         provider openai {
             kind openai-compatible

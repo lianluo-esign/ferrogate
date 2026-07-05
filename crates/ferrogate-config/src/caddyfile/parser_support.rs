@@ -217,10 +217,19 @@ pub(super) fn adapt_site_address(address: &str) -> (Option<String>, Option<Strin
         } else {
             host
         };
-        return (
-            Some(format!("{listen_host}:{port}")),
-            Some(host.to_ascii_lowercase()),
-        );
+        // A wildcard bind address like `0.0.0.0` is never a value a real
+        // client sends as its Host header, so it must not become a
+        // virtual-host match constraint -- routes should match any Host,
+        // exactly like the bare `:PORT` form above (issue #155: this
+        // silently made every route in a `0.0.0.0:PORT` site block
+        // unreachable, since no real request's Host header equals
+        // "0.0.0.0").
+        let host_match = if host == "0.0.0.0" {
+            None
+        } else {
+            Some(host.to_ascii_lowercase())
+        };
+        return (Some(format!("{listen_host}:{port}")), host_match);
     }
     (None, Some(address.to_ascii_lowercase()))
 }

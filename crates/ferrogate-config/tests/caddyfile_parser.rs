@@ -30,6 +30,61 @@ fn parses_minimal_site_block_from_ferrogate_caddyfile() {
     assert_eq!(config.api_keys.len(), 1);
     assert_eq!(config.api_keys[0].key.as_deref(), Some("dev-secret"));
     assert_eq!(config.api_keys[0].allowed_models, ["fast-chat"]);
+    assert_eq!(config.upstreams.len(), 1);
+    assert_eq!(config.upstreams[0].url, "https://httpbin.org");
+    let proxy_route = config
+        .routes
+        .iter()
+        .find(|route| route.upstream.is_some())
+        .expect("httpbin proxy route must exist");
+    assert_eq!(proxy_route.path_prefixes, vec!["/proxy/httpbin"]);
+    assert_eq!(
+        proxy_route.strip_prefix.as_deref(),
+        Some("/proxy/httpbin"),
+        "handle_path must strip its own prefix (issue #155)"
+    );
+    assert!(
+        proxy_route.hosts.is_empty(),
+        "a 0.0.0.0 bind address must not become a virtual-host match \
+         constraint -- real requests never send Host: 0.0.0.0 (issue #155)"
+    );
+}
+
+#[test]
+fn wildcard_bind_address_does_not_constrain_route_host_matching() {
+    let config = parse_caddyfile(
+        r#"
+0.0.0.0:8080 {
+    route /proxy/httpbin/* {
+        reverse_proxy https://httpbin.org
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    assert_eq!(config.listen, "0.0.0.0:8080");
+    assert_eq!(config.routes.len(), 1);
+    assert!(config.routes[0].hosts.is_empty());
+}
+
+#[test]
+fn concrete_ip_bind_address_still_constrains_route_host_matching() {
+    let config = parse_caddyfile(
+        r#"
+192.168.1.5:8080 {
+    route /proxy/httpbin/* {
+        reverse_proxy https://httpbin.org
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    assert_eq!(config.listen, "192.168.1.5:8080");
+    assert_eq!(config.routes[0].hosts, vec!["192.168.1.5"]);
 }
 
 #[test]
@@ -60,8 +115,81 @@ example.com {
     assert_eq!(config.routes.len(), 1);
     assert_eq!(config.routes[0].hosts, vec!["example.com"]);
     assert_eq!(config.routes[0].path_prefixes, vec!["/chat"]);
+    // The innermost matched block is `handle_path /chat/*`, which strips its
+    // own prefix before forwarding upstream (real-Caddy semantics, issue
+    // #155) even though the outer `route`/`handle` blocks do not.
+    assert_eq!(config.routes[0].strip_prefix.as_deref(), Some("/chat"));
     assert_eq!(config.routes[0].request_headers[0].name, "x-provider");
     assert_eq!(config.routes[0].response_headers[0].name, "x-gateway");
+}
+
+#[test]
+fn plain_route_and_handle_do_not_strip_their_prefix() {
+    let config = parse_caddyfile(
+        r#"
+:8080 {
+    route /proxy/httpbin/* {
+        reverse_proxy https://httpbin.org
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    assert_eq!(config.routes.len(), 1);
+    assert_eq!(config.routes[0].path_prefixes, vec!["/proxy/httpbin"]);
+    assert_eq!(config.routes[0].strip_prefix, None);
+}
+
+#[test]
+fn bare_handle_path_with_no_enclosing_route_strips_its_own_prefix() {
+    let config = parse_caddyfile(
+        r#"
+:8080 {
+    handle_path /proxy/httpbin/* {
+        reverse_proxy https://httpbin.org
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    assert_eq!(config.routes.len(), 1);
+    assert_eq!(config.routes[0].path_prefixes, vec!["/proxy/httpbin"]);
+    assert_eq!(
+        config.routes[0].strip_prefix.as_deref(),
+        Some("/proxy/httpbin")
+    );
+}
+
+#[test]
+fn handle_path_nested_under_a_prefixless_route_still_strips() {
+    // A bare `route { ... }` with no path arg of its own must inherit
+    // strip-ness (false) from its parent rather than forcing it back to
+    // false for the nested handle_path — the inner handle_path's own prefix
+    // and strip-ness should still win.
+    let config = parse_caddyfile(
+        r#"
+:8080 {
+    route {
+        handle_path /proxy/httpbin/* {
+            reverse_proxy https://httpbin.org
+        }
+    }
+}
+"#,
+        "test.Caddyfile",
+    )
+    .unwrap();
+
+    assert_eq!(config.routes.len(), 1);
+    assert_eq!(config.routes[0].path_prefixes, vec!["/proxy/httpbin"]);
+    assert_eq!(
+        config.routes[0].strip_prefix.as_deref(),
+        Some("/proxy/httpbin")
+    );
 }
 
 #[test]

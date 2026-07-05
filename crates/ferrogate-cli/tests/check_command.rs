@@ -26,6 +26,7 @@ fn check_accepts_ferrogate_caddyfile_fixture() {
     assert!(stdout.contains("FerroGate config OK"));
     assert!(stdout.contains("admin=localhost:2019"));
     assert!(stdout.contains("snapshot="));
+    assert!(stdout.contains("upstreams=1"));
     assert!(stdout.contains("providers=1"));
     assert!(stdout.contains("models=1"));
     assert!(stdout.contains("api_keys=1"));

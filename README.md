@@ -87,6 +87,7 @@ Probe the gateway:
 
 ```bash
 curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/proxy/httpbin/get
 curl -H 'Authorization: Bearer dev-secret' http://127.0.0.1:8080/v1/models
 ```
 

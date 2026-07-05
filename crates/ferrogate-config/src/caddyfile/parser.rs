@@ -104,7 +104,7 @@ impl<'a> Parser<'a> {
             if self.consume_rbrace() {
                 return Ok(());
             }
-            self.parse_site_directive(host.as_deref(), None)?;
+            self.parse_site_directive(host.as_deref(), None, false)?;
         }
     }
 
@@ -112,6 +112,7 @@ impl<'a> Parser<'a> {
         &mut self,
         host: Option<&str>,
         inherited_prefix: Option<&str>,
+        inherited_strip: bool,
     ) -> std::result::Result<(), CaddyfileDiagnostic> {
         let Some((directive, token)) = self.consume_word_with_token() else {
             return Ok(());
@@ -128,6 +129,16 @@ impl<'a> Parser<'a> {
                     .first()
                     .filter(|arg| arg.starts_with('/'))
                     .map(|arg| caddy_path_to_prefix(arg));
+                // `handle_path` strips its matched prefix before forwarding
+                // upstream (matching real Caddy semantics); plain `route`/
+                // `handle` forward the full original path. A block with no
+                // path arg of its own (e.g. a bare matcher-only `route`)
+                // inherits both the prefix and strip-ness from its parent.
+                let strip = if prefix.is_some() {
+                    directive == "handle_path"
+                } else {
+                    inherited_strip
+                };
                 if !self.consume_lbrace() {
                     return Ok(());
                 }
@@ -136,10 +147,16 @@ impl<'a> Parser<'a> {
                     if self.consume_rbrace() {
                         return Ok(());
                     }
-                    self.parse_site_directive(host, prefix.as_deref().or(inherited_prefix))?;
+                    self.parse_site_directive(
+                        host,
+                        prefix.as_deref().or(inherited_prefix),
+                        strip,
+                    )?;
                 }
             }
-            "reverse_proxy" => self.parse_reverse_proxy(host, inherited_prefix, args),
+            "reverse_proxy" => {
+                self.parse_reverse_proxy(host, inherited_prefix, inherited_strip, args)
+            }
             "ai_gateway" => self.parse_ai_gateway(&token),
             "respond" => {
                 self.add_static_response(host, inherited_prefix, args);
@@ -600,6 +617,7 @@ impl<'a> Parser<'a> {
         &mut self,
         host: Option<&str>,
         inherited_prefix: Option<&str>,
+        inherited_strip: bool,
         args: Vec<String>,
     ) -> std::result::Result<(), CaddyfileDiagnostic> {
         let upstream_urls = args
@@ -662,6 +680,7 @@ impl<'a> Parser<'a> {
                 .map(|value| vec![value.to_string()])
                 .unwrap_or_default(),
             path_prefixes: vec![prefix.to_string()],
+            strip_prefix: inherited_strip.then(|| prefix.to_string()),
             request_headers,
             response_headers,
             ..GatewayRoute::default()
