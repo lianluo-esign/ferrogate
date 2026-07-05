@@ -118,8 +118,32 @@ fn main() -> AnyResult<()> {
     }
 }
 
+/// Default log filter used when `RUST_LOG` is not set. Pingora's own crates
+/// log their internal bootstrap/service lifecycle at `info`, which drowns out
+/// FerroGate's own startup log line with noise an operator can't act on;
+/// downgrade them to `warn` so only genuine Pingora warnings/errors surface,
+/// while FerroGate's own crates keep logging at `info`. `RUST_LOG` still
+/// takes full precedence when set, including to re-enable these at `debug`
+/// for Pingora-level troubleshooting.
+const DEFAULT_LOG_FILTER: &str = "info,\
+    pingora=warn,\
+    pingora_cache=warn,\
+    pingora_core=warn,\
+    pingora_error=warn,\
+    pingora_header_serde=warn,\
+    pingora_http=warn,\
+    pingora_ketama=warn,\
+    pingora_load_balancing=warn,\
+    pingora_lru=warn,\
+    pingora_pool=warn,\
+    pingora_proxy=warn,\
+    pingora_runtime=warn,\
+    pingora_rustls=warn,\
+    pingora_timeout=warn";
+
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())

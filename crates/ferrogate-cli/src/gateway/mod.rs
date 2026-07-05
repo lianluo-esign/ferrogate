@@ -24,7 +24,7 @@ use anyhow::{Context, Result as AnyResult};
 use http::HeaderMap;
 use pingora::{
     listeners::tls::TlsSettings,
-    proxy::http_proxy_service,
+    proxy::http_proxy_service_with_name,
     server::{
         configuration::{Opt as PingoraOpt, ServerConf},
         Server,
@@ -58,6 +58,12 @@ use self::external_actions::{
     serve_gateway_external_action_authorizer_http, serve_gateway_external_action_authorizer_unix,
     GatewayExternalActionAuthorizerService,
 };
+
+/// Operator-facing label for the Pingora HTTP proxy service: used as the
+/// [`pingora::proxy::Service`] name (surfaced in Pingora's own "Starting
+/// service: ..." lifecycle log) and in FerroGate's own startup log line, so
+/// both name the product rather than the underlying Pingora framework.
+const GATEWAY_SERVICE_NAME: &str = "FerroGate Gateway";
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ProxyContext {
@@ -178,7 +184,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let mut server = Server::new_with_opt_and_conf(Some(pingora_opt), server_conf);
     server.bootstrap();
 
-    let mut service = http_proxy_service(&server.configuration, gateway);
+    let mut service = http_proxy_service_with_name(&server.configuration, gateway, GATEWAY_SERVICE_NAME);
     if let Some(paths) = resolved_tls {
         let mut tls_settings = TlsSettings::intermediate(&paths.cert_path, &paths.key_path)
             .context("failed to configure TLS listener")?;
@@ -192,7 +198,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
             tls = true,
             http2 = tls.http2,
             upgrade,
-            "FerroGate Pingora gateway listening with TLS"
+            "{GATEWAY_SERVICE_NAME} listening with TLS"
         );
     } else {
         service.add_tcp(&listen);
@@ -201,7 +207,7 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
             runtime = "pingora",
             tls = false,
             upgrade,
-            "FerroGate Pingora gateway listening"
+            "{GATEWAY_SERVICE_NAME} listening"
         );
     }
     server.add_service(service);

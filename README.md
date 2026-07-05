@@ -114,6 +114,22 @@ Open the local dashboard:
 http://127.0.0.1:8080/admin
 ```
 
+Run the billing service alongside the gateway to see settled usage land in a
+durable ledger — each is its own process, started with its own subcommand
+(full explanation, including the fail-closed pricing rule, under
+[Service Decomposition](#service-decomposition)):
+
+```bash
+FERROGATE_BILLING_LISTEN=127.0.0.1:8092 cargo run -- billing serve &
+TOKEN4AI_API_KEY=sk-... cargo run -- gateway --config config/ferrogate.token4ai.example.toml
+
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H 'authorization: Bearer client-secret' -H 'content-type: application/json' \
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}'
+
+curl -s http://127.0.0.1:8092/v1/billing/ledger
+```
+
 ## Agentic Gateway
 
 FerroGate supports explicit agent traffic without turning every AI request into
