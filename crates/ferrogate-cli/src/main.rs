@@ -57,26 +57,48 @@ fn main() -> AnyResult<()> {
                 };
                 // When a Supabase DSN is provided, resolve hashed durable
                 // virtual API keys against storage; otherwise fall back to the
-                // YAML/in-memory RBAC authenticator.
-                let api_key_authenticator = match args.supabase_dsn.as_deref().map(str::trim) {
+                // YAML/in-memory RBAC authenticator. The same repositories
+                // handle back the admin console (issue #157) when a JWT
+                // secret is also configured.
+                let repositories = match args.supabase_dsn.as_deref().map(str::trim) {
                     Some(dsn) if !dsn.is_empty() => {
-                        let repositories = build_supabase_repositories(SupabaseConnection {
+                        Some(Arc::new(build_supabase_repositories(SupabaseConnection {
                             dsn,
                             tls_mode: &args.supabase_tls_mode,
                             schema: args.supabase_schema.as_deref(),
                             init_schema: args.supabase_init_schema,
-                        })?;
-                        let authenticator: Arc<dyn ferrogate_auth::ApiKeyAuthenticator> = Arc::new(
-                            ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::new(repositories)),
-                        );
-                        Some(authenticator)
+                        })?))
                     }
+                    _ => None,
+                };
+                let api_key_authenticator = repositories.clone().map(|repositories| {
+                    Arc::new(ferrogate_auth::StorageApiKeyAuthenticator::new(
+                        repositories,
+                    )) as Arc<dyn ferrogate_auth::ApiKeyAuthenticator>
+                });
+                let admin_jwt_secret = crate::service_storage::resolve_secret(
+                    args.admin_jwt_secret.as_deref(),
+                    args.admin_jwt_secret_env.as_deref(),
+                )?;
+                let admin_console = match (repositories, admin_jwt_secret) {
+                    (Some(repositories), Some(jwt_secret)) => {
+                        Some(ferrogate_auth::AdminConsoleConfig {
+                            repositories,
+                            jwt_secret,
+                        })
+                    }
+                    (None, Some(_)) => anyhow::bail!(
+                        "--admin-jwt-secret(-env) requires --supabase-dsn: the admin console \
+                         needs durable storage to remember registered users across restarts"
+                    ),
                     _ => None,
                 };
                 ferrogate_auth::serve(ferrogate_auth::AuthServiceConfig {
                     listen: args.listen,
                     data,
                     api_key_authenticator,
+                    admin_console,
+                    cors_allowed_origin: args.cors_allowed_origin,
                 })
             }
         },

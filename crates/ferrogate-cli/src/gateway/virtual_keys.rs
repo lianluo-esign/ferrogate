@@ -32,8 +32,6 @@ use crate::{
 };
 
 const MAX_BODY_BYTES: usize = 64 * 1024;
-/// 192 bits of entropy, matching the `fg_` prefix convention.
-const VIRTUAL_KEY_SECRET_BYTES: usize = 24;
 
 impl FerroGateway {
     pub(super) async fn handle_admin_tenant_accounts(
@@ -759,7 +757,7 @@ impl FerroGateway {
             .id
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| next_hierarchy_id("vk"));
-        let secret = match generate_virtual_api_key_secret() {
+        let secret = match ferrogate_auth::generate_virtual_api_key_secret() {
             Ok(secret) => secret,
             Err(error) => {
                 return write_json_error(
@@ -886,7 +884,7 @@ impl FerroGateway {
             .await;
         };
 
-        let secret = match generate_virtual_api_key_secret() {
+        let secret = match ferrogate_auth::generate_virtual_api_key_secret() {
             Ok(secret) => secret,
             Err(error) => {
                 return write_json_error(
@@ -1207,30 +1205,6 @@ fn admin_virtual_api_key(key: &StoredApiKey) -> AdminVirtualApiKey {
     }
 }
 
-/// Generates a fresh `fg_`-prefixed virtual API key secret using the
-/// process's TLS-grade CSPRNG (`rustls`'s `ring` crypto provider, already a
-/// direct dependency and already used for ACME/TLS in this crate). Returns
-/// plaintext; callers must persist only the derived hash/prefix/last4 via
-/// [`virtual_api_key_material`] and hand the plaintext to the operator once.
-fn generate_virtual_api_key_secret() -> anyhow::Result<String> {
-    let mut random_bytes = [0_u8; VIRTUAL_KEY_SECRET_BYTES];
-    rustls::crypto::ring::default_provider()
-        .secure_random
-        .fill(&mut random_bytes)
-        .map_err(|_| anyhow::anyhow!("failed to generate secure random bytes"))?;
-    Ok(format!("fg_{}", encode_hex(&random_bytes)))
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
 fn next_hierarchy_id(kind: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1252,12 +1226,12 @@ mod tests {
 
     #[test]
     fn generated_secrets_are_unique_fg_prefixed_and_verifiable() {
-        let first = generate_virtual_api_key_secret().expect("first secret");
-        let second = generate_virtual_api_key_secret().expect("second secret");
+        let first = ferrogate_auth::generate_virtual_api_key_secret().expect("first secret");
+        let second = ferrogate_auth::generate_virtual_api_key_secret().expect("second secret");
 
         assert!(first.starts_with("fg_"));
         assert_ne!(first, second, "secrets must not repeat across calls");
-        assert_eq!(first.len(), "fg_".len() + VIRTUAL_KEY_SECRET_BYTES * 2);
+        assert_eq!(first.len(), "fg_".len() + 24 * 2, "192 bits hex-encoded");
 
         let material = virtual_api_key_material(&first).expect("material derivation");
         assert!(material.key_hash.starts_with("sha256:"));

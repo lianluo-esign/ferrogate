@@ -689,6 +689,55 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_project
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix
     ON api_keys(key_prefix);
 
+-- Human admin-console identities (issue #157). Distinct from api_keys, which
+-- model machine/tenant-level gateway access -- admin_users are the people who
+-- sign in to the admin console to manage tenants/workspaces/keys/policies.
+CREATE TABLE IF NOT EXISTS admin_users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    superadmin BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    last_login_at_unix BIGINT,
+    disabled_at_unix BIGINT
+);
+
+-- A user may belong to more than one tenant account, each with its own role.
+CREATE TABLE IF NOT EXISTS admin_user_tenant_memberships (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (user_id, tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_tenant_memberships_user
+    ON admin_user_tenant_memberships(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_tenant_memberships_tenant
+    ON admin_user_tenant_memberships(tenant_id);
+
+-- Refresh tokens are stored hashed (never plaintext) so a durable-storage
+-- read cannot itself mint a valid session; revocation/rotation just marks a
+-- row instead of deleting it, preserving an audit trail.
+CREATE TABLE IF NOT EXISTS admin_user_refresh_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    expires_at_unix BIGINT NOT NULL,
+    revoked_at_unix BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_user
+    ON admin_user_refresh_tokens(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_hash
+    ON admin_user_refresh_tokens(token_hash);
+
 -- Quota/rate-limit policy attached to a scope in the tenant -> project ->
 -- workspace -> key hierarchy. Resolution merges key -> workspace -> project
 -- -> tenant: the nearest defined value overrides, but may not exceed the
@@ -863,5 +912,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (15, '015_billing_report_outbox_dead_letter')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (16, '016_admin_console_users')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

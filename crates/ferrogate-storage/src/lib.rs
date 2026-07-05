@@ -313,8 +313,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 15;
-const POSTGRES_SCHEMA_NAME: &str = "015_billing_report_outbox_dead_letter";
+const POSTGRES_SCHEMA_VERSION: u64 = 16;
+const POSTGRES_SCHEMA_NAME: &str = "016_admin_console_users";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -750,6 +750,9 @@ pub struct RuntimeControlPlaneState {
     tenant_accounts: InMemoryRepository<StoredTenantAccount>,
     projects: InMemoryRepository<StoredProject>,
     workspaces: InMemoryRepository<StoredWorkspace>,
+    admin_users: InMemoryRepository<StoredAdminUser>,
+    admin_user_memberships: InMemoryRepository<StoredAdminUserMembership>,
+    admin_user_refresh_tokens: InMemoryRepository<StoredAdminUserRefreshToken>,
     quota_policies: InMemoryRepository<StoredQuotaPolicy>,
     usage_monthly_rollups: InMemoryRepository<StoredUsageMonthlyRollup>,
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
@@ -1097,6 +1100,135 @@ impl PostgresControlPlaneStore {
             )
         })?;
         rows.iter().map(api_key_from_row).collect()
+    }
+
+    fn upsert_admin_user(&self, user: &StoredAdminUser) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO admin_users \
+                 (id, email, password_hash, display_name, superadmin, created_at_unix, \
+                  updated_at_unix, last_login_at_unix, disabled_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 email = EXCLUDED.email, password_hash = EXCLUDED.password_hash, \
+                 display_name = EXCLUDED.display_name, superadmin = EXCLUDED.superadmin, \
+                 updated_at_unix = EXCLUDED.updated_at_unix, \
+                 last_login_at_unix = EXCLUDED.last_login_at_unix, \
+                 disabled_at_unix = EXCLUDED.disabled_at_unix",
+                &[
+                    &user.id,
+                    &user.email,
+                    &user.password_hash,
+                    &user.display_name,
+                    &user.superadmin,
+                    &user.created_at_unix,
+                    &user.updated_at_unix,
+                    &user.last_login_at_unix,
+                    &user.disabled_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_admin_user_by_id(&self, id: &str) -> Result<Option<StoredAdminUser>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, email, password_hash, display_name, superadmin, created_at_unix, \
+                 updated_at_unix, last_login_at_unix, disabled_at_unix \
+                 FROM admin_users WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        Ok(row.as_ref().map(admin_user_from_row))
+    }
+
+    fn get_admin_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, email, password_hash, display_name, superadmin, created_at_unix, \
+                 updated_at_unix, last_login_at_unix, disabled_at_unix \
+                 FROM admin_users WHERE email = $1",
+                &[&email],
+            )
+        })?;
+        Ok(row.as_ref().map(admin_user_from_row))
+    }
+
+    fn upsert_admin_user_membership(
+        &self,
+        membership: &StoredAdminUserMembership,
+    ) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO admin_user_tenant_memberships \
+                 (id, user_id, tenant_id, role, created_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5) \
+                 ON CONFLICT (user_id, tenant_id) DO UPDATE SET role = EXCLUDED.role",
+                &[
+                    &membership.id,
+                    &membership.user_id,
+                    &membership.tenant_id,
+                    &membership.role,
+                    &membership.created_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn list_admin_user_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, user_id, tenant_id, role, created_at_unix \
+                 FROM admin_user_tenant_memberships WHERE user_id = $1 ORDER BY id ASC",
+                &[&user_id],
+            )
+        })?;
+        Ok(rows.iter().map(admin_user_membership_from_row).collect())
+    }
+
+    fn upsert_admin_user_refresh_token(
+        &self,
+        token: &StoredAdminUserRefreshToken,
+    ) -> Result<(), StorageError> {
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO admin_user_refresh_tokens \
+                 (id, user_id, token_hash, created_at_unix, expires_at_unix, revoked_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (id) DO UPDATE SET revoked_at_unix = EXCLUDED.revoked_at_unix",
+                &[
+                    &token.id,
+                    &token.user_id,
+                    &token.token_hash,
+                    &token.created_at_unix,
+                    &token.expires_at_unix,
+                    &token.revoked_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_admin_user_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, user_id, token_hash, created_at_unix, expires_at_unix, \
+                 revoked_at_unix FROM admin_user_refresh_tokens WHERE token_hash = $1",
+                &[&token_hash],
+            )
+        })?;
+        Ok(row.as_ref().map(admin_user_refresh_token_from_row))
     }
 
     fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
@@ -3627,6 +3759,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "usage_monthly_rollups",
         "billing_ledger",
         "billing_report_outbox",
+        "admin_users",
+        "admin_user_tenant_memberships",
+        "admin_user_refresh_tokens",
         "storage_schema_migrations",
     ];
     for table in TABLES {
@@ -3739,6 +3874,10 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_billing_ledger_model_provider",
         "idx_billing_report_outbox_due",
         "idx_billing_report_outbox_dead_lettered",
+        "idx_admin_user_tenant_memberships_user",
+        "idx_admin_user_tenant_memberships_tenant",
+        "idx_admin_user_refresh_tokens_user",
+        "idx_admin_user_refresh_tokens_hash",
     ];
     for index in INDEXES {
         let count = client
@@ -3820,6 +3959,13 @@ fn api_key_records_supabase_only_error() -> StorageError {
     )
 }
 
+fn admin_console_users_supabase_only_error() -> StorageError {
+    StorageError::Runtime(
+        "admin console user records are Supabase/Postgres-only; set storage.provider = supabase"
+            .into(),
+    )
+}
+
 fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
     StoredTenantAccount {
         id: row.get::<_, String>(0),
@@ -3828,6 +3974,41 @@ fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
         status: row.get::<_, String>(3),
         created_at_unix: row.get::<_, i64>(4),
         updated_at_unix: row.get::<_, i64>(5),
+    }
+}
+
+fn admin_user_from_row(row: &PostgresRow) -> StoredAdminUser {
+    StoredAdminUser {
+        id: row.get::<_, String>(0),
+        email: row.get::<_, String>(1),
+        password_hash: row.get::<_, String>(2),
+        display_name: row.get::<_, String>(3),
+        superadmin: row.get::<_, bool>(4),
+        created_at_unix: row.get::<_, i64>(5),
+        updated_at_unix: row.get::<_, i64>(6),
+        last_login_at_unix: row.get::<_, Option<i64>>(7),
+        disabled_at_unix: row.get::<_, Option<i64>>(8),
+    }
+}
+
+fn admin_user_membership_from_row(row: &PostgresRow) -> StoredAdminUserMembership {
+    StoredAdminUserMembership {
+        id: row.get::<_, String>(0),
+        user_id: row.get::<_, String>(1),
+        tenant_id: row.get::<_, String>(2),
+        role: row.get::<_, String>(3),
+        created_at_unix: row.get::<_, i64>(4),
+    }
+}
+
+fn admin_user_refresh_token_from_row(row: &PostgresRow) -> StoredAdminUserRefreshToken {
+    StoredAdminUserRefreshToken {
+        id: row.get::<_, String>(0),
+        user_id: row.get::<_, String>(1),
+        token_hash: row.get::<_, String>(2),
+        created_at_unix: row.get::<_, i64>(3),
+        expires_at_unix: row.get::<_, i64>(4),
+        revoked_at_unix: row.get::<_, Option<i64>>(5),
     }
 }
 
@@ -3980,7 +4161,9 @@ fn billing_report_outbox_from_row(
 }
 
 fn billing_report_outbox_supabase_only_error() -> StorageError {
-    StorageError::Runtime("billing report outbox requires Supabase/Postgres or in-memory storage".into())
+    StorageError::Runtime(
+        "billing report outbox requires Supabase/Postgres or in-memory storage".into(),
+    )
 }
 
 /// A durable [`ferrogate_billing::LedgerSink`] backed by Supabase/Postgres.
@@ -4738,6 +4921,9 @@ impl RuntimeControlPlaneState {
             tenant_accounts: InMemoryRepository::new(),
             projects: InMemoryRepository::new(),
             workspaces: InMemoryRepository::new(),
+            admin_users: InMemoryRepository::new(),
+            admin_user_memberships: InMemoryRepository::new(),
+            admin_user_refresh_tokens: InMemoryRepository::new(),
             quota_policies: InMemoryRepository::new(),
             usage_monthly_rollups: InMemoryRepository::new(),
             billing_report_outbox: InMemoryRepository::new(),
@@ -4746,6 +4932,52 @@ impl RuntimeControlPlaneState {
 
     pub fn upsert_tenant_account(&mut self, account: StoredTenantAccount) {
         self.tenant_accounts.insert(account.id.clone(), account);
+    }
+
+    pub fn upsert_admin_user(&mut self, user: StoredAdminUser) {
+        self.admin_users.insert(user.id.clone(), user);
+    }
+
+    pub fn get_admin_user_by_id(&self, id: &str) -> Option<StoredAdminUser> {
+        self.admin_users.get(id)
+    }
+
+    pub fn get_admin_user_by_email(&self, email: &str) -> Option<StoredAdminUser> {
+        self.admin_users
+            .list()
+            .into_iter()
+            .find(|user| user.email == email)
+    }
+
+    pub fn upsert_admin_user_membership(&mut self, membership: StoredAdminUserMembership) {
+        self.admin_user_memberships
+            .insert(membership.id.clone(), membership);
+    }
+
+    pub fn list_admin_user_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> Vec<StoredAdminUserMembership> {
+        self.admin_user_memberships
+            .list()
+            .into_iter()
+            .filter(|membership| membership.user_id == user_id)
+            .collect()
+    }
+
+    pub fn upsert_admin_user_refresh_token(&mut self, token: StoredAdminUserRefreshToken) {
+        self.admin_user_refresh_tokens
+            .insert(token.id.clone(), token);
+    }
+
+    pub fn get_admin_user_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Option<StoredAdminUserRefreshToken> {
+        self.admin_user_refresh_tokens
+            .list()
+            .into_iter()
+            .find(|token| token.token_hash == token_hash)
     }
 
     pub fn get_tenant_account(&self, id: &str) -> Option<StoredTenantAccount> {
@@ -4912,7 +5144,9 @@ impl RuntimeControlPlaneState {
             .billing_report_outbox
             .list()
             .into_iter()
-            .filter(|entry| entry.next_attempt_unix <= now_unix && entry.dead_lettered_at_unix.is_none())
+            .filter(|entry| {
+                entry.next_attempt_unix <= now_unix && entry.dead_lettered_at_unix.is_none()
+            })
             .collect();
         due.sort_by(|a, b| {
             a.next_attempt_unix
@@ -5403,6 +5637,52 @@ fn default_active_status() -> String {
 
 fn default_environment() -> String {
     "default".to_string()
+}
+
+/// A human identity for the admin console (issue #157) -- distinct from
+/// [`StoredApiKey`], which models machine/tenant-level gateway access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAdminUser {
+    pub id: String,
+    pub email: String,
+    pub password_hash: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub superadmin: bool,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+    #[serde(default)]
+    pub last_login_at_unix: Option<i64>,
+    #[serde(default)]
+    pub disabled_at_unix: Option<i64>,
+}
+
+/// One admin user's membership in one tenant account, with a per-tenant role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAdminUserMembership {
+    pub id: String,
+    pub user_id: String,
+    pub tenant_id: String,
+    pub role: String,
+    #[serde(default)]
+    pub created_at_unix: i64,
+}
+
+/// A durable, hashed refresh token backing an admin console session. Stored
+/// hashed (never plaintext) so reading this table back can never itself mint
+/// a valid session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAdminUserRefreshToken {
+    pub id: String,
+    pub user_id: String,
+    pub token_hash: String,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    pub expires_at_unix: i64,
+    #[serde(default)]
+    pub revoked_at_unix: Option<i64>,
 }
 
 /// A scope in the tenant -> project -> workspace -> key quota hierarchy.
@@ -6410,6 +6690,118 @@ impl RuntimeStorageRepositories {
     }
 
     // --- Multi-tenant hierarchy: Tenant -> Project -> Workspace ---
+
+    pub fn upsert_admin_user(&self, user: StoredAdminUser) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_admin_user(user);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_admin_user(&user)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    pub fn get_admin_user_by_id(&self, id: &str) -> Result<Option<StoredAdminUser>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_admin_user_by_id(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_admin_user_by_id(id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    pub fn get_admin_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<StoredAdminUser>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_admin_user_by_email(email))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_admin_user_by_email(email)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    pub fn upsert_admin_user_membership(
+        &self,
+        membership: StoredAdminUserMembership,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_admin_user_membership(membership);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_admin_user_membership(&membership)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    pub fn list_admin_user_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_admin_user_memberships_by_user(user_id))
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_admin_user_memberships_by_user(user_id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    pub fn upsert_admin_user_refresh_token(
+        &self,
+        token: StoredAdminUserRefreshToken,
+    ) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_admin_user_refresh_token(token);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_admin_user_refresh_token(&token)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    pub fn get_admin_user_refresh_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredAdminUserRefreshToken>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_admin_user_refresh_token_by_hash(token_hash))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_admin_user_refresh_token_by_hash(token_hash)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
 
     pub fn upsert_tenant_account(&self, account: StoredTenantAccount) -> Result<(), StorageError> {
         match &self.control_plane {

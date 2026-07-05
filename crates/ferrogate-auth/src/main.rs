@@ -88,10 +88,17 @@ fn main() -> anyhow::Result<()> {
                 None => AuthServiceData::default(),
             };
             let api_key_authenticator = supabase_api_key_authenticator(&args)?;
+            // The admin console (register/login/session, issue #157) is only
+            // wired up through `ferrogate auth serve` (see ferrogate-cli's
+            // AuthServeArgs) -- this standalone binary is a secondary
+            // entrypoint that predates the console and stays scoped to the
+            // original virtual-key-resolution feature.
             ferrogate_auth::serve(AuthServiceConfig {
                 listen: args.listen,
                 data,
                 api_key_authenticator,
+                admin_console: None,
+                cors_allowed_origin: None,
             })
         }
     }

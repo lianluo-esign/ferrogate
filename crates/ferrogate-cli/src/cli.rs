@@ -167,6 +167,28 @@ pub(crate) struct AuthServeArgs {
     /// Initialize missing Supabase schema objects before serving.
     #[arg(long, env = "FERROGATE_AUTH_SUPABASE_INIT_SCHEMA")]
     pub(crate) supabase_init_schema: bool,
+    /// Shared secret used to sign/verify admin-console session tokens
+    /// (issue #157). Enables the register/login/refresh/logout/me endpoints
+    /// when set together with --supabase-dsn; prefer --admin-jwt-secret-env
+    /// to keep the secret out of argv.
+    ///
+    /// IMPORTANT: registration provisions a tenant/project/workspace and a
+    /// gateway-facing virtual API key that the *gateway* must also be able to
+    /// see, so --supabase-schema above must be set to the SAME schema the
+    /// gateway's own `storage.postgres_schema` uses (typically
+    /// `ferrogate_control`) -- not left at this flag's own "auth" default,
+    /// which is only correct when the admin console is disabled.
+    #[arg(long, env = "FERROGATE_AUTH_ADMIN_JWT_SECRET")]
+    pub(crate) admin_jwt_secret: Option<String>,
+    /// Environment variable name holding the admin-console JWT secret.
+    #[arg(long, env = "FERROGATE_AUTH_ADMIN_JWT_SECRET_ENV")]
+    pub(crate) admin_jwt_secret_env: Option<String>,
+    /// Origin reflected back as Access-Control-Allow-Origin on every response
+    /// (including OPTIONS preflight), so a separately-deployed admin console
+    /// frontend (issue #158/#159) can call this service cross-origin. Unset
+    /// disables CORS headers entirely.
+    #[arg(long, env = "FERROGATE_AUTH_CORS_ALLOWED_ORIGIN")]
+    pub(crate) cors_allowed_origin: Option<String>,
 }
 
 #[derive(Debug, Args)]
