@@ -12,10 +12,10 @@
 
 FerroGate is an open-source Rust API gateway and AI gateway built on
 Cloudflare Pingora. It gives teams a self-hostable control point for AI traffic:
-OpenAI-compatible APIs, provider routing, virtual API keys, policy checks,
-token accounting, MCP/tool execution, opt-in agent runs, managed agent-worker
-runtime contracts, observability, Admin APIs, cluster operations, and automatic
-HTTPS.
+OpenAI-compatible APIs, multi-vendor provider routing, virtual API keys, policy
+checks, token accounting settled against a standalone billing service,
+MCP/tool execution, opt-in agent runs, isolated `agent-worker` execution,
+observability, Admin APIs, cluster operations, and automatic HTTPS.
 
 The project is developed as the open-source gateway foundation behind
 [Token4AI Cloud](https://token4ai.cloud).
@@ -30,13 +30,20 @@ For the longer capability inventory and current implementation status, read the
   SSE forwarding.
 - **Provider orchestration:** OpenAI-compatible APIs, OpenAI, Azure OpenAI,
   OpenRouter, Anthropic, Gemini, and Grok/xAI with logical models and fallback
-  routing.
+  routing. Ships a ready-to-run [token4ai.cloud](https://token4ai.cloud)
+  example (`config/ferrogate.token4ai.example.toml`) serving gpt-5.5 through
+  the same OpenAI-compatible adapter.
 - **Governance:** virtual API keys, scopes, tenant context, allow/deny rules,
   request rate limits, token budgets, and exact-match response caching.
+- **Service decomposition:** `ferrogate auth serve` and `ferrogate billing
+  serve` run tenant/RBAC and token-usage settlement as independent REST
+  services from the same binary, each with an optional durable Supabase
+  backend — a durable, dead-letter-tracked outbox delivers settled usage from
+  the gateway to the billing service without blocking the request hot path.
 - **Agent and tool traffic:** MCP host/client support, native `POST /v1/mcp`
   JSON-RPC ingress, explicit `POST /v1/agent-runs`, governed tool execution,
-  plugin registration, managed `agent-worker` runtime boundaries, and audit
-  events.
+  plugin registration, an isolated `agent-worker` process for Firecracker-backed
+  execution, and audit events.
 - **Operator visibility:** request logs, usage and metering events, provider
   health, cache/tool metrics, agent run timelines, structured agent-run OTLP
   spans, Prometheus, OTLP export, Admin API, and dashboard.
@@ -119,6 +126,13 @@ Implemented agentic gateway surfaces include:
 - Explicit external-process provider support for local tests and harness
   adapters. Production managed execution should go through `agent-worker` and
   Firecracker microVM isolation.
+- A standalone `agent-worker` process boundary that owns Firecracker microVM
+  lifecycle, framework-handler adapters (Codex, Claude Code, Hermes), and
+  gateway-authorized governed execution of CLI, tool, MCP tool, skill, memory,
+  secret, network-egress, browser, REST, and filesystem actions. A shared
+  `--worker-type cloud|self-hosted` flag selects the trust/enforcement policy
+  on one binary; self-hosted report-only enforcement is not implemented yet,
+  so real execution subcommands currently require `cloud` (managed) mode.
 - Workflow graph policies with model/tool nodes, edge conditions, model-call
   and tool-call budgets, token budgets, iteration limits, counters, and runtime
   timelines.
@@ -191,20 +205,76 @@ For production client secrets, prefer hashed API keys:
 ferrogate hash-key --secret 'your-client-secret'
 ```
 
+## Service Decomposition
+
+`ferrogate` is one binary with subcommands that select which service process
+runs, rather than separate binaries per service:
+
+- `ferrogate run` (alias `gateway`) — the Pingora AI gateway.
+- `ferrogate auth serve` — the tenant/RBAC REST API, optionally backed by
+  Supabase for durable virtual API keys. See
+  [`docs/auth-service-contract.md`](docs/auth-service-contract.md).
+- `ferrogate billing serve` — the token-usage pricing and ledger REST API,
+  in-memory by default or durable via `--supabase-dsn`.
+- `ferrogate storage migrate-to-supabase` — one-shot migration of legacy
+  Postgres/MySQL control-plane state into Supabase.
+
+Point the gateway at a running billing service with a `[billing_service]`
+config section (`enabled`, `endpoint`, `timeout_millis`, optional
+`token`/`token_env`). When enabled, config validation fails closed unless every
+model (and fallback route) carries `input_price_per_1m`/`output_price_per_1m`,
+so monthly budget enforcement can never silently diverge from the billing
+service's own ledger. The gateway then reports each settled usage event to the
+billing service fire-and-forget — the billing round trip never blocks the
+request hot path — and a durable, dead-letter-tracked outbox re-delivers on
+failure.
+
+Try the full loop with the token4ai.cloud (gpt-5.5) example:
+
+```bash
+FERROGATE_BILLING_LISTEN=127.0.0.1:8092 cargo run -- billing serve
+TOKEN4AI_API_KEY=sk-... cargo run -- gateway --config config/ferrogate.token4ai.example.toml
+
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H 'authorization: Bearer client-secret' -H 'content-type: application/json' \
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}'
+
+curl -s http://127.0.0.1:8092/v1/billing/ledger
+```
+
+Note that `GET /v1/billing/ledger` belongs to the standalone billing service's
+own port (`8092` above), not to the gateway's `/admin` or `/v1` surface.
+
 ## Core Modules
 
 ```text
 crates/
-  ferrogate-cli             CLI, Pingora runtime wiring, gateway handlers
-  ferrogate-config          Caddyfile/TOML/YAML config model and parser
-  ferrogate-providers       AI provider adapters and model registry
+  agent-worker              Standalone process for isolated agent execution:
+                             Firecracker microVMs, framework-handler adapters,
+                             governed CLI/tool/MCP/browser/REST/filesystem actions
+  ferrogate-admin           Scaffolding for a future dedicated admin-API service;
+                             not yet wired into any binary
   ferrogate-auth            Standalone tenant and RBAC REST API service
-  ferrogate-policy          Policy decision models and engine
-  ferrogate-storage         Repository traits and control-plane storage boundary
-  ferrogate-billing         Token usage metering models and local event retention
-  ferrogate-observability   Metrics, spans, exporter contracts
-  ferrogate-runtime         Reload, lifecycle, bounded harness, managed worker isolation
+  ferrogate-billing         Standalone billing service: rate cards, ledger
+                             charging, durable outbox delivery
+  ferrogate-cli             CLI, Pingora runtime wiring, gateway/auth/billing/
+                             storage subcommands, gateway handlers
+  ferrogate-config          Caddyfile/TOML/YAML config model and parser
+  ferrogate-core            Shared domain primitives (tenant/request context,
+                             tool definitions, error types) used across crates
   ferrogate-mcp             MCP host/client manager and tool execution bridge
+  ferrogate-observability   Metrics, spans, exporter contracts
+  ferrogate-policy          Policy decision models and engine
+  ferrogate-providers       AI provider adapters and model registry
+  ferrogate-routing         Scaffolding for a future shared route-matching
+                             boundary; not yet consumed by the runtime
+  ferrogate-runtime         Reload, lifecycle, bounded harness, managed worker
+                             isolation
+  ferrogate-storage         Repository traits and control-plane storage
+                             boundary (in-memory, Postgres, MySQL, Supabase)
+tools/
+  ferrogate-test            End-to-end test harness driving admin/auth/gateway/
+                             billing/storage scenarios locally and via Docker
 ```
 
 ## Docker And Deployment
@@ -234,14 +304,27 @@ scripts/check-kubernetes-examples.sh
 helm template ferrogate charts/ferrogate
 ```
 
+These manifests currently deploy the gateway process only (`ferrogate run`) as
+a single container. The standalone billing and auth services (`ferrogate
+billing serve` / `ferrogate auth serve`, see
+[Service Decomposition](#service-decomposition)) ship in the same image but
+are not yet templated as sibling deployments — run them as their own
+workloads pointed at the gateway's `[billing_service]` config and auth
+contract until that lands.
+
 ## Admin API
 
 The checked-in OpenAPI 3.1 document lives at
 [`docs/openapi/admin-api.openapi.json`](docs/openapi/admin-api.openapi.json).
 
-Common runtime and admin surfaces:
+This is a representative subset — the OpenAPI document is authoritative for
+the full surface, which also covers virtual API keys, quota policies,
+self-hosted worker registration, MCP server/plugin CRUD, tenant/project/
+workspace management, and more.
 
 ```text
+GET  /healthz
+GET  /readyz
 GET  /v1/models
 POST /v1/chat/completions
 POST /v1/responses
@@ -254,6 +337,9 @@ GET  /v1/tools
 POST /v1/tools/execute
 POST /v1/mcp
 POST /v1/mcp/tool/execute
+POST /v1/functions/execute
+POST /v1/self-hosted-workers/heartbeat
+POST /v1/self-hosted-workers/runs/poll
 GET  /admin/v1/agent-runs
 GET  /admin/v1/agent-runs/{run_id}
 GET  /admin/v1/agent-upstreams
@@ -267,17 +353,29 @@ GET  /admin/v1/prompt-templates/{id}
 GET  /admin/v1/plugins
 GET  /admin/v1/plugins/{plugin_id}
 GET  /admin/v1/plugins/{plugin_id}/tools
+GET  /admin/v1/virtual-keys
+GET  /admin/v1/quota-policies
+GET  /admin/v1/self-hosted-workers
 GET  /admin/v1/status
 GET  /admin/v1/providers
 GET  /admin/v1/provider-health
 GET  /admin/v1/request-logs
+GET  /admin/v1/audit-events
 GET  /admin/v1/metering-events
+GET  /admin/v1/billing-events
 GET  /admin/v1/usage-aggregates
+GET  /admin/v1/usage-reports
+GET  /admin/v1/billing-outbox-dead-letters
+GET/POST /admin/v1/drain
 POST /admin/v1/config/validate
 POST /admin/v1/config/reload
 GET  /metrics
 GET  /admin
 ```
+
+The standalone billing service (`ferrogate billing serve`) exposes its own
+`GET /v1/billing/ledger` and `POST /v1/billing/charge` on its own listen
+address — these are billing-service routes, not gateway routes.
 
 ## Quality And Security
 
@@ -305,7 +403,9 @@ git diff --check
 ## Documentation
 
 - Product overview and status: [`docs/product-overview.md`](docs/product-overview.md)
+- Agentic gateway architecture: [`docs/agentic-gateway-architecture.md`](docs/agentic-gateway-architecture.md)
 - Agent framework compatibility: [`docs/agent-framework-compatibility.md`](docs/agent-framework-compatibility.md)
+- Agent worker protocol: [`docs/agent-worker-protocol.md`](docs/agent-worker-protocol.md)
 - Durable storage: [`docs/durable-storage.md`](docs/durable-storage.md)
 - Analytics warehouse: [`docs/analytics-warehouse.md`](docs/analytics-warehouse.md)
 - Cluster deployment: [`docs/cluster-deployment.md`](docs/cluster-deployment.md)
