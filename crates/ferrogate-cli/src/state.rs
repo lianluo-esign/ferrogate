@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     env, fs,
     io::ErrorKind,
-    net::{TcpStream, ToSocketAddrs},
+    net::{IpAddr, TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -35,6 +35,7 @@ use crate::extensions::{
     ToolExecutionResponse,
 };
 use crate::metering::{MeteringExportStatus, MeteringExporter};
+use crate::network_access::{resolve_client_ip, IpCidr, UnauthenticatedIpRateLimiter};
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
@@ -919,12 +920,27 @@ pub(crate) struct AppState {
     request_ids: Arc<AtomicU64>,
     drain: Arc<AtomicBool>,
     acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
+    ip_allowlist: Arc<Vec<IpCidr>>,
+    trust_forwarded_for: bool,
+    unauthenticated_rate_limit_per_minute: Option<u64>,
+    unauth_rate_limiter: Arc<UnauthenticatedIpRateLimiter>,
     /// `Provider.secret_ref` values resolved once at config load/reload time
     /// (issue #163), keyed by provider name. Resolving here (rather than per
     /// request) avoids a live Vault round-trip on every AI request; rotation
     /// propagates on the next `/admin/v1/config/reload`, mirroring how every
     /// other config field already picks up changes.
     resolved_provider_secrets: Arc<HashMap<String, String>>,
+}
+
+/// Outcome of [`AppState::check_network_access`]: `Allowed` lets the request
+/// proceed to `authenticate()`; the other variants carry enough context to
+/// write a 403/429 response and increment the matching metric before any
+/// virtual-key/storage lookup happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkAccessDecision {
+    Allowed,
+    IpDenied,
+    RateLimited,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2052,6 +2068,12 @@ struct GatewayMetricsAccumulator {
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
     tool_call_total: u64,
     tool_latency_ms_total: u64,
+    /// Requests rejected pre-authentication for not matching a configured
+    /// `network_access.ip_allowlist` (issue #166).
+    network_access_denied_total: u64,
+    /// Requests rejected pre-authentication for exceeding
+    /// `network_access.unauthenticated_rate_limit_per_minute` (issue #166).
+    network_access_rate_limited_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2342,6 +2364,20 @@ impl GatewayMetricsAccumulator {
         self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
     }
 
+    fn record_network_access_decision(&mut self, decision: NetworkAccessDecision) {
+        match decision {
+            NetworkAccessDecision::Allowed => {}
+            NetworkAccessDecision::IpDenied => {
+                self.network_access_denied_total =
+                    self.network_access_denied_total.saturating_add(1);
+            }
+            NetworkAccessDecision::RateLimited => {
+                self.network_access_rate_limited_total =
+                    self.network_access_rate_limited_total.saturating_add(1);
+            }
+        }
+    }
+
     fn snapshot(&self, service_name: String) -> GatewayMetricsSnapshot {
         GatewayMetricsSnapshot {
             service_name,
@@ -2366,6 +2402,8 @@ impl GatewayMetricsAccumulator {
             tool_latency_ms_total: self.tool_latency_ms_total,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
+            network_access_denied_total: self.network_access_denied_total,
+            network_access_rate_limited_total: self.network_access_rate_limited_total,
         }
     }
 }
@@ -3177,6 +3215,16 @@ impl AppState {
         } else {
             HashMap::new()
         };
+        let ip_allowlist: Vec<IpCidr> = config
+            .network_access
+            .ip_allowlist
+            .iter()
+            .map(|entry| {
+                IpCidr::parse(entry).expect(
+                    "config validation must reject invalid network_access.ip_allowlist entries",
+                )
+            })
+            .collect();
         let resolved_provider_secrets = resolve_provider_secret_refs(&config.providers);
         let mcp_servers = config.mcp_servers.clone();
         let cluster_sync = initial_cluster_sync_status(&config);
@@ -3262,6 +3310,12 @@ impl AppState {
             request_ids: Arc::new(AtomicU64::new(1)),
             drain: Arc::new(AtomicBool::new(false)),
             acme_renewal: None,
+            ip_allowlist: Arc::new(ip_allowlist),
+            trust_forwarded_for: config.network_access.trust_forwarded_for,
+            unauthenticated_rate_limit_per_minute: config
+                .network_access
+                .unauthenticated_rate_limit_per_minute,
+            unauth_rate_limiter: Arc::new(UnauthenticatedIpRateLimiter::default()),
             resolved_provider_secrets: Arc::new(resolved_provider_secrets),
         })
     }
@@ -3681,6 +3735,7 @@ impl AppState {
         next.request_ids = Arc::clone(&self.request_ids);
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
+        next.unauth_rate_limiter = Arc::clone(&self.unauth_rate_limiter);
         self.apply_analytics_config(&next.config.analytics);
         let _ = self.sync_control_plane_storage_from_config(&next.config);
         Ok(next)
@@ -3731,6 +3786,51 @@ impl AppState {
 
     pub(crate) fn auth_required(&self) -> bool {
         self.config.auth_service.enabled || !self.config.api_keys.is_empty()
+    }
+
+    /// Pre-authentication network gate (issue #166): rejects requests whose
+    /// client IP is outside a configured allowlist, or that exceed the
+    /// unauthenticated per-source-IP rate limit — both checked before
+    /// `authenticate()` runs, so a flood or credential-stuffing scan never
+    /// pays the virtual-key/storage lookup cost. A missing/unparsable client
+    /// IP is treated as denied whenever an allowlist is configured (fail
+    /// closed), and is exempt from rate limiting (nothing to key it on).
+    pub(crate) fn check_network_access(
+        &self,
+        headers: &HeaderMap,
+        peer_addr: Option<IpAddr>,
+    ) -> NetworkAccessDecision {
+        let client_ip = resolve_client_ip(headers, peer_addr, self.trust_forwarded_for);
+
+        if !self.ip_allowlist.is_empty() {
+            let allowed =
+                client_ip.is_some_and(|ip| self.ip_allowlist.iter().any(|cidr| cidr.contains(&ip)));
+            if !allowed {
+                self.record_network_access_decision(NetworkAccessDecision::IpDenied);
+                return NetworkAccessDecision::IpDenied;
+            }
+        }
+
+        if let Some(limit) = self.unauthenticated_rate_limit_per_minute {
+            if let Some(ip) = client_ip {
+                let now_minute = now_unix_seconds().unwrap_or(0) / 60;
+                if !self.unauth_rate_limiter.allow(ip, now_minute, limit) {
+                    self.record_network_access_decision(NetworkAccessDecision::RateLimited);
+                    return NetworkAccessDecision::RateLimited;
+                }
+            }
+        }
+
+        NetworkAccessDecision::Allowed
+    }
+
+    fn record_network_access_decision(&self, decision: NetworkAccessDecision) {
+        match self.metrics.lock() {
+            Ok(mut metrics) => metrics.record_network_access_decision(decision),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .record_network_access_decision(decision),
+        }
     }
 
     pub(crate) fn storage_status(&self) -> StorageBackendEvidence {
@@ -5149,6 +5249,8 @@ impl AppState {
                 tool_latency_ms_total: 0,
                 token_totals: TokenMetricTotals::default(),
                 model_provider_totals: Vec::new(),
+                network_access_denied_total: 0,
+                network_access_rate_limited_total: 0,
             })
     }
 

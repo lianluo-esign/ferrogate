@@ -10,6 +10,7 @@ use pingora::{proxy::Session, Result as PingoraResult};
 use crate::{
     responses::{cors_allowed_origin, write_cors_preflight_response, write_json_error},
     routing::{build_target_uri, normalize_host},
+    state::NetworkAccessDecision,
 };
 
 use super::{FerroGateway, ProxyContext};
@@ -28,6 +29,37 @@ impl FerroGateway {
         ctx.traceparent = trace.traceparent;
         ctx.tracestate = trace.tracestate;
         let path = req.uri.path().to_string();
+        let request_headers = req.headers.clone();
+        let peer_ip = session
+            .client_addr()
+            .and_then(|addr| addr.as_inet())
+            .map(|inet| inet.ip());
+
+        match state.check_network_access(&request_headers, peer_ip) {
+            NetworkAccessDecision::Allowed => {}
+            NetworkAccessDecision::IpDenied => {
+                write_json_error(
+                    session,
+                    StatusCode::FORBIDDEN,
+                    "ip_denied",
+                    "source IP is not permitted",
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(true);
+            }
+            NetworkAccessDecision::RateLimited => {
+                write_json_error(
+                    session,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "unauthenticated_rate_limited",
+                    "too many requests from this source; try again later",
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
 
         if req.method == http::Method::OPTIONS
             && path.starts_with("/admin/")

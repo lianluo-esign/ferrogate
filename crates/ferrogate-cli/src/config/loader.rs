@@ -222,6 +222,7 @@ impl Config {
                     })
                 })
                 .collect(),
+            network_access: crate::config::NetworkAccessConfig::default(),
         }
     }
 

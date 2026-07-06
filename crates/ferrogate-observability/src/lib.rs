@@ -357,6 +357,12 @@ pub struct GatewayMetricsSnapshot {
     pub tool_latency_ms_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
+    /// Requests rejected pre-authentication for not matching a configured
+    /// `network_access.ip_allowlist` (issue #166).
+    pub network_access_denied_total: u64,
+    /// Requests rejected pre-authentication for exceeding
+    /// `network_access.unauthenticated_rate_limit_per_minute` (issue #166).
+    pub network_access_rate_limited_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,6 +522,28 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_guardrail_redactions_total {}\n",
         snapshot.guardrail_redaction_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_network_access_denied_total",
+        "Total requests rejected pre-authentication for not matching the configured IP allowlist.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_network_access_denied_total {}\n",
+        snapshot.network_access_denied_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_network_access_rate_limited_total",
+        "Total requests rejected pre-authentication for exceeding the unauthenticated per-source-IP rate limit.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_network_access_rate_limited_total {}\n",
+        snapshot.network_access_rate_limited_total
     ));
 
     push_help(
@@ -1153,6 +1181,8 @@ mod tests {
                 requests: 1,
                 total_tokens: 8,
             }],
+            network_access_denied_total: 3,
+            network_access_rate_limited_total: 4,
         };
 
         let text = render_prometheus_text(&snapshot);
@@ -1164,6 +1194,8 @@ mod tests {
         assert!(text.contains("ferrogate_guardrail_matches_total 2"));
         assert!(text.contains("ferrogate_guardrail_denials_total 1"));
         assert!(text.contains("ferrogate_guardrail_redactions_total 1"));
+        assert!(text.contains("ferrogate_network_access_denied_total 3"));
+        assert!(text.contains("ferrogate_network_access_rate_limited_total 4"));
         assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));
         assert!(text.contains("ferrogate_mcp_tool_calls_total 2"));
         assert!(text.contains("ferrogate_mcp_tool_latency_ms_total 17"));

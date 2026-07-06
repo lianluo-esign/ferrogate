@@ -2560,6 +2560,75 @@ fn accepts_mcp_policy_targets() {
     config.validate().unwrap();
 }
 
+#[test]
+fn accepts_empty_network_access_config_by_default() {
+    let config = Config::default();
+    config.validate().unwrap();
+}
+
+#[test]
+fn accepts_valid_ip_and_cidr_allowlist_entries() {
+    let config = Config {
+        network_access: NetworkAccessConfig {
+            ip_allowlist: vec![
+                "203.0.113.7".into(),
+                "10.0.0.0/8".into(),
+                "2001:db8::/32".into(),
+            ],
+            trust_forwarded_for: false,
+            unauthenticated_rate_limit_per_minute: Some(600),
+        },
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_invalid_ip_allowlist_entry() {
+    let config = Config {
+        network_access: NetworkAccessConfig {
+            ip_allowlist: vec!["not-an-ip".into()],
+            trust_forwarded_for: false,
+            unauthenticated_rate_limit_per_minute: None,
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field network_access.ip_allowlist[0]"));
+}
+
+#[test]
+fn rejects_ip_allowlist_entry_with_invalid_prefix_length() {
+    let config = Config {
+        network_access: NetworkAccessConfig {
+            ip_allowlist: vec!["10.0.0.0/33".into()],
+            trust_forwarded_for: false,
+            unauthenticated_rate_limit_per_minute: None,
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field network_access.ip_allowlist[0]"));
+}
+
+#[test]
+fn rejects_zero_unauthenticated_rate_limit() {
+    let config = Config {
+        network_access: NetworkAccessConfig {
+            ip_allowlist: vec![],
+            trust_forwarded_for: false,
+            unauthenticated_rate_limit_per_minute: Some(0),
+        },
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field network_access.unauthenticated_rate_limit_per_minute"));
+}
+
 fn upstream() -> Upstream {
     Upstream {
         name: "backend".into(),

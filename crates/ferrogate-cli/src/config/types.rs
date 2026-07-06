@@ -74,6 +74,32 @@ pub(crate) struct Config {
     pub(crate) upstreams: Vec<Upstream>,
     #[serde(default)]
     pub(crate) routes: Vec<RouteRule>,
+    #[serde(default)]
+    pub(crate) network_access: NetworkAccessConfig,
+}
+
+/// Pre-authentication network controls (issue #166), applied to every
+/// request before virtual-key/storage lookups. All fields are additive and
+/// default to the pre-#166 behavior (no allowlist, no pre-auth throttling).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct NetworkAccessConfig {
+    /// CIDR ranges (or bare IPs) allowed to reach the gateway. Empty means
+    /// "no restriction" — every source IP is allowed, matching prior
+    /// behavior.
+    #[serde(default)]
+    pub(crate) ip_allowlist: Vec<String>,
+    /// Whether to trust `X-Forwarded-For`/`X-Real-IP` over the raw TCP peer
+    /// address when resolving the client IP for allowlist/rate-limit
+    /// decisions. Only enable this when FerroGate sits behind a reverse
+    /// proxy that itself overwrites these headers — otherwise any client
+    /// can spoof its apparent source IP. Defaults to `false` (trust only
+    /// the raw peer address).
+    #[serde(default)]
+    pub(crate) trust_forwarded_for: bool,
+    /// Maximum requests per source IP per minute before authentication is
+    /// even attempted. `None` (the default) disables pre-auth throttling.
+    #[serde(default)]
+    pub(crate) unauthenticated_rate_limit_per_minute: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1640,6 +1666,7 @@ impl Default for Config {
             cluster: ClusterConfig::default(),
             upstreams: Vec::new(),
             routes: Vec::new(),
+            network_access: NetworkAccessConfig::default(),
         }
     }
 }

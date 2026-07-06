@@ -120,6 +120,7 @@ impl Config {
         self.validate_reliability()?;
         self.validate_agent_runtime()?;
         self.validate_cluster()?;
+        self.validate_network_access()?;
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
         Ok(())
@@ -866,6 +867,26 @@ impl Config {
                     bail!("field cluster.counter_backend: only local and redis are supported");
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn validate_network_access(&self) -> AnyResult<()> {
+        for (index, entry) in self.network_access.ip_allowlist.iter().enumerate() {
+            crate::network_access::IpCidr::parse(entry).map_err(|error| {
+                anyhow::anyhow!(
+                    "field network_access.ip_allowlist[{index}]: {error} (value: {entry:?})"
+                )
+            })?;
+        }
+        if self
+            .network_access
+            .unauthenticated_rate_limit_per_minute
+            .is_some_and(|limit| limit == 0)
+        {
+            bail!(
+                "field network_access.unauthenticated_rate_limit_per_minute: must be greater than zero when set"
+            );
         }
         Ok(())
     }

@@ -16,6 +16,7 @@ mod extensions;
 mod gateway;
 mod lifecycle;
 mod metering;
+mod network_access;
 mod responses;
 mod routing;
 #[cfg(test)]
