@@ -262,7 +262,8 @@ fn rejects_model_without_prices_when_billing_service_enabled() {
     };
 
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("billing_service.enabled requires input_price_per_1m and output_price_per_1m"));
+    assert!(error
+        .contains("billing_service.enabled requires input_price_per_1m and output_price_per_1m"));
 }
 
 #[test]
@@ -290,7 +291,9 @@ fn rejects_fallback_route_without_prices_when_billing_service_enabled() {
     };
 
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("fallbacks[0]: billing_service.enabled requires input_price_per_1m and output_price_per_1m"));
+    assert!(error.contains(
+        "fallbacks[0]: billing_service.enabled requires input_price_per_1m and output_price_per_1m"
+    ));
 }
 
 #[test]
@@ -995,6 +998,9 @@ fn validates_guardrail_keyword_scope_and_effect() {
             keywords: vec!["secret".into()],
             regex: vec![],
             max_input_bytes: None,
+            provider: GuardrailProviderKind::None,
+            provider_endpoint: None,
+            provider_timeout_ms: 2_000,
             effect: GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),
@@ -1024,6 +1030,9 @@ fn validates_response_guardrail_redact_effect() {
             keywords: vec!["secret".into()],
             regex: vec![],
             max_input_bytes: None,
+            provider: GuardrailProviderKind::None,
+            provider_endpoint: None,
+            provider_timeout_ms: 2_000,
             effect: GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
@@ -1054,6 +1063,9 @@ fn validates_guardrail_regex_and_max_input_bytes() {
                 keywords: vec![],
                 regex: vec![r"ABC-[0-9]+".into()],
                 max_input_bytes: None,
+                provider: GuardrailProviderKind::None,
+                provider_endpoint: None,
+                provider_timeout_ms: 2_000,
                 effect: GuardrailEffect::Deny,
                 code: "guardrail_regex_blocked".into(),
                 message: "blocked by regex guardrail".into(),
@@ -1071,6 +1083,9 @@ fn validates_guardrail_regex_and_max_input_bytes() {
                 keywords: vec![],
                 regex: vec![],
                 max_input_bytes: Some(1024),
+                provider: GuardrailProviderKind::None,
+                provider_endpoint: None,
+                provider_timeout_ms: 2_000,
                 effect: GuardrailEffect::Deny,
                 code: "guardrail_input_too_large".into(),
                 message: "input is too large".into(),
@@ -1101,6 +1116,9 @@ fn rejects_invalid_guardrail_regex() {
             keywords: vec![],
             regex: vec!["[".into()],
             max_input_bytes: None,
+            provider: GuardrailProviderKind::None,
+            provider_endpoint: None,
+            provider_timeout_ms: 2_000,
             effect: GuardrailEffect::Deny,
             code: "guardrail_regex_blocked".into(),
             message: "blocked by regex guardrail".into(),
@@ -1131,6 +1149,9 @@ fn rejects_response_guardrail_max_input_bytes() {
             keywords: vec![],
             regex: vec![],
             max_input_bytes: Some(1024),
+            provider: GuardrailProviderKind::None,
+            provider_endpoint: None,
+            provider_timeout_ms: 2_000,
             effect: GuardrailEffect::Deny,
             code: "guardrail_input_too_large".into(),
             message: "input is too large".into(),
@@ -1161,6 +1182,9 @@ fn rejects_request_guardrail_redact_effect() {
             keywords: vec!["secret".into()],
             regex: vec![],
             max_input_bytes: None,
+            provider: GuardrailProviderKind::None,
+            provider_endpoint: None,
+            provider_timeout_ms: 2_000,
             effect: GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
@@ -1190,6 +1214,9 @@ fn rejects_guardrail_with_unknown_model() {
             keywords: vec!["secret".into()],
             regex: vec![],
             max_input_bytes: None,
+            provider: GuardrailProviderKind::None,
+            provider_endpoint: None,
+            provider_timeout_ms: 2_000,
             effect: GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),
@@ -1199,6 +1226,124 @@ fn rejects_guardrail_with_unknown_model() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("unknown model missing-model"));
+}
+
+fn custom_http_guardrail() -> GuardrailRule {
+    GuardrailRule {
+        id: "pii-detector".into(),
+        name: "External PII detector".into(),
+        enabled: true,
+        stage: GuardrailStage::Request,
+        organization_ids: vec![],
+        project_ids: vec![],
+        api_key_ids: vec![],
+        models: vec![],
+        providers: vec![],
+        keywords: vec![],
+        regex: vec![],
+        max_input_bytes: None,
+        provider: GuardrailProviderKind::CustomHttp,
+        provider_endpoint: Some("https://guardrails.example.test/check".into()),
+        provider_timeout_ms: 2_000,
+        effect: GuardrailEffect::Deny,
+        code: "guardrail_pii_detected".into(),
+        message: "blocked by external PII detector".into(),
+    }
+}
+
+#[test]
+fn accepts_guardrail_with_custom_http_provider_only() {
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![custom_http_guardrail()],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_custom_http_guardrail_without_endpoint() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_endpoint = None;
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("required when provider is custom_http"));
+}
+
+#[test]
+fn rejects_custom_http_guardrail_with_invalid_endpoint_scheme() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_endpoint = Some("ftp://guardrails.example.test/check".into());
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("must use http or https"));
+}
+
+#[test]
+fn rejects_guardrail_provider_endpoint_when_provider_is_none() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider = GuardrailProviderKind::None;
+    guardrail.keywords = vec!["secret".into()];
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("only valid when provider is custom_http"));
+}
+
+#[test]
+fn rejects_guardrail_with_zero_provider_timeout() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_timeout_ms = 0;
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("provider_timeout_ms: must be greater than zero"));
+}
+
+#[test]
+fn rejects_guardrail_with_no_detection_mechanism_and_no_provider() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider = GuardrailProviderKind::None;
+    guardrail.provider_endpoint = None;
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("at least one keyword, regex, max_input_bytes, or provider is required"));
 }
 
 #[test]

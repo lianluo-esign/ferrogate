@@ -691,12 +691,30 @@ pub(crate) struct GuardrailRule {
     pub(crate) regex: Vec<String>,
     #[serde(default)]
     pub(crate) max_input_bytes: Option<usize>,
+    #[serde(default)]
+    pub(crate) provider: GuardrailProviderKind,
+    #[serde(default)]
+    pub(crate) provider_endpoint: Option<String>,
+    #[serde(default = "default_guardrail_provider_timeout_ms")]
+    pub(crate) provider_timeout_ms: u64,
     #[serde(default = "default_guardrail_effect")]
     pub(crate) effect: GuardrailEffect,
     #[serde(default = "default_guardrail_code")]
     pub(crate) code: String,
     #[serde(default = "default_guardrail_message")]
     pub(crate) message: String,
+}
+
+/// Selects how a [`GuardrailRule`] decides whether text matches: in-process
+/// keyword/regex/length checks (`None`, the default) or delegation to an
+/// external detector reachable over HTTP (`CustomHttp`) — e.g. a dedicated
+/// PII/jailbreak/toxicity classifier that can't be expressed as a regex.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuardrailProviderKind {
+    #[default]
+    None,
+    CustomHttp,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1336,6 +1354,10 @@ fn default_guardrail_code() -> String {
 
 fn default_guardrail_message() -> String {
     "request blocked by guardrail".to_string()
+}
+
+fn default_guardrail_provider_timeout_ms() -> u64 {
+    2_000
 }
 
 fn default_extension_source() -> String {

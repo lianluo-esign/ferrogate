@@ -1710,12 +1710,13 @@ impl Config {
             if guardrail.name.trim().is_empty() {
                 bail!("field guardrails[{index}].name: cannot be empty");
             }
-            if guardrail.keywords.is_empty()
+            if guardrail.provider == super::GuardrailProviderKind::None
+                && guardrail.keywords.is_empty()
                 && guardrail.regex.is_empty()
                 && guardrail.max_input_bytes.is_none()
             {
                 bail!(
-                    "field guardrails[{index}]: at least one keyword, regex, or max_input_bytes is required"
+                    "field guardrails[{index}]: at least one keyword, regex, max_input_bytes, or provider is required"
                 );
             }
             for (keyword_index, keyword) in guardrail.keywords.iter().enumerate() {
@@ -1777,6 +1778,31 @@ impl Config {
                 bail!(
                     "field guardrails[{index}].max_input_bytes: max input length guardrails apply to request stage only"
                 );
+            }
+            match guardrail.provider {
+                super::GuardrailProviderKind::None => {
+                    if guardrail.provider_endpoint.is_some() {
+                        bail!(
+                            "field guardrails[{index}].provider_endpoint: only valid when provider is custom_http"
+                        );
+                    }
+                }
+                super::GuardrailProviderKind::CustomHttp => {
+                    let endpoint = guardrail.provider_endpoint.as_deref().unwrap_or_default();
+                    if endpoint.trim().is_empty() {
+                        bail!(
+                            "field guardrails[{index}].provider_endpoint: required when provider is custom_http"
+                        );
+                    }
+                    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                        bail!(
+                            "field guardrails[{index}].provider_endpoint: must use http or https"
+                        );
+                    }
+                }
+            }
+            if guardrail.provider_timeout_ms == 0 {
+                bail!("field guardrails[{index}].provider_timeout_ms: must be greater than zero");
             }
         }
 

@@ -26,9 +26,9 @@ use crate::billing_client::BillingReporter;
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, AgentWorkflowPolicy,
     AnalyticsConfig, AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect,
-    GuardrailStage, HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate,
-    PromptTemplateStatus, Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode,
-    Upstream,
+    GuardrailProviderKind, GuardrailStage, HeaderMutation, Model, PolicyRule as ConfigPolicyRule,
+    PromptTemplate, PromptTemplateStatus, Provider, RouteRule, SkillPackage, StorageConfig,
+    StorageMigrationMode, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -1541,6 +1541,9 @@ struct GuardrailRuleRuntime {
     keywords: Vec<String>,
     regex: Vec<Regex>,
     max_input_bytes: Option<usize>,
+    provider: GuardrailProviderKind,
+    provider_endpoint: Option<String>,
+    provider_timeout_ms: u64,
     code: String,
     message: String,
 }
@@ -3201,6 +3204,9 @@ impl AppState {
                     })
                     .collect(),
                 max_input_bytes: rule.max_input_bytes,
+                provider: rule.provider,
+                provider_endpoint: rule.provider_endpoint.clone(),
+                provider_timeout_ms: rule.provider_timeout_ms,
                 code: rule.code.clone(),
                 message: rule.message.clone(),
             })
@@ -4771,6 +4777,45 @@ impl AppState {
             }
             if !allows_optional_scope(&rule.providers, provider) {
                 return None;
+            }
+            if rule.provider == GuardrailProviderKind::CustomHttp {
+                let endpoint = rule.provider_endpoint.as_deref()?;
+                return match call_guardrail_provider(
+                    endpoint,
+                    rule.provider_timeout_ms,
+                    stage,
+                    tenant,
+                    model,
+                    provider,
+                    body_text,
+                ) {
+                    Ok(Some(matched_text)) => Some(GuardrailMatch {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        effect: rule.effect,
+                        matched_text,
+                        redaction_regex: None,
+                        code: rule.code.clone(),
+                        message: rule.message.clone(),
+                    }),
+                    Ok(None) => None,
+                    Err(reason) => Some(GuardrailMatch {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        // Fail closed: a security control we can't reach is
+                        // treated as a deny regardless of the rule's
+                        // configured effect, since there is nothing to
+                        // redact when the provider never responded.
+                        effect: GuardrailEffect::Deny,
+                        matched_text: String::new(),
+                        redaction_regex: None,
+                        code: "guardrail_provider_unavailable".to_string(),
+                        message: format!(
+                            "guardrail provider for rule '{}' is unavailable: {reason}",
+                            rule.name
+                        ),
+                    }),
+                };
             }
             let matched = if let Some(max_input_bytes) = rule.max_input_bytes {
                 if body_text.len() > max_input_bytes {
@@ -7757,6 +7802,59 @@ fn allows_optional_scope(allowed_values: &[String], actual: Option<&str>) -> boo
         || actual.is_some_and(|actual| allowed_values.iter().any(|allowed| allowed == actual))
 }
 
+/// Calls an external guardrail detector over HTTP for a `custom_http`
+/// [`GuardrailProviderKind`] rule. Returns `Ok(Some(matched_text))` when the
+/// provider flags the content, `Ok(None)` when it does not, and `Err` when
+/// the provider could not be reached or returned a malformed response — the
+/// caller treats `Err` as fail-closed since there is no detection result to
+/// trust either way.
+fn call_guardrail_provider(
+    endpoint: &str,
+    timeout_ms: u64,
+    stage: GuardrailStage,
+    tenant: &ferrogate_core::TenantContext,
+    model: Option<&str>,
+    provider: Option<&str>,
+    body_text: &str,
+) -> Result<Option<String>, String> {
+    let request_body = serde_json::json!({
+        "stage": stage,
+        "tenant": tenant,
+        "model": model,
+        "provider": provider,
+        "text": body_text,
+    });
+    let body_bytes = serde_json::to_vec(&request_body)
+        .map_err(|error| format!("failed to encode guardrail provider request: {error}"))?;
+    let response_bytes = ferrogate_secrets::http_post(
+        endpoint,
+        &[("Content-Type".to_string(), "application/json".to_string())],
+        &body_bytes,
+        Duration::from_millis(timeout_ms),
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    let response: serde_json::Value = serde_json::from_slice(&response_bytes)
+        .map_err(|error| format!("invalid JSON response from guardrail provider: {error}"))?;
+    let is_match = response
+        .get("match")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            "guardrail provider response is missing a boolean 'match' field".to_string()
+        })?;
+    if !is_match {
+        return Ok(None);
+    }
+    let matched_text = response
+        .get("matched_text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "guardrail provider reported a match but is missing 'matched_text'".to_string()
+        })?
+        .to_string();
+    Ok(Some(matched_text))
+}
+
 fn fallback_priority_group(routes: &[ModelRoute]) -> Option<(u32, usize)> {
     let priority = routes.first()?.priority;
     let end = routes
@@ -8528,6 +8626,9 @@ mod tests {
                 keywords: vec!["secret".into()],
                 regex: vec![],
                 max_input_bytes: None,
+                provider: GuardrailProviderKind::None,
+                provider_endpoint: None,
+                provider_timeout_ms: 2_000,
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_blocked".into(),
                 message: "blocked by guardrail".into(),
@@ -8601,6 +8702,9 @@ mod tests {
                 keywords: vec!["secret".into()],
                 regex: vec![],
                 max_input_bytes: None,
+                provider: GuardrailProviderKind::None,
+                provider_endpoint: None,
+                provider_timeout_ms: 2_000,
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_blocked".into(),
                 message: "blocked by guardrail".into(),
@@ -8661,6 +8765,9 @@ mod tests {
                 keywords: vec!["secret".into()],
                 regex: vec![],
                 max_input_bytes: None,
+                provider: GuardrailProviderKind::None,
+                provider_endpoint: None,
+                provider_timeout_ms: 2_000,
                 effect: crate::config::GuardrailEffect::Redact,
                 code: "guardrail_redacted".into(),
                 message: "redacted by guardrail".into(),
@@ -8686,6 +8793,180 @@ mod tests {
         assert_eq!(snapshot.guardrail_match_total, 1);
         assert_eq!(snapshot.guardrail_denial_total, 0);
         assert_eq!(snapshot.guardrail_redaction_total, 1);
+    }
+
+    /// Spawns a one-shot plain-HTTP mock guardrail provider on `127.0.0.1`
+    /// that reads a single `Content-Length`-bounded request, records its
+    /// JSON body, and replies with `response_body`. `http_post` always sends
+    /// `Connection: close`, so a single accepted connection is enough.
+    fn spawn_guardrail_provider_mock(
+        response_body: &'static str,
+    ) -> (String, Arc<Mutex<Option<serde_json::Value>>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/check", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(None));
+        let server_captured = Arc::clone(&captured);
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "connection closed before request was complete");
+                raw.extend_from_slice(&buffer[..read]);
+                if let Some(position) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let content_length: usize = String::from_utf8_lossy(&raw[..header_end])
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0);
+            while raw.len() < header_end + content_length {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "connection closed before body was complete");
+                raw.extend_from_slice(&buffer[..read]);
+            }
+            let body = &raw[header_end..header_end + content_length];
+            *server_captured.lock().unwrap() = Some(serde_json::from_slice(body).unwrap());
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        (endpoint, captured)
+    }
+
+    fn custom_http_guardrail_rule(provider_endpoint: String) -> crate::config::GuardrailRule {
+        crate::config::GuardrailRule {
+            id: "pii-detector".into(),
+            name: "External PII detector".into(),
+            enabled: true,
+            stage: crate::config::GuardrailStage::Request,
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec![],
+            models: vec![],
+            providers: vec![],
+            keywords: vec![],
+            regex: vec![],
+            max_input_bytes: None,
+            provider: GuardrailProviderKind::CustomHttp,
+            provider_endpoint: Some(provider_endpoint),
+            provider_timeout_ms: 2_000,
+            effect: crate::config::GuardrailEffect::Deny,
+            code: "guardrail_pii_detected".into(),
+            message: "blocked by external PII detector".into(),
+        }
+    }
+
+    #[test]
+    fn matches_guardrail_via_custom_http_provider_and_sends_request_context() {
+        let (endpoint, captured) = spawn_guardrail_provider_mock(
+            r#"{"match":true,"matched_text":"john@example.com","category":"pii"}"#,
+        );
+        let config = Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            guardrails: vec![custom_http_guardrail_rule(endpoint)],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("org_demo".into()),
+            project_id: Some("project_demo".into()),
+            ..Default::default()
+        };
+
+        let matched = state
+            .match_guardrail(
+                crate::config::GuardrailStage::Request,
+                &tenant,
+                Some("fast-chat"),
+                Some("openai"),
+                "my email is john@example.com",
+            )
+            .expect("custom_http provider should report a match");
+
+        assert_eq!(matched.rule_id, "pii-detector");
+        assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+        assert_eq!(matched.matched_text, "john@example.com");
+        assert_eq!(
+            matched.redact_text("my email is john@example.com"),
+            "my email is [REDACTED]"
+        );
+
+        let request = captured.lock().unwrap().take().expect("request captured");
+        assert_eq!(request["stage"], "request");
+        assert_eq!(request["model"], "fast-chat");
+        assert_eq!(request["provider"], "openai");
+        assert_eq!(request["text"], "my email is john@example.com");
+        assert_eq!(request["tenant"]["organization_id"], "org_demo");
+        assert_eq!(request["tenant"]["project_id"], "project_demo");
+    }
+
+    #[test]
+    fn custom_http_provider_no_match_returns_none() {
+        let (endpoint, _captured) = spawn_guardrail_provider_mock(r#"{"match":false}"#);
+        let config = Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            guardrails: vec![custom_http_guardrail_rule(endpoint)],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        assert!(state
+            .match_guardrail(
+                crate::config::GuardrailStage::Request,
+                &ferrogate_core::TenantContext::default(),
+                Some("fast-chat"),
+                Some("openai"),
+                "nothing suspicious here",
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn custom_http_provider_failure_fails_closed_regardless_of_configured_effect() {
+        // Bind then immediately drop the listener: the port is valid but
+        // nothing is listening, so the connection is refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/check", listener.local_addr().unwrap());
+        drop(listener);
+
+        let mut rule = custom_http_guardrail_rule(endpoint);
+        rule.effect = crate::config::GuardrailEffect::Redact;
+        let config = Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            guardrails: vec![rule],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+
+        let matched = state
+            .match_guardrail(
+                crate::config::GuardrailStage::Request,
+                &ferrogate_core::TenantContext::default(),
+                Some("fast-chat"),
+                Some("openai"),
+                "hello",
+            )
+            .expect("unreachable provider must fail closed with a match");
+
+        assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
+        assert_eq!(matched.code, "guardrail_provider_unavailable");
+        assert!(matched.message.contains("External PII detector"));
     }
 
     #[test]
@@ -8729,6 +9010,9 @@ mod tests {
                 keywords: vec![],
                 regex: vec![r"token-[0-9]+".into()],
                 max_input_bytes: None,
+                provider: GuardrailProviderKind::None,
+                provider_endpoint: None,
+                provider_timeout_ms: 2_000,
                 effect: crate::config::GuardrailEffect::Redact,
                 code: "guardrail_redacted".into(),
                 message: "redacted by guardrail".into(),
@@ -8771,6 +9055,9 @@ mod tests {
                 keywords: vec![],
                 regex: vec![],
                 max_input_bytes: Some(8),
+                provider: GuardrailProviderKind::None,
+                provider_endpoint: None,
+                provider_timeout_ms: 2_000,
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_input_too_large".into(),
                 message: "input is too large".into(),
@@ -9121,6 +9408,7 @@ mod tests {
 
         assert!(state.provider_circuit_allows("openai"));
     }
+
     #[test]
     fn provider_config_prefers_resolved_secret_ref_over_api_key_env() {
         std::env::set_var("FERROGATE_STATE_TEST_SECRET_REF_KEY", "from-secret-ref");
