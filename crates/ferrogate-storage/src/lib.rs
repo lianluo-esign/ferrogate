@@ -1194,6 +1194,34 @@ impl PostgresControlPlaneStore {
         Ok(rows.iter().map(admin_user_membership_from_row).collect())
     }
 
+    fn list_admin_user_memberships_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, user_id, tenant_id, role, created_at_unix \
+                 FROM admin_user_tenant_memberships WHERE tenant_id = $1 ORDER BY id ASC",
+                &[&tenant_id],
+            )
+        })?;
+        Ok(rows.iter().map(admin_user_membership_from_row).collect())
+    }
+
+    fn delete_admin_user_membership(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, StorageError> {
+        let affected = self.with_client(|client| {
+            client.execute(
+                "DELETE FROM admin_user_tenant_memberships WHERE user_id = $1 AND tenant_id = $2",
+                &[&user_id, &tenant_id],
+            )
+        })?;
+        Ok(affected > 0)
+    }
+
     fn upsert_admin_user_refresh_token(
         &self,
         token: &StoredAdminUserRefreshToken,
@@ -4965,6 +4993,30 @@ impl RuntimeControlPlaneState {
             .collect()
     }
 
+    pub fn list_admin_user_memberships_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Vec<StoredAdminUserMembership> {
+        self.admin_user_memberships
+            .list()
+            .into_iter()
+            .filter(|membership| membership.tenant_id == tenant_id)
+            .collect()
+    }
+
+    pub fn delete_admin_user_membership(&mut self, user_id: &str, tenant_id: &str) -> bool {
+        let Some(id) = self
+            .admin_user_memberships
+            .list()
+            .into_iter()
+            .find(|membership| membership.user_id == user_id && membership.tenant_id == tenant_id)
+            .map(|membership| membership.id)
+        else {
+            return false;
+        };
+        self.admin_user_memberships.remove(&id).is_some()
+    }
+
     pub fn upsert_admin_user_refresh_token(&mut self, token: StoredAdminUserRefreshToken) {
         self.admin_user_refresh_tokens
             .insert(token.id.clone(), token);
@@ -6764,6 +6816,45 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_admin_user_memberships_by_user(user_id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    /// Lists every teammate membership for a tenant (issue #162), used by the
+    /// admin console's team-management view.
+    pub fn list_admin_user_memberships_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredAdminUserMembership>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_admin_user_memberships_by_tenant(tenant_id))
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_admin_user_memberships_by_tenant(tenant_id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    /// Revokes a teammate's membership in a tenant (issue #162). Returns
+    /// `true` if a membership existed and was removed.
+    pub fn delete_admin_user_membership(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.delete_admin_user_membership(user_id, tenant_id)
+                })
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_admin_user_membership(user_id, tenant_id)
             }
             RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }

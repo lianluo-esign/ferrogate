@@ -324,3 +324,518 @@ fn register_allows_reusing_an_organization_name() {
     let second = register(&console, "second@example.com", "supersecret2");
     assert_eq!(second.status, 201);
 }
+
+// -- issue #162: team invites, role changes, and revocation ----------------
+
+#[test]
+fn invite_adds_an_existing_user_to_the_tenant_with_a_non_owner_role() {
+    let console = console();
+    let owner = body_json(&register(&console, "owner@acme.test", "correct-horse-1"));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    // The invitee must already have registered somewhere (creating their own
+    // tenant as a side effect) before they can be invited elsewhere.
+    let invitee = body_json(&register(&console, "member@acme.test", "correct-horse-2"));
+    let invitee_user_id = invitee["user"]["id"].as_str().unwrap();
+
+    let invite = handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "member@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    assert_eq!(invite.status, 201);
+    let invite_body = body_json(&invite);
+    assert_eq!(invite_body["role"], "member");
+    assert_eq!(invite_body["user_id"], invitee_user_id);
+
+    let list = handle_admin_team_list(&console, owner_token);
+    assert_eq!(list.status, 200);
+    let members = body_json(&list)["members"].clone();
+    let roles: Vec<String> = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|member| member["role"].as_str().unwrap().to_string())
+        .collect();
+    assert!(roles.contains(&"owner".to_string()));
+    assert!(roles.contains(&"member".to_string()));
+
+    // StoredAdminUserMembership.role is now set to something other than
+    // "owner" via a real code path (acceptance criterion for #162).
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    let memberships = console
+        .repositories
+        .list_admin_user_memberships_by_tenant(owner_tenant_id)
+        .unwrap();
+    assert!(memberships
+        .iter()
+        .any(|membership| membership.user_id == invitee_user_id && membership.role == "member"));
+
+    // The invited user's own membership list now includes both tenants: the
+    // one they registered (as owner) and the one they were invited into.
+    let invitee_memberships = console
+        .repositories
+        .list_admin_user_memberships_by_user(invitee_user_id)
+        .unwrap();
+    assert_eq!(invitee_memberships.len(), 2);
+}
+
+#[test]
+fn invite_is_forbidden_for_a_non_owner() {
+    let console = console();
+    let owner = body_json(&register(&console, "owner2@acme.test", "correct-horse-3"));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    let member = body_json(&register(&console, "member2@acme.test", "correct-horse-4"));
+    let member_user_id = member["user"]["id"].as_str().unwrap();
+    handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "member2@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    // A plain access_token from the invitee's OWN registration reflects
+    // their (owner) role in *their own* tenant, not the tenant they were
+    // just invited into as "member" -- mint a session directly scoped to
+    // the inviter's tenant/role to test the authorization gate itself,
+    // independent of which tenant `handle_admin_login` currently defaults
+    // an account with multiple memberships into.
+    let (member_token, _) = issue_session(
+        &console,
+        member_user_id,
+        "member2@acme.test",
+        owner_tenant_id,
+        "member",
+    )
+    .unwrap();
+
+    let invite = handle_admin_team_invite(
+        &console,
+        &member_token,
+        AdminInviteRequest {
+            email: "someone-else@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+
+    assert_eq!(invite.status, 403);
+}
+
+#[test]
+fn invite_rejects_an_email_with_no_registered_account() {
+    let console = console();
+    let owner_token = body_json(&register(&console, "owner3@acme.test", "correct-horse-5"))
+        ["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let invite = handle_admin_team_invite(
+        &console,
+        &owner_token,
+        AdminInviteRequest {
+            email: "nobody@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+
+    assert_eq!(invite.status, 404);
+}
+
+#[test]
+fn change_role_updates_the_membership_and_enforces_the_owner_gate() {
+    let console = console();
+    let owner = body_json(&register(&console, "owner4@acme.test", "correct-horse-6"));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    let member = body_json(&register(&console, "member4@acme.test", "correct-horse-7"));
+    let member_user_id = member["user"]["id"].as_str().unwrap().to_string();
+    handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "member4@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+
+    // A non-owner cannot change roles. Mint a session scoped to the owner's
+    // tenant (see `invite_is_forbidden_for_a_non_owner` for why a plain
+    // registration access_token won't do).
+    let (member_token, _) = issue_session(
+        &console,
+        &member_user_id,
+        "member4@acme.test",
+        owner_tenant_id,
+        "member",
+    )
+    .unwrap();
+    let forbidden_change = handle_admin_team_change_role(
+        &console,
+        &member_token,
+        &member_user_id,
+        AdminChangeRoleRequest {
+            role: "admin".into(),
+        },
+    );
+    assert_eq!(forbidden_change.status, 403);
+
+    // The owner can promote the member to admin.
+    let change = handle_admin_team_change_role(
+        &console,
+        owner_token,
+        &member_user_id,
+        AdminChangeRoleRequest {
+            role: "admin".into(),
+        },
+    );
+    assert_eq!(change.status, 200);
+
+    let memberships = console
+        .repositories
+        .list_admin_user_memberships_by_tenant(owner_tenant_id)
+        .unwrap();
+    assert!(memberships
+        .iter()
+        .any(|membership| membership.user_id == member_user_id && membership.role == "admin"));
+}
+
+#[test]
+fn change_role_refuses_to_demote_the_last_owner() {
+    let console = console();
+    let owner = body_json(&register(&console, "owner5@acme.test", "correct-horse-8"));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_user_id = owner["user"]["id"].as_str().unwrap();
+
+    let change = handle_admin_team_change_role(
+        &console,
+        owner_token,
+        owner_user_id,
+        AdminChangeRoleRequest {
+            role: "member".into(),
+        },
+    );
+
+    assert_eq!(change.status, 409);
+}
+
+#[test]
+fn revoke_removes_a_teammate_and_refuses_to_remove_the_last_owner() {
+    let console = console();
+    let owner = body_json(&register(&console, "owner6@acme.test", "correct-horse-9"));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_user_id = owner["user"]["id"].as_str().unwrap();
+    let member = body_json(&register(&console, "member6@acme.test", "correct-horse-10"));
+    let member_user_id = member["user"]["id"].as_str().unwrap();
+    handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "member6@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+
+    // The owner can remove the member.
+    let revoke = handle_admin_team_revoke(&console, owner_token, member_user_id);
+    assert_eq!(revoke.status, 200);
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    let memberships = console
+        .repositories
+        .list_admin_user_memberships_by_tenant(owner_tenant_id)
+        .unwrap();
+    assert!(!memberships
+        .iter()
+        .any(|membership| membership.user_id == member_user_id));
+
+    // The sole remaining owner cannot remove themselves (tenant lockout).
+    let self_revoke = handle_admin_team_revoke(&console, owner_token, owner_user_id);
+    assert_eq!(self_revoke.status, 409);
+}
+
+#[test]
+fn team_list_is_unauthorized_without_a_bearer_token() {
+    let console = console();
+    let response = handle_admin_team_list(&console, "not-a-real-jwt");
+    assert_eq!(response.status, 401);
+}
+
+// -- issue #162: runtime Role/PolicyBinding CRUD ---------------------------
+
+fn service() -> AuthService {
+    AuthService::from_data(AuthServiceData::default())
+}
+
+#[test]
+fn rbac_role_upsert_and_list_roundtrip() {
+    let console = console();
+    let service = service();
+    let owner = body_json(&register(
+        &console,
+        "rbac-owner1@acme.test",
+        "correct-horse-11",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let create = handle_rbac_role_upsert(
+        &service,
+        &console,
+        owner_token,
+        RoleUpsertRequest {
+            id: "role_reader".into(),
+            name: "Reader".into(),
+            permissions: vec![Permission {
+                action: "chat.completions".into(),
+                resource: "model:fast-chat".into(),
+            }],
+        },
+    );
+    assert_eq!(create.status, 200);
+
+    let roles = service.rbac.list_roles();
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles[0].id, "role_reader");
+    assert_eq!(roles[0].permissions.len(), 1);
+
+    // Upserting the same id replaces it rather than duplicating.
+    handle_rbac_role_upsert(
+        &service,
+        &console,
+        owner_token,
+        RoleUpsertRequest {
+            id: "role_reader".into(),
+            name: "Reader (renamed)".into(),
+            permissions: vec![],
+        },
+    );
+    let roles = service.rbac.list_roles();
+    assert_eq!(roles.len(), 1);
+    assert_eq!(roles[0].name, "Reader (renamed)");
+}
+
+#[test]
+fn rbac_role_delete_refuses_while_a_binding_still_references_it() {
+    let console = console();
+    let service = service();
+    let owner = body_json(&register(
+        &console,
+        "rbac-owner2@acme.test",
+        "correct-horse-12",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    handle_rbac_role_upsert(
+        &service,
+        &console,
+        owner_token,
+        RoleUpsertRequest {
+            id: "role_writer".into(),
+            name: "Writer".into(),
+            permissions: vec![],
+        },
+    );
+    let bind = handle_rbac_binding_upsert(
+        &service,
+        &console,
+        owner_token,
+        BindingUpsertRequest {
+            id: "binding_1".into(),
+            role_id: "role_writer".into(),
+            subject: PolicySubject::ApiKey {
+                api_key_id: "key-1".into(),
+            },
+        },
+    );
+    assert_eq!(bind.status, 200);
+
+    let delete_in_use = handle_rbac_role_delete(&service, &console, owner_token, "role_writer");
+    assert_eq!(delete_in_use.status, 409);
+
+    let unbind = handle_rbac_binding_delete(&service, &console, owner_token, "binding_1");
+    assert_eq!(unbind.status, 200);
+
+    let delete_now = handle_rbac_role_delete(&service, &console, owner_token, "role_writer");
+    assert_eq!(delete_now.status, 200);
+}
+
+#[test]
+fn rbac_binding_upsert_is_forbidden_for_a_non_owner() {
+    let console = console();
+    let service = service();
+    let owner = body_json(&register(
+        &console,
+        "rbac-owner3@acme.test",
+        "correct-horse-13",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    handle_rbac_role_upsert(
+        &service,
+        &console,
+        owner_token,
+        RoleUpsertRequest {
+            id: "role_viewer".into(),
+            name: "Viewer".into(),
+            permissions: vec![],
+        },
+    );
+    let member = body_json(&register(
+        &console,
+        "rbac-member3@acme.test",
+        "correct-horse-14",
+    ));
+    let member_user_id = member["user"]["id"].as_str().unwrap();
+    handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "rbac-member3@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    let (member_token, _) = issue_session(
+        &console,
+        member_user_id,
+        "rbac-member3@acme.test",
+        owner_tenant_id,
+        "member",
+    )
+    .unwrap();
+
+    let bind = handle_rbac_binding_upsert(
+        &service,
+        &console,
+        &member_token,
+        BindingUpsertRequest {
+            id: "binding_2".into(),
+            role_id: "role_viewer".into(),
+            subject: PolicySubject::ApiKey {
+                api_key_id: "key-2".into(),
+            },
+        },
+    );
+
+    assert_eq!(bind.status, 403);
+}
+
+#[test]
+fn rbac_binding_upsert_rejects_unknown_role_id() {
+    let console = console();
+    let service = service();
+    let owner = body_json(&register(
+        &console,
+        "rbac-owner4@acme.test",
+        "correct-horse-15",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let bind = handle_rbac_binding_upsert(
+        &service,
+        &console,
+        owner_token,
+        BindingUpsertRequest {
+            id: "binding_3".into(),
+            role_id: "role_does_not_exist".into(),
+            subject: PolicySubject::ApiKey {
+                api_key_id: "key-3".into(),
+            },
+        },
+    );
+
+    assert_eq!(bind.status, 422);
+}
+
+#[test]
+fn rbac_binding_delete_refuses_to_touch_another_tenants_binding() {
+    let console = console();
+    let service = service();
+    let tenant_a_owner = body_json(&register(&console, "rbac-a@acme.test", "correct-horse-16"));
+    let tenant_a_token = tenant_a_owner["access_token"].as_str().unwrap();
+    let tenant_b_owner = body_json(&register(&console, "rbac-b@acme.test", "correct-horse-17"));
+    let tenant_b_token = tenant_b_owner["access_token"].as_str().unwrap();
+    handle_rbac_role_upsert(
+        &service,
+        &console,
+        tenant_a_token,
+        RoleUpsertRequest {
+            id: "role_shared".into(),
+            name: "Shared".into(),
+            permissions: vec![],
+        },
+    );
+    handle_rbac_binding_upsert(
+        &service,
+        &console,
+        tenant_a_token,
+        BindingUpsertRequest {
+            id: "binding_a".into(),
+            role_id: "role_shared".into(),
+            subject: PolicySubject::ApiKey {
+                api_key_id: "key-a".into(),
+            },
+        },
+    );
+
+    // Tenant B's owner cannot delete tenant A's binding, even though they
+    // are also a valid owner elsewhere.
+    let cross_tenant_delete =
+        handle_rbac_binding_delete(&service, &console, tenant_b_token, "binding_a");
+    assert_eq!(cross_tenant_delete.status, 404);
+
+    // The binding is untouched.
+    let bindings = service.rbac.list_bindings_for_tenant(&tenant_context_for(
+        tenant_a_owner["tenant"]["id"].as_str().unwrap(),
+    ));
+    assert_eq!(bindings.len(), 1);
+}
+
+#[test]
+fn rbac_authorize_reflects_runtime_bindings_immediately() {
+    let service = service();
+    let request = AuthorizeRequest {
+        tenant: TenantContext {
+            organization_id: Some("tenant-runtime".into()),
+            ..TenantContext::default()
+        },
+        subject: PolicySubject::ApiKey {
+            api_key_id: "key-runtime".into(),
+        },
+        action: "chat.completions".into(),
+        resource: "model:fast-chat".into(),
+    };
+
+    // No role/binding yet -- denied.
+    assert!(!service.authorize(&request).allowed);
+
+    service.rbac.upsert_role(Role {
+        id: "role_runtime".into(),
+        name: "Runtime".into(),
+        permissions: vec![Permission {
+            action: "chat.completions".into(),
+            resource: "model:fast-chat".into(),
+        }],
+    });
+    service
+        .rbac
+        .upsert_binding(PolicyBinding {
+            id: "binding_runtime".into(),
+            role_id: "role_runtime".into(),
+            tenant: TenantContext {
+                organization_id: Some("tenant-runtime".into()),
+                ..TenantContext::default()
+            },
+            subject: PolicySubject::ApiKey {
+                api_key_id: "key-runtime".into(),
+            },
+        })
+        .unwrap();
+
+    // The exact same service instance now allows it -- no restart, no YAML
+    // reload, just the runtime REST-backed mutation (issue #162).
+    let decision = service.authorize(&request);
+    assert!(decision.allowed);
+    assert_eq!(decision.reason, "matched_rbac_binding");
+}

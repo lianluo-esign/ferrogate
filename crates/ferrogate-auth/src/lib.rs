@@ -33,7 +33,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -248,35 +248,54 @@ impl ApiKeyAuthenticator for StorageApiKeyAuthenticator {
     }
 }
 
+/// Holds `AuthServiceData` behind a lock (issue #162) so `Role`/`PolicyBinding`
+/// records can be created, updated, and deleted at runtime through a REST
+/// API instead of only via the static YAML file loaded at process start.
+/// `tenants`/`api_keys` remain effectively read-only (no mutation API is
+/// exposed for them here; that boundary is unchanged from before #162).
 #[derive(Debug, Clone)]
 pub struct RbacAuthService {
-    data: AuthServiceData,
-    roles_by_id: HashMap<String, Role>,
+    data: Arc<RwLock<AuthServiceData>>,
 }
 
 impl RbacAuthService {
     pub fn new(data: AuthServiceData) -> Self {
-        let roles_by_id = data
-            .roles
-            .iter()
-            .cloned()
-            .map(|role| (role.id.clone(), role))
-            .collect();
-        Self { data, roles_by_id }
+        Self {
+            data: Arc::new(RwLock::new(data)),
+        }
     }
 
-    pub fn tenants(&self) -> &[TenantRecord] {
-        &self.data.tenants
+    fn read_data(&self) -> std::sync::RwLockReadGuard<'_, AuthServiceData> {
+        match self.data.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_data(&self) -> std::sync::RwLockWriteGuard<'_, AuthServiceData> {
+        match self.data.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub fn tenants(&self) -> Vec<TenantRecord> {
+        self.read_data().tenants.clone()
     }
 
     pub fn authorize(&self, request: &AuthorizeRequest) -> AuthorizationDecision {
-        let allowed = self
-            .data
+        let data = self.read_data();
+        let roles_by_id: HashMap<&str, &Role> = data
+            .roles
+            .iter()
+            .map(|role| (role.id.as_str(), role))
+            .collect();
+        let allowed = data
             .bindings
             .iter()
             .filter(|binding| binding.subject == request.subject)
             .filter(|binding| tenant_matches(&binding.tenant, &request.tenant))
-            .filter_map(|binding| self.roles_by_id.get(&binding.role_id))
+            .filter_map(|binding| roles_by_id.get(binding.role_id.as_str()))
             .flat_map(|role| role.permissions.iter())
             .any(|permission| {
                 matches_pattern(&permission.action, &request.action)
@@ -293,14 +312,85 @@ impl RbacAuthService {
             },
         }
     }
+
+    // -- issue #162: runtime Role/PolicyBinding CRUD -----------------------
+
+    pub fn list_roles(&self) -> Vec<Role> {
+        self.read_data().roles.clone()
+    }
+
+    /// Creates a new role, or replaces an existing one with the same `id`.
+    pub fn upsert_role(&self, role: Role) {
+        let mut data = self.write_data();
+        match data
+            .roles
+            .iter_mut()
+            .find(|existing| existing.id == role.id)
+        {
+            Some(existing) => *existing = role,
+            None => data.roles.push(role),
+        }
+    }
+
+    /// Deletes a role by id. Fails (returns `false`) rather than leaving
+    /// dangling references if any binding still uses it -- delete the
+    /// binding(s) first.
+    pub fn delete_role(&self, role_id: &str) -> Result<bool, &'static str> {
+        let mut data = self.write_data();
+        if data
+            .bindings
+            .iter()
+            .any(|binding| binding.role_id == role_id)
+        {
+            return Err("role is still referenced by one or more bindings");
+        }
+        let before = data.roles.len();
+        data.roles.retain(|role| role.id != role_id);
+        Ok(data.roles.len() != before)
+    }
+
+    pub fn list_bindings_for_tenant(&self, tenant: &TenantContext) -> Vec<PolicyBinding> {
+        self.read_data()
+            .bindings
+            .iter()
+            .filter(|binding| tenant_matches(&binding.tenant, tenant))
+            .cloned()
+            .collect()
+    }
+
+    /// Creates or replaces a binding. Fails if `role_id` doesn't name an
+    /// existing role, so bindings can't silently grant nothing.
+    pub fn upsert_binding(&self, binding: PolicyBinding) -> Result<(), &'static str> {
+        let mut data = self.write_data();
+        if !data.roles.iter().any(|role| role.id == binding.role_id) {
+            return Err("role_id does not name an existing role");
+        }
+        match data
+            .bindings
+            .iter_mut()
+            .find(|existing| existing.id == binding.id)
+        {
+            Some(existing) => *existing = binding,
+            None => data.bindings.push(binding),
+        }
+        Ok(())
+    }
+
+    pub fn delete_binding(&self, binding_id: &str) -> bool {
+        let mut data = self.write_data();
+        let before = data.bindings.len();
+        data.bindings.retain(|binding| binding.id != binding_id);
+        data.bindings.len() != before
+    }
 }
 
 impl ApiKeyAuthenticator for RbacAuthService {
     fn authenticate(&self, presented_key: &str) -> Option<AuthDecision> {
-        let api_key =
-            self.data.api_keys.iter().find(|api_key| {
-                api_key.enabled && api_key.secret.as_deref() == Some(presented_key)
-            })?;
+        let data = self.read_data();
+        let api_key = data
+            .api_keys
+            .iter()
+            .find(|api_key| api_key.enabled && api_key.secret.as_deref() == Some(presented_key))?;
 
         Some(AuthDecision {
             tenant: api_key.tenant.clone(),
@@ -375,7 +465,7 @@ impl AuthService {
         self
     }
 
-    pub fn tenants(&self) -> &[TenantRecord] {
+    pub fn tenants(&self) -> Vec<TenantRecord> {
         self.rbac.tenants()
     }
 
@@ -527,6 +617,54 @@ pub struct AdminSessionResponse {
 pub struct AdminMeResponse {
     pub user: AdminUserView,
     pub memberships: Vec<AdminTenantView>,
+}
+
+/// Invite an existing registered user (by email) into the caller's own
+/// tenant with the given role (issue #162). Inviting an email with no
+/// existing account is out of scope for this slice -- the invited person
+/// must register (creating their own tenant as a side effect of today's
+/// `/v1/admin/register` flow) before they can be invited elsewhere. Only a
+/// tenant `owner` may invite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminInviteRequest {
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminChangeRoleRequest {
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminTeamMemberView {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: String,
+    pub role: String,
+}
+
+/// Creates or replaces a `Role` by `id` (issue #162). The role catalog is
+/// shared across tenants (a role is just a named permission bundle), so any
+/// authenticated admin-console user may define one; only granting it to a
+/// subject via a `PolicyBinding` has tenant-scoped, owner-gated
+/// consequences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleUpsertRequest {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
+}
+
+/// Creates or replaces a `PolicyBinding` by `id` (issue #162), always scoped
+/// to the caller's own tenant regardless of any `tenant` the caller might
+/// otherwise try to set -- only a tenant `owner` may call this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingUpsertRequest {
+    pub id: String,
+    pub role_id: String,
+    pub subject: PolicySubject,
 }
 
 /// RAII counter guard that decrements the live-connection count on drop
@@ -689,6 +827,113 @@ fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
             with_admin_console(service, |console| match request.bearer_token() {
                 Some(token) => handle_admin_me(console, token),
                 None => unauthorized("missing bearer token"),
+            })
+        }
+        ("GET", "/v1/admin/team") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => handle_admin_team_list(console, token),
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        ("POST", "/v1/admin/team/invite") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => {
+                    let parsed = serde_json::from_slice::<AdminInviteRequest>(&request.body);
+                    match parsed {
+                        Ok(payload) => handle_admin_team_invite(console, token, payload),
+                        Err(error) => bad_request(error),
+                    }
+                }
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        _ if request.path.starts_with("/v1/admin/team/members/") => {
+            with_admin_console(service, |console| {
+                let user_id = request
+                    .path
+                    .strip_prefix("/v1/admin/team/members/")
+                    .unwrap_or_default();
+                if user_id.is_empty() {
+                    return HttpResponse::json(
+                        404,
+                        json!({ "error": { "code": "not_found", "message": "auth service endpoint not found" } }),
+                    );
+                }
+                let Some(token) = request.bearer_token() else {
+                    return unauthorized("missing bearer token");
+                };
+                match request.method.as_str() {
+                    "POST" => {
+                        let parsed =
+                            serde_json::from_slice::<AdminChangeRoleRequest>(&request.body);
+                        match parsed {
+                            Ok(payload) => {
+                                handle_admin_team_change_role(console, token, user_id, payload)
+                            }
+                            Err(error) => bad_request(error),
+                        }
+                    }
+                    "DELETE" => handle_admin_team_revoke(console, token, user_id),
+                    _ => HttpResponse::json(
+                        405,
+                        json!({ "error": { "code": "method_not_allowed", "message": "unsupported method for this route" } }),
+                    ),
+                }
+            })
+        }
+        ("GET", "/v1/rbac/roles") => handle_rbac_roles_list(service),
+        ("POST", "/v1/rbac/roles") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => {
+                    let parsed = serde_json::from_slice::<RoleUpsertRequest>(&request.body);
+                    match parsed {
+                        Ok(payload) => handle_rbac_role_upsert(service, console, token, payload),
+                        Err(error) => bad_request(error),
+                    }
+                }
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        ("DELETE", path) if path.starts_with("/v1/rbac/roles/") => {
+            with_admin_console(service, |console| {
+                let role_id = path.strip_prefix("/v1/rbac/roles/").unwrap_or_default();
+                match request.bearer_token() {
+                    Some(token) if !role_id.is_empty() => {
+                        handle_rbac_role_delete(service, console, token, role_id)
+                    }
+                    Some(_) => not_found("auth service endpoint not found"),
+                    None => unauthorized("missing bearer token"),
+                }
+            })
+        }
+        ("GET", "/v1/rbac/bindings") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => handle_rbac_bindings_list(service, console, token),
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        ("POST", "/v1/rbac/bindings") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => {
+                    let parsed = serde_json::from_slice::<BindingUpsertRequest>(&request.body);
+                    match parsed {
+                        Ok(payload) => handle_rbac_binding_upsert(service, console, token, payload),
+                        Err(error) => bad_request(error),
+                    }
+                }
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        ("DELETE", path) if path.starts_with("/v1/rbac/bindings/") => {
+            with_admin_console(service, |console| {
+                let binding_id = path.strip_prefix("/v1/rbac/bindings/").unwrap_or_default();
+                match request.bearer_token() {
+                    Some(token) if !binding_id.is_empty() => {
+                        handle_rbac_binding_delete(service, console, token, binding_id)
+                    }
+                    Some(_) => not_found("auth service endpoint not found"),
+                    None => unauthorized("missing bearer token"),
+                }
             })
         }
         _ => HttpResponse::json(
@@ -1117,6 +1362,384 @@ fn handle_admin_me(console: &AdminConsoleState, token: &str) -> HttpResponse {
             memberships: tenant_views,
         },
     )
+}
+
+/// Resolves the caller's admin user and their membership in the tenant
+/// their current session was issued for (issue #162). Every team-management
+/// endpoint needs both: the user for audit/self-checks, the membership for
+/// the role gate.
+fn current_admin_session(
+    console: &AdminConsoleState,
+    token: &str,
+) -> Result<(StoredAdminUser, StoredAdminUserMembership), HttpResponse> {
+    let claims = decode_access_token(console, token)
+        .map_err(|_| unauthorized("invalid or expired access token"))?;
+    let user = match console.repositories.get_admin_user_by_id(&claims.sub) {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(unauthorized("account no longer exists")),
+        Err(error) => return Err(storage_error(&error)),
+    };
+    let memberships = match console
+        .repositories
+        .list_admin_user_memberships_by_user(&user.id)
+    {
+        Ok(memberships) => memberships,
+        Err(error) => return Err(storage_error(&error)),
+    };
+    match memberships
+        .into_iter()
+        .find(|membership| membership.tenant_id == claims.tenant_id)
+    {
+        Some(membership) => Ok((user, membership)),
+        None => Err(unauthorized("session tenant membership no longer exists")),
+    }
+}
+
+fn forbidden(message: &str) -> HttpResponse {
+    HttpResponse::json(
+        403,
+        json!({ "error": { "code": "forbidden", "message": message } }),
+    )
+}
+
+fn not_found(message: &str) -> HttpResponse {
+    HttpResponse::json(
+        404,
+        json!({ "error": { "code": "not_found", "message": message } }),
+    )
+}
+
+/// Lists every teammate in the caller's own tenant (issue #162). Any member
+/// (not just owners) may view the roster.
+fn handle_admin_team_list(console: &AdminConsoleState, token: &str) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let memberships = match console
+        .repositories
+        .list_admin_user_memberships_by_tenant(&membership.tenant_id)
+    {
+        Ok(memberships) => memberships,
+        Err(error) => return storage_error(&error),
+    };
+    let mut members = Vec::with_capacity(memberships.len());
+    for member in memberships {
+        match console.repositories.get_admin_user_by_id(&member.user_id) {
+            Ok(Some(user)) => members.push(AdminTeamMemberView {
+                user_id: user.id,
+                email: user.email,
+                display_name: user.display_name,
+                role: member.role,
+            }),
+            Ok(None) => {}
+            Err(error) => return storage_error(&error),
+        }
+    }
+    HttpResponse::json(200, json!({ "members": members }))
+}
+
+/// Adds an existing registered user to the caller's tenant with a
+/// caller-supplied role (issue #162) -- the fix for every membership being
+/// hardcoded to `"owner"`. Only an existing `owner` may invite.
+fn handle_admin_team_invite(
+    console: &AdminConsoleState,
+    token: &str,
+    payload: AdminInviteRequest,
+) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can invite teammates");
+    }
+    let email = payload.email.trim().to_ascii_lowercase();
+    let role = payload.role.trim().to_string();
+    if !is_valid_email(&email) {
+        return unprocessable("email must be a valid address");
+    }
+    if role.is_empty() {
+        return unprocessable("role must not be empty");
+    }
+    let invited_user = match console.repositories.get_admin_user_by_email(&email) {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return HttpResponse::json(
+                404,
+                json!({
+                    "error": {
+                        "code": "user_not_found",
+                        "message": "no registered account with this email; ask them to register \
+                                    first (this creates their own tenant), then invite them again"
+                    }
+                }),
+            )
+        }
+        Err(error) => return storage_error(&error),
+    };
+    let new_membership = StoredAdminUserMembership {
+        id: next_id("membership"),
+        user_id: invited_user.id.clone(),
+        tenant_id: membership.tenant_id,
+        role: role.clone(),
+        created_at_unix: now_unix_seconds() as i64,
+    };
+    if let Err(error) = console
+        .repositories
+        .upsert_admin_user_membership(new_membership)
+    {
+        return storage_error(&error);
+    }
+    HttpResponse::json(
+        201,
+        AdminTeamMemberView {
+            user_id: invited_user.id,
+            email: invited_user.email,
+            display_name: invited_user.display_name,
+            role,
+        },
+    )
+}
+
+/// Changes an existing teammate's role within the caller's tenant (issue
+/// #162). Only an existing `owner` may change roles.
+fn handle_admin_team_change_role(
+    console: &AdminConsoleState,
+    token: &str,
+    target_user_id: &str,
+    payload: AdminChangeRoleRequest,
+) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can change teammate roles");
+    }
+    let role = payload.role.trim().to_string();
+    if role.is_empty() {
+        return unprocessable("role must not be empty");
+    }
+    let existing = match console
+        .repositories
+        .list_admin_user_memberships_by_tenant(&membership.tenant_id)
+    {
+        Ok(memberships) => memberships,
+        Err(error) => return storage_error(&error),
+    };
+    let Some(mut target) = existing
+        .into_iter()
+        .find(|candidate| candidate.user_id == target_user_id)
+    else {
+        return not_found("no such teammate in this tenant");
+    };
+    if target.role == "owner" && role != "owner" {
+        let owners = console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&membership.tenant_id)
+            .map(|memberships| {
+                memberships
+                    .iter()
+                    .filter(|candidate| candidate.role == "owner")
+                    .count()
+            })
+            .unwrap_or(0);
+        if owners <= 1 {
+            return conflict("cannot demote the last owner of a tenant");
+        }
+    }
+    target.role = role.clone();
+    if let Err(error) = console.repositories.upsert_admin_user_membership(target) {
+        return storage_error(&error);
+    }
+    HttpResponse::json(
+        200,
+        json!({ "object": "membership", "user_id": target_user_id, "role": role }),
+    )
+}
+
+/// Revokes a teammate's membership in the caller's tenant (issue #162).
+/// Only an existing `owner` may remove teammates, and the last remaining
+/// owner of a tenant cannot remove themselves (would lock the tenant out of
+/// its own admin console).
+fn handle_admin_team_revoke(
+    console: &AdminConsoleState,
+    token: &str,
+    target_user_id: &str,
+) -> HttpResponse {
+    let (caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can remove teammates");
+    }
+    if caller.id == target_user_id {
+        let owners = match console
+            .repositories
+            .list_admin_user_memberships_by_tenant(&membership.tenant_id)
+        {
+            Ok(memberships) => memberships
+                .iter()
+                .filter(|candidate| candidate.role == "owner")
+                .count(),
+            Err(error) => return storage_error(&error),
+        };
+        if owners <= 1 {
+            return conflict("cannot remove the last owner of a tenant");
+        }
+    }
+    match console
+        .repositories
+        .delete_admin_user_membership(target_user_id, &membership.tenant_id)
+    {
+        Ok(true) => HttpResponse::json(200, json!({ "object": "membership", "removed": true })),
+        Ok(false) => not_found("no such teammate in this tenant"),
+        Err(error) => storage_error(&error),
+    }
+}
+
+fn tenant_context_for(tenant_id: &str) -> TenantContext {
+    TenantContext {
+        organization_id: Some(tenant_id.to_string()),
+        ..TenantContext::default()
+    }
+}
+
+/// Lists every role in the shared role catalog (issue #162). Not
+/// tenant-scoped -- a role is just a named permission bundle, so browsing
+/// the catalog is not itself a sensitive operation.
+fn handle_rbac_roles_list(service: &AuthService) -> HttpResponse {
+    HttpResponse::json(200, json!({ "roles": service.rbac.list_roles() }))
+}
+
+/// Creates or replaces a role (issue #162). Requires any valid admin-console
+/// session -- defining a reusable permission bundle has no effect until a
+/// `PolicyBinding` (owner-gated, tenant-scoped) actually grants it.
+fn handle_rbac_role_upsert(
+    service: &AuthService,
+    console: &AdminConsoleState,
+    token: &str,
+    payload: RoleUpsertRequest,
+) -> HttpResponse {
+    if let Err(response) = current_admin_session(console, token) {
+        return response;
+    }
+    let id = payload.id.trim().to_string();
+    let name = payload.name.trim().to_string();
+    if id.is_empty() {
+        return unprocessable("id must not be empty");
+    }
+    if name.is_empty() {
+        return unprocessable("name must not be empty");
+    }
+    service.rbac.upsert_role(Role {
+        id: id.clone(),
+        name,
+        permissions: payload.permissions,
+    });
+    HttpResponse::json(200, json!({ "object": "role", "id": id }))
+}
+
+/// Deletes a role by id (issue #162). Refuses if any binding still
+/// references it, so authorization decisions never silently lose their
+/// backing role.
+fn handle_rbac_role_delete(
+    service: &AuthService,
+    console: &AdminConsoleState,
+    token: &str,
+    role_id: &str,
+) -> HttpResponse {
+    if let Err(response) = current_admin_session(console, token) {
+        return response;
+    }
+    match service.rbac.delete_role(role_id) {
+        Ok(true) => HttpResponse::json(200, json!({ "object": "role", "removed": true })),
+        Ok(false) => not_found("no such role"),
+        Err(message) => conflict(message),
+    }
+}
+
+/// Lists policy bindings scoped to the caller's own tenant (issue #162).
+fn handle_rbac_bindings_list(
+    service: &AuthService,
+    console: &AdminConsoleState,
+    token: &str,
+) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let tenant = tenant_context_for(&membership.tenant_id);
+    HttpResponse::json(
+        200,
+        json!({ "bindings": service.rbac.list_bindings_for_tenant(&tenant) }),
+    )
+}
+
+/// Creates or replaces a policy binding, always scoped to the caller's own
+/// tenant (issue #162). Only a tenant `owner` may grant roles to subjects --
+/// this is the actually-consequential half of the Role/Binding pair.
+fn handle_rbac_binding_upsert(
+    service: &AuthService,
+    console: &AdminConsoleState,
+    token: &str,
+    payload: BindingUpsertRequest,
+) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can manage policy bindings");
+    }
+    let id = payload.id.trim().to_string();
+    let role_id = payload.role_id.trim().to_string();
+    if id.is_empty() || role_id.is_empty() {
+        return unprocessable("id and role_id must not be empty");
+    }
+    let binding = PolicyBinding {
+        id: id.clone(),
+        role_id,
+        tenant: tenant_context_for(&membership.tenant_id),
+        subject: payload.subject,
+    };
+    match service.rbac.upsert_binding(binding) {
+        Ok(()) => HttpResponse::json(200, json!({ "object": "binding", "id": id })),
+        Err(message) => unprocessable(message),
+    }
+}
+
+/// Deletes a policy binding by id (issue #162), refusing to touch a binding
+/// belonging to a different tenant.
+fn handle_rbac_binding_delete(
+    service: &AuthService,
+    console: &AdminConsoleState,
+    token: &str,
+    binding_id: &str,
+) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can manage policy bindings");
+    }
+    let tenant = tenant_context_for(&membership.tenant_id);
+    let owned = service
+        .rbac
+        .list_bindings_for_tenant(&tenant)
+        .iter()
+        .any(|binding| binding.id == binding_id);
+    if !owned {
+        return not_found("no such binding in this tenant");
+    }
+    if service.rbac.delete_binding(binding_id) {
+        HttpResponse::json(200, json!({ "object": "binding", "removed": true }))
+    } else {
+        not_found("no such binding")
+    }
 }
 
 fn resolve_default_workspace(
