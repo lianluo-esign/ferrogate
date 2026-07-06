@@ -936,6 +936,64 @@ fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
                 }
             })
         }
+        ("POST", "/v1/admin/team/scim-token") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => handle_admin_scim_token_create(console, token),
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        ("GET", "/scim/v2/Users") => {
+            with_admin_console(service, |console| {
+                match resolve_scim_tenant(console, &request) {
+                    Ok(tenant_id) => handle_scim_users_list(console, &tenant_id),
+                    Err(response) => response,
+                }
+            })
+        }
+        ("POST", "/scim/v2/Users") => with_admin_console(service, |console| {
+            match resolve_scim_tenant(console, &request) {
+                Ok(tenant_id) => {
+                    let parsed = serde_json::from_slice::<ScimUserRequest>(&request.body);
+                    match parsed {
+                        Ok(payload) => handle_scim_user_create(console, &tenant_id, payload),
+                        Err(error) => bad_request(error),
+                    }
+                }
+                Err(response) => response,
+            }
+        }),
+        ("GET", "/scim/v2/Groups") => with_admin_console(service, |console| {
+            match resolve_scim_tenant(console, &request) {
+                Ok(tenant_id) => handle_scim_groups_list(console, &tenant_id),
+                Err(response) => response,
+            }
+        }),
+        _ if request.path.starts_with("/scim/v2/Users/") => {
+            with_admin_console(service, |console| {
+                let user_id = request
+                    .path
+                    .strip_prefix("/scim/v2/Users/")
+                    .unwrap_or_default();
+                if user_id.is_empty() {
+                    return not_found("auth service endpoint not found");
+                }
+                let tenant_id = match resolve_scim_tenant(console, &request) {
+                    Ok(tenant_id) => tenant_id,
+                    Err(response) => return response,
+                };
+                match request.method.as_str() {
+                    "GET" => handle_scim_user_get(console, &tenant_id, user_id),
+                    "PATCH" | "PUT" => {
+                        handle_scim_user_patch(console, &tenant_id, user_id, &request.body)
+                    }
+                    "DELETE" => handle_scim_user_delete(console, &tenant_id, user_id),
+                    _ => HttpResponse::json(
+                        405,
+                        json!({ "error": { "code": "method_not_allowed", "message": "unsupported method for this route" } }),
+                    ),
+                }
+            })
+        }
         _ => HttpResponse::json(
             404,
             json!({
@@ -1796,6 +1854,422 @@ fn provision_gateway_api_key(
     };
     console.repositories.upsert_api_key_record(key)?;
     Ok(secret)
+}
+
+// -- issue #161: SCIM 2.0 user/group provisioning --------------------------
+
+/// Scope name marking a virtual API key as a SCIM provisioning credential,
+/// distinct from the `admin.read`/`admin.write` scopes an interactive
+/// admin-console session uses. Requests to `/scim/v2/*` must present a key
+/// carrying exactly this scope.
+const SCIM_PROVISION_SCOPE: &str = "scim.provision";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminScimTokenResponse {
+    pub token: String,
+}
+
+/// Mints a SCIM provisioning token for the caller's own tenant (issue #161).
+/// Only a tenant `owner` may do this; the token is a normal virtual API key
+/// carrying only [`SCIM_PROVISION_SCOPE`], so it is fully independent of --
+/// and can be revoked/rotated the same way as -- any other virtual key via
+/// the existing `/admin/v1/virtual-keys` endpoints.
+fn handle_admin_scim_token_create(console: &AdminConsoleState, token: &str) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can create a SCIM provisioning token");
+    }
+    let workspace = match resolve_default_workspace(console, &membership.tenant_id) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return internal_error("no workspace found for this tenant"),
+        Err(error) => return storage_error(&error),
+    };
+    let secret = match generate_virtual_api_key_secret() {
+        Ok(secret) => secret,
+        Err(error) => return internal_error(&error.to_string()),
+    };
+    let material = match virtual_api_key_material(&secret) {
+        Some(material) => material,
+        None => return internal_error("failed to derive SCIM token material"),
+    };
+    let scope = WorkspaceScope::new(&membership.tenant_id, &workspace.project_id, &workspace.id);
+    let mut tenant = TenantContext::default();
+    scope.apply_to(&mut tenant);
+    let id = next_id("scim");
+    tenant.api_key_id = Some(id.clone());
+    let now = now_unix_seconds();
+    let key = StoredApiKey {
+        id,
+        workspace_id: workspace.id,
+        tenant_id: membership.tenant_id,
+        project_id: workspace.project_id,
+        name: "SCIM provisioning token".into(),
+        key_prefix: material.key_prefix,
+        key_hash: material.key_hash,
+        last4: material.last4,
+        enabled: true,
+        scopes: vec![SCIM_PROVISION_SCOPE.into()],
+        allowed_models: Vec::new(),
+        allowed_providers: Vec::new(),
+        tenant,
+        monthly_token_budget: None,
+        request_limit_per_minute: None,
+        created_at_unix: now,
+        updated_at_unix: now,
+        rotated_at_unix: None,
+        expires_at_unix: None,
+        revoked_at_unix: None,
+    };
+    if let Err(error) = console.repositories.upsert_api_key_record(key) {
+        return storage_error(&error);
+    }
+    HttpResponse::json(201, AdminScimTokenResponse { token: secret })
+}
+
+/// Resolves the tenant a SCIM request is authorized to operate on from its
+/// bearer token, reusing `StorageApiKeyAuthenticator` (the same
+/// prefix+hash+active-check resolution the gateway itself uses for virtual
+/// keys) rather than a separate credential store.
+fn resolve_scim_tenant(
+    console: &AdminConsoleState,
+    request: &HttpRequest,
+) -> Result<String, HttpResponse> {
+    let Some(token) = request.bearer_token() else {
+        return Err(unauthorized("missing bearer token"));
+    };
+    let authenticator = StorageApiKeyAuthenticator::new(Arc::clone(&console.repositories));
+    let Some(decision) = authenticator.authenticate(token) else {
+        return Err(unauthorized("invalid SCIM provisioning token"));
+    };
+    if !decision
+        .scopes
+        .iter()
+        .any(|scope| scope == SCIM_PROVISION_SCOPE)
+    {
+        return Err(forbidden("token is not scoped for SCIM provisioning"));
+    }
+    decision
+        .tenant
+        .organization_id
+        .ok_or_else(|| internal_error("SCIM token has no tenant scope"))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ScimUserRequest {
+    #[serde(rename = "userName")]
+    user_name: String,
+    #[serde(default)]
+    active: Option<bool>,
+    #[serde(default, rename = "displayName")]
+    display_name: Option<String>,
+    /// FerroGate-specific extension (outside the standard SCIM core User
+    /// schema): the tenant role to assign. Defaults to `"member"`. A real
+    /// IdP group-push integration would derive this from the SCIM group
+    /// memberships pushed alongside the user instead; that richer mapping
+    /// is tracked as a follow-up.
+    #[serde(default, rename = "ferrogateRole")]
+    ferrogate_role: Option<String>,
+}
+
+fn scim_user_resource(user: &StoredAdminUser, role: &str) -> serde_json::Value {
+    json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "id": user.id,
+        "userName": user.email,
+        "displayName": user.display_name,
+        "active": user.disabled_at_unix.is_none(),
+        "ferrogateRole": role,
+        "meta": { "resourceType": "User" }
+    })
+}
+
+fn membership_role_in_tenant(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    user_id: &str,
+) -> Option<String> {
+    console
+        .repositories
+        .list_admin_user_memberships_by_tenant(tenant_id)
+        .ok()?
+        .into_iter()
+        .find(|membership| membership.user_id == user_id)
+        .map(|membership| membership.role)
+}
+
+fn handle_scim_users_list(console: &AdminConsoleState, tenant_id: &str) -> HttpResponse {
+    let memberships = match console
+        .repositories
+        .list_admin_user_memberships_by_tenant(tenant_id)
+    {
+        Ok(memberships) => memberships,
+        Err(error) => return storage_error(&error),
+    };
+    let mut resources = Vec::with_capacity(memberships.len());
+    for membership in &memberships {
+        match console
+            .repositories
+            .get_admin_user_by_id(&membership.user_id)
+        {
+            Ok(Some(user)) => resources.push(scim_user_resource(&user, &membership.role)),
+            Ok(None) => {}
+            Err(error) => return storage_error(&error),
+        }
+    }
+    HttpResponse::json(
+        200,
+        json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+            "totalResults": resources.len(),
+            "Resources": resources
+        }),
+    )
+}
+
+fn handle_scim_user_get(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    user_id: &str,
+) -> HttpResponse {
+    let Some(role) = membership_role_in_tenant(console, tenant_id, user_id) else {
+        return not_found("no such user in this tenant");
+    };
+    match console.repositories.get_admin_user_by_id(user_id) {
+        Ok(Some(user)) => HttpResponse::json(200, scim_user_resource(&user, &role)),
+        Ok(None) => not_found("no such user"),
+        Err(error) => storage_error(&error),
+    }
+}
+
+/// Generates an Argon2 hash of a random, immediately-discarded secret so a
+/// SCIM-provisioned account (which authenticates via SSO, not a FerroGate
+/// password -- see issue #160) has no usable password.
+fn unusable_password_hash() -> anyhow::Result<String> {
+    hash_password(&generate_random_hex(32)?)
+}
+
+/// Creates a SCIM user under the token's tenant, or -- if an account with
+/// this email already exists (e.g. self-registered, or provisioned into
+/// another tenant earlier) -- adds a membership for it, matching
+/// `handle_admin_team_invite`'s semantics but keyed by SCIM's own auth and
+/// request shape. Never creates a new tenant/project/workspace.
+fn handle_scim_user_create(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    payload: ScimUserRequest,
+) -> HttpResponse {
+    let email = payload.user_name.trim().to_ascii_lowercase();
+    if !is_valid_email(&email) {
+        return unprocessable("userName must be a valid email address");
+    }
+    let role = payload
+        .ferrogate_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .unwrap_or("member")
+        .to_string();
+    let display_name = payload
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&email)
+        .to_string();
+
+    let existing = match console.repositories.get_admin_user_by_email(&email) {
+        Ok(existing) => existing,
+        Err(error) => return storage_error(&error),
+    };
+    let user = match existing {
+        Some(user) => user,
+        None => {
+            let password_hash = match unusable_password_hash() {
+                Ok(hash) => hash,
+                Err(error) => return internal_error(&error.to_string()),
+            };
+            let now = now_unix_seconds() as i64;
+            let user = StoredAdminUser {
+                id: next_id("user"),
+                email: email.clone(),
+                password_hash,
+                display_name: display_name.clone(),
+                superadmin: false,
+                created_at_unix: now,
+                updated_at_unix: now,
+                last_login_at_unix: None,
+                disabled_at_unix: None,
+            };
+            if let Err(error) = console.repositories.upsert_admin_user(user.clone()) {
+                return storage_error(&error);
+            }
+            user
+        }
+    };
+
+    let membership = StoredAdminUserMembership {
+        id: next_id("membership"),
+        user_id: user.id.clone(),
+        tenant_id: tenant_id.to_string(),
+        role: role.clone(),
+        created_at_unix: now_unix_seconds() as i64,
+    };
+    if let Err(error) = console
+        .repositories
+        .upsert_admin_user_membership(membership)
+    {
+        return storage_error(&error);
+    }
+
+    if payload.active == Some(false) {
+        if let Err(response) = deactivate_admin_user(console, &user.id) {
+            return response;
+        }
+    }
+
+    HttpResponse::json(201, scim_user_resource(&user, &role))
+}
+
+fn deactivate_admin_user(console: &AdminConsoleState, user_id: &str) -> Result<(), HttpResponse> {
+    let mut user = match console.repositories.get_admin_user_by_id(user_id) {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(not_found("no such user")),
+        Err(error) => return Err(storage_error(&error)),
+    };
+    let now = now_unix_seconds() as i64;
+    user.disabled_at_unix = Some(now);
+    if let Err(error) = console.repositories.upsert_admin_user(user) {
+        return Err(storage_error(&error));
+    }
+    if let Err(error) = console
+        .repositories
+        .revoke_all_admin_user_refresh_tokens(user_id, now)
+    {
+        return Err(storage_error(&error));
+    }
+    Ok(())
+}
+
+fn reactivate_admin_user(console: &AdminConsoleState, user_id: &str) -> Result<(), HttpResponse> {
+    let mut user = match console.repositories.get_admin_user_by_id(user_id) {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(not_found("no such user")),
+        Err(error) => return Err(storage_error(&error)),
+    };
+    user.disabled_at_unix = None;
+    if let Err(error) = console.repositories.upsert_admin_user(user) {
+        return Err(storage_error(&error));
+    }
+    Ok(())
+}
+
+/// Parses the `active` value out of either a simplified `{"active": false}`
+/// body or a standards-shaped SCIM PATCH
+/// `{"Operations":[{"op":"replace","path":"active","value":false}]}` body.
+fn parse_scim_active_patch(body: &[u8]) -> Option<bool> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if let Some(active) = value.get("active").and_then(serde_json::Value::as_bool) {
+        return Some(active);
+    }
+    let operations = value.get("Operations")?.as_array()?;
+    operations.iter().find_map(|operation| {
+        let path = operation.get("path")?.as_str()?;
+        if !path.eq_ignore_ascii_case("active") {
+            return None;
+        }
+        operation.get("value")?.as_bool()
+    })
+}
+
+/// Updates a SCIM user's `active` state (issue #161). Deactivating sets
+/// `disabled_at_unix` and revokes every outstanding refresh token so a
+/// deprovisioned user's existing sessions actually end, not just future
+/// logins.
+fn handle_scim_user_patch(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    user_id: &str,
+    body: &[u8],
+) -> HttpResponse {
+    let Some(role) = membership_role_in_tenant(console, tenant_id, user_id) else {
+        return not_found("no such user in this tenant");
+    };
+    match parse_scim_active_patch(body) {
+        Some(true) => {
+            if let Err(response) = reactivate_admin_user(console, user_id) {
+                return response;
+            }
+        }
+        Some(false) => {
+            if let Err(response) = deactivate_admin_user(console, user_id) {
+                return response;
+            }
+        }
+        None => return unprocessable("could not determine an 'active' value from the PATCH body"),
+    }
+    match console.repositories.get_admin_user_by_id(user_id) {
+        Ok(Some(user)) => HttpResponse::json(200, scim_user_resource(&user, &role)),
+        Ok(None) => not_found("no such user"),
+        Err(error) => storage_error(&error),
+    }
+}
+
+/// SCIM DELETE deprovisions a user (issue #161): deactivate + revoke
+/// sessions rather than hard-deleting the account, preserving audit history
+/// and any OTHER tenant's membership for the same person.
+fn handle_scim_user_delete(
+    console: &AdminConsoleState,
+    tenant_id: &str,
+    user_id: &str,
+) -> HttpResponse {
+    if membership_role_in_tenant(console, tenant_id, user_id).is_none() {
+        return not_found("no such user in this tenant");
+    }
+    if let Err(response) = deactivate_admin_user(console, user_id) {
+        return response;
+    }
+    HttpResponse::no_content(204)
+}
+
+/// Lists the tenant's in-use roles as SCIM groups (issue #161) -- a
+/// read-only view for now; group-to-role assignment happens via the
+/// `ferrogateRole` extension on `POST /scim/v2/Users` (see
+/// `ScimUserRequest`), not by pushing SCIM group memberships.
+fn handle_scim_groups_list(console: &AdminConsoleState, tenant_id: &str) -> HttpResponse {
+    let memberships = match console
+        .repositories
+        .list_admin_user_memberships_by_tenant(tenant_id)
+    {
+        Ok(memberships) => memberships,
+        Err(error) => return storage_error(&error),
+    };
+    let mut roles: Vec<String> = memberships
+        .into_iter()
+        .map(|membership| membership.role)
+        .collect();
+    roles.sort();
+    roles.dedup();
+    let resources: Vec<serde_json::Value> = roles
+        .iter()
+        .map(|role| {
+            json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                "id": role,
+                "displayName": role,
+            })
+        })
+        .collect();
+    HttpResponse::json(
+        200,
+        json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+            "totalResults": resources.len(),
+            "Resources": resources
+        }),
+    )
 }
 
 fn issue_session(

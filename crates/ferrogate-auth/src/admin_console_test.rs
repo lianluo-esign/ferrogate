@@ -839,3 +839,418 @@ fn rbac_authorize_reflects_runtime_bindings_immediately() {
     assert!(decision.allowed);
     assert_eq!(decision.reason, "matched_rbac_binding");
 }
+
+// -- issue #161: SCIM 2.0 user/group provisioning --------------------------
+
+fn scim_request(method: &str, path: &str, token: &str, body: Vec<u8>) -> HttpRequest {
+    let mut headers = HashMap::new();
+    if !token.is_empty() {
+        headers.insert("authorization".to_string(), format!("Bearer {token}"));
+    }
+    HttpRequest {
+        method: method.into(),
+        path: path.into(),
+        headers,
+        body,
+    }
+}
+
+#[test]
+fn scim_token_create_requires_owner_and_mints_a_scim_scoped_key() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner1@acme.test",
+        "correct-horse-18",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let created = handle_admin_scim_token_create(&console, owner_token);
+    assert_eq!(created.status, 201);
+    let scim_token = body_json(&created)["token"].as_str().unwrap().to_string();
+    assert!(scim_token.starts_with("fg_"));
+
+    let request = scim_request("GET", "/scim/v2/Users", &scim_token, Vec::new());
+    let tenant_id = resolve_scim_tenant(&console, &request).unwrap();
+    assert_eq!(tenant_id, owner["tenant"]["id"].as_str().unwrap());
+}
+
+#[test]
+fn scim_token_create_is_forbidden_for_a_non_owner() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner2@acme.test",
+        "correct-horse-19",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    let member = body_json(&register(
+        &console,
+        "scim-member2@acme.test",
+        "correct-horse-20",
+    ));
+    let member_user_id = member["user"]["id"].as_str().unwrap();
+    handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "scim-member2@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    let (member_token, _) = issue_session(
+        &console,
+        member_user_id,
+        "scim-member2@acme.test",
+        owner_tenant_id,
+        "member",
+    )
+    .unwrap();
+
+    let created = handle_admin_scim_token_create(&console, &member_token);
+    assert_eq!(created.status, 403);
+}
+
+#[test]
+fn resolve_scim_tenant_rejects_missing_and_wrong_scope_tokens() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner3@acme.test",
+        "correct-horse-21",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let no_token = scim_request("GET", "/scim/v2/Users", "", Vec::new());
+    assert!(resolve_scim_tenant(&console, &no_token).is_err());
+
+    // A regular admin-console JWT is not a virtual-key-shaped credential,
+    // so it must not resolve as a SCIM token either.
+    let jwt_as_scim = scim_request("GET", "/scim/v2/Users", owner_token, Vec::new());
+    assert!(resolve_scim_tenant(&console, &jwt_as_scim).is_err());
+
+    // A real gateway_api_key (admin.read/admin.write scoped, not
+    // scim.provision) must also be rejected.
+    let gateway_key = owner["gateway_api_key"].as_str().unwrap();
+    let wrong_scope = scim_request("GET", "/scim/v2/Users", gateway_key, Vec::new());
+    assert!(resolve_scim_tenant(&console, &wrong_scope).is_err());
+}
+
+#[test]
+fn scim_user_create_provisions_a_new_account_with_the_given_role() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner4@acme.test",
+        "correct-horse-22",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-provisioned@acme.test".into(),
+            active: None,
+            display_name: Some("SCIM User".into()),
+            ferrogate_role: Some("admin".into()),
+        },
+    );
+    assert_eq!(create.status, 201);
+    let body = body_json(&create);
+    assert_eq!(body["userName"], "scim-provisioned@acme.test");
+    assert_eq!(body["ferrogateRole"], "admin");
+    assert_eq!(body["active"], true);
+
+    let user = console
+        .repositories
+        .get_admin_user_by_email("scim-provisioned@acme.test")
+        .unwrap()
+        .unwrap();
+    let memberships = console
+        .repositories
+        .list_admin_user_memberships_by_tenant(&tenant_id)
+        .unwrap();
+    let membership = memberships
+        .iter()
+        .find(|membership| membership.user_id == user.id)
+        .unwrap();
+    // Not hardcoded to "owner" -- the actual bug #162/#161 close out.
+    assert_eq!(membership.role, "admin");
+}
+
+#[test]
+fn scim_user_create_adds_membership_for_an_already_registered_user_without_duplicating_the_account()
+{
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner5@acme.test",
+        "correct-horse-23",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let existing = body_json(&register(
+        &console,
+        "scim-existing@acme.test",
+        "correct-horse-24",
+    ));
+    let existing_user_id = existing["user"]["id"].as_str().unwrap().to_string();
+
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-existing@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("member".into()),
+        },
+    );
+    assert_eq!(create.status, 201);
+    assert_eq!(body_json(&create)["id"], existing_user_id);
+
+    // Same account, now with a second membership -- not a duplicate user.
+    let memberships = console
+        .repositories
+        .list_admin_user_memberships_by_user(&existing_user_id)
+        .unwrap();
+    assert_eq!(memberships.len(), 2);
+}
+
+#[test]
+fn scim_user_list_and_get_reflect_provisioned_users() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner6@acme.test",
+        "correct-horse-25",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-listed@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("member".into()),
+        },
+    );
+
+    let list = handle_scim_users_list(&console, &tenant_id);
+    assert_eq!(list.status, 200);
+    let body = body_json(&list);
+    assert_eq!(body["totalResults"], 2); // owner + provisioned member
+
+    let listed_id = body["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|resource| resource["userName"] == "scim-listed@acme.test")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let get = handle_scim_user_get(&console, &tenant_id, &listed_id);
+    assert_eq!(get.status, 200);
+    assert_eq!(body_json(&get)["userName"], "scim-listed@acme.test");
+
+    assert_eq!(
+        handle_scim_user_get(&console, &tenant_id, "no-such-id").status,
+        404
+    );
+}
+
+#[test]
+fn scim_patch_deactivate_revokes_refresh_tokens_and_supports_reactivation() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner7@acme.test",
+        "correct-horse-26",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-deactivate@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("member".into()),
+        },
+    );
+    let user_id = body_json(&create)["id"].as_str().unwrap().to_string();
+
+    // Issue the user a live session, matching what a real login would do.
+    let (_, refresh_secret) = issue_session(
+        &console,
+        &user_id,
+        "scim-deactivate@acme.test",
+        &tenant_id,
+        "member",
+    )
+    .unwrap();
+    let refresh_hash = hash_virtual_api_key_secret(&refresh_secret);
+    assert!(console
+        .repositories
+        .get_admin_user_refresh_token_by_hash(&refresh_hash)
+        .unwrap()
+        .unwrap()
+        .revoked_at_unix
+        .is_none());
+
+    let patch_body = serde_json::to_vec(&serde_json::json!({ "active": false })).unwrap();
+    let patch = handle_scim_user_patch(&console, &tenant_id, &user_id, &patch_body);
+    assert_eq!(patch.status, 200);
+    assert_eq!(body_json(&patch)["active"], false);
+
+    let user = console
+        .repositories
+        .get_admin_user_by_id(&user_id)
+        .unwrap()
+        .unwrap();
+    assert!(user.disabled_at_unix.is_some());
+    let refreshed = console
+        .repositories
+        .get_admin_user_refresh_token_by_hash(&refresh_hash)
+        .unwrap()
+        .unwrap();
+    assert!(
+        refreshed.revoked_at_unix.is_some(),
+        "deactivation must revoke existing sessions, not just block future logins"
+    );
+
+    // The standards-shaped SCIM PATCH Operations body also works.
+    let standard_patch_body = serde_json::to_vec(&serde_json::json!({
+        "Operations": [{"op": "replace", "path": "active", "value": true}]
+    }))
+    .unwrap();
+    let reactivate = handle_scim_user_patch(&console, &tenant_id, &user_id, &standard_patch_body);
+    assert_eq!(reactivate.status, 200);
+    assert_eq!(body_json(&reactivate)["active"], true);
+    let user = console
+        .repositories
+        .get_admin_user_by_id(&user_id)
+        .unwrap()
+        .unwrap();
+    assert!(user.disabled_at_unix.is_none());
+}
+
+#[test]
+fn scim_patch_rejects_a_body_with_no_recognizable_active_value() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner7b@acme.test",
+        "correct-horse-26b",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-badpatch@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("member".into()),
+        },
+    );
+    let user_id = body_json(&create)["id"].as_str().unwrap().to_string();
+
+    let patch = handle_scim_user_patch(&console, &tenant_id, &user_id, b"{}");
+    assert_eq!(patch.status, 422);
+}
+
+#[test]
+fn scim_delete_deprovisions_a_user() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner8@acme.test",
+        "correct-horse-27",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-delete@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("member".into()),
+        },
+    );
+    let user_id = body_json(&create)["id"].as_str().unwrap().to_string();
+
+    let delete = handle_scim_user_delete(&console, &tenant_id, &user_id);
+    assert_eq!(delete.status, 204);
+
+    let user = console
+        .repositories
+        .get_admin_user_by_id(&user_id)
+        .unwrap()
+        .unwrap();
+    assert!(user.disabled_at_unix.is_some());
+
+    assert_eq!(
+        handle_scim_user_delete(&console, &tenant_id, "no-such-id").status,
+        404
+    );
+}
+
+#[test]
+fn scim_groups_list_reflects_distinct_tenant_roles() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner9@acme.test",
+        "correct-horse-28",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+    handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "scim-group-member@acme.test".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: Some("admin".into()),
+        },
+    );
+
+    let groups = handle_scim_groups_list(&console, &tenant_id);
+    assert_eq!(groups.status, 200);
+    let names: Vec<String> = body_json(&groups)["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["displayName"].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.contains(&"owner".to_string()));
+    assert!(names.contains(&"admin".to_string()));
+}
+
+#[test]
+fn scim_user_create_rejects_invalid_username() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "scim-owner10@acme.test",
+        "correct-horse-29",
+    ));
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let create = handle_scim_user_create(
+        &console,
+        &tenant_id,
+        ScimUserRequest {
+            user_name: "not-an-email".into(),
+            active: None,
+            display_name: None,
+            ferrogate_role: None,
+        },
+    );
+    assert_eq!(create.status, 422);
+}

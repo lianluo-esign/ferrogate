@@ -1259,6 +1259,24 @@ impl PostgresControlPlaneStore {
         Ok(row.as_ref().map(admin_user_refresh_token_from_row))
     }
 
+    /// Revokes every not-yet-revoked refresh token for a user (issue #161),
+    /// used when a SCIM/admin deactivation must terminate live sessions
+    /// immediately rather than waiting for access-token expiry.
+    fn revoke_all_admin_user_refresh_tokens(
+        &self,
+        user_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        let affected = self.with_client(|client| {
+            client.execute(
+                "UPDATE admin_user_refresh_tokens SET revoked_at_unix = $1 \
+                 WHERE user_id = $2 AND revoked_at_unix IS NULL",
+                &[&revoked_at_unix, &user_id],
+            )
+        })?;
+        Ok(affected)
+    }
+
     fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
         self.with_client(|client| {
             client.execute(
@@ -5032,6 +5050,26 @@ impl RuntimeControlPlaneState {
             .find(|token| token.token_hash == token_hash)
     }
 
+    pub fn revoke_all_admin_user_refresh_tokens(
+        &mut self,
+        user_id: &str,
+        revoked_at_unix: i64,
+    ) -> u64 {
+        let mut affected = 0u64;
+        for mut token in self
+            .admin_user_refresh_tokens
+            .list()
+            .into_iter()
+            .filter(|token| token.user_id == user_id && token.revoked_at_unix.is_none())
+        {
+            token.revoked_at_unix = Some(revoked_at_unix);
+            self.admin_user_refresh_tokens
+                .insert(token.id.clone(), token);
+            affected += 1;
+        }
+        affected
+    }
+
     pub fn get_tenant_account(&self, id: &str) -> Option<StoredTenantAccount> {
         self.tenant_accounts.get(id)
     }
@@ -6889,6 +6927,28 @@ impl RuntimeStorageRepositories {
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_admin_user_refresh_token_by_hash(token_hash)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
+        }
+    }
+
+    /// Revokes every live refresh token for a user (issue #161), so a SCIM
+    /// or admin-console deactivation terminates existing browser sessions
+    /// immediately rather than merely blocking future logins.
+    pub fn revoke_all_admin_user_refresh_tokens(
+        &self,
+        user_id: &str,
+        revoked_at_unix: i64,
+    ) -> Result<u64, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| {
+                    control_plane.revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
+                })
+                .unwrap_or(0)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
             }
             RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
