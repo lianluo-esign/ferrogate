@@ -12,7 +12,7 @@
 
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpStream, ToSocketAddrs},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Arc, Mutex},
@@ -23,6 +23,12 @@ use std::{
 use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_core::{ApprovalPolicy, ToolDef};
 use http::Uri;
+use rustls::{
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme,
+    StreamOwned,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -584,6 +590,8 @@ struct HttpMcpClient {
     endpoint: String,
     timeout: Duration,
     headers: Vec<(String, String)>,
+    tls: McpTlsConfig,
+    transport: McpTransport,
     next_id: u64,
 }
 
@@ -598,6 +606,8 @@ impl HttpMcpClient {
             endpoint,
             timeout: Duration::from_millis(config.timeout_ms),
             headers: resolved_headers(config)?,
+            tls: config.tls.clone(),
+            transport: config.transport.clone(),
             next_id: 1,
         })
     }
@@ -651,7 +661,14 @@ impl HttpMcpClient {
     }
 
     fn post_json(&self, body: &Value) -> AnyResult<Value> {
-        post_http_json(&self.endpoint, self.timeout, &self.headers, body)
+        post_http_json(
+            &self.endpoint,
+            self.timeout,
+            &self.headers,
+            &self.tls,
+            &self.transport,
+            body,
+        )
     }
 
     fn next_jsonrpc_id(&mut self) -> u64 {
@@ -783,43 +800,302 @@ fn validate_http_endpoint(raw: &str) -> AnyResult<()> {
     }
 }
 
+/// Validates that `tls.ca_cert_path`, if set, points at a file that exists
+/// and parses as at least one PEM certificate (issue #167). Called from
+/// `validate_mcp_server_config` so a bad path fails config validation
+/// instead of failing silently at first connection attempt.
+fn validate_mcp_tls_config(tls: &McpTlsConfig) -> AnyResult<()> {
+    if let Some(path) = tls.ca_cert_path.as_deref() {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read tls.ca_cert_path {path}"))?;
+        let certs = rustls_pemfile::certs(&mut bytes.as_slice())
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to parse tls.ca_cert_path {path} as PEM"))?;
+        if certs.is_empty() {
+            bail!("tls.ca_cert_path {path} contains no PEM certificates");
+        }
+    }
+    Ok(())
+}
+
+/// Builds (and does not cache, since each `McpTlsConfig` can differ per
+/// server) the rustls client config used to dial `https://` MCP endpoints.
+/// rustls 0.23 requires selecting a process-wide default `CryptoProvider`
+/// once more than one crypto backend is compiled into the binary — which
+/// happens here because `ferrogate-auth` depends on `rustls` with the
+/// `ring` feature while this crate uses the default `aws-lc-rs` backend.
+/// Installing the default explicitly and idempotently avoids the "Could not
+/// automatically determine the process-level CryptoProvider" panic in any
+/// binary/test that links both (issue #163/#167).
+fn ensure_rustls_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
+fn mcp_tls_client_config(tls: &McpTlsConfig) -> AnyResult<Arc<ClientConfig>> {
+    ensure_rustls_crypto_provider();
+    if tls.insecure_skip_verify {
+        tracing::warn!(
+            "MCP server configured with tls.insecure_skip_verify=true; certificate validation is disabled"
+        );
+        let config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoServerCertVerification))
+            .with_no_client_auth();
+        return Ok(Arc::new(config));
+    }
+
+    let mut roots = RootCertStore::empty();
+    let native_certs = rustls_native_certs::load_native_certs();
+    if !native_certs.errors.is_empty() {
+        bail!(
+            "failed to load platform native certificates: {:?}",
+            native_certs.errors
+        );
+    }
+    for cert in native_certs.certs {
+        let _ = roots.add(cert);
+    }
+    if let Some(path) = tls.ca_cert_path.as_deref() {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read tls.ca_cert_path {path}"))?;
+        let certs = rustls_pemfile::certs(&mut bytes.as_slice())
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to parse tls.ca_cert_path {path} as PEM"))?;
+        for cert in certs {
+            roots
+                .add(cert)
+                .with_context(|| format!("failed to trust certificate from {path}"))?;
+        }
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+/// A `rustls` server-certificate verifier that accepts everything, used only
+/// when an operator explicitly sets `tls.insecure_skip_verify = true`.
+#[derive(Debug)]
+struct NoServerCertVerification;
+
+impl ServerCertVerifier for NoServerCertVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+        ]
+    }
+}
+
 fn post_http_json(
     endpoint: &str,
     timeout: Duration,
     headers: &[(String, String)],
+    tls: &McpTlsConfig,
+    transport: &McpTransport,
     body: &Value,
 ) -> AnyResult<Value> {
     let target = parse_http_target(endpoint)?;
     let body = serde_json::to_vec(body)?;
-    let mut stream = TcpStream::connect_timeout(&target.address, timeout)
+    let accept = match transport {
+        McpTransport::Sse => "text/event-stream, application/json",
+        _ => "application/json",
+    };
+    let tcp = TcpStream::connect_timeout(&target.address, timeout)
         .with_context(|| format!("failed to connect MCP endpoint {}", target.authority))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    tcp.set_read_timeout(Some(timeout))?;
+    tcp.set_write_timeout(Some(timeout))?;
+
+    match target.scheme {
+        HttpScheme::Http => {
+            let mut stream = tcp;
+            send_mcp_http_request(&mut stream, &target, headers, accept, &body)
+        }
+        HttpScheme::Https => {
+            let server_name = ServerName::try_from(target.host.clone())
+                .with_context(|| format!("invalid MCP TLS server name {}", target.host))?;
+            let config = mcp_tls_client_config(tls)?;
+            let connection = ClientConnection::new(config, server_name)
+                .context("failed to initialize MCP TLS client")?;
+            let mut tls_stream = StreamOwned::new(connection, tcp);
+            send_mcp_http_request(&mut tls_stream, &target, headers, accept, &body)
+        }
+    }
+}
+
+fn send_mcp_http_request<S: Read + Write>(
+    stream: &mut S,
+    target: &HttpTarget,
+    headers: &[(String, String)],
+    accept: &str,
+    body: &[u8],
+) -> AnyResult<Value> {
     write!(
         stream,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
         target.path_query,
         target.authority,
+        accept,
         body.len()
     )?;
     for (name, value) in headers {
         write!(stream, "{name}: {value}\r\n")?;
     }
     write!(stream, "\r\n")?;
-    stream.write_all(&body)?;
+    stream.write_all(body)?;
     stream.flush()?;
 
+    let mut reader = BufReader::new(stream);
+    let head = read_http_response_head(&mut reader)?;
+    if head
+        .content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream")
+    {
+        read_sse_json_response(&mut reader)
+    } else {
+        read_json_body(&mut reader, head.content_length)
+    }
+}
+
+/// `Content-Type` and `Content-Length` parsed from a response's headers.
+struct HttpResponseHead {
+    content_type: String,
+    content_length: Option<usize>,
+}
+
+/// Reads HTTP response status + headers up to the blank line. The connection
+/// remains positioned at the start of the response body afterward.
+fn read_http_response_head<R: BufRead>(reader: &mut R) -> AnyResult<HttpResponseHead> {
+    let mut status_line = String::new();
+    if reader.read_line(&mut status_line)? == 0 {
+        bail!("MCP endpoint closed the connection before sending a response");
+    }
+    if status_line.split_whitespace().nth(1).is_none() {
+        bail!("invalid MCP HTTP response status line");
+    }
+    let mut content_type = String::new();
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim();
+            if name.eq_ignore_ascii_case("content-type") {
+                content_type = value.trim().to_string();
+            } else if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse::<usize>().ok();
+            }
+        }
+    }
+    Ok(HttpResponseHead {
+        content_type,
+        content_length,
+    })
+}
+
+/// Reads the response body as a single JSON value (the `application/json`
+/// response shape most `StreamableHttp` MCP servers use). Prefers an exact
+/// `Content-Length`-bounded read over `read_to_end` so a well-formed
+/// response doesn't require the peer to close (and send a TLS
+/// `close_notify`) before we can parse it.
+fn read_json_body<R: BufRead>(reader: &mut R, content_length: Option<usize>) -> AnyResult<Value> {
+    if let Some(len) = content_length {
+        let mut raw = vec![0u8; len];
+        reader.read_exact(&mut raw)?;
+        return serde_json::from_slice(&raw).context("invalid MCP JSON response");
+    }
     let mut raw = Vec::new();
-    std::io::Read::read_to_end(&mut stream, &mut raw)?;
-    let response = String::from_utf8_lossy(&raw);
-    let (_, body) = response
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow::anyhow!("invalid MCP HTTP response"))?;
-    serde_json::from_str(body).context("invalid MCP JSON response")
+    reader.read_to_end(&mut raw)?;
+    serde_json::from_slice(&raw).context("invalid MCP JSON response")
+}
+
+/// Incrementally parses a `text/event-stream` response, returning as soon as
+/// one `data:` field assembles into a complete JSON value — rather than
+/// blocking on connection close, which a real SSE stream may not do
+/// promptly (issue #167).
+fn read_sse_json_response<R: BufRead>(reader: &mut R) -> AnyResult<Value> {
+    let mut data_buf = String::new();
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            bail!("MCP SSE stream closed before a JSON-RPC response arrived");
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            if let Ok(value) = serde_json::from_str::<Value>(&data_buf) {
+                return Ok(value);
+            }
+            data_buf.clear();
+            continue;
+        }
+        if let Some(data) = trimmed.strip_prefix("data:") {
+            if !data_buf.is_empty() {
+                data_buf.push('\n');
+            }
+            data_buf.push_str(data.trim_start());
+        }
+        // Other SSE fields (`event:`, `id:`, `retry:`) and `:`-prefixed
+        // comment/keep-alive lines are not needed for JSON-RPC correlation.
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpScheme {
+    Http,
+    Https,
 }
 
 #[derive(Debug)]
 struct HttpTarget {
+    scheme: HttpScheme,
+    host: String,
     authority: String,
     path_query: String,
     address: std::net::SocketAddr,
@@ -829,20 +1105,26 @@ fn parse_http_target(raw: &str) -> AnyResult<HttpTarget> {
     let uri: Uri = raw
         .parse()
         .with_context(|| format!("invalid MCP endpoint {raw}"))?;
-    if uri.scheme_str() != Some("http") {
-        bail!("MCP test HTTP client supports http endpoints; configure HTTPS through rmcp transport in production");
-    }
+    let scheme = match uri.scheme_str() {
+        Some("http") => HttpScheme::Http,
+        Some("https") => HttpScheme::Https,
+        _ => bail!("MCP network transports require http or https url"),
+    };
+    let default_port = match scheme {
+        HttpScheme::Http => 80,
+        HttpScheme::Https => 443,
+    };
     let authority = uri
         .authority()
         .ok_or_else(|| anyhow::anyhow!("MCP endpoint must include authority"))?;
     let host = authority.host().to_string();
-    let port = authority.port_u16().unwrap_or(80);
+    let port = authority.port_u16().unwrap_or(default_port);
     let address = (host.as_str(), port)
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow::anyhow!("MCP endpoint resolved no addresses"))?;
-    let authority = if port == 80 {
-        host
+    let authority = if port == default_port {
+        host.clone()
     } else {
         format!("{host}:{port}")
     };
@@ -851,6 +1133,8 @@ fn parse_http_target(raw: &str) -> AnyResult<HttpTarget> {
         .map(|path| path.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     Ok(HttpTarget {
+        scheme,
+        host,
         authority,
         path_query,
         address,
@@ -1022,6 +1306,8 @@ pub fn validate_mcp_server_config(config: &McpServerConfig) -> AnyResult<()> {
                 anyhow::anyhow!("MCP network server {} requires url", config.name)
             })?;
             validate_http_endpoint(url)?;
+            validate_mcp_tls_config(&config.tls)
+                .with_context(|| format!("MCP server {}", config.name))?;
         }
         McpTransport::Stdio => {
             if config.command.as_deref().is_none_or(str::is_empty) {
