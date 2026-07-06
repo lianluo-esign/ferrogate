@@ -29,14 +29,15 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
           rustup default "$RUSTUP_TOOLCHAIN"
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Install supply-chain security tools
+        run: |
+          cargo install cargo-deny --locked
+          cargo install cargo-audit --locked
 
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Check locked metadata
-        run: cargo metadata --locked --format-version=1 >/dev/null
+      - name: Run security check (strict)
+        env:
+          FERROGATE_SECURITY_REQUIRE_TOOLS: "1"
+        run: ./scripts/security-check.sh
 
       - name: Run config validation tests
         run: |

@@ -992,9 +992,11 @@ version = "2026.6.22"
 dependencies = [
  "anyhow",
  "argon2",
+ "base64",
  "blake2",
  "clap",
  "ferrogate-core",
+ "ferrogate-secrets",
  "ferrogate-storage",
  "jsonwebtoken",
  "rand_core 0.6.4",
@@ -1003,6 +1005,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
@@ -1035,6 +1038,7 @@ dependencies = [
  "ferrogate-policy",
  "ferrogate-providers",
  "ferrogate-runtime",
+ "ferrogate-secrets",
  "ferrogate-storage",
  "http",
  "instant-acme",
@@ -1079,9 +1083,14 @@ dependencies = [
  "anyhow",
  "ferrogate-core",
  "http",
+ "rcgen",
  "rmcp",
+ "rustls",
+ "rustls-native-certs 0.8.3",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1133,6 +1142,21 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tempfile",
+]
+
+[[package]]
+name = "ferrogate-secrets"
+version = "2026.6.22"
+dependencies = [
+ "anyhow",
+ "http",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs 0.8.3",
+ "rustls-pemfile",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

@@ -453,11 +453,16 @@ Run the local gate before committing:
 ./scripts/security-check.sh
 ```
 
-Strict mode requires cargo-deny and cargo-audit:
+Strict mode requires cargo-deny and cargo-audit, and is what CI enforces on
+every change (see [`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)):
 
 ```bash
 FERROGATE_SECURITY_REQUIRE_TOOLS=1 ./scripts/security-check.sh
 ```
+
+See [`SECURITY.md`](SECURITY.md) for the vulnerability-disclosure process and
+[`docs/security-controls.md`](docs/security-controls.md) for a control-family
+mapping of shipped security capabilities.
 
 For narrower local checks:
 
@@ -479,6 +484,7 @@ git diff --check
 - Cluster deployment: [`docs/cluster-deployment.md`](docs/cluster-deployment.md)
 - Auth service contract: [`docs/auth-service-contract.md`](docs/auth-service-contract.md)
 - Performance testing: [`docs/performance-testing.md`](docs/performance-testing.md)
+- Security controls: [`docs/security-controls.md`](docs/security-controls.md)
 - Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 
 ## Contributing
