@@ -290,6 +290,7 @@ fn options_preflight_gets_a_no_content_response_for_any_path() {
     let request = HttpRequest {
         method: "OPTIONS".into(),
         path: "/v1/admin/register".into(),
+        query: String::new(),
         headers: HashMap::new(),
         body: Vec::new(),
     };
@@ -850,6 +851,7 @@ fn scim_request(method: &str, path: &str, token: &str, body: Vec<u8>) -> HttpReq
     HttpRequest {
         method: method.into(),
         path: path.into(),
+        query: String::new(),
         headers,
         body,
     }
@@ -1253,4 +1255,447 @@ fn scim_user_create_rejects_invalid_username() {
         },
     );
     assert_eq!(create.status, 422);
+}
+
+// -- issue #160: OIDC SSO (Authorization Code + PKCE) ----------------------
+
+#[derive(Clone)]
+struct MockOidcRealm {
+    jwks_json: String,
+    id_token: String,
+    requests: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+fn decode_hex(hex: &str) -> Vec<u8> {
+    let hex = hex.trim();
+    let chars: Vec<char> = hex.chars().collect();
+    let mut bytes = Vec::with_capacity(chars.len() / 2);
+    let mut index = 0;
+    while index + 1 < chars.len() {
+        let byte_str: String = chars[index..index + 2].iter().collect();
+        bytes.push(u8::from_str_radix(&byte_str, 16).unwrap());
+        index += 2;
+    }
+    bytes
+}
+
+/// Shells out to `openssl` (already relied on by the existing ACME tests)
+/// to generate a real RSA keypair, returning the PEM-encoded private key
+/// and the modulus (`n`) as a base64url string for building a matching JWK.
+/// The public exponent is always `65537` ("AQAB") for openssl-generated
+/// keys, so it's hardcoded rather than parsed.
+fn generate_test_rsa_key() -> (Vec<u8>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let key_path = dir.path().join("key.pem");
+    let status = std::process::Command::new("openssl")
+        .arg("genrsa")
+        .arg("-out")
+        .arg(&key_path)
+        .arg("2048")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("openssl must be available to generate a test RSA key");
+    assert!(status.success(), "openssl genrsa failed");
+    let pem = std::fs::read(&key_path).unwrap();
+
+    let modulus_output = std::process::Command::new("openssl")
+        .arg("rsa")
+        .arg("-in")
+        .arg(&key_path)
+        .arg("-noout")
+        .arg("-modulus")
+        .output()
+        .expect("openssl rsa -modulus must succeed");
+    assert!(modulus_output.status.success());
+    let modulus_text = String::from_utf8(modulus_output.stdout).unwrap();
+    let hex = modulus_text
+        .trim()
+        .strip_prefix("Modulus=")
+        .expect("openssl -modulus output must start with Modulus=");
+    let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(decode_hex(hex));
+    (pem, n)
+}
+
+fn jwks_json_for(n: &str, kid: &str) -> String {
+    serde_json::json!({
+        "keys": [{
+            "kty": "RSA",
+            "use": "sig",
+            "kid": kid,
+            "alg": "RS256",
+            "n": n,
+            "e": "AQAB",
+        }]
+    })
+    .to_string()
+}
+
+fn sign_test_id_token(
+    key_pem: &[u8],
+    kid: &str,
+    issuer: &str,
+    audience: &str,
+    extra_claims: serde_json::Value,
+) -> String {
+    let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some(kid.to_string());
+    let now = now_unix_seconds();
+    let mut claims = serde_json::json!({
+        "iss": issuer,
+        "sub": "idp-user-1",
+        "aud": audience,
+        "iat": now,
+        "exp": now + 300,
+    });
+    for (key, value) in extra_claims.as_object().unwrap() {
+        claims[key] = value.clone();
+    }
+    encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_rsa_pem(key_pem).unwrap(),
+    )
+    .unwrap()
+}
+
+/// Binds a mock OIDC IdP's listener up front so the real, OS-assigned port
+/// is known before signing the ID token (whose `iss` claim must match).
+fn bind_mock_oidc_server() -> (TcpListener, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    (listener, format!("http://{addr}"))
+}
+
+/// Serves discovery/JWKS/token-exchange responses for up to 8 connections,
+/// matching the small, fixed number of requests one authorize+callback
+/// round trip makes (discovery is fetched twice since nothing is cached).
+fn run_mock_oidc_server(listener: TcpListener, realm: MockOidcRealm, issuer: String) {
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(8) {
+            let Ok(stream) = stream else { break };
+            handle_mock_oidc_connection(stream, &realm, &issuer);
+        }
+    });
+}
+
+fn handle_mock_oidc_connection(
+    mut stream: std::net::TcpStream,
+    realm: &MockOidcRealm,
+    issuer: &str,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(_) => return,
+        };
+        if read == 0 {
+            return;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos;
+        }
+        if buffer.len() > 65_536 {
+            return;
+        }
+    };
+    let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+    let mut lines = header_text.lines();
+    let request_line = lines.next().unwrap_or("").to_string();
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+    let content_length: usize = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse().ok())
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    let body_end = (body_start + content_length).min(buffer.len());
+    let body = String::from_utf8_lossy(&buffer[body_start..body_end]).to_string();
+
+    if let Ok(mut requests) = realm.requests.lock() {
+        requests.push((path.clone(), body));
+    }
+
+    let (status, content_body) = if path.starts_with("/.well-known/openid-configuration") {
+        (
+            200,
+            serde_json::json!({
+                "issuer": issuer,
+                "authorization_endpoint": format!("{issuer}/authorize"),
+                "token_endpoint": format!("{issuer}/token"),
+                "jwks_uri": format!("{issuer}/jwks"),
+            })
+            .to_string(),
+        )
+    } else if path.starts_with("/jwks") {
+        (200, realm.jwks_json.clone())
+    } else if path.starts_with("/token") {
+        (
+            200,
+            serde_json::json!({ "id_token": realm.id_token, "access_token": "mock-access-token" })
+                .to_string(),
+        )
+    } else {
+        (404, "{}".to_string())
+    };
+    let response = format!(
+        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        content_body.len(),
+        content_body
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn sso_config_request(issuer: &str) -> SsoConfigRequest {
+    SsoConfigRequest {
+        issuer: issuer.to_string(),
+        client_id: "test-client-id".into(),
+        client_secret: "test-client-secret".into(),
+        redirect_uri: "http://localhost:3000/callback".into(),
+        group_role_mapping: [("Engineering".to_string(), "admin".to_string())]
+            .into_iter()
+            .collect(),
+        default_role: "member".into(),
+        group_claim: "groups".into(),
+    }
+}
+
+#[test]
+fn sso_config_set_requires_owner() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "sso-owner-gate@acme.test",
+        "correct-horse-31",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_tenant_id = owner["tenant"]["id"].as_str().unwrap();
+    let member = body_json(&register(
+        &console,
+        "sso-member-gate@acme.test",
+        "correct-horse-32",
+    ));
+    let member_user_id = member["user"]["id"].as_str().unwrap();
+    handle_admin_team_invite(
+        &console,
+        owner_token,
+        AdminInviteRequest {
+            email: "sso-member-gate@acme.test".into(),
+            role: "member".into(),
+        },
+    );
+    let (member_token, _) = issue_session(
+        &console,
+        member_user_id,
+        "sso-member-gate@acme.test",
+        owner_tenant_id,
+        "member",
+    )
+    .unwrap();
+
+    let forbidden_set = handle_admin_sso_config_set(
+        &console,
+        &member_token,
+        sso_config_request("http://127.0.0.1:1"),
+    );
+    assert_eq!(forbidden_set.status, 403);
+
+    let ok_set = handle_admin_sso_config_set(
+        &console,
+        owner_token,
+        sso_config_request("http://127.0.0.1:1"),
+    );
+    assert_eq!(ok_set.status, 200);
+}
+
+#[test]
+fn sso_authorize_returns_404_when_not_configured() {
+    let console = console();
+    let response = handle_sso_authorize(&console, "no-such-tenant");
+    assert_eq!(response.status, 404);
+}
+
+#[test]
+fn sso_end_to_end_provisions_new_user_and_maps_group_to_role() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "sso-owner2@acme.test",
+        "correct-horse-33",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let (listener, issuer) = bind_mock_oidc_server();
+    let (key_pem, n) = generate_test_rsa_key();
+    let kid = "test-key-1";
+    let jwks_json = jwks_json_for(&n, kid);
+    let id_token = sign_test_id_token(
+        &key_pem,
+        kid,
+        &issuer,
+        "test-client-id",
+        serde_json::json!({
+            "email": "sso-user@acme.test",
+            "name": "SSO User",
+            "groups": ["Engineering"],
+        }),
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let realm = MockOidcRealm {
+        jwks_json,
+        id_token,
+        requests: requests.clone(),
+    };
+    run_mock_oidc_server(listener, realm, issuer.clone());
+
+    let config_set =
+        handle_admin_sso_config_set(&console, owner_token, sso_config_request(&issuer));
+    assert_eq!(config_set.status, 200);
+
+    let authorize = handle_sso_authorize(&console, &tenant_id);
+    assert_eq!(authorize.status, 200);
+    let authorize_body = body_json(&authorize);
+    let state = authorize_body["state"].as_str().unwrap().to_string();
+    assert!(authorize_body["authorize_url"]
+        .as_str()
+        .unwrap()
+        .starts_with(&format!("{issuer}/authorize")));
+
+    let callback = handle_sso_callback(&console, "fake-authorization-code", &state);
+    assert_eq!(callback.status, 200);
+    let session = body_json(&callback);
+    assert_eq!(session["user"]["email"], "sso-user@acme.test");
+    assert_eq!(session["tenant"]["id"], tenant_id);
+    // Mapped via group_role_mapping (Engineering -> admin), not hardcoded
+    // to "owner" or the configured default_role ("member").
+    assert_eq!(session["tenant"]["role"], "admin");
+    assert!(session["access_token"].as_str().unwrap().contains('.'));
+    assert!(session["gateway_api_key"]
+        .as_str()
+        .unwrap()
+        .starts_with("fg_"));
+
+    // JIT-provisioned: a real StoredAdminUser + membership now exist.
+    let user = console
+        .repositories
+        .get_admin_user_by_email("sso-user@acme.test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        membership_role_in_tenant(&console, &tenant_id, &user.id).as_deref(),
+        Some("admin")
+    );
+
+    // PKCE was actually exercised end-to-end: the token-exchange request
+    // included a code_verifier alongside the authorization code.
+    let logged = requests.lock().unwrap();
+    let token_request = logged
+        .iter()
+        .find(|(path, _)| path.starts_with("/token"))
+        .expect("token endpoint must have been called");
+    assert!(token_request.1.contains("code_verifier="));
+    assert!(token_request.1.contains("grant_type=authorization_code"));
+    assert!(token_request.1.contains("code=fake-authorization-code"));
+    drop(logged);
+
+    // The state is single-use: replaying the same callback must fail.
+    let replay = handle_sso_callback(&console, "fake-authorization-code", &state);
+    assert_eq!(replay.status, 401);
+}
+
+#[test]
+fn sso_callback_rejects_an_unknown_state() {
+    let console = console();
+    let response = handle_sso_callback(&console, "some-code", "never-issued-state");
+    assert_eq!(response.status, 401);
+}
+
+#[test]
+fn sso_second_login_does_not_overwrite_a_role_set_afterward() {
+    let console = console();
+    let owner = body_json(&register(
+        &console,
+        "sso-owner3@acme.test",
+        "correct-horse-34",
+    ));
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let tenant_id = owner["tenant"]["id"].as_str().unwrap().to_string();
+
+    let (listener, issuer) = bind_mock_oidc_server();
+    let (key_pem, n) = generate_test_rsa_key();
+    let kid = "test-key-2";
+    let jwks_json = jwks_json_for(&n, kid);
+    let id_token = sign_test_id_token(
+        &key_pem,
+        kid,
+        &issuer,
+        "test-client-id",
+        serde_json::json!({
+            "email": "sso-user2@acme.test",
+            "name": "SSO User Two",
+            "groups": ["Engineering"],
+        }),
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let realm = MockOidcRealm {
+        jwks_json,
+        id_token,
+        requests,
+    };
+    run_mock_oidc_server(listener, realm, issuer.clone());
+    handle_admin_sso_config_set(&console, owner_token, sso_config_request(&issuer));
+
+    // First login: JIT-provisioned as "admin" via the group mapping.
+    let state_1 = body_json(&handle_sso_authorize(&console, &tenant_id))["state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = handle_sso_callback(&console, "code-1", &state_1);
+    assert_eq!(first.status, 200);
+    assert_eq!(body_json(&first)["tenant"]["role"], "admin");
+
+    // An owner then demotes them to "member" via the ordinary team API.
+    let user_id = body_json(&first)["user"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let change = handle_admin_team_change_role(
+        &console,
+        owner_token,
+        &user_id,
+        AdminChangeRoleRequest {
+            role: "member".into(),
+        },
+    );
+    assert_eq!(change.status, 200);
+
+    // A second SSO login (same IdP groups) must NOT silently re-promote them
+    // back to "admin" -- the explicit change takes precedence.
+    let state_2 = body_json(&handle_sso_authorize(&console, &tenant_id))["state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second = handle_sso_callback(&console, "code-2", &state_2);
+    assert_eq!(second.status, 200);
+    assert_eq!(body_json(&second)["tenant"]["role"], "member");
 }

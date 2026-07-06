@@ -15,13 +15,14 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
+use base64::Engine as _;
 use blake2::{Blake2b512, Digest};
 use ferrogate_core::{TenantContext, WorkspaceScope};
 use ferrogate_storage::{
     RuntimeStorageRepositories, StoredAdminUser, StoredAdminUserMembership,
     StoredAdminUserRefreshToken, StoredApiKey, StoredProject, StoredTenantAccount, StoredWorkspace,
 };
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, decode_header, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
@@ -33,7 +34,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -539,6 +540,15 @@ struct AdminConsoleState {
     repositories: Arc<RuntimeStorageRepositories>,
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
+    /// Per-tenant OIDC SSO configuration (issue #160), set at runtime via
+    /// `POST /v1/admin/team/sso-config`. In-memory only for now (mirrors
+    /// #162's runtime Role/PolicyBinding CRUD): durable persistence is a
+    /// follow-up, not required for the runtime capability itself.
+    sso_configs: Arc<RwLock<HashMap<String, SsoProviderConfig>>>,
+    /// Short-lived state for in-flight `authorize` -> `callback` round
+    /// trips, keyed by the OAuth `state` parameter. Entries are removed on
+    /// first use and expire after 10 minutes (see `handle_sso_callback`).
+    pending_sso_flows: Arc<Mutex<HashMap<String, PendingSsoFlow>>>,
 }
 
 impl AdminConsoleState {
@@ -547,6 +557,8 @@ impl AdminConsoleState {
             repositories: config.repositories,
             encoding_key: EncodingKey::from_secret(config.jwt_secret.as_bytes()),
             decoding_key: DecodingKey::from_secret(config.jwt_secret.as_bytes()),
+            sso_configs: Arc::new(RwLock::new(HashMap::new())),
+            pending_sso_flows: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -994,6 +1006,36 @@ fn route_request(service: &AuthService, request: HttpRequest) -> HttpResponse {
                 }
             })
         }
+        ("POST", "/v1/admin/team/sso-config") => {
+            with_admin_console(service, |console| match request.bearer_token() {
+                Some(token) => {
+                    let parsed = serde_json::from_slice::<SsoConfigRequest>(&request.body);
+                    match parsed {
+                        Ok(payload) => handle_admin_sso_config_set(console, token, payload),
+                        Err(error) => bad_request(error),
+                    }
+                }
+                None => unauthorized("missing bearer token"),
+            })
+        }
+        ("GET", "/v1/admin/auth/sso/authorize") => {
+            with_admin_console(service, |console| match request.query_param("tenant_id") {
+                Some(tenant_id) if !tenant_id.is_empty() => {
+                    handle_sso_authorize(console, &tenant_id)
+                }
+                _ => unprocessable("tenant_id query parameter is required"),
+            })
+        }
+        ("GET", "/v1/admin/auth/sso/callback") => with_admin_console(service, |console| {
+            let code = request.query_param("code");
+            let state = request.query_param("state");
+            match (code, state) {
+                (Some(code), Some(state)) if !code.is_empty() && !state.is_empty() => {
+                    handle_sso_callback(console, &code, &state)
+                }
+                _ => unprocessable("code and state query parameters are required"),
+            }
+        }),
         _ => HttpResponse::json(
             404,
             json!({
@@ -2272,6 +2314,419 @@ fn handle_scim_groups_list(console: &AdminConsoleState, tenant_id: &str) -> Http
     )
 }
 
+// -- issue #160: OIDC SSO (Authorization Code + PKCE) ----------------------
+
+fn default_sso_role() -> String {
+    "member".to_string()
+}
+
+fn default_group_claim() -> String {
+    "groups".to_string()
+}
+
+/// Request body for `POST /v1/admin/team/sso-config` (issue #160). Only a
+/// tenant `owner` may set this.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SsoConfigRequest {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+    #[serde(default)]
+    pub group_role_mapping: HashMap<String, String>,
+    #[serde(default = "default_sso_role")]
+    pub default_role: String,
+    /// ID-token claim carrying the caller's IdP group memberships (an
+    /// array of strings), used with `group_role_mapping`. Defaults to
+    /// `"groups"`, the common Okta/Azure AD/Keycloak convention.
+    #[serde(default = "default_group_claim")]
+    pub group_claim: String,
+}
+
+#[derive(Debug, Clone)]
+struct SsoProviderConfig {
+    issuer: String,
+    client_id: String,
+    client_secret: String,
+    redirect_uri: String,
+    group_role_mapping: HashMap<String, String>,
+    default_role: String,
+    group_claim: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSsoFlow {
+    tenant_id: String,
+    code_verifier: String,
+    created_at_unix: i64,
+}
+
+/// An in-flight SSO flow may sit in the browser for a while (IdP login,
+/// possibly MFA); 10 minutes is generous without leaving stale entries
+/// around indefinitely.
+const SSO_FLOW_TTL_SECS: i64 = 600;
+
+fn read_sso_config(console: &AdminConsoleState, tenant_id: &str) -> Option<SsoProviderConfig> {
+    match console.sso_configs.read() {
+        Ok(configs) => configs.get(tenant_id).cloned(),
+        Err(poisoned) => poisoned.into_inner().get(tenant_id).cloned(),
+    }
+}
+
+/// Configures OIDC SSO for the caller's own tenant (issue #160). Only a
+/// tenant `owner` may do this. Stored in-memory (see `AdminConsoleState`
+/// doc comment) -- rotating/removing it is the same call with new values.
+fn handle_admin_sso_config_set(
+    console: &AdminConsoleState,
+    token: &str,
+    payload: SsoConfigRequest,
+) -> HttpResponse {
+    let (_caller, membership) = match current_admin_session(console, token) {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if membership.role != "owner" {
+        return forbidden("only a tenant owner can configure SSO");
+    }
+    let issuer = payload.issuer.trim().trim_end_matches('/').to_string();
+    let client_id = payload.client_id.trim().to_string();
+    let client_secret = payload.client_secret.trim().to_string();
+    let redirect_uri = payload.redirect_uri.trim().to_string();
+    if issuer.is_empty()
+        || client_id.is_empty()
+        || client_secret.is_empty()
+        || redirect_uri.is_empty()
+    {
+        return unprocessable("issuer, client_id, client_secret, and redirect_uri are required");
+    }
+    let config = SsoProviderConfig {
+        issuer,
+        client_id,
+        client_secret,
+        redirect_uri,
+        group_role_mapping: payload.group_role_mapping,
+        default_role: payload.default_role,
+        group_claim: payload.group_claim,
+    };
+    match console.sso_configs.write() {
+        Ok(mut configs) => {
+            configs.insert(membership.tenant_id, config);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().insert(membership.tenant_id, config);
+        }
+    }
+    HttpResponse::json(200, json!({ "object": "sso_config", "configured": true }))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OidcDiscoveryDocument {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
+}
+
+fn fetch_oidc_discovery(issuer: &str) -> anyhow::Result<OidcDiscoveryDocument> {
+    let url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+    let body = ferrogate_secrets::http_get(&url, &[], Duration::from_secs(10), None)
+        .context("failed to fetch OIDC discovery document")?;
+    serde_json::from_slice(&body).context("invalid OIDC discovery document")
+}
+
+fn fetch_jwks(jwks_uri: &str) -> anyhow::Result<jsonwebtoken::jwk::JwkSet> {
+    let body = ferrogate_secrets::http_get(jwks_uri, &[], Duration::from_secs(10), None)
+        .context("failed to fetch JWKS")?;
+    serde_json::from_slice(&body).context("invalid JWKS document")
+}
+
+/// Minimal percent-encoding for query/form values -- avoids a new
+/// dependency for what's otherwise a one-screen helper.
+fn urlencode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// Generates a PKCE `code_verifier`/`code_challenge` pair (S256), per
+/// RFC 7636.
+fn generate_pkce_pair() -> anyhow::Result<(String, String)> {
+    let verifier = generate_random_hex(48)?;
+    let digest = Sha256::digest(verifier.as_bytes());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    Ok((verifier, challenge))
+}
+
+/// Starts an OIDC Authorization Code + PKCE flow for `tenant_id` (issue
+/// #160). Unauthenticated by design -- the browser isn't logged in yet.
+/// Returns the IdP authorize URL for the console to redirect to, rather
+/// than issuing an HTTP redirect itself, so a JSON-API-only client can
+/// drive the flow too.
+fn handle_sso_authorize(console: &AdminConsoleState, tenant_id: &str) -> HttpResponse {
+    let Some(config) = read_sso_config(console, tenant_id) else {
+        return not_found("SSO is not configured for this tenant");
+    };
+    let discovery = match fetch_oidc_discovery(&config.issuer) {
+        Ok(discovery) => discovery,
+        Err(error) => return internal_error(&format!("OIDC discovery failed: {error:#}")),
+    };
+    let (code_verifier, code_challenge) = match generate_pkce_pair() {
+        Ok(pair) => pair,
+        Err(error) => return internal_error(&error.to_string()),
+    };
+    let state = match generate_random_hex(24) {
+        Ok(state) => state,
+        Err(error) => return internal_error(&error.to_string()),
+    };
+    let flow = PendingSsoFlow {
+        tenant_id: tenant_id.to_string(),
+        code_verifier,
+        created_at_unix: now_unix_seconds() as i64,
+    };
+    match console.pending_sso_flows.lock() {
+        Ok(mut flows) => {
+            flows.insert(state.clone(), flow);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().insert(state.clone(), flow);
+        }
+    }
+    let authorize_url = format!(
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20profile&state={}&code_challenge={}&code_challenge_method=S256",
+        discovery.authorization_endpoint,
+        urlencode(&config.client_id),
+        urlencode(&config.redirect_uri),
+        state,
+        code_challenge,
+    );
+    HttpResponse::json(
+        200,
+        json!({ "authorize_url": authorize_url, "state": state }),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcTokenResponse {
+    id_token: String,
+}
+
+/// Completes an OIDC Authorization Code + PKCE flow (issue #160):
+/// - exchanges `code` for tokens using the stashed PKCE `code_verifier`,
+/// - validates the returned ID token's signature against the IdP's JWKS
+///   (matched by `kid`), issuer, audience, and expiry,
+/// - maps the IdP's group claim to a tenant role via `group_role_mapping`,
+/// - just-in-time provisions the `StoredAdminUser` + membership on first
+///   login (never overwriting a role an owner set explicitly afterward),
+/// - and issues the same session shape `register`/`login` return.
+fn handle_sso_callback(console: &AdminConsoleState, code: &str, state: &str) -> HttpResponse {
+    let flow = match console.pending_sso_flows.lock() {
+        Ok(mut flows) => flows.remove(state),
+        Err(poisoned) => poisoned.into_inner().remove(state),
+    };
+    let Some(flow) = flow else {
+        return unauthorized("unknown or already-used SSO state");
+    };
+    if now_unix_seconds() as i64 - flow.created_at_unix > SSO_FLOW_TTL_SECS {
+        return unauthorized("SSO flow has expired; please sign in again");
+    }
+    let Some(config) = read_sso_config(console, &flow.tenant_id) else {
+        return internal_error("SSO configuration was removed mid-flow");
+    };
+    let discovery = match fetch_oidc_discovery(&config.issuer) {
+        Ok(discovery) => discovery,
+        Err(error) => return internal_error(&format!("OIDC discovery failed: {error:#}")),
+    };
+
+    let form_body = format!(
+        "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&client_secret={}&code_verifier={}",
+        urlencode(code),
+        urlencode(&config.redirect_uri),
+        urlencode(&config.client_id),
+        urlencode(&config.client_secret),
+        urlencode(&flow.code_verifier),
+    );
+    let token_response_body = match ferrogate_secrets::http_post(
+        &discovery.token_endpoint,
+        &[(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )],
+        form_body.as_bytes(),
+        Duration::from_secs(10),
+        None,
+    ) {
+        Ok(body) => body,
+        Err(error) => return internal_error(&format!("token exchange failed: {error:#}")),
+    };
+    let token_response: OidcTokenResponse = match serde_json::from_slice(&token_response_body) {
+        Ok(value) => value,
+        Err(error) => return internal_error(&format!("invalid token endpoint response: {error}")),
+    };
+
+    let header = match decode_header(&token_response.id_token) {
+        Ok(header) => header,
+        Err(error) => return unauthorized(&format!("invalid ID token header: {error}")),
+    };
+    let Some(kid) = header.kid else {
+        return unauthorized("ID token is missing a key id (kid)");
+    };
+    let jwks = match fetch_jwks(&discovery.jwks_uri) {
+        Ok(jwks) => jwks,
+        Err(error) => return internal_error(&format!("failed to fetch JWKS: {error:#}")),
+    };
+    let Some(jwk) = jwks.find(&kid) else {
+        return unauthorized("ID token key id was not found in the IdP's JWKS");
+    };
+    let decoding_key = match DecodingKey::from_jwk(jwk) {
+        Ok(key) => key,
+        Err(error) => return internal_error(&format!("unsupported JWK: {error}")),
+    };
+    let mut validation = Validation::new(header.alg);
+    validation.set_audience(&[config.client_id.as_str()]);
+    validation.set_issuer(&[config.issuer.as_str()]);
+    let claims =
+        match decode::<serde_json::Value>(&token_response.id_token, &decoding_key, &validation) {
+            Ok(data) => data.claims,
+            Err(error) => return unauthorized(&format!("ID token validation failed: {error}")),
+        };
+
+    let email = claims
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .filter(|email| is_valid_email(email));
+    let Some(email) = email else {
+        return unprocessable("ID token did not include a usable email claim");
+    };
+    let display_name = claims
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&email)
+        .to_string();
+    let groups: Vec<String> = claims
+        .get(&config.group_claim)
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mapped_role = groups
+        .iter()
+        .find_map(|group| config.group_role_mapping.get(group).cloned())
+        .unwrap_or(config.default_role);
+
+    let existing = match console.repositories.get_admin_user_by_email(&email) {
+        Ok(existing) => existing,
+        Err(error) => return storage_error(&error),
+    };
+    let user = match existing {
+        Some(user) => user,
+        None => {
+            let password_hash = match unusable_password_hash() {
+                Ok(hash) => hash,
+                Err(error) => return internal_error(&error.to_string()),
+            };
+            let now = now_unix_seconds() as i64;
+            let user = StoredAdminUser {
+                id: next_id("user"),
+                email: email.clone(),
+                password_hash,
+                display_name: display_name.clone(),
+                superadmin: false,
+                created_at_unix: now,
+                updated_at_unix: now,
+                last_login_at_unix: Some(now),
+                disabled_at_unix: None,
+            };
+            if let Err(error) = console.repositories.upsert_admin_user(user.clone()) {
+                return storage_error(&error);
+            }
+            user
+        }
+    };
+    if user.disabled_at_unix.is_some() {
+        return unauthorized("this account has been disabled");
+    }
+
+    // Only set a role on first join -- never let a later SSO login
+    // silently override a role an owner explicitly changed afterward via
+    // the team-management API.
+    let effective_role = match membership_role_in_tenant(console, &flow.tenant_id, &user.id) {
+        Some(role) => role,
+        None => {
+            let membership = StoredAdminUserMembership {
+                id: next_id("membership"),
+                user_id: user.id.clone(),
+                tenant_id: flow.tenant_id.clone(),
+                role: mapped_role.clone(),
+                created_at_unix: now_unix_seconds() as i64,
+            };
+            if let Err(error) = console
+                .repositories
+                .upsert_admin_user_membership(membership)
+            {
+                return storage_error(&error);
+            }
+            mapped_role
+        }
+    };
+
+    let tenant_account = match console.repositories.get_tenant_account(&flow.tenant_id) {
+        Ok(Some(account)) => account,
+        Ok(None) => return internal_error("tenant account no longer exists"),
+        Err(error) => return storage_error(&error),
+    };
+    let workspace = match resolve_default_workspace(console, &flow.tenant_id) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return internal_error("no workspace found for this tenant"),
+        Err(error) => return storage_error(&error),
+    };
+    let gateway_api_key = match provision_gateway_api_key(
+        console,
+        &workspace.id,
+        &workspace.project_id,
+        &flow.tenant_id,
+    ) {
+        Ok(secret) => secret,
+        Err(error) => return internal_error(&error.to_string()),
+    };
+    match issue_session(console, &user.id, &email, &flow.tenant_id, &effective_role) {
+        Ok((access_token, refresh_token)) => HttpResponse::json(
+            200,
+            AdminSessionResponse {
+                access_token,
+                refresh_token,
+                expires_in: ADMIN_SESSION_ACCESS_TOKEN_TTL_SECS,
+                user: AdminUserView {
+                    id: user.id,
+                    email,
+                    display_name: user.display_name,
+                },
+                tenant: AdminTenantView {
+                    id: tenant_account.id,
+                    name: tenant_account.name,
+                    role: effective_role,
+                },
+                gateway_api_key,
+            },
+        ),
+        Err(error) => internal_error(&error.to_string()),
+    }
+}
+
 fn issue_session(
     console: &AdminConsoleState,
     user_id: &str,
@@ -2435,6 +2890,11 @@ fn bad_request(error: serde_json::Error) -> HttpResponse {
 struct HttpRequest {
     method: String,
     path: String,
+    /// Raw query string (no leading `?`), empty if the request line had
+    /// none. Needed for the OIDC SSO callback (issue #160), which -- being
+    /// a standard OAuth2 redirect from the IdP -- always arrives as
+    /// `GET /.../callback?code=...&state=...`, not a JSON body.
+    query: String,
     /// Header names lowercased for case-insensitive lookup.
     headers: HashMap<String, String>,
     body: Vec<u8>,
@@ -2450,6 +2910,53 @@ impl HttpRequest {
     fn bearer_token(&self) -> Option<&str> {
         self.header("authorization")?.strip_prefix("Bearer ")
     }
+
+    /// Looks up a single value from the URL-decoded query string.
+    fn query_param(&self, name: &str) -> Option<String> {
+        self.query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            if key != name {
+                return None;
+            }
+            Some(urldecode(value))
+        })
+    }
+}
+
+/// Minimal percent-decoding for query values (the inverse of `urlencode`).
+/// Unrecognized `%XX` sequences and `+` are passed through unchanged rather
+/// than erroring -- this is a best-effort read of a query string we don't
+/// control the shape of (the IdP's redirect).
+fn urldecode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
+                match hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                    Some(byte) => {
+                        decoded.push(byte);
+                        index += 3;
+                    }
+                    None => {
+                        decoded.push(bytes[index]);
+                        index += 1;
+                    }
+                }
+            }
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
@@ -2479,13 +2986,12 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         .next()
         .ok_or_else(|| anyhow!("missing HTTP method"))?
         .to_string();
-    let path = request_parts
+    let raw_target = request_parts
         .next()
-        .ok_or_else(|| anyhow!("missing HTTP path"))?
-        .split('?')
-        .next()
-        .unwrap_or("/")
-        .to_string();
+        .ok_or_else(|| anyhow!("missing HTTP path"))?;
+    let mut target_parts = raw_target.splitn(2, '?');
+    let path = target_parts.next().unwrap_or("/").to_string();
+    let query = target_parts.next().unwrap_or("").to_string();
     let headers: HashMap<String, String> = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
@@ -2513,6 +3019,7 @@ fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
     Ok(HttpRequest {
         method,
         path,
+        query,
         headers,
         body: buffer[body_start..body_end].to_vec(),
     })
