@@ -1,0 +1,29 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-06
+# description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+
+[package]
+name = "ferrogate-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "FerroGate secret-reference resolution (env, HashiCorp Vault)."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+http.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true

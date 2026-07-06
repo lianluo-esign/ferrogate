@@ -919,6 +919,12 @@ pub(crate) struct AppState {
     request_ids: Arc<AtomicU64>,
     drain: Arc<AtomicBool>,
     acme_renewal: Option<Arc<SharedAcmeRenewalState>>,
+    /// `Provider.secret_ref` values resolved once at config load/reload time
+    /// (issue #163), keyed by provider name. Resolving here (rather than per
+    /// request) avoids a live Vault round-trip on every AI request; rotation
+    /// propagates on the next `/admin/v1/config/reload`, mirroring how every
+    /// other config field already picks up changes.
+    resolved_provider_secrets: Arc<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3171,6 +3177,7 @@ impl AppState {
         } else {
             HashMap::new()
         };
+        let resolved_provider_secrets = resolve_provider_secret_refs(&config.providers);
         let mcp_servers = config.mcp_servers.clone();
         let cluster_sync = initial_cluster_sync_status(&config);
         let metering_exporter = MeteringExporter::from_config(&config.metering)
@@ -3255,6 +3262,7 @@ impl AppState {
             request_ids: Arc::new(AtomicU64::new(1)),
             drain: Arc::new(AtomicBool::new(false)),
             acme_renewal: None,
+            resolved_provider_secrets: Arc::new(resolved_provider_secrets),
         })
     }
 
@@ -3868,11 +3876,16 @@ impl AppState {
     }
 
     pub(crate) fn provider_config(&self, provider: &Provider) -> ProviderConfig {
+        let api_key = self
+            .resolved_provider_secrets
+            .get(&provider.name)
+            .cloned()
+            .or_else(|| provider.api_key_value());
         ProviderConfig {
             name: provider.name.clone(),
             kind: provider.kind.clone(),
             base_url: provider.base_url.clone(),
-            api_key: provider.api_key_value(),
+            api_key,
             openrouter_http_referer: provider.openrouter_http_referer.clone(),
             openrouter_x_title: provider.openrouter_x_title.clone(),
         }
@@ -7528,6 +7541,49 @@ fn sanitize_redis_key_part(value: &str) -> String {
         .collect()
 }
 
+/// Resolves every configured `Provider.secret_ref` once (issue #163),
+/// keyed by provider name. Failures (bad reference syntax, unreachable
+/// Vault, missing field) are logged and skipped rather than failing
+/// gateway startup/reload — a provider whose secret fails to resolve just
+/// falls back to `api_key_env` in `AppState::provider_config`, matching the
+/// existing fail-open behavior for optional-adjacent config.
+fn resolve_provider_secret_refs(providers: &[Provider]) -> HashMap<String, String> {
+    let mut resolved = HashMap::new();
+    if !providers
+        .iter()
+        .any(|provider| provider.secret_ref.is_some())
+    {
+        return resolved;
+    }
+    let registry = ferrogate_secrets::SecretResolverRegistry::from_env();
+    for provider in providers {
+        let Some(secret_ref) = provider.secret_ref.as_deref() else {
+            continue;
+        };
+        match registry.resolve(secret_ref) {
+            Ok(Some(value)) => {
+                resolved.insert(provider.name.clone(), value);
+            }
+            Ok(None) => {
+                warn!(
+                    provider = %provider.name,
+                    secret_ref,
+                    "provider secret_ref resolved to no value; falling back to api_key_env if set"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    provider = %provider.name,
+                    secret_ref,
+                    error = %error,
+                    "failed to resolve provider secret_ref; falling back to api_key_env if set"
+                );
+            }
+        }
+    }
+    resolved
+}
+
 fn provider_circuit_config(config: &Config) -> Option<ProviderCircuitConfig> {
     Some(ProviderCircuitConfig {
         failure_threshold: config
@@ -7845,6 +7901,7 @@ mod tests {
             kind: "openai".into(),
             base_url: "http://127.0.0.1:10001/v1".into(),
             api_key_env: None,
+            secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
             enabled: true,
@@ -8157,6 +8214,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -8335,6 +8393,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -8407,6 +8466,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -8466,6 +8526,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -8533,6 +8594,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -8639,6 +8701,7 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
                     api_key_env: None,
+                    secret_ref: None,
                     openrouter_http_referer: None,
                     openrouter_x_title: None,
                     enabled: true,
@@ -8648,6 +8711,7 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
                     api_key_env: None,
+                    secret_ref: None,
                     openrouter_http_referer: None,
                     openrouter_x_title: None,
                     enabled: true,
@@ -8657,6 +8721,7 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
                     api_key_env: None,
+                    secret_ref: None,
                     openrouter_http_referer: None,
                     openrouter_x_title: None,
                     enabled: true,
@@ -8732,6 +8797,7 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
                     api_key_env: None,
+                    secret_ref: None,
                     openrouter_http_referer: None,
                     openrouter_x_title: None,
                     enabled: true,
@@ -8741,6 +8807,7 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
                     api_key_env: None,
+                    secret_ref: None,
                     openrouter_http_referer: None,
                     openrouter_x_title: None,
                     enabled: true,
@@ -8750,6 +8817,7 @@ mod tests {
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
                     api_key_env: None,
+                    secret_ref: None,
                     openrouter_http_referer: None,
                     openrouter_x_title: None,
                     enabled: true,
@@ -8912,6 +8980,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -8937,6 +9006,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -8949,6 +9019,57 @@ mod tests {
 
         assert!(state.provider_circuit_allows("openai"));
     }
+    #[test]
+    fn provider_config_prefers_resolved_secret_ref_over_api_key_env() {
+        std::env::set_var("FERROGATE_STATE_TEST_SECRET_REF_KEY", "from-secret-ref");
+        std::env::set_var("FERROGATE_STATE_TEST_API_KEY_ENV_KEY", "from-api-key-env");
+        let mut provider = test_provider();
+        provider.api_key_env = Some("FERROGATE_STATE_TEST_API_KEY_ENV_KEY".into());
+        provider.secret_ref = Some("env://FERROGATE_STATE_TEST_SECRET_REF_KEY".into());
+        let state = AppState::new(Config {
+            providers: vec![provider.clone()],
+            ..Config::default()
+        });
+
+        let config = state.provider_config(&provider);
+
+        assert_eq!(config.api_key.as_deref(), Some("from-secret-ref"));
+    }
+
+    #[test]
+    fn provider_config_falls_back_to_api_key_env_when_secret_ref_unresolvable() {
+        std::env::remove_var("FERROGATE_STATE_TEST_UNSET_SECRET_REF_KEY");
+        std::env::set_var(
+            "FERROGATE_STATE_TEST_FALLBACK_API_KEY_ENV",
+            "fallback-value",
+        );
+        let mut provider = test_provider();
+        provider.api_key_env = Some("FERROGATE_STATE_TEST_FALLBACK_API_KEY_ENV".into());
+        provider.secret_ref = Some("env://FERROGATE_STATE_TEST_UNSET_SECRET_REF_KEY".into());
+        let state = AppState::new(Config {
+            providers: vec![provider.clone()],
+            ..Config::default()
+        });
+
+        let config = state.provider_config(&provider);
+
+        assert_eq!(config.api_key.as_deref(), Some("fallback-value"));
+    }
+
+    #[test]
+    fn provider_config_uses_api_key_env_when_no_secret_ref_configured() {
+        std::env::set_var("FERROGATE_STATE_TEST_PLAIN_API_KEY_ENV", "plain-value");
+        let mut provider = test_provider();
+        provider.api_key_env = Some("FERROGATE_STATE_TEST_PLAIN_API_KEY_ENV".into());
+        let state = AppState::new(Config {
+            providers: vec![provider.clone()],
+            ..Config::default()
+        });
+
+        let config = state.provider_config(&provider);
+
+        assert_eq!(config.api_key.as_deref(), Some("plain-value"));
+    }
 
     #[test]
     fn provider_health_reports_disabled_provider_without_probe() {
@@ -8958,6 +9079,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: false,
@@ -9046,6 +9168,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -9252,6 +9375,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10002/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -10715,6 +10839,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,
@@ -11126,6 +11251,7 @@ mod tests {
             kind: "openai".into(),
             base_url: base_url.into(),
             api_key_env: None,
+            secret_ref: None,
             openrouter_http_referer: None,
             openrouter_x_title: None,
             enabled: true,

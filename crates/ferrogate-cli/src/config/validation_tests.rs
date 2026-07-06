@@ -106,6 +106,57 @@ fn rejects_model_with_unknown_fallback_provider() {
 }
 
 #[test]
+fn accepts_provider_with_env_secret_ref() {
+    let mut provider = provider();
+    provider.secret_ref = Some("env://OPENAI_API_KEY".into());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn accepts_provider_with_vault_secret_ref() {
+    let mut provider = provider();
+    provider.secret_ref = Some("vault://secret/data/openai#api_key".into());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_provider_secret_ref_with_unsupported_scheme() {
+    let mut provider = provider();
+    provider.secret_ref = Some("aws-sm://openai/api-key".into());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].secret_ref"));
+    assert!(error.contains("env:// or vault://"));
+}
+
+#[test]
+fn rejects_provider_vault_secret_ref_missing_field() {
+    let mut provider = provider();
+    provider.secret_ref = Some("vault://secret/data/openai".into());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].secret_ref"));
+}
+
+#[test]
 fn rejects_model_fallback_with_zero_weight() {
     let mut model = model();
     model.fallbacks = vec![ModelFallback {
@@ -2524,6 +2575,7 @@ fn provider() -> Provider {
         kind: "openai".into(),
         base_url: "http://127.0.0.1:8081/v1".into(),
         api_key_env: None,
+        secret_ref: None,
         openrouter_http_referer: None,
         openrouter_x_title: None,
         enabled: true,

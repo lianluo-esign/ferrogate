@@ -399,11 +399,22 @@ fn read_response_head<S: Read>(stream: &mut S) -> AnyResult<(StatusCode, Vec<u8>
     ))
 }
 
+/// See the identical helper in `telemetry.rs` for why this is needed:
+/// rustls panics if more than one crypto backend is compiled in and no
+/// process-wide default has been installed explicitly (issue #163).
+fn ensure_rustls_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
     static TLS_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     if let Some(config) = TLS_CLIENT_CONFIG.get() {
         return Ok(Arc::clone(config));
     }
+    ensure_rustls_crypto_provider();
 
     let mut roots = RootCertStore::empty();
     let native_certs = rustls_native_certs::load_native_certs();

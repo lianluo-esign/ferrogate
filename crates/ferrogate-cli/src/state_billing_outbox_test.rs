@@ -78,7 +78,11 @@ fn sweep_dead_letters_after_max_attempts_and_stops_retrying() {
     // One more failed delivery attempt crosses the threshold and dead-letters.
     state.sweep_billing_outbox_once();
 
-    assert!(state.repositories.list_due_billing_reports(0, 10).unwrap().is_empty());
+    assert!(state
+        .repositories
+        .list_due_billing_reports(0, 10)
+        .unwrap()
+        .is_empty());
     let dead_letters = state.billing_outbox_dead_letters().unwrap();
     assert_eq!(dead_letters.len(), 1);
     assert_eq!(dead_letters[0].id, id);
@@ -106,7 +110,11 @@ fn sweep_reschedules_with_backoff_before_the_attempt_threshold() {
     // schedules `next_attempt_unix` from the real wall clock, so query with a
     // far-future cutoff rather than assuming a specific timestamp.
     assert!(state.billing_outbox_dead_letters().unwrap().is_empty());
-    assert!(state.repositories.list_due_billing_reports(0, 10).unwrap().is_empty());
+    assert!(state
+        .repositories
+        .list_due_billing_reports(0, 10)
+        .unwrap()
+        .is_empty());
     let rescheduled = state
         .repositories
         .list_due_billing_reports(i64::MAX, 10)

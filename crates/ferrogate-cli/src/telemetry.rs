@@ -1341,11 +1341,26 @@ fn parse_response_status(raw: &[u8]) -> AnyResult<StatusCode> {
     StatusCode::from_u16(status_code).context("OTLP collector returned invalid status")
 }
 
+/// rustls 0.23 requires selecting a process-wide default `CryptoProvider`
+/// once more than one crypto backend is compiled into the binary — which
+/// happens here because `ferrogate-auth` depends on `rustls` with the
+/// `ring` feature while this crate uses the default `aws-lc-rs` backend.
+/// Installing the default explicitly and idempotently avoids the "Could not
+/// automatically determine the process-level CryptoProvider" panic in any
+/// binary/test that links both (issue #163).
+fn ensure_rustls_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
     static TLS_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     if let Some(config) = TLS_CLIENT_CONFIG.get() {
         return Ok(Arc::clone(config));
     }
+    ensure_rustls_crypto_provider();
 
     let mut roots = RootCertStore::empty();
     let native_certs = rustls_native_certs::load_native_certs();

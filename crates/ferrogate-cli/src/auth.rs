@@ -1099,6 +1099,7 @@ mod tests {
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
                 api_key_env: None,
+                secret_ref: None,
                 openrouter_http_referer: None,
                 openrouter_x_title: None,
                 enabled: true,

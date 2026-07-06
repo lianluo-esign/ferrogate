@@ -744,24 +744,39 @@ fn run_cloudflare_dns_action(
     let api_token = dns_config_value(acme, "api_token")?;
     let zone_id = match acme.dns_config.get("zone_id") {
         Some(zone_id) => zone_id.trim().to_string(),
-        None => resolve_cloudflare_zone_id(api_token, dns_config_value(acme, "zone_name")?)?,
+        None => resolve_cloudflare_zone_id(&api_token, &dns_config_value(acme, "zone_name")?)?,
     };
     let record_name = record.name.trim_end_matches('.');
     match action {
         "set" => {
-            ensure_cloudflare_txt_record(acme, api_token, &zone_id, record_name, &record.value)
+            ensure_cloudflare_txt_record(acme, &api_token, &zone_id, record_name, &record.value)
         }
-        "cleanup" => cleanup_cloudflare_txt_record(api_token, &zone_id, record_name, &record.value),
+        "cleanup" => {
+            cleanup_cloudflare_txt_record(&api_token, &zone_id, record_name, &record.value)
+        }
         _ => bail!("unsupported Cloudflare DNS action {action}"),
     }
 }
 
-fn dns_config_value<'a>(acme: &'a TlsAcmeConfig, key: &str) -> AnyResult<&'a str> {
-    acme.dns_config
+/// Reads `tls.acme.dns_config.{key}`. The value may be a plain literal
+/// (unchanged pre-#163 behavior) or a `env://`/`vault://` secret reference
+/// (issue #163), resolved through `ferrogate-secrets` — letting the ACME DNS
+/// provider token come from the same secret backends as provider API keys.
+fn dns_config_value(acme: &TlsAcmeConfig, key: &str) -> AnyResult<String> {
+    let raw = acme
+        .dns_config
         .get(key)
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("missing tls.acme.dns_config.{key}"))
+        .ok_or_else(|| anyhow::anyhow!("missing tls.acme.dns_config.{key}"))?;
+    if raw.starts_with("env://") || raw.starts_with("vault://") {
+        let registry = ferrogate_secrets::SecretResolverRegistry::from_env();
+        return registry
+            .resolve(raw)
+            .with_context(|| format!("failed to resolve tls.acme.dns_config.{key}"))?
+            .ok_or_else(|| anyhow::anyhow!("tls.acme.dns_config.{key} resolved to no value"));
+    }
+    Ok(raw.to_string())
 }
 
 fn resolve_cloudflare_zone_id(api_token: &str, zone_name: &str) -> AnyResult<String> {
@@ -977,11 +992,22 @@ fn find_crlf(raw: &[u8]) -> Option<usize> {
     raw.windows(2).position(|window| window == b"\r\n")
 }
 
+/// See the identical helper in `telemetry.rs` for why this is needed:
+/// rustls panics if more than one crypto backend is compiled in and no
+/// process-wide default has been installed explicitly (issue #163).
+fn ensure_rustls_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 fn tls_client_config() -> AnyResult<Arc<ClientConfig>> {
     static TLS_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     if let Some(config) = TLS_CLIENT_CONFIG.get() {
         return Ok(Arc::clone(config));
     }
+    ensure_rustls_crypto_provider();
 
     let mut roots = RootCertStore::empty();
     let native_certs = rustls_native_certs::load_native_certs();
@@ -1623,6 +1649,69 @@ mod tests {
 
         assert_eq!(status, "200");
         assert_eq!(body, "{\"ok\":1}");
+    }
+
+    #[test]
+    fn dns_config_value_accepts_plain_literal_unchanged() {
+        let mut dns_config = BTreeMap::new();
+        dns_config.insert("api_token".to_string(), "cf-token".to_string());
+        let acme = TlsAcmeConfig {
+            dns_config,
+            ..TlsAcmeConfig::default()
+        };
+
+        assert_eq!(dns_config_value(&acme, "api_token").unwrap(), "cf-token");
+    }
+
+    #[test]
+    fn dns_config_value_resolves_env_secret_ref() {
+        std::env::set_var("FERROGATE_ACME_TEST_CF_TOKEN", "resolved-token");
+        let mut dns_config = BTreeMap::new();
+        dns_config.insert(
+            "api_token".to_string(),
+            "env://FERROGATE_ACME_TEST_CF_TOKEN".to_string(),
+        );
+        let acme = TlsAcmeConfig {
+            dns_config,
+            ..TlsAcmeConfig::default()
+        };
+
+        assert_eq!(
+            dns_config_value(&acme, "api_token").unwrap(),
+            "resolved-token"
+        );
+    }
+
+    #[test]
+    fn dns_config_value_errors_when_env_secret_ref_is_unset() {
+        std::env::remove_var("FERROGATE_ACME_TEST_CF_TOKEN_UNSET");
+        let mut dns_config = BTreeMap::new();
+        dns_config.insert(
+            "api_token".to_string(),
+            "env://FERROGATE_ACME_TEST_CF_TOKEN_UNSET".to_string(),
+        );
+        let acme = TlsAcmeConfig {
+            dns_config,
+            ..TlsAcmeConfig::default()
+        };
+
+        let error = dns_config_value(&acme, "api_token")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("resolved to no value"));
+    }
+
+    #[test]
+    fn dns_config_value_rejects_missing_key() {
+        let acme = TlsAcmeConfig {
+            dns_config: BTreeMap::new(),
+            ..TlsAcmeConfig::default()
+        };
+
+        let error = dns_config_value(&acme, "api_token")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing tls.acme.dns_config.api_token"));
     }
 
     fn write_test_certificate(cert: &Path, key: &Path, days: &str) -> bool {

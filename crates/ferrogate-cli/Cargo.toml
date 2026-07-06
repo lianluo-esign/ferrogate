@@ -37,6 +37,7 @@ ferrogate-observability = { path = "../ferrogate-observability" }
 ferrogate-policy = { path = "../ferrogate-policy" }
 ferrogate-providers = { path = "../ferrogate-providers" }
 ferrogate-runtime = { path = "../ferrogate-runtime" }
+ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
 http.workspace = true
 instant-acme.workspace = true

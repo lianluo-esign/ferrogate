@@ -888,6 +888,11 @@ impl Config {
             if provider.api_key_env.as_deref().is_some_and(str::is_empty) {
                 bail!("field providers[{index}].api_key_env: cannot be empty");
             }
+            if let Some(secret_ref) = provider.secret_ref.as_deref() {
+                ferrogate_secrets::SecretRef::parse(secret_ref).map_err(|error| {
+                    anyhow::anyhow!("field providers[{index}].secret_ref: {error}")
+                })?;
+            }
             if provider
                 .openrouter_http_referer
                 .as_deref()

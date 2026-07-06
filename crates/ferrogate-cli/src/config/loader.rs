@@ -104,6 +104,7 @@ impl Config {
                     kind: provider.kind,
                     base_url: provider.base_url,
                     api_key_env: provider.api_key_env,
+                    secret_ref: None,
                     openrouter_http_referer: provider.openrouter_http_referer,
                     openrouter_x_title: provider.openrouter_x_title,
                     enabled: true,

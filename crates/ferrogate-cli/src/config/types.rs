@@ -350,6 +350,12 @@ pub(crate) struct Provider {
     pub(crate) base_url: String,
     #[serde(default)]
     pub(crate) api_key_env: Option<String>,
+    /// Secret-manager reference (`env://NAME` or `vault://mount/path#field`,
+    /// issue #163), resolved once at config load/reload time and cached —
+    /// see `AppState::resolved_provider_secrets`. Takes precedence over
+    /// `api_key_env` when both are set and resolution succeeds.
+    #[serde(default)]
+    pub(crate) secret_ref: Option<String>,
     #[serde(default)]
     pub(crate) openrouter_http_referer: Option<String>,
     #[serde(default)]
