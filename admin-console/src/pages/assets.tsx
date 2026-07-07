@@ -83,6 +83,23 @@ export default function AssetsPage() {
     queryFn: () => gatewayGet<AdminPage<AssetSummary>>(apiKey, "/v1/assets"),
   });
 
+  // Quota usage (issue #178's acceptance criteria): current bytes are
+  // summed client-side from the already-fetched asset list rather than a
+  // dedicated endpoint (none exists -- tenant_asset_storage_bytes_used is
+  // only used internally by the push quota check today); the limit comes
+  // from the resolved-defaults endpoint (issue #168) since a plan's
+  // default_asset_storage_quota_bytes isn't exposed anywhere else either.
+  const tenantId = session?.tenant.id;
+  const { data: resolvedDefaults } = useQuery({
+    queryKey: ["tenant-resolved-defaults-for-quota", tenantId],
+    queryFn: () =>
+      gatewayGet<{ default_asset_storage_quota_bytes: number | null }>(
+        apiKey,
+        `/admin/v1/tenant-accounts/${encodeURIComponent(tenantId ?? "")}/resolved-defaults`,
+      ),
+    enabled: Boolean(tenantId),
+  });
+
   const uploadMutation = useMutation({
     mutationFn: async () => {
       if (!file) throw new Error("Choose a file to upload");
@@ -135,6 +152,8 @@ export default function AssetsPage() {
   }
 
   const rows = data?.data ?? [];
+  const bytesUsed = rows.reduce((total, asset) => total + asset.size_bytes, 0);
+  const quotaBytes = resolvedDefaults?.default_asset_storage_quota_bytes ?? null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -146,6 +165,18 @@ export default function AssetsPage() {
           hosting (see Plans) or a bound role granting the assets.host permission.
         </p>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Storage quota</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm">
+            {formatBytes(bytesUsed)} used
+            {quotaBytes !== null ? ` of ${formatBytes(quotaBytes)}` : " (no quota configured)"}
+          </p>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -231,6 +262,7 @@ export default function AssetsPage() {
               <TableHead>Name</TableHead>
               <TableHead>Version</TableHead>
               <TableHead>Content type</TableHead>
+              <TableHead>Content hash</TableHead>
               <TableHead>Size</TableHead>
               <TableHead>Storage</TableHead>
               <TableHead className="w-32" />
@@ -239,13 +271,13 @@ export default function AssetsPage() {
           <TableBody>
             {isLoading ? (
               <TableRow>
-                <TableCell colSpan={7} className="h-24 text-center">
+                <TableCell colSpan={8} className="h-24 text-center">
                   Loading...
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="h-24 text-center">
+                <TableCell colSpan={8} className="h-24 text-center">
                   No assets yet.
                 </TableCell>
               </TableRow>
@@ -256,6 +288,9 @@ export default function AssetsPage() {
                   <TableCell>{asset.name}</TableCell>
                   <TableCell>{asset.version}</TableCell>
                   <TableCell>{asset.content_type}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {asset.content_hash.slice(0, 12)}...
+                  </TableCell>
                   <TableCell>{formatBytes(asset.size_bytes)}</TableCell>
                   <TableCell>{asset.storage_backed ? "Bucket" : "Inline"}</TableCell>
                   <TableCell className="flex gap-2">
