@@ -1002,6 +1002,94 @@ pub(crate) struct AdminPlanMutationResponse {
     pub(crate) plan: AdminPlan,
 }
 
+// --- Prepaid-credit wallets and payment methods (issue #169) ---
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminWallet {
+    pub(crate) tenant_id: String,
+    pub(crate) balance_credits: i64,
+    pub(crate) auto_recharge_threshold_credits: Option<i64>,
+    pub(crate) auto_recharge_amount_credits: Option<i64>,
+    pub(crate) dunning: bool,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+/// POST create / PATCH merge payload for `/admin/v1/wallets`. Deliberately
+/// has no `balance_credits` field -- balance only ever changes through the
+/// atomic `POST /admin/v1/wallets/{tenant_id}/adjust` endpoint
+/// (`AdminWalletAdjustRequest`), never a blind overwrite, so a wallet's
+/// balance can't accidentally be reset by an unrelated config update.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminWalletMutation {
+    #[serde(default)]
+    pub(crate) tenant_id: Option<String>,
+    #[serde(default)]
+    pub(crate) auto_recharge_threshold_credits: Option<i64>,
+    #[serde(default)]
+    pub(crate) auto_recharge_amount_credits: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminWalletAdjustRequest {
+    /// Positive to credit (top-up), negative to debit. Applied atomically
+    /// against the wallet's current balance -- never a blind overwrite.
+    pub(crate) delta_credits: i64,
+}
+
+/// Triggers a real payment-provider charge (issue #169), crediting the
+/// wallet with the resulting credits on success. Distinct from
+/// `AdminWalletAdjustRequest`, which changes the balance directly with no
+/// payment-provider involvement (an operator-issued credit/correction).
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminWalletChargeRequest {
+    pub(crate) payment_method_id: Option<String>,
+    pub(crate) amount_usd_cents: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminWalletChargeResponse {
+    pub(crate) object: &'static str,
+    pub(crate) succeeded: bool,
+    pub(crate) provider_charge_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) decline_reason: Option<String>,
+    pub(crate) wallet: AdminWallet,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminWalletMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) wallet: AdminWallet,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPaymentMethod {
+    pub(crate) id: String,
+    pub(crate) tenant_id: String,
+    pub(crate) provider: String,
+    pub(crate) provider_customer_id: String,
+    pub(crate) provider_payment_method_id: String,
+    pub(crate) is_default: bool,
+    pub(crate) created_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminPaymentMethodCreateRequest {
+    pub(crate) tenant_id: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) provider_customer_id: Option<String>,
+    pub(crate) provider_payment_method_id: Option<String>,
+    #[serde(default)]
+    pub(crate) is_default: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPaymentMethodMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) payment_method: AdminPaymentMethod,
+}
+
 // --- Multi-tenant hierarchy + durable virtual API keys (TOK-11 / TOK-12) ---
 
 #[derive(Debug, Serialize)]

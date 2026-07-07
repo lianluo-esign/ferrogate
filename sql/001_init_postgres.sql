@@ -870,6 +870,42 @@ UPDATE plans
 ALTER TABLE tenants
     ADD COLUMN IF NOT EXISTS plan_id TEXT NOT NULL DEFAULT 'free' REFERENCES plans(id);
 
+-- wallets: prepaid-credit balance for self-serve billing (issue #169),
+-- distinct from and enforced independently of quota_policies'
+-- monthly_budget_usd (that only throttles spend against a number nobody
+-- ever paid). A tenant's wallet is opt-in -- no row means no
+-- wallet-balance enforcement applies, same pattern as plans' feature
+-- flags (issue #182/#183). balance_credits is an integer (matching
+-- ferrogate_billing::pricing::DEFAULT_CREDITS_PER_USD's unit), not
+-- floating-point USD, so repeated debits never accumulate rounding drift.
+CREATE TABLE IF NOT EXISTS wallets (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL UNIQUE REFERENCES tenants(id) ON DELETE CASCADE,
+    balance_credits BIGINT NOT NULL DEFAULT 0,
+    auto_recharge_threshold_credits BIGINT,
+    auto_recharge_amount_credits BIGINT,
+    dunning BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+-- payment_methods: opaque references to payment-provider-side payment
+-- methods (issue #169), e.g. a Stripe payment_method/customer id pair.
+-- Never stores raw card data -- that stays entirely on the payment
+-- provider's side.
+CREATE TABLE IF NOT EXISTS payment_methods (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    provider_customer_id TEXT NOT NULL,
+    provider_payment_method_id TEXT NOT NULL,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_methods_tenant
+    ON payment_methods(tenant_id);
+
 -- stored_assets: tenant-scoped static asset storage (issue #176), the
 -- foundation of the unified agent-asset hosting epic (#175) -- CLI tool
 -- packages, MCP connection manifests, Skill bundles, static sites, and
@@ -1153,5 +1189,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (22, '022_plans_extension_tools_enabled')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (23, '023_wallets_and_payment_methods')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

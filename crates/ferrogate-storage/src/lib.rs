@@ -41,6 +41,9 @@ mod metadata_rollups;
 use metadata_rollups::increment_usage_metadata_rollups;
 pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
 
+mod wallet;
+pub use wallet::{payment_method_id, StoredPaymentMethod, StoredWallet};
+
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
     StorageProviderKind::Supabase,
     StorageProviderKind::Postgres,
@@ -773,6 +776,8 @@ pub struct RuntimeControlPlaneState {
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
     budget_alert_notifications: InMemoryRepository<StoredBudgetAlertNotification>,
     usage_metadata_rollups: InMemoryRepository<StoredUsageMetadataRollup>,
+    wallets: InMemoryRepository<StoredWallet>,
+    payment_methods: InMemoryRepository<StoredPaymentMethod>,
 }
 
 struct PostgresControlPlaneStore {
@@ -4016,6 +4021,8 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "tenant_role_bindings",
         "budget_alert_notifications",
         "usage_metadata_rollups",
+        "wallets",
+        "payment_methods",
     ];
     for table in TABLES {
         let exists = client
@@ -5247,6 +5254,8 @@ impl RuntimeControlPlaneState {
             billing_report_outbox: InMemoryRepository::new(),
             budget_alert_notifications: InMemoryRepository::new(),
             usage_metadata_rollups: InMemoryRepository::new(),
+            wallets: InMemoryRepository::new(),
+            payment_methods: InMemoryRepository::new(),
         }
     }
 
@@ -10795,6 +10804,107 @@ mod tests {
             .expect("tenant rollup must still accumulate normally");
         assert_eq!(tenant_rollup.request_count, 3);
         assert_eq!(tenant_rollup.total_tokens, 160);
+    }
+
+    #[test]
+    fn wallet_balance_adjusts_atomically_and_is_opt_in_per_tenant() {
+        let repositories = memory_repositories();
+
+        // No wallet row yet: adjusting a nonexistent wallet is a no-op,
+        // not an error -- wallets are opt-in (issue #169).
+        assert!(repositories
+            .adjust_wallet_balance("tenant-wallet", -100, 1)
+            .unwrap()
+            .is_none());
+        assert!(repositories.get_wallet("tenant-wallet").unwrap().is_none());
+
+        repositories
+            .upsert_wallet(StoredWallet {
+                id: "tenant-wallet".into(),
+                tenant_id: "tenant-wallet".into(),
+                balance_credits: 1_000,
+                auto_recharge_threshold_credits: Some(200),
+                auto_recharge_amount_credits: Some(500),
+                dunning: false,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        // Debit: a settled request costs 300 credits.
+        let after_debit = repositories
+            .adjust_wallet_balance("tenant-wallet", -300, 2)
+            .unwrap()
+            .expect("wallet exists, must return the updated row");
+        assert_eq!(after_debit.balance_credits, 700);
+        assert_eq!(after_debit.updated_at_unix, 2);
+
+        // Top-up (positive delta): a manual or auto-recharge credit.
+        let after_topup = repositories
+            .adjust_wallet_balance("tenant-wallet", 500, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_topup.balance_credits, 1_200);
+
+        // Dunning state: set, then cleared by a later successful charge.
+        repositories
+            .set_wallet_dunning("tenant-wallet", true, 4)
+            .unwrap();
+        assert!(
+            repositories
+                .get_wallet("tenant-wallet")
+                .unwrap()
+                .unwrap()
+                .dunning
+        );
+        repositories
+            .set_wallet_dunning("tenant-wallet", false, 5)
+            .unwrap();
+        assert!(
+            !repositories
+                .get_wallet("tenant-wallet")
+                .unwrap()
+                .unwrap()
+                .dunning
+        );
+
+        assert_eq!(repositories.list_wallets().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn payment_methods_are_scoped_per_tenant_and_idempotent_on_reattachment() {
+        let repositories = memory_repositories();
+
+        let method = StoredPaymentMethod {
+            id: payment_method_id("tenant-pm", "stripe", "pm_123"),
+            tenant_id: "tenant-pm".into(),
+            provider: "stripe".into(),
+            provider_customer_id: "cus_123".into(),
+            provider_payment_method_id: "pm_123".into(),
+            is_default: true,
+            created_at_unix: 1,
+        };
+        repositories.upsert_payment_method(method.clone()).unwrap();
+        // Re-attaching the same provider-side payment method is idempotent
+        // (deterministic id), not a duplicate row.
+        repositories.upsert_payment_method(method).unwrap();
+
+        let listed = repositories.list_payment_methods("tenant-pm").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].provider_payment_method_id, "pm_123");
+
+        assert!(repositories
+            .list_payment_methods("no-such-tenant")
+            .unwrap()
+            .is_empty());
+
+        assert!(repositories
+            .delete_payment_method(&payment_method_id("tenant-pm", "stripe", "pm_123"))
+            .unwrap());
+        assert!(repositories
+            .list_payment_methods("tenant-pm")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -300,6 +300,30 @@ fn finalize_auth(
             }
         }
     }
+    // Prepaid-credit wallet balance (issue #169) -- distinct from and
+    // enforced independently of the monthly_budget_usd check above: a
+    // wallet tracks money actually paid, monthly_budget_usd is just a
+    // configured throttle. Opt-in per tenant: `wallet_balance_exhausted`
+    // returns false (never denies) when the tenant has no wallet row at
+    // all, so this is purely additive for every tenant that hasn't
+    // adopted prepaid billing.
+    match state.wallet_balance_exhausted(&auth.tenant_context()) {
+        Ok(true) => {
+            return Err(AuthError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "wallet_balance_exhausted",
+                message: "prepaid credit balance has been exhausted for this tenant".into(),
+            });
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return Err(AuthError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "quota_resolution_unavailable",
+                message: format!("wallet balance lookup failed: {error}"),
+            });
+        }
+    }
     let rpm_limit = min_opt_u64(auth.request_limit_per_minute, quota.rpm_limit);
     if let Some(limit) = rpm_limit {
         require_request_budget(state, &auth, limit, request_id)?;

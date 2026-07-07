@@ -61,6 +61,7 @@ pub(super) enum RouteGroup {
     Billing,
     Rbac,
     Plans,
+    Wallets,
 }
 
 /// Built once (first access) and reused for the process lifetime: the
@@ -245,6 +246,11 @@ fn build_route_group_router() -> Router<RouteGroup> {
     insert("/admin/v1/plans", RouteGroup::Plans);
     insert("/admin/v1/plans/{*rest}", RouteGroup::Plans);
 
+    insert("/admin/v1/wallets", RouteGroup::Wallets);
+    insert("/admin/v1/wallets/{*rest}", RouteGroup::Wallets);
+    insert("/admin/v1/payment-methods", RouteGroup::Wallets);
+    insert("/admin/v1/payment-methods/{*rest}", RouteGroup::Wallets);
+
     insert("/admin/v1/metering-events", RouteGroup::Billing);
     insert("/admin/v1/billing-events", RouteGroup::Billing);
     insert("/admin/v1/metering-export-status", RouteGroup::Billing);
@@ -318,6 +324,7 @@ impl FerroGateway {
             RouteGroup::Billing => self.try_billing_routes(session, ctx, req).await,
             RouteGroup::Rbac => self.try_rbac_routes(session, ctx, req).await,
             RouteGroup::Plans => self.try_plans_routes(session, ctx, req).await,
+            RouteGroup::Wallets => self.try_wallets_routes(session, ctx, req).await,
         }
     }
 
@@ -860,6 +867,34 @@ impl FerroGateway {
         if req.path == "/admin/v1/plans" || req.path.starts_with("/admin/v1/plans/") {
             self.handle_admin_plans(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn try_wallets_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path == "/admin/v1/wallets" || req.path.starts_with("/admin/v1/wallets/") {
+            self.handle_admin_wallets(session, ctx, &req.headers, &req.method, &req.path)
+                .await?;
+            return Ok(true);
+        }
+        if req.path == "/admin/v1/payment-methods"
+            || req.path.starts_with("/admin/v1/payment-methods/")
+        {
+            self.handle_admin_payment_methods(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         Ok(false)

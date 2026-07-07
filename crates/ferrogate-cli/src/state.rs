@@ -72,11 +72,12 @@ use ferrogate_storage::{
     StoredBillingReportOutboxEntry, StoredBudgetAlertNotification,
     StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
     StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
-    StoredManagedWorkerSession, StoredPermission, StoredPlan, StoredProject, StoredQuotaPolicy,
-    StoredRequestLog, StoredRole, StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact,
-    StoredSelfHostedWorkerCheckpoint, StoredSelfHostedWorkerHeartbeat,
-    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount,
-    StoredTenantRoleBinding, StoredUsageAggregate, StoredUsageMonthlyRollup, StoredWorkspace,
+    StoredManagedWorkerSession, StoredPaymentMethod, StoredPermission, StoredPlan, StoredProject,
+    StoredQuotaPolicy, StoredRequestLog, StoredRole, StoredSelfHostedRunDispatch,
+    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
+    StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredTenantRoleBinding,
+    StoredUsageAggregate, StoredUsageMonthlyRollup, StoredWallet, StoredWorkspace,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -4575,6 +4576,54 @@ impl AppState {
         Ok(self.repositories.upsert_plan(plan)?)
     }
 
+    pub(crate) fn list_wallets(&self) -> anyhow::Result<Vec<StoredWallet>> {
+        Ok(self.repositories.list_wallets()?)
+    }
+
+    pub(crate) fn get_wallet(&self, tenant_id: &str) -> anyhow::Result<Option<StoredWallet>> {
+        Ok(self.repositories.get_wallet(tenant_id)?)
+    }
+
+    pub(crate) fn upsert_wallet(&self, wallet: StoredWallet) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_wallet(wallet)?)
+    }
+
+    pub(crate) fn adjust_wallet_balance(
+        &self,
+        tenant_id: &str,
+        delta_credits: i64,
+    ) -> anyhow::Result<Option<StoredWallet>> {
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        Ok(self
+            .repositories
+            .adjust_wallet_balance(tenant_id, delta_credits, now)?)
+    }
+
+    pub(crate) fn set_wallet_dunning(&self, tenant_id: &str, dunning: bool) -> anyhow::Result<()> {
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        Ok(self
+            .repositories
+            .set_wallet_dunning(tenant_id, dunning, now)?)
+    }
+
+    pub(crate) fn list_payment_methods(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<Vec<StoredPaymentMethod>> {
+        Ok(self.repositories.list_payment_methods(tenant_id)?)
+    }
+
+    pub(crate) fn upsert_payment_method(
+        &self,
+        payment_method: StoredPaymentMethod,
+    ) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_payment_method(payment_method)?)
+    }
+
+    pub(crate) fn delete_payment_method(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_payment_method(id)?)
+    }
+
     pub(crate) fn list_projects(&self) -> anyhow::Result<Vec<StoredProject>> {
         Ok(self.repositories.list_projects()?)
     }
@@ -4812,6 +4861,65 @@ impl AppState {
             .map(|rollup| rollup.cost_usd)
             .unwrap_or(0.0);
         Ok(spent >= budget_usd)
+    }
+
+    /// Prepaid-credit wallet balance check (issue #169), keyed by the
+    /// tenant (`organization_id`) alone -- wallets are 1:1 with a tenant,
+    /// not scoped per project/workspace/key the way `quota_policies` is.
+    /// Opt-in: `Ok(false)` (never denies) both when the request has no
+    /// tenant attribution and when the tenant has no wallet row at all,
+    /// so this is purely additive for every tenant that hasn't adopted
+    /// prepaid billing.
+    pub(crate) fn wallet_balance_exhausted(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+    ) -> anyhow::Result<bool> {
+        let Some(tenant_id) = tenant.organization_id.as_deref() else {
+            return Ok(false);
+        };
+        let Some(wallet) = self.repositories.get_wallet(tenant_id)? else {
+            return Ok(false);
+        };
+        Ok(wallet.balance_credits <= 0)
+    }
+
+    /// Debits a settled request's cost from the tenant's wallet, if one
+    /// exists (issue #169) -- a no-op (not an error) for the common case
+    /// of a tenant that hasn't adopted prepaid billing. Converts
+    /// `cost_usd` to credits via the same
+    /// `ferrogate_billing::pricing::DEFAULT_CREDITS_PER_USD` unit the
+    /// standalone billing service's `PriceBook` uses, so "credits" means
+    /// the same thing everywhere in the system. Best-effort: a storage
+    /// error here is logged and swallowed, matching the budget-alert
+    /// webhook's "a bookkeeping side-effect must never fail the
+    /// triggering request" precedent (issue #170).
+    fn debit_wallet_for_settled_cost(&self, tenant: &ferrogate_core::TenantContext, cost_usd: f64) {
+        if cost_usd <= 0.0 {
+            return;
+        }
+        let Some(tenant_id) = tenant.organization_id.as_deref() else {
+            return;
+        };
+        let delta_credits =
+            -((cost_usd * ferrogate_billing::pricing::DEFAULT_CREDITS_PER_USD).round() as i64);
+        if delta_credits == 0 {
+            return;
+        }
+        let now = now_unix_seconds().unwrap_or_default() as i64;
+        match self
+            .repositories
+            .adjust_wallet_balance(tenant_id, delta_credits, now)
+        {
+            Ok(None) => {} // no wallet for this tenant; nothing to do
+            Ok(Some(_)) => {}
+            Err(error) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    error = %error,
+                    "failed to debit tenant wallet for settled request cost"
+                );
+            }
+        }
     }
 
     /// Best-effort proactive budget-threshold alerting (issue #170): checks
@@ -5435,6 +5543,12 @@ impl AppState {
         // `usage_monthly_rollups` synchronously), so spend read here
         // reflects this request (issue #170).
         self.dispatch_budget_threshold_alerts(&draft.request.tenant);
+        // Prepaid-credit wallet debit (issue #169): a no-op for tenants
+        // without a wallet row (opt-in), so this never affects a request
+        // outside the prepaid-billing path.
+        if let Some(cost_usd) = event.cost_usd {
+            self.debit_wallet_for_settled_cost(&draft.request.tenant, cost_usd);
+        }
         Ok(())
     }
 

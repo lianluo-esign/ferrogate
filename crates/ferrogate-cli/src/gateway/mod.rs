@@ -16,6 +16,7 @@ mod function_egress;
 mod handlers;
 mod local;
 mod mcp_rpc;
+mod payments;
 mod plans;
 mod proxy;
 mod quota_policies;
@@ -24,6 +25,7 @@ mod responses_stream;
 mod route_groups;
 mod usage_reports;
 mod virtual_keys;
+mod wallets;
 
 use anyhow::{Context, Result as AnyResult};
 use http::HeaderMap;

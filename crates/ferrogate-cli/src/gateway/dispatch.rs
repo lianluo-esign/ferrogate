@@ -162,7 +162,11 @@ pub(super) async fn dispatch_provider_catalog_request(
     })
 }
 
-fn provider_http_client() -> AnyResult<Client> {
+/// Shared reqwest client + crypto-provider setup for outbound HTTPS calls
+/// to external services -- originally built for AI provider dispatch,
+/// reused as-is by `payments::StripePaymentProviderAdapter` (issue #169)
+/// rather than standing up a second client/crypto-provider installation.
+pub(super) fn provider_http_client() -> AnyResult<Client> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     let result = CLIENT.get_or_init(|| {
         ensure_provider_crypto_provider();
