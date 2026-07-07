@@ -171,6 +171,22 @@ pub struct BillingEvent {
     /// this map is never unbounded once it reaches the ledger.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// This request's debit against the tenant's prepaid-credit wallet
+    /// (issue #169), if one exists -- always negative (credits drawn
+    /// down), `None` for a tenant with no wallet row or when `cost_usd`
+    /// is `None`/zero. Reported here purely for visibility: the debit
+    /// itself already happened in the gateway's own wallet storage
+    /// (`AppState::debit_wallet_for_settled_cost`) before this event was
+    /// built, so `ferrogate-billing` (which cannot depend on
+    /// `ferrogate-storage` -- see the module doc comment) never mutates
+    /// a wallet balance itself, only mirrors the outcome.
+    #[serde(default)]
+    pub wallet_delta_credits: Option<i64>,
+    /// The wallet's balance immediately after `wallet_delta_credits` was
+    /// applied. `None` under the same conditions as
+    /// `wallet_delta_credits`.
+    #[serde(default)]
+    pub wallet_balance_after_credits: Option<i64>,
 }
 
 /// Maximum number of metadata key/value pairs a single request may attach

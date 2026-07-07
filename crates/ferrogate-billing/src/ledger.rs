@@ -81,6 +81,15 @@ pub struct LedgerEntry {
     pub cost_source: CostSource,
     #[serde(default)]
     pub occurred_at_unix: Option<u64>,
+    /// This entry's debit against the tenant's prepaid-credit wallet
+    /// (issue #169), copied through verbatim from the originating
+    /// [`BillingEvent`] -- see that field's doc comment for why this
+    /// crate only mirrors the outcome rather than computing or applying
+    /// it.
+    #[serde(default)]
+    pub wallet_delta_credits: Option<i64>,
+    #[serde(default)]
+    pub wallet_balance_after_credits: Option<i64>,
 }
 
 /// Deterministic idempotency key for a usage event, matching the metering
@@ -173,6 +182,8 @@ pub fn charge(book: &PriceBook, event: &BillingEvent) -> Result<LedgerEntry, Bil
         unit_price,
         cost_source,
         occurred_at_unix: event.occurred_at_unix,
+        wallet_delta_credits: event.wallet_delta_credits,
+        wallet_balance_after_credits: event.wallet_balance_after_credits,
     })
 }
 

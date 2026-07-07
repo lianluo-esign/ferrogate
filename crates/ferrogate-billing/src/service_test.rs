@@ -49,6 +49,8 @@ fn event_json(provider: &str, model: &str) -> Vec<u8> {
         cost_usd: None,
         latency_ms: None,
         metadata: std::collections::BTreeMap::new(),
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
     })
     .unwrap()
 }

@@ -590,6 +590,8 @@ mod tests {
             cost_usd: None,
             latency_ms: None,
             metadata: std::collections::BTreeMap::new(),
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
         };
 
         assert_eq!(
@@ -627,6 +629,8 @@ mod tests {
             cost_usd: Some(0.0012),
             latency_ms: Some(430),
             metadata: std::collections::BTreeMap::new(),
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
         }
     }
 }

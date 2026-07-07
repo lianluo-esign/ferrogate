@@ -35,6 +35,8 @@ fn event(request_id: &str, provider: &str, model: &str) -> BillingEvent {
         cost_usd: None,
         latency_ms: None,
         metadata: std::collections::BTreeMap::new(),
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
     }
 }
 
@@ -64,6 +66,35 @@ fn charge_prices_usage_and_credits() {
 fn charge_fails_closed_on_missing_price() {
     let error = charge(&book(), &event("req-2", "anthropic", "claude")).unwrap_err();
     assert_eq!(error.code, "price_not_found");
+}
+
+#[test]
+fn charge_mirrors_wallet_debit_fields_from_the_event_without_recomputing_them() {
+    // Issue #169's GET /v1/billing/ledger acceptance criterion: wallet
+    // debits show up alongside cost/credit fields. charge() must copy
+    // these through verbatim from the event -- it has no way to compute
+    // them itself (this crate can't depend on ferrogate-storage, where
+    // the actual wallet lives; see BillingEvent::wallet_delta_credits's
+    // doc comment).
+    let mut source = event("req-wallet-1", "openai", "gpt-5.5");
+    source.wallet_delta_credits = Some(-35_000);
+    source.wallet_balance_after_credits = Some(465_000);
+
+    let entry = charge(&book(), &source).unwrap();
+
+    assert_eq!(entry.wallet_delta_credits, Some(-35_000));
+    assert_eq!(entry.wallet_balance_after_credits, Some(465_000));
+}
+
+#[test]
+fn charge_leaves_wallet_fields_none_for_a_tenant_without_a_wallet() {
+    // The common case (no prepaid wallet adopted): both fields stay None,
+    // not some sentinel like 0, so a ledger consumer can distinguish
+    // "no wallet" from "debited zero credits".
+    let entry = charge(&book(), &event("req-wallet-2", "openai", "gpt-5.5")).unwrap();
+
+    assert_eq!(entry.wallet_delta_credits, None);
+    assert_eq!(entry.wallet_balance_after_credits, None);
 }
 
 #[test]

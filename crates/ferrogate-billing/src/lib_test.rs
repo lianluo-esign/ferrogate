@@ -29,6 +29,8 @@ fn test_event(request_id: &str) -> BillingEvent {
         cost_usd: None,
         latency_ms: None,
         metadata: std::collections::BTreeMap::new(),
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
     }
 }
 
@@ -83,6 +85,8 @@ fn in_memory_sink_records_billing_events() {
         cost_usd: Some(0.001),
         latency_ms: Some(120),
         metadata: std::collections::BTreeMap::new(),
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
     })
     .unwrap();
 
@@ -116,6 +120,8 @@ fn in_memory_sink_enforces_retention_limit() {
             cost_usd: None,
             latency_ms: None,
             metadata: std::collections::BTreeMap::new(),
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
         })
         .unwrap();
     }

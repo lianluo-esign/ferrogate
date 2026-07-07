@@ -4905,6 +4905,15 @@ fn usage_monthly_rollup_from_row(
 
 fn billing_event_from_row(row: PostgresRow) -> Result<BillingEvent, StorageError> {
     let metadata = deserialize_storage_document(&row.get::<_, String>(25))?;
+    // metering_events has no wallet_delta_credits/wallet_balance_after_credits
+    // columns -- unlike the billing_report_outbox row and the standalone
+    // billing service's billing_ledger table (both store their payload as
+    // a JSON blob column, `deserialize_storage_document`d back into the
+    // full struct wallet fields included, see `ledger_entry_from_row`),
+    // this table backs the gateway's own internal metering/billing-events
+    // admin view, not GET /v1/billing/ledger (issue #169's actual
+    // acceptance target), so it was never a candidate for carrying this
+    // data and reading it back here as None is correct, not a gap.
     Ok(BillingEvent {
         request_id: row.get(0),
         trace_id: row.get(1),
@@ -4936,6 +4945,8 @@ fn billing_event_from_row(row: PostgresRow) -> Result<BillingEvent, StorageError
         cost_usd: row.get(23),
         latency_ms: row.get::<_, Option<i64>>(24).map(nonnegative_u64),
         metadata,
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
     })
 }
 
@@ -10682,6 +10693,8 @@ mod tests {
                 cost_usd: Some(0.01),
                 latency_ms: Some(120),
                 metadata: std::collections::BTreeMap::new(),
+                wallet_delta_credits: None,
+                wallet_balance_after_credits: None,
             })
             .unwrap();
         repositories
@@ -10705,6 +10718,8 @@ mod tests {
                 cost_usd: Some(0.002),
                 latency_ms: Some(80),
                 metadata: std::collections::BTreeMap::new(),
+                wallet_delta_credits: None,
+                wallet_balance_after_credits: None,
             })
             .unwrap();
 
@@ -10771,6 +10786,8 @@ mod tests {
                     "customer_id".to_string(),
                     customer_id.to_string(),
                 )]),
+                wallet_delta_credits: None,
+                wallet_balance_after_credits: None,
             };
 
         repositories

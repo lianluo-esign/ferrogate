@@ -49,6 +49,8 @@ fn sample_billing_event(request_id: &str) -> BillingEvent {
         cost_usd: Some(0.01),
         latency_ms: None,
         metadata: std::collections::BTreeMap::new(),
+        wallet_delta_credits: None,
+        wallet_balance_after_credits: None,
     }
 }
 

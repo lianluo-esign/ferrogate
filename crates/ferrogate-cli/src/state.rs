@@ -4927,24 +4927,34 @@ impl AppState {
     /// error here is logged and swallowed, matching the budget-alert
     /// webhook's "a bookkeeping side-effect must never fail the
     /// triggering request" precedent (issue #170).
-    fn debit_wallet_for_settled_cost(&self, tenant: &ferrogate_core::TenantContext, cost_usd: f64) {
+    ///
+    /// Returns the debit's outcome (delta + resulting balance) so the
+    /// caller can attach it to the `BillingEvent` it's about to build and
+    /// carry it through to the standalone billing service's ledger
+    /// (issue #169's `GET /v1/billing/ledger` acceptance criterion) --
+    /// `None` covers every "nothing happened" case (no cost, no tenant
+    /// attribution, no wallet row, or a storage error), matching the
+    /// pre-existing best-effort/no-op-by-default semantics exactly.
+    fn debit_wallet_for_settled_cost(
+        &self,
+        tenant: &ferrogate_core::TenantContext,
+        cost_usd: f64,
+    ) -> Option<WalletDebitOutcome> {
         if cost_usd <= 0.0 {
-            return;
+            return None;
         }
-        let Some(tenant_id) = tenant.organization_id.as_deref() else {
-            return;
-        };
+        let tenant_id = tenant.organization_id.as_deref()?;
         let delta_credits =
             -((cost_usd * ferrogate_billing::pricing::DEFAULT_CREDITS_PER_USD).round() as i64);
         if delta_credits == 0 {
-            return;
+            return None;
         }
         let now = now_unix_seconds().unwrap_or_default() as i64;
         match self
             .repositories
             .adjust_wallet_balance(tenant_id, delta_credits, now)
         {
-            Ok(None) => {} // no wallet for this tenant; nothing to do
+            Ok(None) => None, // no wallet for this tenant; nothing to do
             Ok(Some(wallet)) => {
                 self.record_wallet_ledger_event(
                     tenant_id,
@@ -4955,7 +4965,12 @@ impl AppState {
                         -delta_credits, wallet.balance_credits
                     ),
                 );
-                self.maybe_trigger_auto_recharge(wallet)
+                let outcome = WalletDebitOutcome {
+                    delta_credits,
+                    balance_after_credits: wallet.balance_credits,
+                };
+                self.maybe_trigger_auto_recharge(wallet);
+                Some(outcome)
             }
             Err(error) => {
                 warn!(
@@ -4963,6 +4978,7 @@ impl AppState {
                     error = %error,
                     "failed to debit tenant wallet for settled request cost"
                 );
+                None
             }
         }
     }
@@ -5690,6 +5706,21 @@ impl AppState {
             draft.provider_model,
             &usage,
         );
+        // Prepaid-credit wallet debit (issue #169): a no-op for tenants
+        // without a wallet row (opt-in), so this never affects a request
+        // outside the prepaid-billing path. Computed *before* building
+        // `event` (rather than after recording it, as this used to do) so
+        // the outcome can be attached to the event itself and carried
+        // through to the standalone billing service's ledger
+        // (`GET /v1/billing/ledger` showing wallet debits alongside cost/
+        // credit fields is one of #169's acceptance criteria) -- the debit
+        // still happens exactly once, here, before anything is recorded;
+        // the billing service only ever mirrors this outcome, never
+        // computes or applies its own (see `BillingEvent::wallet_delta_credits`'s
+        // doc comment in `ferrogate-billing`).
+        let wallet_debit = cost_usd.and_then(|cost_usd| {
+            self.debit_wallet_for_settled_cost(&draft.request.tenant, cost_usd)
+        });
         let event = BillingEvent {
             request_id: draft.request.request_id.clone(),
             trace_id: draft.request.trace_id.clone(),
@@ -5714,6 +5745,10 @@ impl AppState {
             cost_usd,
             latency_ms: draft.latency_ms,
             metadata: draft.metadata.cloned().unwrap_or_default(),
+            wallet_delta_credits: wallet_debit.as_ref().map(|outcome| outcome.delta_credits),
+            wallet_balance_after_credits: wallet_debit
+                .as_ref()
+                .map(|outcome| outcome.balance_after_credits),
         };
         self.metering_events.record(event.clone())?;
         // Durably enqueue the settled usage for delivery to the standalone
@@ -5788,12 +5823,6 @@ impl AppState {
         // `usage_monthly_rollups` synchronously), so spend read here
         // reflects this request (issue #170).
         self.dispatch_budget_threshold_alerts(&draft.request.tenant);
-        // Prepaid-credit wallet debit (issue #169): a no-op for tenants
-        // without a wallet row (opt-in), so this never affects a request
-        // outside the prepaid-billing path.
-        if let Some(cost_usd) = event.cost_usd {
-            self.debit_wallet_for_settled_cost(&draft.request.tenant, cost_usd);
-        }
         Ok(())
     }
 
@@ -6032,6 +6061,8 @@ impl AppState {
             cost_usd: None,
             latency_ms: Some(latency_ms),
             metadata: std::collections::BTreeMap::new(),
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
         };
         let _ = self.metering_events.record(event.clone());
         self.record_billing_metrics(&event);
@@ -7783,6 +7814,16 @@ impl AppState {
             .get(next as usize % endpoints.len())
             .map(|url| (*url).to_string())
     }
+}
+
+/// The result of one `AppState::debit_wallet_for_settled_cost` call
+/// (issue #169): threaded into the `BillingEvent` the caller is about to
+/// build so it can be mirrored, not recomputed, in the standalone billing
+/// service's ledger.
+#[derive(Debug, Clone, Copy)]
+struct WalletDebitOutcome {
+    delta_credits: i64,
+    balance_after_credits: i64,
 }
 
 #[derive(Debug)]
@@ -10983,6 +11024,120 @@ mod tests {
         assert_eq!(rollup.request_count, 1);
         assert_eq!(rollup.error_count, 0);
         assert!((rollup.cost_usd - 0.000_013).abs() < 1e-9);
+    }
+
+    #[test]
+    fn billing_event_carries_the_wallet_debit_outcome_when_a_wallet_exists() {
+        // Issue #169's GET /v1/billing/ledger acceptance criterion: the
+        // BillingEvent posted to the standalone billing service (and thus
+        // the LedgerEntry it produces) must show the wallet debit
+        // alongside cost/credit fields, not just update the wallet
+        // silently on the side.
+        let config = Config {
+            providers: vec![Provider {
+                region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
+                name: "openai".into(),
+                kind: "openai".into(),
+                base_url: "http://127.0.0.1:10001/v1".into(),
+                api_key_env: None,
+                secret_ref: None,
+                openrouter_http_referer: None,
+                openrouter_x_title: None,
+                enabled: true,
+            }],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy: RoutingStrategy::Priority,
+                fallbacks: vec![],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                // $1/1M input tokens, chosen so 500_000 prompt tokens
+                // settles to exactly $0.50 = 500_000 credits.
+                input_price_per_1m: Some(1.0),
+                output_price_per_1m: Some(0.0),
+                enabled: true,
+                cache_enabled: None,
+            }],
+            ..Config::default()
+        };
+        let state = AppState::new(config);
+        state
+            .upsert_wallet(ferrogate_storage::StoredWallet {
+                id: "org".into(),
+                tenant_id: "org".into(),
+                balance_credits: 1_000_000,
+                auto_recharge_threshold_credits: None,
+                auto_recharge_amount_credits: None,
+                dunning: false,
+                created_at_unix: 0,
+                updated_at_unix: 0,
+            })
+            .unwrap();
+        let request = RequestContext {
+            request_id: "fg-wallet-test".into(),
+            trace_id: Some("trace-wallet-test".into()),
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            route: Some("openai.chat.completions".into()),
+            upstream: Some("openai".into()),
+            tenant: ferrogate_core::TenantContext {
+                workspace_id: None,
+                organization_id: Some("org".into()),
+                team_id: None,
+                project_id: None,
+                user_id: None,
+                api_key_id: None,
+            },
+        };
+
+        state
+            .record_billing_event(
+                BillingEventDraft {
+                    request: &request,
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-4o-mini",
+                    status_code: 200,
+                    latency_ms: None,
+                    metadata: None,
+                },
+                &ProviderUsage {
+                    prompt_tokens: Some(500_000),
+                    completion_tokens: Some(0),
+                    total_tokens: Some(500_000),
+                },
+            )
+            .unwrap();
+
+        let events = state.billing_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].wallet_delta_credits,
+            Some(-500_000),
+            "500_000 prompt tokens @ $1/1M = $0.50 = 500_000 credits debited"
+        );
+        assert_eq!(
+            events[0].wallet_balance_after_credits,
+            Some(500_000),
+            "1_000_000 starting balance - 500_000 debited = 500_000 remaining"
+        );
+
+        let wallet = state.get_wallet("org").unwrap().unwrap();
+        assert_eq!(
+            wallet.balance_credits, 500_000,
+            "the event's reported balance must match the real, persisted wallet balance"
+        );
     }
 
     #[test]
