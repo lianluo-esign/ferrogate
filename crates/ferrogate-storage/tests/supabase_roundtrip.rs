@@ -438,6 +438,7 @@ fn virtual_api_key_governance_fields_round_trip_through_real_supabase() {
             name: "Tenant RT".into(),
             slug: "tenant-rt".into(),
             status: "active".into(),
+            plan_id: "free".into(),
             created_at_unix: 1,
             updated_at_unix: 1,
         })
