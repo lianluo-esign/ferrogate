@@ -2959,7 +2959,7 @@ fn self_hosted_seed_dispatch_id(worker_id: &str) -> String {
     format!("self-hosted-dispatch-{worker_id}")
 }
 
-fn self_hosted_tenant_id(tenant: &ferrogate_core::TenantContext) -> String {
+pub(crate) fn self_hosted_tenant_id(tenant: &ferrogate_core::TenantContext) -> String {
     tenant
         .organization_id
         .as_deref()

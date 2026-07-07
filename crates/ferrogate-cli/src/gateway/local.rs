@@ -2827,6 +2827,46 @@ impl FerroGateway {
             }
         };
 
+        // Plan/permission gate for MCP tool execution specifically (issue
+        // #168's originally-scoped enforcement point, never wired until
+        // #182): either the tenant's plan enables mcp_enabled, or a bound
+        // role grants the mcp.execute permission. Extension-backend tool
+        // execution (/v1/tools/execute) is unaffected -- it isn't MCP.
+        //
+        // Only enforced when a StoredTenantAccount actually exists for this
+        // tenant_id: a virtual key's organization_id is free-form
+        // attribution, not a foreign key, and plenty of legitimate setups
+        // (and most of this repo's own test fixtures) tag a key with an
+        // organization_id without ever registering it through
+        // /admin/v1/tenant-accounts. Since mcp_enabled was dead/unchecked
+        // until now, treating "no formal tenant record" as an implicit
+        // denial would be a silent breaking change for exactly that setup;
+        // role-based grants still apply regardless of tenant-account
+        // existence, since bindings are keyed by tenant_id directly.
+        if backend == ToolExecuteBackend::Mcp {
+            if let Some(tenant_id) = auth.organization_id.as_deref() {
+                let tenant_account_exists =
+                    state.get_tenant_account(tenant_id).ok().flatten().is_some();
+                let plan_grants_access = state
+                    .resolve_tenant_plan(tenant_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|plan| plan.mcp_enabled);
+                let role_grants_access = state.tenant_has_permission(tenant_id, "mcp.execute");
+                if tenant_account_exists && !plan_grants_access && !role_grants_access {
+                    return write_json_error(
+                        session,
+                        StatusCode::FORBIDDEN,
+                        "mcp_tools_disabled",
+                        "the tenant's plan does not enable MCP tool execution and no bound \
+                         role grants the mcp.execute permission",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+            }
+        }
+
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
             Err(limit) => {
@@ -4899,6 +4939,59 @@ impl FerroGateway {
                             .await;
                         }
                     };
+
+                // Plan/permission gate for self-hosted worker registration
+                // (issue #168's originally-scoped enforcement point, never
+                // wired until #182): either the tenant's plan enables
+                // self_hosted_workers_enabled, or a bound role grants the
+                // workers.self_hosted permission. Derived the same way
+                // register_self_hosted_worker itself attributes ownership
+                // (crate::state::self_hosted_tenant_id), so the gate checks
+                // the exact tenant the registration will be recorded under.
+                //
+                // Only enforced when a StoredTenantAccount actually exists
+                // for this tenant_id -- see the identical rationale on the
+                // MCP tool-execution gate above (local.rs, ToolExecuteBackend
+                // ::Mcp branch): self_hosted_workers_enabled was dead/
+                // unchecked until now, and plenty of legitimate registration
+                // payloads carry a TenantContext with no matching formal
+                // tenant record.
+                let self_hosted_tenant_id = crate::state::self_hosted_tenant_id(&payload.tenant);
+                let tenant_account_exists = state
+                    .get_tenant_account(&self_hosted_tenant_id)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let plan_grants_access = state
+                    .resolve_tenant_plan(&self_hosted_tenant_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|plan| plan.self_hosted_workers_enabled);
+                let role_grants_access =
+                    state.tenant_has_permission(&self_hosted_tenant_id, "workers.self_hosted");
+                if tenant_account_exists && !plan_grants_access && !role_grants_access {
+                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                        ctx,
+                        &auth,
+                        "self_hosted_worker.register",
+                        "new",
+                        "rejected",
+                        format!(
+                            "tenant {self_hosted_tenant_id}'s plan does not enable self-hosted \
+                             workers and no bound role grants the workers.self_hosted permission"
+                        ),
+                    ));
+                    return write_json_error(
+                        session,
+                        StatusCode::FORBIDDEN,
+                        "self_hosted_workers_disabled",
+                        "the tenant's plan does not enable self-hosted workers and no bound \
+                         role grants the workers.self_hosted permission",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+
                 match state.register_self_hosted_worker(payload) {
                     Ok(worker) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
