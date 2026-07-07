@@ -249,6 +249,26 @@ impl FerroGateway {
             }
         };
 
+        // Supply-chain hardening (issue #179): content-type allowlist,
+        // malware-signature scan, and mcp_manifest stdio-transport block --
+        // FerroGate is the origin server vouching for this content once
+        // stored, not just proxying it, so this runs before anything is
+        // durably written.
+        if let Err(message) = super::asset_security::validate_asset_content(
+            asset_type,
+            &content_type,
+            &content,
+        ) {
+            return write_json_error(
+                session,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "asset_rejected",
+                message,
+                &ctx.request_id,
+            )
+            .await;
+        }
+
         if let Some(default_quota) = plan.as_ref().and_then(|plan| plan.default_asset_storage_quota_bytes) {
             let existing = match state.get_asset(&stored_asset_id(&tenant_id, asset_type, name, version)) {
                 Ok(existing) => existing,
