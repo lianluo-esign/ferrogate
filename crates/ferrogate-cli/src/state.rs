@@ -67,10 +67,10 @@ use ferrogate_storage::{
     ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, QuotaScopeKind,
     RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
     RuntimeStorageRepositories, StorageBackendEvidence, StorageError, StoredAgentRun,
-    StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAuditEvent,
+    StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
     StoredBillingReportOutboxEntry, StoredManagedWorkerIsolationEvidence,
     StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
-    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredProject,
+    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredPlan, StoredProject,
     StoredQuotaPolicy, StoredRequestLog, StoredSelfHostedRunDispatch,
     StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
     StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
@@ -4484,6 +4484,18 @@ impl AppState {
         Ok(self.repositories.upsert_tenant_account(account)?)
     }
 
+    /// Resolves a tenant's assigned plan (issue #168), if any -- the tenant
+    /// account's `plan_id` may point at a plan that no longer exists, in
+    /// which case this returns `Ok(None)` rather than an error, matching
+    /// [`resolve_effective_quota`]'s existing fail-open-to-no-plan-defaults
+    /// behavior for a missing plan row.
+    pub(crate) fn resolve_tenant_plan(&self, tenant_id: &str) -> anyhow::Result<Option<StoredPlan>> {
+        let Some(account) = self.repositories.get_tenant_account(tenant_id)? else {
+            return Ok(None);
+        };
+        Ok(self.repositories.get_plan(&account.plan_id)?)
+    }
+
     pub(crate) fn list_projects(&self) -> anyhow::Result<Vec<StoredProject>> {
         Ok(self.repositories.list_projects()?)
     }
@@ -4549,6 +4561,39 @@ impl AppState {
         Ok(self
             .repositories
             .delete_quota_policy(scope_type, scope_id)?)
+    }
+
+    // --- Static asset hosting (issue #176/#177) ---
+
+    pub(crate) fn upsert_asset(&self, asset: StoredAsset) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_asset(asset)?)
+    }
+
+    pub(crate) fn get_asset(&self, id: &str) -> anyhow::Result<Option<StoredAsset>> {
+        Ok(self.repositories.get_asset(id)?)
+    }
+
+    pub(crate) fn list_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> anyhow::Result<Vec<StoredAsset>> {
+        Ok(self.repositories.list_assets(tenant_id, asset_type)?)
+    }
+
+    pub(crate) fn delete_asset(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.repositories.delete_asset(id)?)
+    }
+
+    /// Cumulative stored bytes for a tenant across all asset types, used to
+    /// enforce `StoredPlan::default_asset_storage_quota_bytes` at push time.
+    pub(crate) fn tenant_asset_storage_bytes_used(&self, tenant_id: &str) -> anyhow::Result<u64> {
+        Ok(self
+            .repositories
+            .list_assets(tenant_id, None)?
+            .iter()
+            .map(|asset| asset.size_bytes)
+            .sum())
     }
 
     // --- P1-4 usage/cost monthly rollups ---
@@ -4700,10 +4745,7 @@ impl AppState {
             }
         }
         let plan = match tenant.organization_id.as_deref() {
-            Some(tenant_id) => match self.repositories.get_tenant_account(tenant_id)? {
-                Some(account) => self.repositories.get_plan(&account.plan_id)?,
-                None => None,
-            },
+            Some(tenant_id) => self.resolve_tenant_plan(tenant_id)?,
             None => None,
         };
         Ok(resolve_effective_quota(

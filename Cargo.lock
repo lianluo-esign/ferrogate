@@ -1042,6 +1042,7 @@ dependencies = [
  "ferrogate-storage",
  "http",
  "instant-acme",
+ "matchit",
  "pingora",
  "rcgen",
  "redis",
@@ -1171,6 +1172,7 @@ dependencies = [
  "postgres-native-tls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
 ]
@@ -2067,6 +2069,12 @@ checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
 ]
+
+[[package]]
+name = "matchit"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f926ade0c4e170215ae43342bf13b9310a437609c81f29f86c5df6657582ef9"
 
 [[package]]
 name = "md-5"

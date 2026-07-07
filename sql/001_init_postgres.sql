@@ -779,6 +779,15 @@ CREATE TABLE IF NOT EXISTS plans (
     updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
 );
 
+-- Gates /v1/assets/* (issue #176/#177) the same way mcp_enabled gates MCP
+-- tool governance. Added via ALTER rather than the CREATE TABLE above so
+-- this migration file stays idempotent against already-provisioned plans
+-- tables (mirrors the tenants.plan_id ALTER pattern just below).
+ALTER TABLE plans
+    ADD COLUMN IF NOT EXISTS asset_hosting_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE plans
+    ADD COLUMN IF NOT EXISTS default_asset_storage_quota_bytes BIGINT;
+
 -- Every tenant lands on this plan unless explicitly assigned another one --
 -- seeded before the `tenants.plan_id` foreign key below is added, since that
 -- column's default value must reference a row that already exists.
@@ -786,8 +795,61 @@ INSERT INTO plans (id, name, slug, mcp_enabled, self_hosted_workers_enabled, adm
 VALUES ('free', 'Free', 'free', FALSE, FALSE, 1)
 ON CONFLICT (id) DO NOTHING;
 
+-- Unlike mcp_enabled/self_hosted_workers_enabled (left FALSE above), a small
+-- free asset-hosting quota is a deliberate self-serve growth lever (issue
+-- #176/#177), matching the in-memory default_free_plan(). A separate UPDATE
+-- (rather than folding into the INSERT) so re-running this migration also
+-- backfills the value onto a 'free' row created before these columns
+-- existed -- the ADD COLUMN default above would otherwise leave it FALSE.
+UPDATE plans
+    SET asset_hosting_enabled = TRUE, default_asset_storage_quota_bytes = 10485760
+    WHERE id = 'free';
+
 ALTER TABLE tenants
     ADD COLUMN IF NOT EXISTS plan_id TEXT NOT NULL DEFAULT 'free' REFERENCES plans(id);
+
+-- stored_assets: tenant-scoped static asset storage (issue #176), the
+-- foundation of the unified agent-asset hosting epic (#175) -- CLI tool
+-- packages, MCP connection manifests, Skill bundles, static sites, and
+-- config files all share this one table instead of being special-cased.
+--
+-- `content` stores file bytes inline (BYTEA, which Postgres TOASTs/
+-- compresses transparently above ~2KB) rather than referencing a separate
+-- object-storage bucket, so every asset operation is a single Postgres/
+-- Supabase round trip with no external bucket credentials required. The
+-- `size_bytes` check constraint caps a single asset at 10 MiB as a hard
+-- backstop until a real object-storage backend replaces inline BYTEA for
+-- larger files.
+--
+-- Isolation is enforced at the application layer via `tenant_id` (same
+-- model as every other multi-tenant table in this schema -- tenants,
+-- projects, workspaces, quota_policies, plans -- none of which use
+-- Postgres RLS today, since FerroGate connects as one shared service role
+-- rather than issuing per-tenant JWTs that `auth.uid()`-style RLS expects).
+-- Genuine RLS/S3-scoped-credential isolation is tracked as a follow-up in
+-- issue #179 once this moves to real Supabase Storage buckets.
+CREATE TABLE IF NOT EXISTS stored_assets (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    project_id TEXT,
+    asset_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0 AND size_bytes <= 10485760),
+    content BYTEA NOT NULL,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (tenant_id, asset_type, name, version)
+);
+
+-- Composite index: leftmost prefix (tenant_id, tenant_id+asset_type) covers
+-- both "list everything for a tenant" and "list one asset_type for a
+-- tenant", and the full column set covers the ORDER BY name, version list
+-- query without a separate sort step.
+CREATE INDEX IF NOT EXISTS idx_stored_assets_tenant_type_name
+    ON stored_assets(tenant_id, asset_type, name, version);
 
 -- billing_ledger: the settled money/credit flow produced by the standalone
 -- billing microservice (issue #129). Each row is one priced charge derived
@@ -951,5 +1013,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (17, '017_plans')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (18, '018_stored_assets')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

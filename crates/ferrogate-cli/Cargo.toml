@@ -41,6 +41,7 @@ ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
 http.workspace = true
 instant-acme.workspace = true
+matchit.workspace = true
 pingora.workspace = true
 redis.workspace = true
 regex.workspace = true

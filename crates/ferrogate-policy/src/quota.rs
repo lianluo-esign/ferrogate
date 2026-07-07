@@ -461,6 +461,8 @@ mod tests {
             default_monthly_budget_usd: Some(250.0),
             created_at_unix: 1,
             updated_at_unix: 1,
+            asset_hosting_enabled: true,
+            default_asset_storage_quota_bytes: Some(1_000_000),
         }
     }
 

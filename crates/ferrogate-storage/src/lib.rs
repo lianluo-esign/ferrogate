@@ -755,6 +755,7 @@ pub struct RuntimeControlPlaneState {
     admin_user_refresh_tokens: InMemoryRepository<StoredAdminUserRefreshToken>,
     quota_policies: InMemoryRepository<StoredQuotaPolicy>,
     plans: InMemoryRepository<StoredPlan>,
+    assets: InMemoryRepository<StoredAsset>,
     usage_monthly_rollups: InMemoryRepository<StoredUsageMonthlyRollup>,
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
 }
@@ -1517,14 +1518,16 @@ impl PostgresControlPlaneStore {
         let default_rpm_limit = plan.default_rpm_limit.map(saturating_i64);
         let default_tpm_limit = plan.default_tpm_limit.map(saturating_i64);
         let admin_console_seats = plan.admin_console_seats.map(i64::from);
+        let default_asset_storage_quota_bytes =
+            plan.default_asset_storage_quota_bytes.map(saturating_i64);
         self.with_client(|client| {
             client.execute(
                 "INSERT INTO plans \
                  (id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                   admin_console_seats, default_model_allowlist_json, default_rpm_limit, \
                   default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
-                  updated_at_unix) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12) \
+                  updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12, $13, $14) \
                  ON CONFLICT (id) DO UPDATE SET \
                  name = EXCLUDED.name, slug = EXCLUDED.slug, \
                  mcp_enabled = EXCLUDED.mcp_enabled, \
@@ -1534,7 +1537,9 @@ impl PostgresControlPlaneStore {
                  default_rpm_limit = EXCLUDED.default_rpm_limit, \
                  default_tpm_limit = EXCLUDED.default_tpm_limit, \
                  default_monthly_budget_usd = EXCLUDED.default_monthly_budget_usd, \
-                 updated_at_unix = EXCLUDED.updated_at_unix",
+                 updated_at_unix = EXCLUDED.updated_at_unix, \
+                 asset_hosting_enabled = EXCLUDED.asset_hosting_enabled, \
+                 default_asset_storage_quota_bytes = EXCLUDED.default_asset_storage_quota_bytes",
                 &[
                     &plan.id,
                     &plan.name,
@@ -1548,6 +1553,8 @@ impl PostgresControlPlaneStore {
                     &plan.default_monthly_budget_usd,
                     &plan.created_at_unix,
                     &plan.updated_at_unix,
+                    &plan.asset_hosting_enabled,
+                    &default_asset_storage_quota_bytes,
                 ],
             )?;
             Ok(())
@@ -1560,7 +1567,7 @@ impl PostgresControlPlaneStore {
                 "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                  admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
-                 updated_at_unix \
+                 updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes \
                  FROM plans WHERE id = $1",
                 &[&id],
             )
@@ -1574,12 +1581,85 @@ impl PostgresControlPlaneStore {
                 "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                  admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
-                 updated_at_unix \
+                 updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes \
                  FROM plans ORDER BY id ASC",
                 &[],
             )
         })?;
         rows.iter().map(plan_from_row).collect()
+    }
+
+    fn upsert_asset(&self, asset: &StoredAsset) -> Result<(), StorageError> {
+        let size_bytes = saturating_i64(asset.size_bytes);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO stored_assets \
+                 (id, tenant_id, project_id, asset_type, name, version, content_type, \
+                  content_hash, size_bytes, content, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, \
+                 size_bytes = EXCLUDED.size_bytes, content = EXCLUDED.content, \
+                 updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &asset.id,
+                    &asset.tenant_id,
+                    &asset.project_id,
+                    &asset.asset_type,
+                    &asset.name,
+                    &asset.version,
+                    &asset.content_type,
+                    &asset.content_hash,
+                    &size_bytes,
+                    &asset.content,
+                    &asset.created_at_unix,
+                    &asset.updated_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix \
+                 FROM stored_assets WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        Ok(row.as_ref().map(asset_from_row))
+    }
+
+    fn list_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        let rows = self.with_client(|client| match asset_type {
+            Some(asset_type) => client.query(
+                "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix \
+                 FROM stored_assets WHERE tenant_id = $1 AND asset_type = $2 \
+                 ORDER BY name ASC, version ASC",
+                &[&tenant_id, &asset_type],
+            ),
+            None => client.query(
+                "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix \
+                 FROM stored_assets WHERE tenant_id = $1 \
+                 ORDER BY asset_type ASC, name ASC, version ASC",
+                &[&tenant_id],
+            ),
+        })?;
+        Ok(rows.iter().map(asset_from_row).collect())
+    }
+
+    fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
+        let affected =
+            self.with_client(|client| client.execute("DELETE FROM stored_assets WHERE id = $1", &[&id]))?;
+        Ok(affected > 0)
     }
 
     fn get_usage_monthly_rollup(
@@ -3884,6 +3964,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "admin_user_tenant_memberships",
         "admin_user_refresh_tokens",
         "storage_schema_migrations",
+        "quota_policies",
+        "plans",
+        "stored_assets",
     ];
     for table in TABLES {
         let exists = client
@@ -4229,12 +4312,37 @@ fn plan_from_row(row: &PostgresRow) -> Result<StoredPlan, StorageError> {
         default_monthly_budget_usd: row.get::<_, Option<f64>>(9),
         created_at_unix: row.get::<_, i64>(10),
         updated_at_unix: row.get::<_, i64>(11),
+        asset_hosting_enabled: row.get::<_, bool>(12),
+        default_asset_storage_quota_bytes: row.get::<_, Option<i64>>(13).map(nonnegative_u64),
     })
 }
 
 fn plans_supabase_only_error() -> StorageError {
     StorageError::Runtime(
         "plans are Supabase/Postgres-only; set storage.provider = supabase".into(),
+    )
+}
+
+fn asset_from_row(row: &PostgresRow) -> StoredAsset {
+    StoredAsset {
+        id: row.get::<_, String>(0),
+        tenant_id: row.get::<_, String>(1),
+        project_id: row.get::<_, Option<String>>(2),
+        asset_type: row.get::<_, String>(3),
+        name: row.get::<_, String>(4),
+        version: row.get::<_, String>(5),
+        content_type: row.get::<_, String>(6),
+        content_hash: row.get::<_, String>(7),
+        size_bytes: nonnegative_u64(row.get::<_, i64>(8)),
+        content: row.get::<_, Vec<u8>>(9),
+        created_at_unix: row.get::<_, i64>(10),
+        updated_at_unix: row.get::<_, i64>(11),
+    }
+}
+
+fn assets_supabase_only_error() -> StorageError {
+    StorageError::Runtime(
+        "stored assets are Supabase/Postgres-only; set storage.provider = supabase".into(),
     )
 }
 
@@ -5076,6 +5184,7 @@ impl RuntimeControlPlaneState {
             admin_user_refresh_tokens: InMemoryRepository::new(),
             quota_policies: InMemoryRepository::new(),
             plans,
+            assets: InMemoryRepository::new(),
             usage_monthly_rollups: InMemoryRepository::new(),
             billing_report_outbox: InMemoryRepository::new(),
         }
@@ -5252,6 +5361,30 @@ impl RuntimeControlPlaneState {
 
     pub fn list_plans(&self) -> Vec<StoredPlan> {
         self.plans.list()
+    }
+
+    pub fn upsert_asset(&mut self, asset: StoredAsset) {
+        self.assets.insert(asset.id.clone(), asset);
+    }
+
+    pub fn get_asset(&self, id: &str) -> Option<StoredAsset> {
+        self.assets.get(id)
+    }
+
+    pub fn list_assets(&self, tenant_id: &str, asset_type: Option<&str>) -> Vec<StoredAsset> {
+        self.assets
+            .list()
+            .into_iter()
+            .filter(|asset| asset.tenant_id == tenant_id)
+            .filter(|asset| match asset_type {
+                Some(wanted) => asset.asset_type == wanted,
+                None => true,
+            })
+            .collect()
+    }
+
+    pub fn delete_asset(&mut self, id: &str) -> bool {
+        self.assets.remove(id).is_some()
     }
 
     /// In-memory counterpart of `increment_usage_monthly_rollups` (Postgres):
@@ -5832,6 +5965,13 @@ fn default_free_plan() -> StoredPlan {
         default_monthly_budget_usd: None,
         created_at_unix: 0,
         updated_at_unix: 0,
+        // Unlike mcp_enabled/self_hosted_workers_enabled (compute-adjacent,
+        // gated off by default), a small free asset-hosting quota is a
+        // deliberate self-serve growth lever (issue #176/#177) rather than a
+        // premium-only feature -- 10 MiB matches the per-asset row cap in
+        // the `stored_assets` schema.
+        asset_hosting_enabled: true,
+        default_asset_storage_quota_bytes: Some(10 * 1024 * 1024),
     }
 }
 
@@ -5863,6 +6003,58 @@ pub struct StoredPlan {
     pub created_at_unix: i64,
     #[serde(default)]
     pub updated_at_unix: i64,
+    /// Gates `/v1/assets/*` (issue #176/#177) the same way `mcp_enabled`
+    /// gates MCP tool governance -- fail closed when absent or `false`.
+    #[serde(default)]
+    pub asset_hosting_enabled: bool,
+    #[serde(default)]
+    pub default_asset_storage_quota_bytes: Option<u64>,
+}
+
+/// A tenant-scoped static asset (issue #176): the storage primitive behind
+/// the unified agent-asset hosting epic (#175) -- CLI tool packages, MCP
+/// connection manifests, Skill bundles, static sites, and config files all
+/// share this one table rather than being special-cased per type.
+///
+/// Content is stored inline (`content`) rather than referencing a separate
+/// object-storage bucket for this first cut: it keeps every asset
+/// operation to a single Postgres/Supabase round trip with no external
+/// bucket credentials required, at the cost of Postgres row size for large
+/// assets. Swapping `content` for a bucket/object-key reference is a
+/// compatible follow-up once Supabase Storage bucket credentials are
+/// available for live verification (see #176).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredAsset {
+    pub id: String,
+    pub tenant_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub asset_type: String,
+    pub name: String,
+    pub version: String,
+    pub content_type: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
+    pub content: Vec<u8>,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+/// Deterministic id for an asset so `upsert` is naturally idempotent per
+/// `(tenant_id, asset_type, name, version)`, mirroring [`quota_policy_id`].
+pub fn stored_asset_id(tenant_id: &str, asset_type: &str, name: &str, version: &str) -> String {
+    format!("{tenant_id}:{asset_type}:{name}:{version}")
+}
+
+/// SHA-256 content hash, hex-encoded. Computed by the caller when an asset
+/// is pushed and re-verified on every read so storage-layer corruption or
+/// tampering is detected rather than silently served (#176/#179).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Project (business line) nested under a tenant.
@@ -7380,6 +7572,61 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_plans(),
             RuntimeControlPlaneBackend::Mysql(_) => Err(plans_supabase_only_error()),
+        }
+    }
+
+    /// Creates or replaces an asset (issue #176). Unlike plans/quota
+    /// policies (shared/scope-keyed), assets are tenant-owned -- same trust
+    /// model as tenant account CRUD.
+    pub fn upsert_asset(&self, asset: StoredAsset) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_asset(asset);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert_asset(&asset),
+            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
+        }
+    }
+
+    pub fn get_asset(&self, id: &str) -> Result<Option<StoredAsset>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_asset(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_asset(id),
+            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
+        }
+    }
+
+    pub fn list_assets(
+        &self,
+        tenant_id: &str,
+        asset_type: Option<&str>,
+    ) -> Result<Vec<StoredAsset>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_assets(tenant_id, asset_type))
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.list_assets(tenant_id, asset_type)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
+        }
+    }
+
+    pub fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|mut control_plane| control_plane.delete_asset(id))
+                .unwrap_or(false)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.delete_asset(id),
+            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
         }
     }
 

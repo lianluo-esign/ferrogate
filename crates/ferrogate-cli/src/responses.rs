@@ -1118,6 +1118,30 @@ pub(crate) struct AdminQuotaPolicyMutationResponse {
     pub(crate) policy: AdminQuotaPolicy,
 }
 
+// --- Static asset hosting (issue #176/#177) ---
+
+/// Metadata for one tenant-scoped static asset -- deliberately excludes
+/// `content`: list/mutation responses return this summary, and only the
+/// dedicated content-fetch endpoint returns raw bytes.
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetSummary {
+    pub(crate) id: String,
+    pub(crate) asset_type: String,
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) content_type: String,
+    pub(crate) content_hash: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AssetMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) asset: AssetSummary,
+}
+
 /// One row of the P1-4 usage/cost report: either a raw per-scope-per-month
 /// rollup, or (when `group_by` is requested) a sum across every rollup
 /// sharing that row's `scope_type`/`scope_id`/`period_month` key -- whichever
