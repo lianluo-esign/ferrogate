@@ -16,7 +16,7 @@ mod function_egress;
 mod handlers;
 mod local;
 mod mcp_rpc;
-mod payments;
+pub(crate) mod payments;
 mod plans;
 mod proxy;
 mod quota_policies;

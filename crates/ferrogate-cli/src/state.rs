@@ -4911,13 +4911,127 @@ impl AppState {
             .adjust_wallet_balance(tenant_id, delta_credits, now)
         {
             Ok(None) => {} // no wallet for this tenant; nothing to do
-            Ok(Some(_)) => {}
+            Ok(Some(wallet)) => self.maybe_trigger_auto_recharge(wallet),
             Err(error) => {
                 warn!(
                     tenant_id = %tenant_id,
                     error = %error,
                     "failed to debit tenant wallet for settled request cost"
                 );
+            }
+        }
+    }
+
+    /// Fires an auto-recharge charge in the background when a debit just
+    /// dropped a wallet's balance to or below its configured threshold
+    /// (issue #169) -- spawned via `tokio::spawn` rather than awaited
+    /// inline, so a slow or unreachable payment provider can never add
+    /// latency to (or fail) the request whose settlement triggered it.
+    ///
+    /// Skips firing when the wallet is already in a dunning state: a
+    /// declined charge sets `dunning = true` specifically so this doesn't
+    /// hammer the payment provider with a retry on every single
+    /// subsequent request while the balance stays below threshold --
+    /// recovery requires an operator (or an updated payment method) to
+    /// clear the dunning state, at which point the next debit that
+    /// crosses the threshold will retry.
+    fn maybe_trigger_auto_recharge(&self, wallet: ferrogate_storage::StoredWallet) {
+        if wallet.dunning {
+            return;
+        }
+        let Some(threshold) = wallet.auto_recharge_threshold_credits else {
+            return;
+        };
+        if wallet.balance_credits > threshold {
+            return;
+        }
+        let Some(amount_credits) = wallet
+            .auto_recharge_amount_credits
+            .filter(|amount| *amount > 0)
+        else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            state
+                .execute_auto_recharge(&wallet.tenant_id, amount_credits)
+                .await;
+        });
+    }
+
+    /// Executes one auto-recharge attempt (issue #169): resolves the
+    /// tenant's default payment method and the configured Stripe secret,
+    /// charges `amount_credits` worth of USD, and credits the wallet on
+    /// success or marks it `dunning` on failure/decline/misconfiguration.
+    /// Async and only ever called via `tokio::spawn` from
+    /// `maybe_trigger_auto_recharge` -- never awaited inline on the
+    /// request path.
+    async fn execute_auto_recharge(&self, tenant_id: &str, amount_credits: i64) {
+        use crate::gateway::payments::PaymentProviderAdapter;
+
+        let Ok(secret_key) = std::env::var("FERROGATE_STRIPE_SECRET_KEY") else {
+            warn!(
+                tenant_id = %tenant_id,
+                "auto-recharge threshold crossed but FERROGATE_STRIPE_SECRET_KEY is not set; \
+                 marking wallet dunning rather than silently skipping"
+            );
+            let _ = self.set_wallet_dunning(tenant_id, true);
+            return;
+        };
+        let Some(payment_method) = self
+            .list_payment_methods(tenant_id)
+            .ok()
+            .and_then(|methods| methods.into_iter().find(|method| method.is_default))
+        else {
+            warn!(
+                tenant_id = %tenant_id,
+                "auto-recharge threshold crossed but the tenant has no default payment method"
+            );
+            let _ = self.set_wallet_dunning(tenant_id, true);
+            return;
+        };
+        let amount_usd_cents = ((amount_credits as f64)
+            / (ferrogate_billing::pricing::DEFAULT_CREDITS_PER_USD / 100.0))
+            .round() as u64;
+        let adapter = crate::gateway::payments::StripePaymentProviderAdapter::new(secret_key);
+        let idempotency_key = format!(
+            "auto-recharge:{tenant_id}:{}",
+            now_unix_seconds().unwrap_or_default()
+        );
+        let outcome = adapter
+            .charge(
+                &payment_method.provider_customer_id,
+                &payment_method.provider_payment_method_id,
+                amount_usd_cents,
+                &idempotency_key,
+            )
+            .await;
+        match outcome {
+            Ok(outcome) if outcome.succeeded => {
+                let _ = self.set_wallet_dunning(tenant_id, false);
+                if let Err(error) = self.adjust_wallet_balance(tenant_id, amount_credits) {
+                    warn!(
+                        tenant_id = %tenant_id,
+                        error = %error,
+                        "auto-recharge charge succeeded but crediting the wallet failed"
+                    );
+                }
+            }
+            Ok(outcome) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    decline_reason = ?outcome.decline_reason,
+                    "auto-recharge charge was declined"
+                );
+                let _ = self.set_wallet_dunning(tenant_id, true);
+            }
+            Err(error) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    error = %error,
+                    "auto-recharge charge request failed"
+                );
+                let _ = self.set_wallet_dunning(tenant_id, true);
             }
         }
     }

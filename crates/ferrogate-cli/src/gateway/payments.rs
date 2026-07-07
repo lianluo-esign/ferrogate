@@ -85,10 +85,19 @@ pub(crate) struct StripePaymentProviderAdapter {
 impl StripePaymentProviderAdapter {
     pub(crate) const PROVIDER_NAME: &'static str = "stripe";
 
+    /// `FERROGATE_STRIPE_API_BASE`, when set, overrides the real Stripe
+    /// API host -- exists so E2E tests can point every construction site
+    /// (including the auto-recharge background path, which has no other
+    /// way to reach a test-local mock server) at a local mock Stripe API
+    /// without a parallel test-only constructor drifting out of sync with
+    /// the real one. Unset in production, where this is always
+    /// `https://api.stripe.com`.
     pub(crate) fn new(secret_key: String) -> Self {
+        let api_base = std::env::var("FERROGATE_STRIPE_API_BASE")
+            .unwrap_or_else(|_| "https://api.stripe.com".to_string());
         Self {
             secret_key,
-            api_base: "https://api.stripe.com".to_string(),
+            api_base,
         }
     }
 
