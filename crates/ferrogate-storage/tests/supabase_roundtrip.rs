@@ -627,6 +627,7 @@ fn usage_cost_accounting_round_trips_through_real_supabase() {
             occurred_at_unix: Some(1_783_036_800), // 2026-07
             cost_usd: Some(0.015),
             latency_ms: Some(240),
+            metadata: std::collections::BTreeMap::new(),
         })
         .expect("append_billing_event must succeed");
     assert!(
@@ -714,6 +715,7 @@ fn billing_ledger_round_trips_through_real_supabase() {
         occurred_at_unix: Some(1_800_000_000),
         cost_usd: None,
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     };
     let entry =
         ferrogate_billing::charge(&price_book, &event).expect("charge must price the event");
@@ -791,6 +793,7 @@ fn billing_ledger_tenant_filter_is_pushed_into_the_query_through_real_supabase()
             occurred_at_unix: Some(1_800_000_000),
             cost_usd: None,
             latency_ms: None,
+            metadata: std::collections::BTreeMap::new(),
         };
         let entry = ferrogate_billing::charge(&price_book, &event).expect("must price");
         storage
@@ -852,6 +855,7 @@ fn billing_report_outbox_round_trips_through_real_supabase() {
         occurred_at_unix: Some(1_800_000_000),
         cost_usd: Some(0.01),
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     };
 
     // Enqueue is idempotent on the id; due at t=100.
@@ -923,6 +927,7 @@ fn billing_report_dead_letter_round_trips_through_real_supabase() {
         occurred_at_unix: Some(1_800_000_000),
         cost_usd: None,
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     };
     let id = "ferrogate:trace-dead-letter-rt:req-dead-letter-rt";
     storage
@@ -983,6 +988,7 @@ fn append_billing_event_with_outbox_enqueue_commits_both_writes_atomically() {
         occurred_at_unix: Some(1_800_000_000),
         cost_usd: Some(0.02),
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     };
     let outbox_id = "ferrogate:trace-combined-rt:req-combined-rt";
 

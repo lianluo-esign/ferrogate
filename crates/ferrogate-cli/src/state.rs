@@ -1833,12 +1833,19 @@ impl AgentRunFilter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UsageReportGroupBy {
     /// Aggregate every period_month into one row per (scope_type, scope_id).
     Scope,
     /// Aggregate every scope into one row per period_month.
     PeriodMonth,
+    /// Aggregate every period_month into one row per distinct value of the
+    /// given metadata key (issue #171), e.g. `group_by=metadata.customer_id`
+    /// returns one row per distinct `customer_id` value ever seen. Sourced
+    /// from `usage_metadata_rollups`, not `usage_monthly_rollups` -- an
+    /// entirely separate aggregation dimension from the built-in scope
+    /// chain, not a further breakdown of it.
+    Metadata(String),
 }
 
 /// Query filter for the P1-4 `/admin/v1/usage-reports` surface, built on top
@@ -1875,7 +1882,11 @@ impl UsageReportFilter {
                     filter.group_by = match value.as_str() {
                         "scope" => Some(UsageReportGroupBy::Scope),
                         "period_month" | "month" => Some(UsageReportGroupBy::PeriodMonth),
-                        _ => None,
+                        other => other
+                            .strip_prefix("metadata.")
+                            .map(str::trim)
+                            .filter(|key| !key.is_empty())
+                            .map(|key| UsageReportGroupBy::Metadata(key.to_string())),
                     }
                 }
                 _ => {}
@@ -1914,6 +1925,8 @@ fn usage_report_row_raw(rollup: StoredUsageMonthlyRollup) -> crate::responses::A
         period_month: Some(rollup.period_month),
         scope_type: Some(rollup.scope_type.as_str().to_string()),
         scope_id: Some(rollup.scope_id),
+        metadata_key: None,
+        metadata_value: None,
         prompt_tokens: rollup.prompt_tokens,
         completion_tokens: rollup.completion_tokens,
         total_tokens: rollup.total_tokens,
@@ -1932,6 +1945,27 @@ fn usage_report_row_zero(
         period_month: period_month.map(ToOwned::to_owned),
         scope_type: scope_type.map(|scope_type| scope_type.as_str().to_string()),
         scope_id: scope_id.map(ToOwned::to_owned),
+        metadata_key: None,
+        metadata_value: None,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost_usd: 0.0,
+        request_count: 0,
+        error_count: 0,
+    }
+}
+
+fn usage_metadata_report_row_zero(
+    metadata_key: &str,
+    metadata_value: &str,
+) -> crate::responses::AdminUsageReportRow {
+    crate::responses::AdminUsageReportRow {
+        period_month: None,
+        scope_type: None,
+        scope_id: None,
+        metadata_key: Some(metadata_key.to_string()),
+        metadata_value: Some(metadata_value.to_string()),
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
@@ -4926,13 +4960,17 @@ impl AppState {
         &self,
         filter: &UsageReportFilter,
     ) -> anyhow::Result<Vec<crate::responses::AdminUsageReportRow>> {
+        if let Some(UsageReportGroupBy::Metadata(metadata_key)) = &filter.group_by {
+            return Ok(self.metadata_usage_report(metadata_key, filter));
+        }
         let rollups: Vec<StoredUsageMonthlyRollup> = self
             .list_usage_monthly_rollups()?
             .into_iter()
             .filter(|rollup| filter.matches(rollup))
             .collect();
-        Ok(match filter.group_by {
+        Ok(match &filter.group_by {
             None => rollups.into_iter().map(usage_report_row_raw).collect(),
+            Some(UsageReportGroupBy::Metadata(_)) => unreachable!("handled above"),
             Some(UsageReportGroupBy::Scope) => {
                 let mut groups: std::collections::BTreeMap<
                     (String, String),
@@ -4974,6 +5012,50 @@ impl AppState {
                 groups.into_values().collect()
             }
         })
+    }
+
+    /// `group_by=metadata.<key>` usage report (issue #171): one row per
+    /// distinct value ever seen for `metadata_key`, summed across every
+    /// period_month within `filter`'s range. Sourced from
+    /// `usage_metadata_rollups`, an aggregation dimension orthogonal to the
+    /// tenant/project/workspace/key scope chain `usage_monthly_rollups`
+    /// covers -- `filter.scope_type`/`scope_id` don't apply here (a
+    /// metadata rollup has no scope), only the period range does.
+    fn metadata_usage_report(
+        &self,
+        metadata_key: &str,
+        filter: &UsageReportFilter,
+    ) -> Vec<crate::responses::AdminUsageReportRow> {
+        let rollups = self
+            .repositories
+            .list_usage_metadata_rollups(metadata_key)
+            .unwrap_or_default();
+        let mut groups: std::collections::BTreeMap<String, crate::responses::AdminUsageReportRow> =
+            std::collections::BTreeMap::new();
+        for rollup in rollups {
+            if let Some(from_month) = &filter.from_month {
+                if rollup.period_month < *from_month {
+                    continue;
+                }
+            }
+            if let Some(to_month) = &filter.to_month {
+                if rollup.period_month > *to_month {
+                    continue;
+                }
+            }
+            let row = groups
+                .entry(rollup.metadata_value.clone())
+                .or_insert_with(|| {
+                    usage_metadata_report_row_zero(metadata_key, &rollup.metadata_value)
+                });
+            row.prompt_tokens += rollup.prompt_tokens;
+            row.completion_tokens += rollup.completion_tokens;
+            row.total_tokens += rollup.total_tokens;
+            row.cost_usd += rollup.cost_usd;
+            row.request_count += rollup.request_count;
+            row.error_count += rollup.error_count;
+        }
+        groups.into_values().collect()
     }
 
     /// Resolve the effective (merged, capped) quota for a request's tenant
@@ -5200,6 +5282,7 @@ impl AppState {
             usage_source: BillingUsageSource::ProviderUsage,
             status_code: draft.status_code,
             latency_ms: draft.latency_ms,
+            metadata: draft.metadata,
         })
     }
 
@@ -5217,6 +5300,7 @@ impl AppState {
             usage_source: BillingUsageSource::GatewayEstimate,
             status_code: draft.status_code,
             latency_ms: draft.latency_ms,
+            metadata: draft.metadata,
         })
     }
 
@@ -5262,6 +5346,7 @@ impl AppState {
             occurred_at_unix: now_unix_seconds(),
             cost_usd,
             latency_ms: draft.latency_ms,
+            metadata: draft.metadata.cloned().unwrap_or_default(),
         };
         self.metering_events.record(event.clone())?;
         // Durably enqueue the settled usage for delivery to the standalone
@@ -5573,6 +5658,7 @@ impl AppState {
             occurred_at_unix: now_unix_seconds(),
             cost_usd: None,
             latency_ms: Some(latency_ms),
+            metadata: std::collections::BTreeMap::new(),
         };
         let _ = self.metering_events.record(event.clone());
         self.record_billing_metrics(&event);
@@ -7336,6 +7422,7 @@ struct BillingTokenUsageDraft<'a> {
     usage_source: BillingUsageSource,
     status_code: u16,
     latency_ms: Option<u64>,
+    metadata: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
 /// Everything about a settled request needed to record a billing event,
@@ -7351,6 +7438,12 @@ pub(crate) struct BillingEventDraft<'a> {
     pub(crate) provider_model: &'a str,
     pub(crate) status_code: u16,
     pub(crate) latency_ms: Option<u64>,
+    /// Caller-supplied request tags (issue #171) -- `None` for every
+    /// non-AI-request settlement path (self-hosted worker billing, MCP tool
+    /// billing, etc.), `Some` only where an ingress actually parses a
+    /// `metadata` object (currently `ChatCompletionRequest`, shared by both
+    /// the chat completions and Responses API endpoints).
+    pub(crate) metadata: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
 /// Settled cost in USD for one request, looked up from the model registry's
@@ -9268,6 +9361,7 @@ mod tests {
                     provider_model: "gpt-test",
                     status_code: 200,
                     latency_ms: Some(10),
+                    metadata: None,
                 },
                 &ProviderUsage {
                     prompt_tokens: Some(prompt_tokens),
@@ -10328,6 +10422,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: Some(120),
+                    metadata: None,
                 },
                 &ProviderUsage {
                     prompt_tokens: Some(3),
@@ -10393,6 +10488,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: None,
+                    metadata: None,
                 },
                 &ProviderUsage {
                     prompt_tokens: Some(3),
@@ -10441,6 +10537,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: Some(95),
+                    metadata: None,
                 },
                 &BillingTokenUsage::new(2, 6, 8),
             )
@@ -10473,6 +10570,23 @@ mod tests {
         assert_eq!(
             UsageReportFilter::from_query(None),
             UsageReportFilter::default()
+        );
+
+        // group_by=metadata.<key> (issue #171) extracts the key verbatim;
+        // an empty key (just "metadata.") or an unrecognized value parses
+        // to no group_by rather than panicking.
+        let metadata_filter = UsageReportFilter::from_query(Some("group_by=metadata.customer_id"));
+        assert_eq!(
+            metadata_filter.group_by,
+            Some(UsageReportGroupBy::Metadata("customer_id".to_string()))
+        );
+        assert_eq!(
+            UsageReportFilter::from_query(Some("group_by=metadata.")).group_by,
+            None
+        );
+        assert_eq!(
+            UsageReportFilter::from_query(Some("group_by=nonsense")).group_by,
+            None
         );
     }
 
@@ -10538,6 +10652,7 @@ mod tests {
                         provider_model: "gpt-4o-mini",
                         status_code: 200,
                         latency_ms: Some(10),
+                        metadata: None,
                     },
                     &ProviderUsage {
                         prompt_tokens: Some(1000),
@@ -12112,6 +12227,7 @@ mod tests {
                         provider_model: "gpt-4o-mini",
                         status_code,
                         latency_ms: None,
+                        metadata: None,
                     },
                     &BillingTokenUsage::new(index, index, index * 2),
                 )
@@ -12262,6 +12378,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: None,
+                    metadata: None,
                 },
                 &ProviderUsage {
                     prompt_tokens: Some(3),
@@ -12279,6 +12396,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: None,
+                    metadata: None,
                 },
                 &ProviderUsage {
                     prompt_tokens: Some(7),

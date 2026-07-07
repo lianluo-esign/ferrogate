@@ -15,7 +15,7 @@
 //! crate) so the dependency graph stays acyclic.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -163,6 +163,56 @@ pub struct BillingEvent {
     /// dispatch-start to response-settlement (P1-4).
     #[serde(default)]
     pub latency_ms: Option<u64>,
+    /// Arbitrary caller-supplied request tags (issue #171), e.g. an
+    /// end-customer id, a feature flag, an experiment arm -- attribution
+    /// dimensions beyond the built-in tenant/project/workspace/key scope
+    /// chain. Bounded by [`MAX_METADATA_ENTRIES`]/[`MAX_METADATA_KEY_LEN`]/
+    /// [`MAX_METADATA_VALUE_LEN`] at the point a request is accepted, so
+    /// this map is never unbounded once it reaches the ledger.
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+}
+
+/// Maximum number of metadata key/value pairs a single request may attach
+/// (issue #171) -- comparable to Cloudflare AI Gateway's 5 Custom Metadata
+/// pairs. Enforced where a request is first accepted (the gateway's
+/// `ChatCompletionRequest` parsing), not here, but the ledger/rollup
+/// storage code documents/relies on this bound too.
+pub const MAX_METADATA_ENTRIES: usize = 8;
+/// Maximum byte length of a single metadata key (issue #171).
+pub const MAX_METADATA_KEY_LEN: usize = 64;
+/// Maximum byte length of a single metadata value (issue #171).
+pub const MAX_METADATA_VALUE_LEN: usize = 256;
+
+/// Validates a caller-supplied request metadata map against the
+/// [`MAX_METADATA_ENTRIES`]/[`MAX_METADATA_KEY_LEN`]/[`MAX_METADATA_VALUE_LEN`]
+/// bounds (issue #171), returning a human-readable reason on the first
+/// violation found. Shared by every ingress path that accepts a `metadata`
+/// object so the limits can't drift between chat completions and Responses
+/// API (issue #171's suggested scope explicitly covers both).
+pub fn validate_request_metadata(metadata: &BTreeMap<String, String>) -> Result<(), String> {
+    if metadata.len() > MAX_METADATA_ENTRIES {
+        return Err(format!(
+            "metadata supports at most {MAX_METADATA_ENTRIES} entries, got {}",
+            metadata.len()
+        ));
+    }
+    for (key, value) in metadata {
+        if key.is_empty() {
+            return Err("metadata keys must not be empty".to_string());
+        }
+        if key.len() > MAX_METADATA_KEY_LEN {
+            return Err(format!(
+                "metadata key {key:?} exceeds the {MAX_METADATA_KEY_LEN}-byte limit"
+            ));
+        }
+        if value.len() > MAX_METADATA_VALUE_LEN {
+            return Err(format!(
+                "metadata value for key {key:?} exceeds the {MAX_METADATA_VALUE_LEN}-byte limit"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

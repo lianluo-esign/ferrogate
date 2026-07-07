@@ -33,6 +33,7 @@ fn event(request_id: &str) -> BillingEvent {
         occurred_at_unix: None,
         cost_usd: None,
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     }
 }
 

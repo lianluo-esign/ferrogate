@@ -49,6 +49,14 @@ struct ChatCompletionRequest {
     model: String,
     #[serde(default)]
     stream: bool,
+    /// Arbitrary caller-supplied request tags (issue #171) -- shared by
+    /// both chat completions and the Responses API, since both endpoints
+    /// deserialize into this same struct. Bounded by
+    /// `ferrogate_billing::validate_request_metadata` at parse time
+    /// (see `parse_ai_request`), so by the time this reaches billing it's
+    /// already within the size/count limits.
+    #[serde(default)]
+    metadata: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -831,6 +839,7 @@ impl FerroGateway {
                                     latency_ms: Some(
                                         request_started_at.elapsed().as_millis() as u64
                                     ),
+                                    metadata: request.metadata.as_ref(),
                                 },
                                 &estimated_usage,
                             ) {
@@ -1201,6 +1210,7 @@ impl FerroGateway {
                                     latency_ms: Some(
                                         request_started_at.elapsed().as_millis() as u64
                                     ),
+                                    metadata: request.metadata.as_ref(),
                                 },
                                 &usage,
                             ) {
@@ -1230,6 +1240,7 @@ impl FerroGateway {
                                 provider_model: &model_route.provider_model,
                                 status_code: response.status.as_u16(),
                                 latency_ms: Some(request_started_at.elapsed().as_millis() as u64),
+                                metadata: request.metadata.as_ref(),
                             },
                             &estimated_usage,
                         ) {
@@ -1787,6 +1798,17 @@ fn build_ai_request_plan(
                 message: format!("{}: {error}", endpoint.invalid_request_label()),
             })
         })?;
+    if let Some(metadata) = &request.metadata {
+        if let Err(reason) = ferrogate_billing::validate_request_metadata(metadata) {
+            return Err(reject_ai_request(AiRequestRejection {
+                tenant: auth.tenant_context(),
+                logical_model: Some(request.model.clone()),
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_request_metadata",
+                message: reason,
+            }));
+        }
+    }
 
     if !auth.can_use_model(&request.model) {
         return Err(reject_ai_request(AiRequestRejection {

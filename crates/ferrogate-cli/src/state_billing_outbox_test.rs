@@ -48,6 +48,7 @@ fn sample_billing_event(request_id: &str) -> BillingEvent {
         occurred_at_unix: Some(1_800_000_000),
         cost_usd: Some(0.01),
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     }
 }
 

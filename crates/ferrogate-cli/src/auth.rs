@@ -1193,6 +1193,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: Some(10),
+                    metadata: None,
                 },
                 &ProviderUsage {
                     prompt_tokens: Some(1000),

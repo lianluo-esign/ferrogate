@@ -1620,6 +1620,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: None,
+                    metadata: None,
                 },
                 &ferrogate_billing::TokenUsage::new(1, 2, 3),
             )
@@ -1749,6 +1750,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: None,
+                    metadata: None,
                 },
                 &ferrogate_billing::TokenUsage::new(1, 2, 3),
             )
@@ -1959,6 +1961,7 @@ mod tests {
                     provider_model: "gpt-4o-mini",
                     status_code: 200,
                     latency_ms: None,
+                    metadata: None,
                 },
                 &ferrogate_billing::TokenUsage::new(1, 2, 3),
             )

@@ -34,6 +34,7 @@ fn event(request_id: &str, provider: &str, model: &str) -> BillingEvent {
         occurred_at_unix: Some(1_800_000_000),
         cost_usd: None,
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     }
 }
 

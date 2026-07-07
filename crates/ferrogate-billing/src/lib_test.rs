@@ -28,6 +28,7 @@ fn test_event(request_id: &str) -> BillingEvent {
         occurred_at_unix: None,
         cost_usd: None,
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     }
 }
 
@@ -81,6 +82,7 @@ fn in_memory_sink_records_billing_events() {
         occurred_at_unix: Some(1),
         cost_usd: Some(0.001),
         latency_ms: Some(120),
+        metadata: std::collections::BTreeMap::new(),
     })
     .unwrap();
 
@@ -113,6 +115,7 @@ fn in_memory_sink_enforces_retention_limit() {
             occurred_at_unix: None,
             cost_usd: None,
             latency_ms: None,
+            metadata: std::collections::BTreeMap::new(),
         })
         .unwrap();
     }
@@ -123,6 +126,50 @@ fn in_memory_sink_enforces_retention_limit() {
     assert_eq!(events[0].request_id, "fg-2");
     assert_eq!(events[1].request_id, "fg-3");
     assert_eq!(sink.list_paginated(1, 1)[0].request_id, "fg-3");
+}
+
+#[test]
+fn validate_request_metadata_accepts_a_map_within_all_bounds() {
+    let metadata = BTreeMap::from([("customer_id".to_string(), "acme".to_string())]);
+    assert!(validate_request_metadata(&metadata).is_ok());
+}
+
+#[test]
+fn validate_request_metadata_accepts_an_empty_map() {
+    assert!(validate_request_metadata(&BTreeMap::new()).is_ok());
+}
+
+#[test]
+fn validate_request_metadata_rejects_too_many_entries() {
+    let metadata: BTreeMap<String, String> = (0..MAX_METADATA_ENTRIES + 1)
+        .map(|index| (format!("key-{index}"), "value".to_string()))
+        .collect();
+    let error = validate_request_metadata(&metadata).unwrap_err();
+    assert!(error.contains("at most"), "{error}");
+}
+
+#[test]
+fn validate_request_metadata_rejects_an_empty_key() {
+    let metadata = BTreeMap::from([(String::new(), "value".to_string())]);
+    let error = validate_request_metadata(&metadata).unwrap_err();
+    assert!(error.contains("empty"), "{error}");
+}
+
+#[test]
+fn validate_request_metadata_rejects_a_key_over_the_length_limit() {
+    let metadata = BTreeMap::from([("k".repeat(MAX_METADATA_KEY_LEN + 1), "value".to_string())]);
+    let error = validate_request_metadata(&metadata).unwrap_err();
+    assert!(error.contains("key"), "{error}");
+}
+
+#[test]
+fn validate_request_metadata_rejects_a_value_over_the_length_limit() {
+    let metadata = BTreeMap::from([(
+        "customer_id".to_string(),
+        "v".repeat(MAX_METADATA_VALUE_LEN + 1),
+    )]);
+    let error = validate_request_metadata(&metadata).unwrap_err();
+    assert!(error.contains("value"), "{error}");
 }
 
 #[test]

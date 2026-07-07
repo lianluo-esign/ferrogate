@@ -783,6 +783,37 @@ CREATE TABLE IF NOT EXISTS budget_alert_notifications (
     UNIQUE (scope_type, scope_id, period_month, threshold_pct)
 );
 
+-- Arbitrary caller-supplied request metadata (issue #171): tags a settled
+-- request beyond the built-in tenant/project/workspace/key scope chain, so
+-- a reseller platform can attribute cost to its own end-customer id,
+-- feature flag, or experiment arm. Bounded at request-ingress time (see
+-- ferrogate_billing::validate_request_metadata), not here.
+ALTER TABLE metering_events
+    ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- usage_metadata_rollups: per-calendar-month usage/cost rollup keyed by an
+-- arbitrary metadata key/value pair (issue #171), aggregated alongside (not
+-- instead of) usage_monthly_rollups. A settled request with N metadata
+-- pairs increments N of these rows -- mirrors how one request fans out
+-- into up to four usage_monthly_rollups rows (one per scope level).
+CREATE TABLE IF NOT EXISTS usage_metadata_rollups (
+    id TEXT PRIMARY KEY,
+    period_month TEXT NOT NULL,
+    metadata_key TEXT NOT NULL,
+    metadata_value TEXT NOT NULL,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    request_count BIGINT NOT NULL DEFAULT 0,
+    error_count BIGINT NOT NULL DEFAULT 0,
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (period_month, metadata_key, metadata_value)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_metadata_rollups_key
+    ON usage_metadata_rollups(metadata_key, period_month);
+
 -- plans: sellable subscription tiers (issue #168). A named bundle of feature
 -- flags plus default quota values that seed the effective-quota merge chain
 -- as its floor, below any explicit scope-level quota_policies row. Shared
@@ -1104,5 +1135,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (20, '020_budget_alert_notifications')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (21, '021_usage_metadata_rollups')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

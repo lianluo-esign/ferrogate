@@ -48,6 +48,7 @@ fn event_json(provider: &str, model: &str) -> Vec<u8> {
         occurred_at_unix: Some(1),
         cost_usd: None,
         latency_ms: None,
+        metadata: std::collections::BTreeMap::new(),
     })
     .unwrap()
 }

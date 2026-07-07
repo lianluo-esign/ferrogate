@@ -1235,6 +1235,13 @@ pub(crate) struct AdminUsageReportRow {
     pub(crate) scope_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) scope_id: Option<String>,
+    /// Present only for `group_by=metadata.<key>` rows (issue #171) --
+    /// `metadata_key` is the requested key, `metadata_value` is the
+    /// distinct value this row aggregates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) metadata_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) metadata_value: Option<String>,
     pub(crate) prompt_tokens: u64,
     pub(crate) completion_tokens: u64,
     pub(crate) total_tokens: u64,

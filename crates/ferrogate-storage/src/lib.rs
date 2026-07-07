@@ -37,6 +37,10 @@ pub use rbac::{tenant_role_binding_id, StoredPermission, StoredRole, StoredTenan
 mod budget_alerts;
 pub use budget_alerts::{budget_alert_notification_id, StoredBudgetAlertNotification};
 
+mod metadata_rollups;
+use metadata_rollups::increment_usage_metadata_rollups;
+pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
+
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
     StorageProviderKind::Supabase,
     StorageProviderKind::Postgres,
@@ -768,6 +772,7 @@ pub struct RuntimeControlPlaneState {
     usage_monthly_rollups: InMemoryRepository<StoredUsageMonthlyRollup>,
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
     budget_alert_notifications: InMemoryRepository<StoredBudgetAlertNotification>,
+    usage_metadata_rollups: InMemoryRepository<StoredUsageMetadataRollup>,
 }
 
 struct PostgresControlPlaneStore {
@@ -1946,6 +1951,7 @@ impl PostgresControlPlaneStore {
             .is_some()
             .then(|| serialize_storage_document(event))
             .transpose()?;
+        let metadata_json = serialize_storage_document(&event.metadata)?;
         self.with_client(|client| {
             let mut transaction = client.transaction()?;
             upsert_tenant_context(&mut transaction, &tenant_context_id, &event.tenant)?;
@@ -1953,8 +1959,8 @@ impl PostgresControlPlaneStore {
                 "INSERT INTO metering_events \
                  (request_id, tenant_context_id, trace_id, agent_run_id, workflow_id, \
                   workflow_version, workflow_node_id, cluster_id, node_id, status_code, \
-                  occurred_at_unix, cost_usd, latency_ms) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+                  occurred_at_unix, cost_usd, latency_ms, metadata_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::text::jsonb) \
                  ON CONFLICT (request_id) DO NOTHING",
                 &[
                     &event.request_id,
@@ -1970,6 +1976,7 @@ impl PostgresControlPlaneStore {
                     &saturating_i64(occurred_at_unix),
                     &event.cost_usd,
                     &latency_ms,
+                    &metadata_json,
                 ],
             )?;
             if inserted == 1 {
@@ -2006,17 +2013,24 @@ impl PostgresControlPlaneStore {
                     total_tokens,
                 };
                 upsert_usage_rollup_delta(&mut transaction, &rollup)?;
+                let usage_delta = UsageMonthlyDelta {
+                    prompt_tokens: event.usage.prompt_tokens,
+                    completion_tokens: event.usage.completion_tokens,
+                    total_tokens: event.usage.total_tokens,
+                    cost_usd: event.cost_usd.unwrap_or(0.0),
+                    is_error,
+                };
                 increment_usage_monthly_rollups(
                     &mut transaction,
                     &event.tenant,
                     &period_month,
-                    &UsageMonthlyDelta {
-                        prompt_tokens: event.usage.prompt_tokens,
-                        completion_tokens: event.usage.completion_tokens,
-                        total_tokens: event.usage.total_tokens,
-                        cost_usd: event.cost_usd.unwrap_or(0.0),
-                        is_error,
-                    },
+                    &usage_delta,
+                )?;
+                increment_usage_metadata_rollups(
+                    &mut transaction,
+                    &event.metadata,
+                    &period_month,
+                    &usage_delta,
                 )?;
                 if let (Some((outbox_id, next_attempt_unix)), Some(event_json)) =
                     (outbox_enqueue, outbox_event_json.as_ref())
@@ -3241,7 +3255,7 @@ impl PostgresControlPlaneStore {
                         t.organization_id, t.team_id, t.project_id, t.user_id, t.api_key_id, \
                         r.logical_model, r.provider, r.provider_model, \
                         u.prompt_tokens, u.completion_tokens, u.total_tokens, u.usage_source, \
-                        t.workspace_id, e.cost_usd, e.latency_ms, \
+                        t.workspace_id, e.cost_usd, e.latency_ms, e.metadata_json::text, \
                         count(*) OVER() \
                  FROM metering_events e \
                  JOIN tenant_contexts t ON t.id = e.tenant_context_id \
@@ -3254,10 +3268,14 @@ impl PostgresControlPlaneStore {
                 .map_err(postgres_error)?;
             let total = rows
                 .first()
-                .map(|row| row.get::<_, i64>(25))
+                .map(|row| row.get::<_, i64>(26))
                 .unwrap_or_default();
+            let data = rows
+                .into_iter()
+                .map(billing_event_from_row)
+                .collect::<Result<Vec<_>, StorageError>>()?;
             Ok(StoragePage {
-                data: rows.into_iter().map(billing_event_from_row).collect(),
+                data,
                 total: usize::try_from(total).unwrap_or(usize::MAX),
                 offset: usize::try_from(offset).unwrap_or(usize::MAX),
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
@@ -3266,23 +3284,25 @@ impl PostgresControlPlaneStore {
     }
 
     fn billing_events(&self) -> Result<Vec<BillingEvent>, StorageError> {
-        self.with_client(|client| {
-            let rows = client.query(
-                "SELECT e.request_id, e.trace_id, e.agent_run_id, e.workflow_id, \
+        self.with_client_storage(|client| {
+            let rows = client
+                .query(
+                    "SELECT e.request_id, e.trace_id, e.agent_run_id, e.workflow_id, \
                         e.workflow_version, e.workflow_node_id, e.cluster_id, e.node_id, \
                         e.status_code, e.occurred_at_unix, \
                         t.organization_id, t.team_id, t.project_id, t.user_id, t.api_key_id, \
                         r.logical_model, r.provider, r.provider_model, \
                         u.prompt_tokens, u.completion_tokens, u.total_tokens, u.usage_source, \
-                        t.workspace_id, e.cost_usd, e.latency_ms \
+                        t.workspace_id, e.cost_usd, e.latency_ms, e.metadata_json::text \
                  FROM metering_events e \
                  JOIN tenant_contexts t ON t.id = e.tenant_context_id \
                  JOIN metering_event_routes r ON r.request_id = e.request_id \
                  JOIN metering_event_usage u ON u.request_id = e.request_id \
                  ORDER BY e.occurred_at_unix ASC, e.request_id ASC",
-                &[],
-            )?;
-            Ok(rows.into_iter().map(billing_event_from_row).collect())
+                    &[],
+                )
+                .map_err(postgres_error)?;
+            rows.into_iter().map(billing_event_from_row).collect()
         })
     }
 
@@ -3989,6 +4009,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "roles",
         "tenant_role_bindings",
         "budget_alert_notifications",
+        "usage_metadata_rollups",
     ];
     for table in TABLES {
         let exists = client
@@ -4764,6 +4785,7 @@ struct UsageRollupUpsert<'a> {
 /// A settled request's usage/cost delta to fan out across scope levels.
 /// Bundled into one struct so the transaction-scoped helpers below stay
 /// under clippy's argument-count lint.
+#[derive(Clone, Copy)]
 struct UsageMonthlyDelta {
     prompt_tokens: u64,
     completion_tokens: u64,
@@ -4860,8 +4882,9 @@ fn usage_monthly_rollup_from_row(
     })
 }
 
-fn billing_event_from_row(row: PostgresRow) -> BillingEvent {
-    BillingEvent {
+fn billing_event_from_row(row: PostgresRow) -> Result<BillingEvent, StorageError> {
+    let metadata = deserialize_storage_document(&row.get::<_, String>(25))?;
+    Ok(BillingEvent {
         request_id: row.get(0),
         trace_id: row.get(1),
         agent_run_id: row.get(2),
@@ -4891,7 +4914,8 @@ fn billing_event_from_row(row: PostgresRow) -> BillingEvent {
         usage_source: billing_usage_source_from_str(row.get::<_, String>(21).as_str()),
         cost_usd: row.get(23),
         latency_ms: row.get::<_, Option<i64>>(24).map(nonnegative_u64),
-    }
+        metadata,
+    })
 }
 
 fn usage_aggregate_from_row(row: PostgresRow) -> StoredUsageAggregate {
@@ -5215,6 +5239,7 @@ impl RuntimeControlPlaneState {
             usage_monthly_rollups: InMemoryRepository::new(),
             billing_report_outbox: InMemoryRepository::new(),
             budget_alert_notifications: InMemoryRepository::new(),
+            usage_metadata_rollups: InMemoryRepository::new(),
         }
     }
 
@@ -8264,16 +8289,22 @@ impl RuntimeStorageRepositories {
                     let period_month = period_month_from_unix(saturating_i64(
                         event.occurred_at_unix.unwrap_or_else(now_unix_seconds),
                     ));
+                    let usage_delta = UsageMonthlyDelta {
+                        prompt_tokens: event.usage.prompt_tokens,
+                        completion_tokens: event.usage.completion_tokens,
+                        total_tokens: event.usage.total_tokens,
+                        cost_usd: event.cost_usd.unwrap_or(0.0),
+                        is_error: event.status_code >= 400,
+                    };
                     control_plane.increment_usage_monthly_rollups(
                         &event.tenant,
                         &period_month,
-                        &UsageMonthlyDelta {
-                            prompt_tokens: event.usage.prompt_tokens,
-                            completion_tokens: event.usage.completion_tokens,
-                            total_tokens: event.usage.total_tokens,
-                            cost_usd: event.cost_usd.unwrap_or(0.0),
-                            is_error: event.status_code >= 400,
-                        },
+                        &usage_delta,
+                    );
+                    control_plane.increment_usage_metadata_rollups(
+                        &event.metadata,
+                        &period_month,
+                        &usage_delta,
                     );
                 }
                 Ok(true)
@@ -10608,6 +10639,7 @@ mod tests {
                 occurred_at_unix: Some(1_783_036_800),
                 cost_usd: Some(0.01),
                 latency_ms: Some(120),
+                metadata: std::collections::BTreeMap::new(),
             })
             .unwrap();
         repositories
@@ -10630,6 +10662,7 @@ mod tests {
                 occurred_at_unix: Some(1_783_036_800),
                 cost_usd: Some(0.002),
                 latency_ms: Some(80),
+                metadata: std::collections::BTreeMap::new(),
             })
             .unwrap();
 
@@ -10658,6 +10691,91 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(repositories.list_usage_monthly_rollups().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn usage_metadata_rollup_accumulates_per_value_alongside_scope_rollups() {
+        let repositories = memory_repositories();
+        let tenant = TenantContext {
+            organization_id: Some("tenant-b".into()),
+            team_id: None,
+            project_id: None,
+            workspace_id: None,
+            user_id: None,
+            api_key_id: None,
+        };
+
+        let event =
+            |request_id: &str, customer_id: &str, prompt_tokens: u64, cost_usd: f64| BillingEvent {
+                request_id: request_id.into(),
+                trace_id: None,
+                agent_run_id: None,
+                workflow_id: None,
+                workflow_version: None,
+                workflow_node_id: None,
+                cluster_id: None,
+                node_id: None,
+                tenant: tenant.clone(),
+                logical_model: "fast-chat".into(),
+                provider: "openai".into(),
+                provider_model: "gpt-4o-mini".into(),
+                usage: TokenUsage::new(prompt_tokens, 0, prompt_tokens),
+                usage_source: ferrogate_billing::BillingUsageSource::ProviderUsage,
+                status_code: 200,
+                occurred_at_unix: Some(1_783_036_800),
+                cost_usd: Some(cost_usd),
+                latency_ms: None,
+                metadata: std::collections::BTreeMap::from([(
+                    "customer_id".to_string(),
+                    customer_id.to_string(),
+                )]),
+            };
+
+        repositories
+            .append_billing_event(event("req-meta-1", "acme", 100, 0.01))
+            .unwrap();
+        repositories
+            .append_billing_event(event("req-meta-2", "acme", 50, 0.005))
+            .unwrap();
+        repositories
+            .append_billing_event(event("req-meta-3", "globex", 10, 0.001))
+            .unwrap();
+
+        let acme = repositories
+            .list_usage_metadata_rollups("customer_id")
+            .unwrap()
+            .into_iter()
+            .find(|rollup| rollup.metadata_value == "acme")
+            .expect("acme rollup must exist");
+        assert_eq!(acme.request_count, 2);
+        assert_eq!(acme.total_tokens, 150);
+        assert!((acme.cost_usd - 0.015).abs() < 1e-9, "{}", acme.cost_usd);
+
+        let globex = repositories
+            .list_usage_metadata_rollups("customer_id")
+            .unwrap()
+            .into_iter()
+            .find(|rollup| rollup.metadata_value == "globex")
+            .expect("globex rollup must exist");
+        assert_eq!(globex.request_count, 1);
+        assert_eq!(globex.total_tokens, 10);
+
+        // A key nothing was tagged with returns no rows -- proves rollups
+        // are scoped per requested key, not a flattened union of every key
+        // ever seen.
+        assert!(repositories
+            .list_usage_metadata_rollups("no_such_key")
+            .unwrap()
+            .is_empty());
+
+        // The same 3 events also drove the existing tenant-scope rollup
+        // (issue #171 adds a new dimension, it doesn't disturb the old one).
+        let tenant_rollup = repositories
+            .get_usage_monthly_rollup(QuotaScopeKind::Tenant, "tenant-b", "2026-07")
+            .unwrap()
+            .expect("tenant rollup must still accumulate normally");
+        assert_eq!(tenant_rollup.request_count, 3);
+        assert_eq!(tenant_rollup.total_tokens, 160);
     }
 
     #[test]
