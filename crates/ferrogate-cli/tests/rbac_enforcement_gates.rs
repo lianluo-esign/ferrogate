@@ -261,6 +261,91 @@ fn extension_tool_execution_is_gated_by_plan_then_lifted_by_role() {
 }
 
 #[test]
+fn mcp_json_rpc_tools_call_is_gated_by_the_same_plan_check_as_the_rest_endpoints() {
+    let Ok(dsn) = std::env::var("FERROGATE_SUPABASE_DSN") else {
+        eprintln!(
+            "skipping mcp_json_rpc_tools_call_is_gated_by_the_same_plan_check_as_the_rest_endpoints: \
+             FERROGATE_SUPABASE_DSN is not set"
+        );
+        return;
+    };
+
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    std::fs::write(&config_path, gates_config(&gateway_addr, &dsn)).unwrap();
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    // Deliberately does NOT create/bind the mcp.execute permission or
+    // role in this test: doing so would race
+    // mcp_tool_execution_is_gated_by_plan_then_lifted_by_role, which
+    // creates and later deletes that same global permission key and runs
+    // concurrently in the same test binary. The role-lifts-the-gate path
+    // is exactly the same `tool_execution_entitlement_denial` call
+    // already exercised by that test through /v1/mcp/tool/execute; this
+    // test's job is only to prove the *denial* also reaches the
+    // /v1/mcp JSON-RPC transport, which is the bug this gate closes.
+    psql_exec(
+        &dsn,
+        "INSERT INTO ferrogate_control.plans (id, name, slug, mcp_enabled) \
+         VALUES ('no-mcp', 'No MCP', 'no-mcp', FALSE) \
+         ON CONFLICT (id) DO UPDATE SET mcp_enabled = FALSE",
+    );
+    let register = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &[
+            "Authorization: Bearer admin-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"id":"org_mcp_rpc_gate","name":"MCP RPC Gate","slug":"org-mcp-rpc-gate","plan_id":"no-mcp"}"#,
+    );
+    assert!(
+        register.contains("HTTP/1.1 200") || register.contains("HTTP/1.1 201"),
+        "tenant registration failed: {register}"
+    );
+
+    // The same tool execution, reached through the /v1/mcp JSON-RPC
+    // transport instead of /v1/mcp/tool/execute -- before the fix, this
+    // path bypassed the plan/RBAC gate entirely (a follow-up audit found
+    // it as a third, unfixed sibling of the #183 bug class).
+    let response = http_request(
+        &gateway_addr,
+        "POST",
+        "/v1/mcp",
+        &[
+            "Authorization: Bearer mcp-rpc-gate-secret",
+            "Content-Type: application/json",
+        ],
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whatever","arguments":{}}}"#,
+    );
+    // JSON-RPC responses are always HTTP 200, with the denial surfaced
+    // inside the JSON-RPC error envelope instead of an HTTP status code.
+    assert!(
+        response.contains("HTTP/1.1 200"),
+        "JSON-RPC transport always responds 200, denial is in the envelope: {response}"
+    );
+    let body = response_json(response.clone());
+    assert!(
+        body.get("error").is_some(),
+        "expected a JSON-RPC error for a plan-disabled tenant: {response}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not enable MCP tool execution"),
+        "expected the same denial message the REST endpoint returns: {response}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
 fn self_hosted_worker_registration_is_gated_by_plan_then_lifted_by_role() {
     let Ok(dsn) = std::env::var("FERROGATE_SUPABASE_DSN") else {
         eprintln!(
@@ -411,6 +496,13 @@ name = "Extension gate client"
 key = "extension-gate-secret"
 scopes = ["tools.execute"]
 organization_id = "org_extension_gate"
+
+[[api_keys]]
+id = "mcp-rpc-gate-client"
+name = "MCP RPC gate client"
+key = "mcp-rpc-gate-secret"
+scopes = ["tools.execute"]
+organization_id = "org_mcp_rpc_gate"
 "#
     )
 }

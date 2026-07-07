@@ -84,6 +84,69 @@ pub(super) enum ToolExecuteBackend {
     Mcp,
 }
 
+/// Shared plan/RBAC entitlement gate for tool execution (issue #182,
+/// extended to the Extension backend in #183, and to the `/v1/mcp`
+/// JSON-RPC `tools/call` transport after a follow-up audit found it was
+/// a third call site executing the same underlying MCP tool with no
+/// equivalent gate). Centralized here -- rather than re-implemented per
+/// call site -- specifically because that's the exact failure mode that
+/// produced both bugs: a gate added at one HTTP entry point with nothing
+/// forcing every other entry point reaching the same executor to apply
+/// it too. Every caller that can trigger `AppState::execute_mcp_tool`
+/// (directly or via `ToolExecutionRequest`) must call this first.
+///
+/// Only enforced when a `StoredTenantAccount` actually exists for this
+/// tenant_id: a virtual key's `organization_id` is free-form attribution,
+/// not a foreign key, and plenty of legitimate setups (and most of this
+/// repo's own test fixtures) tag a key with an `organization_id` without
+/// ever registering it through `/admin/v1/tenant-accounts`. Since these
+/// flags were dead/unchecked until #182, treating "no formal tenant
+/// record" as an implicit denial would be a silent breaking change for
+/// exactly that setup; role-based grants still apply regardless of
+/// tenant-account existence, since bindings are keyed by tenant_id
+/// directly. Returns `Some((code, message))` when the tenant must be
+/// denied, `None` when execution may proceed.
+pub(super) fn tool_execution_entitlement_denial(
+    state: &crate::state::AppState,
+    auth: &AuthContext,
+    backend: ToolExecuteBackend,
+) -> Option<(&'static str, &'static str)> {
+    let (plan_enabled, permission_key, error_code, error_message): (
+        fn(&StoredPlan) -> bool,
+        &str,
+        &str,
+        &str,
+    ) = match backend {
+        ToolExecuteBackend::Mcp => (
+            |plan| plan.mcp_enabled,
+            "mcp.execute",
+            "mcp_tools_disabled",
+            "the tenant's plan does not enable MCP tool execution and no bound role \
+             grants the mcp.execute permission",
+        ),
+        ToolExecuteBackend::Extension => (
+            |plan| plan.extension_tools_enabled,
+            "extensions.execute",
+            "extension_tools_disabled",
+            "the tenant's plan does not enable extension tool execution and no bound \
+             role grants the extensions.execute permission",
+        ),
+    };
+    let tenant_id = auth.organization_id.as_deref()?;
+    let tenant_account_exists = state.get_tenant_account(tenant_id).ok().flatten().is_some();
+    let plan_grants_access = state
+        .resolve_tenant_plan(tenant_id)
+        .ok()
+        .flatten()
+        .is_some_and(|plan| plan_enabled(&plan));
+    let role_grants_access = state.tenant_has_permission(tenant_id, permission_key);
+    if tenant_account_exists && !plan_grants_access && !role_grants_access {
+        Some((error_code, error_message))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ToolExecutionContext<'a> {
     pub(super) agent_run_id: Option<&'a str>,
@@ -2834,58 +2897,20 @@ impl FerroGateway {
         // found it was the same endpoint family with the same resource-cost
         // shape but no equivalent gate -- a plan disabling MCP had zero
         // protection against identical traffic routed through
-        // /v1/tools/execute instead of /v1/mcp/tool/execute).
-        //
-        // Only enforced when a StoredTenantAccount actually exists for this
-        // tenant_id: a virtual key's organization_id is free-form
-        // attribution, not a foreign key, and plenty of legitimate setups
-        // (and most of this repo's own test fixtures) tag a key with an
-        // organization_id without ever registering it through
-        // /admin/v1/tenant-accounts. Since these flags were dead/unchecked
-        // until #182, treating "no formal tenant record" as an implicit
-        // denial would be a silent breaking change for exactly that setup;
-        // role-based grants still apply regardless of tenant-account
-        // existence, since bindings are keyed by tenant_id directly.
-        let (plan_enabled, permission_key, error_code, error_message): (
-            fn(&StoredPlan) -> bool,
-            &str,
-            &str,
-            &str,
-        ) = match backend {
-            ToolExecuteBackend::Mcp => (
-                |plan| plan.mcp_enabled,
-                "mcp.execute",
-                "mcp_tools_disabled",
-                "the tenant's plan does not enable MCP tool execution and no bound role \
-                 grants the mcp.execute permission",
-            ),
-            ToolExecuteBackend::Extension => (
-                |plan| plan.extension_tools_enabled,
-                "extensions.execute",
-                "extension_tools_disabled",
-                "the tenant's plan does not enable extension tool execution and no bound \
-                 role grants the extensions.execute permission",
-            ),
-        };
-        if let Some(tenant_id) = auth.organization_id.as_deref() {
-            let tenant_account_exists =
-                state.get_tenant_account(tenant_id).ok().flatten().is_some();
-            let plan_grants_access = state
-                .resolve_tenant_plan(tenant_id)
-                .ok()
-                .flatten()
-                .is_some_and(|plan| plan_enabled(&plan));
-            let role_grants_access = state.tenant_has_permission(tenant_id, permission_key);
-            if tenant_account_exists && !plan_grants_access && !role_grants_access {
-                return write_json_error(
-                    session,
-                    StatusCode::FORBIDDEN,
-                    error_code,
-                    error_message,
-                    &ctx.request_id,
-                )
-                .await;
-            }
+        // /v1/tools/execute instead of /v1/mcp/tool/execute). See
+        // `tool_execution_entitlement_denial`'s doc comment for why this
+        // check is centralized rather than reimplemented per call site.
+        if let Some((error_code, error_message)) =
+            tool_execution_entitlement_denial(&state, &auth, backend)
+        {
+            return write_json_error(
+                session,
+                StatusCode::FORBIDDEN,
+                error_code,
+                error_message,
+                &ctx.request_id,
+            )
+            .await;
         }
 
         let body = match read_request_body(session, 64 * 1024).await? {

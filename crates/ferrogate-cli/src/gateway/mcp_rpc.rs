@@ -15,7 +15,10 @@ use crate::{
     state::{AdminAuditEventDraft, AppState},
 };
 
-use super::local::{validate_skill_tool_capability, SkillExecutionContext, ToolExecuteBackend};
+use super::local::{
+    tool_execution_entitlement_denial, validate_skill_tool_capability, SkillExecutionContext,
+    ToolExecuteBackend,
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct McpJsonRpcRequest {
@@ -163,6 +166,18 @@ async fn tools_call(
     id: Option<Value>,
     params: &Value,
 ) -> McpJsonRpcResponse {
+    // Plan/RBAC entitlement gate (issues #182/#183): this JSON-RPC
+    // transport executes the exact same MCP tools as `POST
+    // /v1/mcp/tool/execute`, discovered by a follow-up audit to be a
+    // third call site that bypassed the gate those two REST endpoints
+    // both enforce. See `tool_execution_entitlement_denial`'s doc
+    // comment.
+    if let Some((error_code, error_message)) =
+        tool_execution_entitlement_denial(state, auth, ToolExecuteBackend::Mcp)
+    {
+        return error(id, mcp_error_code(error_code), error_message.to_string());
+    }
+
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return error(id, -32602, "tools/call params.name is required");
     };
