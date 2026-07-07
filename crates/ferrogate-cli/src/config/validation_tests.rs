@@ -118,6 +118,76 @@ fn accepts_provider_with_env_secret_ref() {
 }
 
 #[test]
+fn rejects_empty_provider_region() {
+    let mut provider = provider();
+    provider.region = Some(String::new());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].region: cannot be empty"));
+}
+
+#[test]
+fn accepts_provider_with_declared_region() {
+    let mut provider = provider();
+    provider.region = Some("eu-west-1".into());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_api_key_region_allowlist_entry_with_no_matching_provider() {
+    let mut provider = provider();
+    provider.region = Some("eu-west-1".into());
+    let mut key = api_key("tenant-key", "Tenant Key");
+    key.region_allowlist = vec!["us-east-1".into()];
+    let config = Config {
+        providers: vec![provider],
+        api_keys: vec![key],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("region_allowlist"));
+    assert!(error.contains("us-east-1"));
+}
+
+#[test]
+fn rejects_empty_api_key_region_allowlist_entry() {
+    let mut key = api_key("tenant-key", "Tenant Key");
+    key.region_allowlist = vec![String::new()];
+    let config = Config {
+        api_keys: vec![key],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field api_keys[0].region_allowlist: cannot contain an empty value"));
+}
+
+#[test]
+fn accepts_api_key_region_allowlist_matching_a_declared_provider_region() {
+    let mut provider = provider();
+    provider.region = Some("eu-west-1".into());
+    let mut key = api_key("tenant-key", "Tenant Key");
+    key.region_allowlist = vec!["eu-west-1".into()];
+    let config = Config {
+        providers: vec![provider],
+        api_keys: vec![key],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
 fn accepts_provider_with_vault_secret_ref() {
     let mut provider = provider();
     provider.secret_ref = Some("vault://secret/data/openai#api_key".into());
@@ -2785,6 +2855,7 @@ fn upstream() -> Upstream {
 
 fn provider() -> Provider {
     Provider {
+        region: None,
         name: "openai".into(),
         kind: "openai".into(),
         base_url: "http://127.0.0.1:8081/v1".into(),
@@ -2831,6 +2902,7 @@ fn route(upstream: &str, prefixes: Vec<&str>) -> RouteRule {
 
 fn api_key(id: &str, name: &str) -> ApiKey {
     ApiKey {
+        region_allowlist: Vec::new(),
         id: id.into(),
         name: name.into(),
         key_env: None,

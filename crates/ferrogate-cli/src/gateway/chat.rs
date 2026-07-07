@@ -1849,7 +1849,24 @@ fn build_ai_request_plan(
     }
 
     let estimated_usage = estimate_chat_completion_usage(&body_json);
-    let routes = state.candidate_model_routes(&model, Some(&estimated_usage));
+    let routes =
+        state.candidate_model_routes(&model, Some(&estimated_usage), &auth.region_allowlist);
+    // Fail closed (issue #173): a region-constrained tenant with zero
+    // surviving candidates is rejected with a specific, logged reason
+    // rather than silently falling through to whatever routes remained
+    // (there are none) or an opaque downstream failure.
+    if routes.is_empty() && !auth.region_allowlist.is_empty() {
+        return Err(reject_ai_request(AiRequestRejection {
+            tenant: auth.tenant_context(),
+            logical_model: Some(request.model.clone()),
+            status: StatusCode::FORBIDDEN,
+            code: "region_not_allowed",
+            message: format!(
+                "no candidate route for model {} satisfies this tenant's region allowlist",
+                request.model
+            ),
+        }));
+    }
     let body_text = String::from_utf8_lossy(body).into_owned();
     Ok(AiRequestPlan {
         auth,
@@ -2664,6 +2681,7 @@ mod tests {
     fn ai_plan_config() -> Config {
         Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:9999/v1".into(),
@@ -2689,6 +2707,7 @@ mod tests {
                 cache_enabled: None,
             }],
             api_keys: vec![ApiKey {
+                region_allowlist: Vec::new(),
                 id: "key_dev".into(),
                 name: "Development key".into(),
                 key_env: None,

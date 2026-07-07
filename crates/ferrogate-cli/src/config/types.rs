@@ -388,6 +388,14 @@ pub(crate) struct Provider {
     pub(crate) openrouter_x_title: Option<String>,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    /// Physical region this provider is hosted in (issue #173), e.g.
+    /// "eu-west-1" -- additive and `#[serde(default)]` so existing configs
+    /// deserialize unchanged. Enforced against a tenant's region
+    /// allowlist (`ApiKey::region_allowlist`) at routing time via
+    /// `AppState::candidate_model_routes`; unset means the provider isn't
+    /// eligible for a region-constrained tenant (fails closed, not open).
+    #[serde(default)]
+    pub(crate) region: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -462,6 +470,15 @@ pub(crate) struct ApiKey {
     pub(crate) allowed_providers: Vec<String>,
     #[serde(default)]
     pub(crate) denied_providers: Vec<String>,
+    /// Regions this key's requests may route to (issue #173), e.g.
+    /// ["eu-west-1"] -- empty means unrestricted, mirroring
+    /// `allowed_models`/`allowed_providers`. Enforced in
+    /// `AppState::candidate_model_routes` against each `ModelRoute`'s
+    /// `region` (sourced from `Provider::region`); a route with no
+    /// declared region is ineligible once this is non-empty (fail closed,
+    /// not open).
+    #[serde(default)]
+    pub(crate) region_allowlist: Vec<String>,
     #[serde(default)]
     pub(crate) organization_id: Option<String>,
     #[serde(default)]

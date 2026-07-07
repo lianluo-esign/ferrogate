@@ -100,6 +100,7 @@ impl Config {
                 .providers
                 .into_iter()
                 .map(|provider| Provider {
+                    region: None,
                     name: provider.name,
                     kind: provider.kind,
                     base_url: provider.base_url,
@@ -140,6 +141,7 @@ impl Config {
                 .api_keys
                 .into_iter()
                 .map(|key| crate::config::ApiKey {
+                    region_allowlist: Vec::new(),
                     id: key.id,
                     name: key.name,
                     key_env: key.key_env,

@@ -29,6 +29,9 @@ pub(crate) struct AuthContext {
     pub(crate) denied_models: HashSet<String>,
     pub(crate) allowed_providers: HashSet<String>,
     pub(crate) denied_providers: HashSet<String>,
+    /// Region(s) this key's requests may route to (issue #173). Empty
+    /// means unrestricted, mirroring `allowed_models`/`allowed_providers`.
+    pub(crate) region_allowlist: HashSet<String>,
     pub(crate) monthly_token_budget: Option<u64>,
     pub(crate) request_limit_per_minute: Option<u64>,
     #[allow(dead_code)]
@@ -97,6 +100,7 @@ pub(crate) fn authenticate(
 ) -> std::result::Result<AuthContext, AuthError> {
     if !state.auth_required() {
         return Ok(AuthContext {
+            region_allowlist: HashSet::new(),
             api_key_id: None,
             scopes: HashSet::new(),
             allowed_models: HashSet::new(),
@@ -164,6 +168,7 @@ pub(crate) fn authenticate(
                 });
             }
             let auth = AuthContext {
+                region_allowlist: configured_key.region_allowlist.iter().cloned().collect(),
                 api_key_id: Some(configured_key.id.clone()),
                 scopes: configured_key.scopes.iter().cloned().collect(),
                 allowed_models: configured_key.allowed_models.iter().cloned().collect(),
@@ -221,6 +226,13 @@ fn authenticate_durable(
         });
     }
     Ok(Some(AuthContext {
+        // Durable/Supabase-backed keys don't carry a region allowlist yet
+        // (issue #173's initial cut only wires it through the YAML
+        // config.api_keys path) -- unrestricted here, not a silent
+        // regression, since region enforcement is new and this path never
+        // had it. Extending StoredApiKey/ApiKeyDecision with a
+        // region_allowlist column is a straightforward follow-up.
+        region_allowlist: HashSet::new(),
         api_key_id: decision.tenant.api_key_id.clone(),
         scopes: decision.scopes.into_iter().collect(),
         allowed_models: decision.allowed_models.into_iter().collect(),
@@ -380,6 +392,7 @@ fn authenticate_external(
         auth_service_post_json(state, "/v1/auth/resolve-api-key", &request)
             .map_err(|error| external_auth_error(error, request_id))?;
     let auth = AuthContext {
+        region_allowlist: HashSet::new(),
         api_key_id: decision.tenant.api_key_id.clone(),
         scopes: decision.scopes.into_iter().collect(),
         allowed_models: decision.allowed_models.into_iter().collect(),
@@ -717,6 +730,7 @@ mod tests {
 
     fn decoy_yaml_key() -> ApiKey {
         ApiKey {
+            region_allowlist: Vec::new(),
             id: "decoy".into(),
             name: "Decoy key".into(),
             key_env: None,
@@ -1096,6 +1110,7 @@ mod tests {
         let state = AppState::new(Config {
             api_keys: vec![decoy_yaml_key()],
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -1201,6 +1216,7 @@ mod tests {
     #[test]
     fn auth_context_model_allowlist() {
         let auth = AuthContext {
+            region_allowlist: HashSet::new(),
             api_key_id: Some("key".into()),
             scopes: HashSet::new(),
             allowed_models: HashSet::from(["fast-chat".into()]),
@@ -1226,6 +1242,7 @@ mod tests {
     #[test]
     fn auth_context_provider_allowlist() {
         let auth = AuthContext {
+            region_allowlist: HashSet::new(),
             api_key_id: Some("key".into()),
             scopes: HashSet::new(),
             allowed_models: HashSet::new(),
@@ -1252,6 +1269,7 @@ mod tests {
     #[test]
     fn auth_context_denylist_overrides_allowlist() {
         let auth = AuthContext {
+            region_allowlist: HashSet::new(),
             api_key_id: Some("key".into()),
             scopes: HashSet::new(),
             allowed_models: HashSet::from(["fast-chat".into()]),
@@ -1291,6 +1309,7 @@ mod tests {
     fn verifies_hashed_api_key_secret() {
         let hash = hash_api_key_secret("client-secret");
         let key = ApiKey {
+            region_allowlist: Vec::new(),
             id: "key".into(),
             name: "Key".into(),
             key_env: None,

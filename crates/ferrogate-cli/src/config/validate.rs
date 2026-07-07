@@ -928,6 +928,9 @@ impl Config {
             {
                 bail!("field providers[{index}].openrouter_x_title: cannot be empty");
             }
+            if provider.region.as_deref().is_some_and(str::is_empty) {
+                bail!("field providers[{index}].region: cannot be empty");
+            }
         }
         Ok(names)
     }
@@ -1090,6 +1093,30 @@ impl Config {
                         "field api_keys[{index}].denied_providers: api key {} denies unknown provider {}",
                         key.id,
                         denied_provider
+                    );
+                }
+            }
+            // Issue #173: cross-validate against declared provider regions
+            // (not just non-empty) -- a region_allowlist entry that
+            // matches no configured provider's `region` can never be
+            // satisfied, so it's a config mistake (typo, or the intended
+            // provider forgot to declare its region) worth catching at
+            // validation time rather than a tenant silently getting zero
+            // usable routes at request time.
+            for region in &key.region_allowlist {
+                if region.trim().is_empty() {
+                    bail!("field api_keys[{index}].region_allowlist: cannot contain an empty value");
+                }
+                if !self
+                    .providers
+                    .iter()
+                    .any(|provider| provider.region.as_deref() == Some(region.as_str()))
+                {
+                    bail!(
+                        "field api_keys[{index}].region_allowlist: api key {} requires region {} \
+                         but no configured provider declares it",
+                        key.id,
+                        region
                     );
                 }
             }

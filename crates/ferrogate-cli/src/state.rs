@@ -5,7 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env, fs,
     io::ErrorKind,
     net::{IpAddr, TcpStream, ToSocketAddrs},
@@ -3177,8 +3177,21 @@ impl AppState {
             .collect();
         let plugin_registrations = config.plugin_registrations();
         let extension_registry = ExtensionRegistry::from_config(&plugin_registrations);
-        let model_registry = ModelRegistry::new(config.models.iter().map(model_registry_entry))
-            .expect("config validation must reject invalid model registry entries");
+        // Provider name -> declared region (issue #173), threaded into
+        // each ModelRoute so candidate_model_routes can enforce a
+        // tenant's region_allowlist at routing time.
+        let provider_regions: HashMap<&str, Option<&str>> = config
+            .providers
+            .iter()
+            .map(|provider| (provider.name.as_str(), provider.region.as_deref()))
+            .collect();
+        let model_registry = ModelRegistry::new(
+            config
+                .models
+                .iter()
+                .map(|model| model_registry_entry(model, &provider_regions)),
+        )
+        .expect("config validation must reject invalid model registry entries");
 
         let policy_engine = build_policy_engine(&config.policies);
         let guardrail_rules = config
@@ -4164,8 +4177,9 @@ impl AppState {
         &self,
         model: &ResolvedModelRoute,
         estimated_usage: Option<&BillingTokenUsage>,
+        region_allowlist: &HashSet<String>,
     ) -> Vec<ModelRoute> {
-        match model.routing_strategy {
+        let mut routes = match model.routing_strategy {
             RoutingStrategy::Priority => {
                 let mut routes = vec![model.primary.clone()];
                 let mut cursor = self.model_route_counter.fetch_add(1, Ordering::Relaxed);
@@ -4207,7 +4221,21 @@ impl AppState {
                 self.sort_routes_by_balanced_score(&mut routes);
                 routes
             }
+        };
+        // Region enforcement (issue #173), applied uniformly after
+        // strategy-specific ordering rather than duplicated per arm:
+        // sort order is independent of region eligibility. Empty
+        // allowlist means unrestricted; non-empty fails closed on routes
+        // with no declared region, not just a mismatched one.
+        if !region_allowlist.is_empty() {
+            routes.retain(|route| {
+                route
+                    .region
+                    .as_deref()
+                    .is_some_and(|region| region_allowlist.contains(region))
+            });
         }
+        routes
     }
 
     fn sort_routes_by_latency(&self, routes: &mut [ModelRoute]) {
@@ -8007,7 +8035,10 @@ fn total_weight(routes: &[ModelRoute]) -> u64 {
         .max(1)
 }
 
-fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
+fn model_registry_entry(
+    model: &Model,
+    provider_regions: &HashMap<&str, Option<&str>>,
+) -> ModelRegistryEntry {
     let mut entry = ModelRegistryEntry::new(
         model.name.clone(),
         model.provider.clone(),
@@ -8021,6 +8052,7 @@ fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
     entry.enabled = model.enabled;
     entry.primary.input_price_per_1m = model.input_price_per_1m;
     entry.primary.output_price_per_1m = model.output_price_per_1m;
+    entry.primary.region = provider_region(provider_regions, &model.provider);
     entry.fallbacks = model
         .fallbacks
         .iter()
@@ -8034,9 +8066,21 @@ fn model_registry_entry(model: &Model) -> ModelRegistryEntry {
                 fallback.priority.unwrap_or(100),
                 fallback.weight.unwrap_or(1),
             )
+            .with_region(provider_region(provider_regions, &fallback.provider))
         })
         .collect();
     entry
+}
+
+fn provider_region(
+    provider_regions: &HashMap<&str, Option<&str>>,
+    provider_name: &str,
+) -> Option<String> {
+    provider_regions
+        .get(provider_name)
+        .copied()
+        .flatten()
+        .map(str::to_string)
 }
 
 fn route_estimated_cost(route: &ModelRoute, usage: Option<&BillingTokenUsage>) -> f64 {
@@ -8219,6 +8263,7 @@ mod tests {
 
     fn test_provider() -> Provider {
         Provider {
+            region: None,
             name: "openai".into(),
             kind: "openai".into(),
             base_url: "http://127.0.0.1:10001/v1".into(),
@@ -8250,6 +8295,7 @@ mod tests {
 
     fn test_api_key(id: &str) -> ApiKey {
         ApiKey {
+            region_allowlist: Vec::new(),
             id: id.into(),
             name: id.into(),
             key_env: None,
@@ -8532,6 +8578,7 @@ mod tests {
         let active = Config::default();
         let candidate = Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -8711,6 +8758,7 @@ mod tests {
     fn matches_request_guardrail_by_tenant_model_provider_and_keyword() {
         let config = Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -8787,6 +8835,7 @@ mod tests {
     fn ignores_disabled_guardrails() {
         let config = Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -8850,6 +8899,7 @@ mod tests {
     fn matches_response_guardrail_with_redact_effect() {
         let config = Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9095,6 +9145,7 @@ mod tests {
     fn matches_regex_and_redacts_with_compiled_pattern() {
         let config = Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9208,6 +9259,7 @@ mod tests {
         let config = Config {
             providers: vec![
                 Provider {
+                    region: None,
                     name: "primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9218,6 +9270,7 @@ mod tests {
                     enabled: true,
                 },
                 Provider {
+                    region: None,
                     name: "backup-a".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -9228,6 +9281,7 @@ mod tests {
                     enabled: true,
                 },
                 Provider {
+                    region: None,
                     name: "backup-b".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -9279,17 +9333,17 @@ mod tests {
         let resolved = state.resolve_model("fast-chat").unwrap();
 
         let first = state
-            .candidate_model_routes(&resolved, None)
+            .candidate_model_routes(&resolved, None, &HashSet::new())
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
         let second = state
-            .candidate_model_routes(&resolved, None)
+            .candidate_model_routes(&resolved, None, &HashSet::new())
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
         let third = state
-            .candidate_model_routes(&resolved, None)
+            .candidate_model_routes(&resolved, None, &HashSet::new())
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
@@ -9299,11 +9353,148 @@ mod tests {
         assert_eq!(third, ["primary", "backup-a", "backup-b"]);
     }
 
+    fn region_test_config(routing_strategy: RoutingStrategy) -> Config {
+        Config {
+            providers: vec![
+                Provider {
+                    region: Some("eu-west-1".into()),
+                    name: "eu-primary".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10001/v1".into(),
+                    api_key_env: None,
+                    secret_ref: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
+                    enabled: true,
+                },
+                Provider {
+                    region: Some("us-east-1".into()),
+                    name: "us-fallback".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10002/v1".into(),
+                    api_key_env: None,
+                    secret_ref: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
+                    enabled: true,
+                },
+                Provider {
+                    region: None,
+                    name: "no-region-fallback".into(),
+                    kind: "openai".into(),
+                    base_url: "http://127.0.0.1:10003/v1".into(),
+                    api_key_env: None,
+                    secret_ref: None,
+                    openrouter_http_referer: None,
+                    openrouter_x_title: None,
+                    enabled: true,
+                },
+            ],
+            models: vec![Model {
+                name: "fast-chat".into(),
+                provider: "eu-primary".into(),
+                provider_model: "gpt-4o-mini".into(),
+                routing_strategy,
+                fallbacks: vec![
+                    crate::config::ModelFallback {
+                        provider: "us-fallback".into(),
+                        provider_model: "gpt-4.1-mini".into(),
+                        input_price_per_1m: Some(1.0),
+                        output_price_per_1m: Some(1.0),
+                        priority: Some(10),
+                        weight: Some(1),
+                        enabled: true,
+                    },
+                    crate::config::ModelFallback {
+                        provider: "no-region-fallback".into(),
+                        provider_model: "gpt-4.1".into(),
+                        input_price_per_1m: Some(0.5),
+                        output_price_per_1m: Some(0.5),
+                        priority: Some(20),
+                        weight: Some(1),
+                        enabled: true,
+                    },
+                ],
+                visible_organization_ids: vec![],
+                visible_project_ids: vec![],
+                capabilities: vec![],
+                context_window: None,
+                input_price_per_1m: Some(2.0),
+                output_price_per_1m: Some(2.0),
+                enabled: true,
+                cache_enabled: None,
+            }],
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn candidate_model_routes_is_unrestricted_with_an_empty_region_allowlist() {
+        let config = region_test_config(RoutingStrategy::Priority);
+        config.validate().unwrap();
+        let state = AppState::new(config);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+
+        let routes = state.candidate_model_routes(&resolved, None, &HashSet::new());
+        assert_eq!(routes.len(), 3, "no region_allowlist means no filtering");
+    }
+
+    #[test]
+    fn candidate_model_routes_filters_by_region_for_priority_strategy() {
+        let config = region_test_config(RoutingStrategy::Priority);
+        config.validate().unwrap();
+        let state = AppState::new(config);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+
+        let region_allowlist = HashSet::from(["eu-west-1".to_string()]);
+        let routes = state.candidate_model_routes(&resolved, None, &region_allowlist);
+        let providers: Vec<_> = routes.iter().map(|route| route.provider.as_str()).collect();
+        assert_eq!(
+            providers,
+            ["eu-primary"],
+            "us-fallback (wrong region) and no-region-fallback (undeclared region) must both \
+             be excluded once a region_allowlist is set"
+        );
+    }
+
+    #[test]
+    fn candidate_model_routes_region_filter_applies_to_lowest_cost_strategy_too() {
+        let config = region_test_config(RoutingStrategy::LowestCost);
+        config.validate().unwrap();
+        let state = AppState::new(config);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+
+        // no-region-fallback is the cheapest route and would normally sort
+        // first under LowestCost -- it must still be excluded by the
+        // region filter, proving the filter isn't strategy-specific.
+        let region_allowlist = HashSet::from(["eu-west-1".to_string()]);
+        let routes = state.candidate_model_routes(&resolved, None, &region_allowlist);
+        let providers: Vec<_> = routes.iter().map(|route| route.provider.as_str()).collect();
+        assert_eq!(providers, ["eu-primary"]);
+    }
+
+    #[test]
+    fn candidate_model_routes_fails_closed_when_no_route_satisfies_the_region_allowlist() {
+        let config = region_test_config(RoutingStrategy::Priority);
+        config.validate().unwrap();
+        let state = AppState::new(config);
+        let resolved = state.resolve_model("fast-chat").unwrap();
+
+        let region_allowlist = HashSet::from(["ap-southeast-1".to_string()]);
+        let routes = state.candidate_model_routes(&resolved, None, &region_allowlist);
+        assert!(
+            routes.is_empty(),
+            "no configured provider is in ap-southeast-1, so the candidate list must be empty, \
+             not silently fall back to an out-of-region provider"
+        );
+    }
+
     #[test]
     fn orders_lowest_cost_routes_by_estimated_price() {
         let config = Config {
             providers: vec![
                 Provider {
+                    region: None,
                     name: "primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9314,6 +9505,7 @@ mod tests {
                     enabled: true,
                 },
                 Provider {
+                    region: None,
                     name: "backup-a".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -9324,6 +9516,7 @@ mod tests {
                     enabled: true,
                 },
                 Provider {
+                    region: None,
                     name: "backup-b".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -9376,7 +9569,7 @@ mod tests {
         let usage = BillingTokenUsage::new(1_000, 2_000, 3_000);
 
         let providers = state
-            .candidate_model_routes(&resolved, Some(&usage))
+            .candidate_model_routes(&resolved, Some(&usage), &HashSet::new())
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
@@ -9397,7 +9590,7 @@ mod tests {
         let resolved = state.resolve_model("fast-chat").unwrap();
 
         let providers = state
-            .candidate_model_routes(&resolved, None)
+            .candidate_model_routes(&resolved, None, &HashSet::new())
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
@@ -9420,7 +9613,7 @@ mod tests {
         let resolved = state.resolve_model("fast-chat").unwrap();
 
         let providers = state
-            .candidate_model_routes(&resolved, None)
+            .candidate_model_routes(&resolved, None, &HashSet::new())
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
@@ -9470,7 +9663,7 @@ mod tests {
         let usage = BillingTokenUsage::new(1_000, 1_000, 2_000);
 
         let providers = state
-            .candidate_model_routes(&resolved, Some(&usage))
+            .candidate_model_routes(&resolved, Some(&usage), &HashSet::new())
             .into_iter()
             .map(|route| route.provider)
             .collect::<Vec<_>>();
@@ -9487,6 +9680,7 @@ mod tests {
                 ..crate::config::ReliabilityConfig::default()
             },
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9513,6 +9707,7 @@ mod tests {
     fn provider_circuit_is_disabled_without_reliability_config() {
         let state = AppState::new(Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9587,6 +9782,7 @@ mod tests {
     fn provider_health_reports_disabled_provider_without_probe() {
         let state = AppState::new(Config {
             providers: vec![Provider {
+                region: None,
                 name: "disabled".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
@@ -9610,6 +9806,7 @@ mod tests {
     fn api_key_request_window_rejects_after_configured_limit() {
         let state = AppState::new(Config {
             api_keys: vec![crate::config::ApiKey {
+                region_allowlist: Vec::new(),
                 id: "key_dev".into(),
                 name: "Development key".into(),
                 key_env: None,
@@ -9676,6 +9873,7 @@ mod tests {
     fn records_token_metering_event_with_settled_gateway_cost() {
         let config = Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9883,6 +10081,7 @@ mod tests {
     fn usage_report_filters_by_scope_and_aggregates_with_group_by() {
         let config = Config {
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10002/v1".into(),
@@ -11325,6 +11524,7 @@ mod tests {
     fn request_log_export_filters_records_and_redacts_configured_secrets() {
         let state = AppState::new(Config {
             api_keys: vec![crate::config::ApiKey {
+                region_allowlist: Vec::new(),
                 id: "key_dev".into(),
                 name: "Development key".into(),
                 key_env: None,
@@ -11347,6 +11547,7 @@ mod tests {
                 cache_enabled: None,
             }],
             providers: vec![Provider {
+                region: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -11759,6 +11960,7 @@ mod tests {
 
     fn provider_config(name: &str, base_url: &str) -> Provider {
         Provider {
+            region: None,
             name: name.into(),
             kind: "openai".into(),
             base_url: base_url.into(),

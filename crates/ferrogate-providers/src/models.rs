@@ -26,6 +26,12 @@ pub struct ModelRoute {
     pub output_price_per_1m: Option<f64>,
     pub priority: u32,
     pub weight: u32,
+    /// The provider's declared physical region (issue #173), e.g.
+    /// "eu-west-1" -- `None` when the provider config doesn't declare one.
+    /// A tenant with a non-empty region allowlist can only route to
+    /// routes where this is `Some` and contained in that allowlist; see
+    /// `ferrogate-cli`'s `AuthContext::can_use_region`.
+    pub region: Option<String>,
 }
 
 impl ModelRoute {
@@ -48,7 +54,13 @@ impl ModelRoute {
             output_price_per_1m,
             priority,
             weight,
+            region: None,
         }
+    }
+
+    pub fn with_region(mut self, region: Option<String>) -> Self {
+        self.region = region;
+        self
     }
 }
 

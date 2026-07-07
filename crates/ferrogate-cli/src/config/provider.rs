@@ -23,6 +23,7 @@ mod tests {
     fn provider_api_key_reads_non_empty_environment_value() {
         std::env::set_var("FERROGATE_PROVIDER_TEST_KEY", "provider-secret");
         let provider = Provider {
+            region: None,
             name: "openai".into(),
             kind: "openai".into(),
             base_url: "https://api.openai.example/v1".into(),
@@ -40,6 +41,7 @@ mod tests {
     fn provider_api_key_ignores_missing_or_empty_environment_value() {
         std::env::set_var("FERROGATE_PROVIDER_EMPTY_KEY", "");
         let provider = Provider {
+            region: None,
             name: "openai".into(),
             kind: "openai".into(),
             base_url: "https://api.openai.example/v1".into(),

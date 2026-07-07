@@ -2327,7 +2327,7 @@ impl FerroGateway {
             )
             .await;
         }
-        let routes = state.candidate_model_routes(&model, None);
+        let routes = state.candidate_model_routes(&model, None, &auth.region_allowlist);
         if !routes
             .iter()
             .any(|route| auth.can_use_provider(&route.provider))
@@ -8725,6 +8725,7 @@ fn api_key_from_mutation(
     }
 
     Ok(ApiKey {
+        region_allowlist: Vec::new(),
         id,
         name: payload
             .name
