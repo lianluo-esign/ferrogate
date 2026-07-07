@@ -1114,6 +1114,9 @@ mod tests {
             api_keys: vec![decoy_yaml_key()],
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),

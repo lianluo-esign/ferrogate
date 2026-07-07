@@ -8,6 +8,7 @@
 
 mod anthropic;
 mod azure;
+mod bedrock;
 mod canonical;
 mod gemini;
 mod grok;
@@ -15,10 +16,12 @@ mod models;
 mod openai;
 mod openrouter;
 mod registry;
+mod sigv4;
 mod types;
 
 pub use anthropic::AnthropicAdapter;
 pub use azure::AzureOpenAiAdapter;
+pub use bedrock::BedrockAdapter;
 pub use gemini::GeminiAdapter;
 pub use grok::GrokAdapter;
 pub use models::{
@@ -30,7 +33,7 @@ pub use openrouter::OpenRouterAdapter;
 pub use registry::ProviderAdapterRegistry;
 pub use types::{
     is_openai_compatible_provider_kind, provider_compatibility_kind, AdapterError,
-    ChatCompletionPlan, ProviderAdapter, ProviderCatalogModel, ProviderCatalogRequest,
-    ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage,
-    ResponsesPlan, SecretValue,
+    AwsProviderCredentials, ChatCompletionPlan, ProviderAdapter, ProviderCatalogModel,
+    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHeader,
+    ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
 };

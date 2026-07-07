@@ -947,6 +947,47 @@ impl Config {
             if provider.region.as_deref().is_some_and(str::is_empty) {
                 bail!("field providers[{index}].region: cannot be empty");
             }
+            if provider
+                .aws_access_key_id
+                .as_deref()
+                .is_some_and(str::is_empty)
+            {
+                bail!("field providers[{index}].aws_access_key_id: cannot be empty");
+            }
+            if provider
+                .aws_secret_access_key_env
+                .as_deref()
+                .is_some_and(str::is_empty)
+            {
+                bail!("field providers[{index}].aws_secret_access_key_env: cannot be empty");
+            }
+            if provider
+                .aws_session_token_env
+                .as_deref()
+                .is_some_and(str::is_empty)
+            {
+                bail!("field providers[{index}].aws_session_token_env: cannot be empty");
+            }
+            // Bedrock has no bearer-token auth mode -- fail at config-load
+            // time (not silently at first-request time) when any piece of
+            // the SigV4 credential shape is missing.
+            if matches!(provider.kind.as_str(), "bedrock" | "aws-bedrock") {
+                if provider.aws_access_key_id.is_none() {
+                    bail!(
+                        "field providers[{index}].aws_access_key_id: required when kind = bedrock"
+                    );
+                }
+                if provider.aws_secret_access_key_env.is_none() {
+                    bail!(
+                        "field providers[{index}].aws_secret_access_key_env: required when kind = bedrock"
+                    );
+                }
+                if provider.region.is_none() {
+                    bail!(
+                        "field providers[{index}].region: required when kind = bedrock (this is the AWS region, e.g. us-east-1)"
+                    );
+                }
+            }
         }
         Ok(names)
     }

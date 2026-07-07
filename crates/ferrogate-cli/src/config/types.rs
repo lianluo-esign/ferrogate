@@ -398,6 +398,28 @@ pub(crate) struct Provider {
     /// eligible for a region-constrained tenant (fails closed, not open).
     #[serde(default)]
     pub(crate) region: Option<String>,
+    /// AWS access key id for the `bedrock` provider kind (issue #172) --
+    /// not a secret itself (safe to store in plain config), paired with
+    /// `aws_secret_access_key_env` for the actual secret. `region` above
+    /// (already used for #173's data-residency routing) doubles as the
+    /// AWS region a Bedrock provider targets, rather than adding a
+    /// duplicate field.
+    #[serde(default)]
+    pub(crate) aws_access_key_id: Option<String>,
+    /// Environment variable holding the AWS secret access key. This
+    /// resolves AWS credentials from the environment only (not through
+    /// the vault-backed `secret_ref` mechanism `api_key_env` has), since
+    /// Bedrock needs two independent secrets (secret key + optional
+    /// session token) rather than the single generic `api_key` that
+    /// mechanism was built for -- a deliberate scope-narrowing for
+    /// issue #172's first cut, not a design dead-end.
+    #[serde(default)]
+    pub(crate) aws_secret_access_key_env: Option<String>,
+    /// Environment variable holding a temporary AWS session token (STS
+    /// assumed-role credentials). Omit for long-lived IAM user access
+    /// keys.
+    #[serde(default)]
+    pub(crate) aws_session_token_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

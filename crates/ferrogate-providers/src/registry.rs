@@ -9,10 +9,10 @@ use serde_json::Value;
 
 use crate::types::is_openai_compatible_provider_kind;
 use crate::{
-    AdapterError, AnthropicAdapter, AzureOpenAiAdapter, ChatCompletionPlan, GeminiAdapter,
-    GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter, ProviderCatalogModel,
-    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHttpRequest,
-    ProviderUsage, ResponsesPlan,
+    AdapterError, AnthropicAdapter, AzureOpenAiAdapter, BedrockAdapter, ChatCompletionPlan,
+    GeminiAdapter, GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter,
+    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
+    ProviderHttpRequest, ProviderUsage, ResponsesPlan,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -23,6 +23,7 @@ pub struct ProviderAdapterRegistry {
     grok: GrokAdapter,
     openrouter: OpenRouterAdapter,
     azure_openai: AzureOpenAiAdapter,
+    bedrock: BedrockAdapter,
 }
 
 impl ProviderAdapterRegistry {
@@ -34,6 +35,7 @@ impl ProviderAdapterRegistry {
             "grok" | "xai" => Ok(&self.grok),
             "openrouter" => Ok(&self.openrouter),
             "azure" | "azure-openai" => Ok(&self.azure_openai),
+            "bedrock" | "aws-bedrock" => Ok(&self.bedrock),
             other => Err(AdapterError::UnsupportedProviderKind {
                 kind: other.to_string(),
             }),
@@ -185,9 +187,23 @@ mod tests {
     }
 
     #[test]
+    fn resolves_bedrock_adapter() {
+        // Issue #172: "bedrock" was intentionally unsupported until this
+        // adapter landed -- this replaces the old
+        // rejects_unknown_provider_kind_before_runtime_dispatch test, which
+        // pinned that as expected behavior.
+        let registry = ProviderAdapterRegistry::default();
+        assert_eq!(registry.adapter_for("bedrock").unwrap().kind(), "bedrock");
+        assert_eq!(
+            registry.adapter_for("aws-bedrock").unwrap().kind(),
+            "bedrock"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_provider_kind_before_runtime_dispatch() {
         let registry = ProviderAdapterRegistry::default();
-        let error = match registry.adapter_for("bedrock") {
+        let error = match registry.adapter_for("vertex") {
             Ok(adapter) => panic!("unexpected provider adapter {}", adapter.kind()),
             Err(error) => error,
         };
@@ -195,7 +211,7 @@ mod tests {
         assert_eq!(
             error,
             AdapterError::UnsupportedProviderKind {
-                kind: "bedrock".into()
+                kind: "vertex".into()
             }
         );
     }
@@ -453,6 +469,7 @@ mod tests {
             api_key: Some("provider-secret".into()),
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            aws_credentials: None,
         }
     }
 }

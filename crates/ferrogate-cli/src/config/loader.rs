@@ -101,6 +101,9 @@ impl Config {
                 .into_iter()
                 .map(|provider| Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: provider.name,
                     kind: provider.kind,
                     base_url: provider.base_url,

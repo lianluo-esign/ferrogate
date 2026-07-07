@@ -19,6 +19,8 @@ authors.workspace = true
 ferrogate-core = { path = "../ferrogate-core" }
 serde.workspace = true
 serde_json.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 
 [features]
 default = []

@@ -142,6 +142,89 @@ fn accepts_provider_with_declared_region() {
     config.validate().unwrap();
 }
 
+fn bedrock_provider() -> Provider {
+    Provider {
+        kind: "bedrock".into(),
+        aws_access_key_id: Some("AKIDEXAMPLE".into()),
+        aws_secret_access_key_env: Some("BEDROCK_SECRET_KEY".into()),
+        region: Some("us-east-1".into()),
+        ..provider()
+    }
+}
+
+#[test]
+fn accepts_a_fully_configured_bedrock_provider() {
+    let config = Config {
+        providers: vec![bedrock_provider()],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_bedrock_provider_missing_aws_access_key_id() {
+    let mut provider = bedrock_provider();
+    provider.aws_access_key_id = None;
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].aws_access_key_id: required when kind = bedrock"));
+}
+
+#[test]
+fn rejects_bedrock_provider_missing_aws_secret_access_key_env() {
+    let mut provider = bedrock_provider();
+    provider.aws_secret_access_key_env = None;
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error
+        .contains("field providers[0].aws_secret_access_key_env: required when kind = bedrock"));
+}
+
+#[test]
+fn rejects_bedrock_provider_missing_region() {
+    let mut provider = bedrock_provider();
+    provider.region = None;
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].region: required when kind = bedrock"));
+}
+
+#[test]
+fn rejects_empty_aws_secret_access_key_env() {
+    let mut provider = bedrock_provider();
+    provider.aws_secret_access_key_env = Some(String::new());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].aws_secret_access_key_env: cannot be empty"));
+}
+
+#[test]
+fn a_non_bedrock_provider_does_not_require_aws_credentials() {
+    let config = Config {
+        providers: vec![provider()],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
 #[test]
 fn rejects_api_key_region_allowlist_entry_with_no_matching_provider() {
     let mut provider = provider();
@@ -2856,6 +2939,9 @@ fn upstream() -> Upstream {
 fn provider() -> Provider {
     Provider {
         region: None,
+        aws_access_key_id: None,
+        aws_secret_access_key_env: None,
+        aws_session_token_env: None,
         name: "openai".into(),
         kind: "openai".into(),
         base_url: "http://127.0.0.1:8081/v1".into(),

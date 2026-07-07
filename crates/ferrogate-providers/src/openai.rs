@@ -359,6 +359,7 @@ mod tests {
             api_key: api_key.map(str::to_string),
             openrouter_http_referer: None,
             openrouter_x_title: None,
+            aws_credentials: None,
         }
     }
 

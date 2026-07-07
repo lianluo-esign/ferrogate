@@ -53,9 +53,10 @@ use ferrogate_policy::{
     PolicyRule, PolicySubject, QuotaScopeChain,
 };
 use ferrogate_providers::{
-    AdapterError, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry, ModelRegistryError,
-    ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
+    AdapterError, AwsProviderCredentials, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry,
+    ModelRegistryError, ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
     ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
+    SecretValue,
 };
 use ferrogate_runtime::{
     InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunAckStatus,
@@ -4041,6 +4042,7 @@ impl AppState {
             api_key,
             openrouter_http_referer: provider.openrouter_http_referer.clone(),
             openrouter_x_title: provider.openrouter_x_title.clone(),
+            aws_credentials: aws_provider_credentials(provider),
         }
     }
 
@@ -7458,6 +7460,37 @@ pub(crate) struct BillingEventDraft<'a> {
     pub(crate) metadata: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
+/// Resolves AWS SigV4 credentials for a `bedrock`-kind provider (issue
+/// #172) from `aws_access_key_id` (plain config) + `aws_secret_access_key_env`
+/// (an environment variable name) + `region` (reused from #173's
+/// data-residency field) + an optional `aws_session_token_env`. Returns
+/// `None` when any required piece is absent -- the Bedrock adapter then
+/// fails closed at request-preparation time (`AdapterError::InvalidRequest`)
+/// rather than sending an unsigned request, same fail-closed shape as
+/// every other required-config gap in this codebase. Env vars, not the
+/// vault-backed `secret_ref` mechanism `api_key` has: see the field docs
+/// on `Provider::aws_secret_access_key_env`.
+fn aws_provider_credentials(provider: &Provider) -> Option<AwsProviderCredentials> {
+    let access_key_id = provider.aws_access_key_id.clone()?;
+    let secret_env = provider.aws_secret_access_key_env.as_deref()?;
+    let secret_access_key = std::env::var(secret_env)
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    let region = provider.region.clone()?;
+    let session_token = provider
+        .aws_session_token_env
+        .as_deref()
+        .and_then(|env| std::env::var(env).ok())
+        .filter(|value| !value.is_empty())
+        .map(SecretValue::new);
+    Some(AwsProviderCredentials {
+        access_key_id,
+        secret_access_key: SecretValue::new(secret_access_key),
+        session_token,
+        region,
+    })
+}
+
 /// Settled cost in USD for one request, looked up from the model registry's
 /// configured pricing for whichever route (primary or fallback) actually
 /// served `provider`/`provider_model`. `None` when the model is unknown or
@@ -8529,6 +8562,9 @@ mod tests {
     fn test_provider() -> Provider {
         Provider {
             region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key_env: None,
+            aws_session_token_env: None,
             name: "openai".into(),
             kind: "openai".into(),
             base_url: "http://127.0.0.1:10001/v1".into(),
@@ -8844,6 +8880,9 @@ mod tests {
         let candidate = Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9024,6 +9063,9 @@ mod tests {
         let config = Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9101,6 +9143,9 @@ mod tests {
         let config = Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9165,6 +9210,9 @@ mod tests {
         let config = Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9651,6 +9699,9 @@ mod tests {
         let config = Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9765,6 +9816,9 @@ mod tests {
             providers: vec![
                 Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9776,6 +9830,9 @@ mod tests {
                 },
                 Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "backup-a".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -9787,6 +9844,9 @@ mod tests {
                 },
                 Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "backup-b".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -9863,6 +9923,9 @@ mod tests {
             providers: vec![
                 Provider {
                     region: Some("eu-west-1".into()),
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "eu-primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9874,6 +9937,9 @@ mod tests {
                 },
                 Provider {
                     region: Some("us-east-1".into()),
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "us-fallback".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -9885,6 +9951,9 @@ mod tests {
                 },
                 Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "no-region-fallback".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -10000,6 +10069,9 @@ mod tests {
             providers: vec![
                 Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10011,6 +10083,9 @@ mod tests {
                 },
                 Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "backup-a".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -10022,6 +10097,9 @@ mod tests {
                 },
                 Provider {
                     region: None,
+                    aws_access_key_id: None,
+                    aws_secret_access_key_env: None,
+                    aws_session_token_env: None,
                     name: "backup-b".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -10186,6 +10264,9 @@ mod tests {
             },
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10213,6 +10294,9 @@ mod tests {
         let state = AppState::new(Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10288,6 +10372,9 @@ mod tests {
         let state = AppState::new(Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "disabled".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
@@ -10379,6 +10466,9 @@ mod tests {
         let config = Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10607,6 +10697,9 @@ mod tests {
         let config = Config {
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10002/v1".into(),
@@ -12074,6 +12167,9 @@ mod tests {
             }],
             providers: vec![Provider {
                 region: None,
+                aws_access_key_id: None,
+                aws_secret_access_key_env: None,
+                aws_session_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -12490,6 +12586,9 @@ mod tests {
     fn provider_config(name: &str, base_url: &str) -> Provider {
         Provider {
             region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key_env: None,
+            aws_session_token_env: None,
             name: name.into(),
             kind: "openai".into(),
             base_url: base_url.into(),

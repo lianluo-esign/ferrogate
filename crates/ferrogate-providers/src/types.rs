@@ -16,6 +16,38 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     pub openrouter_http_referer: Option<String>,
     pub openrouter_x_title: Option<String>,
+    /// AWS SigV4 credentials for the `bedrock` adapter (issue #172) --
+    /// unused by every other adapter, which authenticate via `api_key`
+    /// instead. `None` for a Bedrock provider means the adapter fails
+    /// closed at request-preparation time rather than silently sending an
+    /// unsigned (and therefore rejected) request.
+    pub aws_credentials: Option<AwsProviderCredentials>,
+}
+
+/// AWS access-key credentials plus the region a Bedrock provider targets
+/// (issue #172). `session_token` is present only for temporary/STS
+/// credentials; long-lived IAM user access keys omit it. The secret
+/// fields use [`SecretValue`] so an accidental `{:?}` of a
+/// [`ProviderConfig`] (or anything embedding it) can never leak them,
+/// mirroring how [`ProviderHeader`] already protects header values.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AwsProviderCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: SecretValue,
+    pub session_token: Option<SecretValue>,
+    pub region: String,
+}
+
+impl fmt::Debug for AwsProviderCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AwsProviderCredentials")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &self.secret_access_key)
+            .field("session_token", &self.session_token)
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
