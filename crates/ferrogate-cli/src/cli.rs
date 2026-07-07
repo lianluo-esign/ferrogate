@@ -272,4 +272,81 @@ pub(crate) enum Commands {
     Reload(ReloadArgs),
     /// Hash a virtual API key secret for durable configuration.
     HashKey(HashKeyArgs),
+    /// Push/pull/list static assets through /v1/assets/* (issue #178).
+    Assets(AssetsArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AssetsArgs {
+    #[command(subcommand)]
+    pub(crate) command: AssetsCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AssetsCommands {
+    /// Upload a local file as a new asset version.
+    Push(AssetsPushArgs),
+    /// Download an asset's content to a local file (or stdout with `-`).
+    Pull(AssetsIdentityArgs),
+    /// List a tenant's assets, optionally filtered by asset type.
+    List(AssetsListArgs),
+    /// Delete one asset version.
+    Delete(AssetsIdentityArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct AssetsConnectionArgs {
+    /// Running gateway base URL, for example http://127.0.0.1:8080.
+    #[arg(long, env = "FERROGATE_GATEWAY_URL")]
+    pub(crate) gateway_url: String,
+    /// Virtual API key with assets.read/assets.write scope.
+    #[arg(long, env = "FERROGATE_API_KEY")]
+    pub(crate) api_key: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AssetsPushArgs {
+    #[command(flatten)]
+    pub(crate) connection: AssetsConnectionArgs,
+    /// Local file to upload.
+    pub(crate) path: PathBuf,
+    /// Asset type, e.g. cli_tool, mcp_manifest, skill_bundle, static_site, config_file.
+    #[arg(long = "type")]
+    pub(crate) asset_type: String,
+    /// Asset name.
+    #[arg(long)]
+    pub(crate) name: String,
+    /// Asset version.
+    #[arg(long)]
+    pub(crate) version: String,
+    /// Content-Type header to record; guessed from the file extension when omitted.
+    #[arg(long)]
+    pub(crate) content_type: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AssetsIdentityArgs {
+    #[command(flatten)]
+    pub(crate) connection: AssetsConnectionArgs,
+    /// Asset type.
+    #[arg(long = "type")]
+    pub(crate) asset_type: String,
+    /// Asset name.
+    #[arg(long)]
+    pub(crate) name: String,
+    /// Asset version.
+    #[arg(long)]
+    pub(crate) version: String,
+    /// Output file for `pull` (defaults to stdout when omitted or `-`).
+    #[arg(long)]
+    pub(crate) output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AssetsListArgs {
+    #[command(flatten)]
+    pub(crate) connection: AssetsConnectionArgs,
+    /// Restrict the list to one asset type.
+    #[arg(long = "type")]
+    pub(crate) asset_type: Option<String>,
 }

@@ -6,6 +6,7 @@
 
 mod acme;
 mod approval;
+mod assets_cli;
 mod auth;
 mod billing;
 mod billing_client;
@@ -138,6 +139,7 @@ fn main() -> AnyResult<()> {
             println!("{}", auth::hash_api_key_secret(&args.secret));
             Ok(())
         }
+        Commands::Assets(args) => assets_cli::execute_assets_command(args.command),
     }
 }
 
