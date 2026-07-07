@@ -44,6 +44,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Workspaces", url: "/app/workspaces" },
       { title: "API / virtual keys", url: "/app/api-keys" },
       { title: "Quota policies", url: "/app/quota-policies" },
+      { title: "Plans", url: "/app/plans" },
     ],
   },
   {
@@ -86,6 +87,7 @@ export const RESOURCE_ICONS: Record<string, LucideIcon> = {
   workspaces: Boxes,
   "api-keys": KeyRound,
   "quota-policies": Gauge,
+  plans: CreditCard,
   providers: Network,
   models: Sparkles,
   "agent-upstreams": Bot,

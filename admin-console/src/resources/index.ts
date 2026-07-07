@@ -6,6 +6,7 @@ import { billingEventsConfig } from "@/resources/billing-events";
 import { managedWorkersConfig } from "@/resources/managed-workers";
 import { mcpServersConfig } from "@/resources/mcp-servers";
 import { modelsConfig } from "@/resources/models";
+import { plansConfig } from "@/resources/plans";
 import { pluginsConfig } from "@/resources/plugins";
 import { projectsConfig } from "@/resources/projects";
 import { promptTemplatesConfig } from "@/resources/prompt-templates";
@@ -31,6 +32,7 @@ export const RESOURCE_ROUTES: ResourceRoute[] = [
   { path: "/app/workspaces", config: workspacesConfig },
   { path: "/app/api-keys", config: virtualKeysConfig },
   { path: "/app/quota-policies", config: quotaPoliciesConfig },
+  { path: "/app/plans", config: plansConfig },
   { path: "/app/providers", config: providersConfig },
   { path: "/app/models", config: modelsConfig },
   { path: "/app/agent-upstreams", config: agentUpstreamsConfig },
