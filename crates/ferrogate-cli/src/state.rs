@@ -4561,6 +4561,18 @@ impl AppState {
         Ok(self.repositories.get_plan(&account.plan_id)?)
     }
 
+    pub(crate) fn list_plans(&self) -> anyhow::Result<Vec<StoredPlan>> {
+        Ok(self.repositories.list_plans()?)
+    }
+
+    pub(crate) fn get_plan(&self, id: &str) -> anyhow::Result<Option<StoredPlan>> {
+        Ok(self.repositories.get_plan(id)?)
+    }
+
+    pub(crate) fn upsert_plan(&self, plan: StoredPlan) -> anyhow::Result<()> {
+        Ok(self.repositories.upsert_plan(plan)?)
+    }
+
     pub(crate) fn list_projects(&self) -> anyhow::Result<Vec<StoredProject>> {
         Ok(self.repositories.list_projects()?)
     }

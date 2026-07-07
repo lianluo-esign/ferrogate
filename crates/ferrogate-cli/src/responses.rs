@@ -937,6 +937,68 @@ pub(crate) struct AdminDeleteResponse {
     pub(crate) deleted: bool,
 }
 
+// --- Sellable subscription plans/tiers (issue #168) ---
+
+/// A named, sellable subscription tier: a bundle of feature flags plus
+/// default quota values that seeds the effective-quota merge chain as its
+/// floor, below any explicit scope-level `quota_policies` row -- see
+/// `ferrogate_policy::resolve_effective_quota`.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPlan {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) slug: String,
+    pub(crate) mcp_enabled: bool,
+    pub(crate) self_hosted_workers_enabled: bool,
+    pub(crate) admin_console_seats: Option<u32>,
+    pub(crate) default_model_allowlist: Vec<String>,
+    pub(crate) default_rpm_limit: Option<u64>,
+    pub(crate) default_tpm_limit: Option<u64>,
+    pub(crate) default_monthly_budget_usd: Option<f64>,
+    pub(crate) asset_hosting_enabled: bool,
+    pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+/// POST create / PUT replace / PATCH merge payload for `/admin/v1/plans`.
+/// All fields optional so PATCH can carry only the fields being changed;
+/// PUT/POST treat an absent field as "reset to default" the same way
+/// `AdminQuotaPolicyMutation` does.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminPlanMutation {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) slug: Option<String>,
+    #[serde(default)]
+    pub(crate) mcp_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) self_hosted_workers_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) admin_console_seats: Option<u32>,
+    #[serde(default)]
+    pub(crate) default_model_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) default_rpm_limit: Option<u64>,
+    #[serde(default)]
+    pub(crate) default_tpm_limit: Option<u64>,
+    #[serde(default)]
+    pub(crate) default_monthly_budget_usd: Option<f64>,
+    #[serde(default)]
+    pub(crate) asset_hosting_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPlanMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) plan: AdminPlan,
+}
+
 // --- Multi-tenant hierarchy + durable virtual API keys (TOK-11 / TOK-12) ---
 
 #[derive(Debug, Serialize)]

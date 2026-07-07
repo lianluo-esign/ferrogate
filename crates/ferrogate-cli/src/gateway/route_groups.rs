@@ -60,6 +60,7 @@ pub(super) enum RouteGroup {
     Asset,
     Billing,
     Rbac,
+    Plans,
 }
 
 /// Built once (first access) and reused for the process lifetime: the
@@ -215,6 +216,10 @@ fn build_route_group_router() -> Router<RouteGroup> {
     insert("/admin/v1/policies/{*rest}", RouteGroup::AdminPolicy);
 
     insert("/admin/v1/tenant-accounts", RouteGroup::TenantHierarchy);
+    insert(
+        "/admin/v1/tenant-accounts/{*rest}",
+        RouteGroup::TenantHierarchy,
+    );
     insert("/admin/v1/projects", RouteGroup::TenantHierarchy);
     insert("/admin/v1/workspaces", RouteGroup::TenantHierarchy);
     insert("/admin/v1/tenants", RouteGroup::TenantHierarchy);
@@ -236,6 +241,9 @@ fn build_route_group_router() -> Router<RouteGroup> {
     insert("/admin/v1/roles", RouteGroup::Rbac);
     insert("/admin/v1/roles/{*rest}", RouteGroup::Rbac);
     insert("/admin/v1/tenant-roles/{*rest}", RouteGroup::Rbac);
+
+    insert("/admin/v1/plans", RouteGroup::Plans);
+    insert("/admin/v1/plans/{*rest}", RouteGroup::Plans);
 
     insert("/admin/v1/metering-events", RouteGroup::Billing);
     insert("/admin/v1/billing-events", RouteGroup::Billing);
@@ -309,6 +317,7 @@ impl FerroGateway {
             RouteGroup::Asset => self.try_asset_routes(session, ctx, req).await,
             RouteGroup::Billing => self.try_billing_routes(session, ctx, req).await,
             RouteGroup::Rbac => self.try_rbac_routes(session, ctx, req).await,
+            RouteGroup::Plans => self.try_plans_routes(session, ctx, req).await,
         }
     }
 
@@ -787,8 +796,10 @@ impl FerroGateway {
         ctx: &ProxyContext,
         req: &RequestParts,
     ) -> PingoraResult<bool> {
-        if req.path == "/admin/v1/tenant-accounts" {
-            self.handle_admin_tenant_accounts(session, ctx, &req.headers, &req.method)
+        if req.path == "/admin/v1/tenant-accounts"
+            || req.path.starts_with("/admin/v1/tenant-accounts/")
+        {
+            self.handle_admin_tenant_accounts(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
             return Ok(true);
         }
@@ -834,6 +845,20 @@ impl FerroGateway {
             || req.path.starts_with("/admin/v1/quota-policies/")
         {
             self.handle_admin_quota_policies(session, ctx, &req.headers, &req.method, &req.path)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn try_plans_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path == "/admin/v1/plans" || req.path.starts_with("/admin/v1/plans/") {
+            self.handle_admin_plans(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
             return Ok(true);
         }

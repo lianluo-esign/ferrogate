@@ -19,6 +19,7 @@ mod gateway;
 mod lifecycle;
 mod metering;
 mod network_access;
+mod plans_cli;
 mod responses;
 mod routing;
 #[cfg(test)]
@@ -141,6 +142,7 @@ fn main() -> AnyResult<()> {
             Ok(())
         }
         Commands::Assets(args) => assets_cli::execute_assets_command(args.command),
+        Commands::Plans(args) => plans_cli::execute_plans_command(args.command),
     }
 }
 

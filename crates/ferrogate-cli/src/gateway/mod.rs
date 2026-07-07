@@ -16,6 +16,7 @@ mod function_egress;
 mod handlers;
 mod local;
 mod mcp_rpc;
+mod plans;
 mod proxy;
 mod quota_policies;
 mod rbac;

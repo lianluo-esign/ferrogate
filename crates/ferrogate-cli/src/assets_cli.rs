@@ -106,7 +106,7 @@ fn execute_delete(args: AssetsIdentityArgs) -> AnyResult<()> {
     print_json_or_raise(&response, "delete")
 }
 
-fn print_json_or_raise(response: &RawHttpResponse, action: &str) -> AnyResult<()> {
+pub(crate) fn print_json_or_raise(response: &RawHttpResponse, action: &str) -> AnyResult<()> {
     if !(200..300).contains(&response.status) {
         bail!(
             "{action} failed: status={} body={}",
@@ -131,14 +131,20 @@ fn guess_content_type(path: &std::path::Path) -> String {
     .to_string()
 }
 
+/// Parses a `--gateway-url`/`FERROGATE_GATEWAY_URL` value and connects a raw
+/// TCP client to it. Shared by every `ferrogate-cli` subcommand that talks
+/// to a running gateway's admin/data-plane HTTP surface without pulling in
+/// `reqwest` (`ferrogate-cli`'s `main()` is a sync binary entrypoint) --
+/// originally built for `assets push/pull/list/delete` (issue #178), reused
+/// as-is by `plans_cli` (issue #168) rather than duplicating it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GatewayEndpoint {
+pub(crate) struct GatewayEndpoint {
     host: String,
     port: u16,
 }
 
 impl GatewayEndpoint {
-    fn parse(raw: &str) -> AnyResult<Self> {
+    pub(crate) fn parse(raw: &str) -> AnyResult<Self> {
         let rest = raw
             .strip_prefix("http://")
             .ok_or_else(|| anyhow::anyhow!("--gateway-url currently supports only http:// URLs"))?;
@@ -170,12 +176,12 @@ impl GatewayEndpoint {
     }
 }
 
-struct RawHttpResponse {
-    status: u16,
-    body: Vec<u8>,
+pub(crate) struct RawHttpResponse {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
 }
 
-fn send_request(
+pub(crate) fn send_request(
     endpoint: &GatewayEndpoint,
     method: &str,
     path: &str,

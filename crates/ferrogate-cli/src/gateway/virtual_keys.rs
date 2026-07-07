@@ -40,7 +40,26 @@ impl FerroGateway {
         ctx: &super::ProxyContext,
         headers: &http::HeaderMap,
         method: &Method,
+        path: &str,
     ) -> PingoraResult<()> {
+        if path != "/admin/v1/tenant-accounts" {
+            let Some(id) = path
+                .strip_prefix("/admin/v1/tenant-accounts/")
+                .filter(|id| !id.is_empty())
+            else {
+                return write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "tenant account endpoint not found",
+                    &ctx.request_id,
+                )
+                .await;
+            };
+            return self
+                .handle_admin_tenant_account_by_id(session, ctx, headers, method, id)
+                .await;
+        }
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
@@ -173,6 +192,166 @@ impl FerroGateway {
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method_not_allowed",
                     "tenant accounts endpoint supports GET and POST",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    /// `/admin/v1/tenant-accounts/{id}`: GET reads the account; PATCH merges
+    /// (currently the only real use case is assigning `plan_id` -- issue
+    /// #168 -- but every mutable field is accepted for symmetry with the
+    /// create payload). No DELETE: out of scope, same as `plans.rs`.
+    async fn handle_admin_tenant_account_by_id(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        id: &str,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        match *method {
+            Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                Ok(_) => match state.get_tenant_account(id) {
+                    Ok(Some(account)) => {
+                        let body = AdminTenantAccountMutationResponse {
+                            object: "tenant_account",
+                            tenant: admin_tenant_account(&account),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Ok(None) => {
+                        write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "tenant_account_not_found",
+                            format!("no tenant account with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                },
+                Err(error) => {
+                    write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await
+                }
+            },
+            Method::PATCH => {
+                let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
+                    Ok(auth) => auth,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
+                let payload = match read_json_body::<AdminTenantAccountCreateRequest>(
+                    session,
+                    &ctx.request_id,
+                )
+                .await?
+                {
+                    Ok(payload) => payload,
+                    Err(()) => return Ok(()),
+                };
+                let Some(existing) = state.get_tenant_account(id).ok().flatten() else {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "tenant_account_not_found",
+                        format!("no tenant account with id {id}"),
+                        &ctx.request_id,
+                    )
+                    .await;
+                };
+                if let Some(plan_id) = payload.plan_id.as_deref() {
+                    if plan_id.trim().is_empty() {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_tenant",
+                            "field plan_id must not be empty when present",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    if state.get_plan(plan_id).ok().flatten().is_none() {
+                        return write_json_error(
+                            session,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_tenant",
+                            format!("plan {plan_id} does not exist"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                }
+                let account = StoredTenantAccount {
+                    id: id.to_string(),
+                    name: payload.name.unwrap_or(existing.name),
+                    slug: payload.slug.unwrap_or(existing.slug),
+                    status: payload.status.unwrap_or(existing.status),
+                    plan_id: payload.plan_id.unwrap_or(existing.plan_id),
+                    created_at_unix: existing.created_at_unix,
+                    updated_at_unix: now_unix_seconds(),
+                };
+                match state.upsert_tenant_account(account.clone()) {
+                    Ok(()) => {
+                        state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                            ctx,
+                            &auth,
+                            "tenant_account.update",
+                            id,
+                            "committed",
+                            format!("tenant account {id} updated"),
+                        ));
+                        let body = AdminTenantAccountMutationResponse {
+                            object: "tenant_account",
+                            tenant: admin_tenant_account(&account),
+                        };
+                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+                    }
+                    Err(error) => {
+                        write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await
+                    }
+                }
+            }
+            _ => {
+                write_json_error(
+                    session,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "tenant account endpoint supports GET and PATCH",
                     &ctx.request_id,
                 )
                 .await

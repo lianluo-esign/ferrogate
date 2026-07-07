@@ -274,6 +274,8 @@ pub(crate) enum Commands {
     HashKey(HashKeyArgs),
     /// Push/pull/list static assets through /v1/assets/* (issue #178).
     Assets(AssetsArgs),
+    /// Create/list/assign sellable subscription plans (issue #168).
+    Plans(PlansArgs),
 }
 
 #[derive(Debug, Args)]
@@ -349,4 +351,75 @@ pub(crate) struct AssetsListArgs {
     /// Restrict the list to one asset type.
     #[arg(long = "type")]
     pub(crate) asset_type: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PlansArgs {
+    #[command(subcommand)]
+    pub(crate) command: PlansCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum PlansCommands {
+    /// Create a new sellable plan.
+    Create(PlansCreateArgs),
+    /// List every plan.
+    List(PlansConnectionArgs),
+    /// Assign an existing plan to an existing tenant.
+    Assign(PlansAssignArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct PlansConnectionArgs {
+    /// Running gateway base URL, for example http://127.0.0.1:8080.
+    #[arg(long, env = "FERROGATE_GATEWAY_URL")]
+    pub(crate) gateway_url: String,
+    /// Virtual API key with admin.read/admin.write scope.
+    #[arg(long, env = "FERROGATE_API_KEY")]
+    pub(crate) api_key: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PlansCreateArgs {
+    #[command(flatten)]
+    pub(crate) connection: PlansConnectionArgs,
+    /// Plan id; defaults to the slug when omitted.
+    #[arg(long)]
+    pub(crate) id: Option<String>,
+    /// Human-readable plan name.
+    #[arg(long)]
+    pub(crate) name: String,
+    /// URL-safe plan identifier.
+    #[arg(long)]
+    pub(crate) slug: String,
+    /// Grant MCP tool governance access.
+    #[arg(long)]
+    pub(crate) mcp_enabled: bool,
+    /// Grant self-hosted/managed worker dispatch eligibility.
+    #[arg(long)]
+    pub(crate) self_hosted_workers_enabled: bool,
+    /// Grant /v1/assets/* hosting access.
+    #[arg(long)]
+    pub(crate) asset_hosting_enabled: bool,
+    /// Default requests-per-minute cap for tenants on this plan.
+    #[arg(long)]
+    pub(crate) default_rpm_limit: Option<u64>,
+    /// Default tokens-per-minute cap for tenants on this plan.
+    #[arg(long)]
+    pub(crate) default_tpm_limit: Option<u64>,
+    /// Default monthly budget (USD) for tenants on this plan.
+    #[arg(long)]
+    pub(crate) default_monthly_budget_usd: Option<f64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PlansAssignArgs {
+    #[command(flatten)]
+    pub(crate) connection: PlansConnectionArgs,
+    /// Tenant account id to update.
+    #[arg(long)]
+    pub(crate) tenant_id: String,
+    /// Plan id to assign to the tenant.
+    #[arg(long)]
+    pub(crate) plan_id: String,
 }
