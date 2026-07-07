@@ -13,7 +13,79 @@
 
 mod support;
 
+use std::io::Write;
+use std::process::Command;
+
 use support::{free_addr, http_request, start_gateway, wait_for_gateway};
+
+#[test]
+fn tampered_stored_content_is_rejected_on_read_instead_of_served() {
+    let Ok(dsn) = std::env::var("FERROGATE_SUPABASE_DSN") else {
+        eprintln!(
+            "skipping tampered_stored_content_is_rejected_on_read_instead_of_served: \
+             FERROGATE_SUPABASE_DSN is not set"
+        );
+        return;
+    };
+
+    let (gateway_addr, mut gateway) = start_registered_gateway(&dsn, "org_asset_security");
+
+    let push = http_request(
+        &gateway_addr,
+        "PUT",
+        "/v1/assets/config_file/tamper-target/1.0.0",
+        &[
+            "Authorization: Bearer asset-security-secret",
+            "Content-Type: text/plain",
+        ],
+        "original, untampered content",
+    );
+    assert!(push.contains("HTTP/1.1 200"), "push failed: {push}");
+
+    // A clean read succeeds before any tampering.
+    let clean_pull = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/config_file/tamper-target/1.0.0",
+        &["Authorization: Bearer asset-security-secret"],
+        "",
+    );
+    assert!(clean_pull.contains("HTTP/1.1 200"), "{clean_pull}");
+
+    // Corrupt the stored bytes directly in the database, bypassing the
+    // gateway's own write path entirely -- this is what storage-layer
+    // corruption or a tampered row would look like, not something the API
+    // could ever produce on its own.
+    psql_exec(
+        &dsn,
+        "UPDATE ferrogate_control.stored_assets SET content = 'tampered content'::bytea \
+         WHERE tenant_id = 'org_asset_security' AND asset_type = 'config_file' \
+         AND name = 'tamper-target'",
+    );
+
+    let tampered_pull = http_request(
+        &gateway_addr,
+        "GET",
+        "/v1/assets/config_file/tamper-target/1.0.0",
+        &["Authorization: Bearer asset-security-secret"],
+        "",
+    );
+    assert!(
+        tampered_pull.contains("HTTP/1.1 500"),
+        "a content_hash mismatch must fail closed, not serve tampered bytes: {tampered_pull}"
+    );
+    assert!(
+        tampered_pull.contains("asset_integrity_check_failed"),
+        "{tampered_pull}"
+    );
+    assert!(
+        !tampered_pull.contains("tampered content"),
+        "tampered bytes must never reach the client: {tampered_pull}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
 
 #[test]
 fn eicar_test_payload_is_rejected_at_push() {
@@ -256,4 +328,19 @@ scopes = ["assets.read", "assets.write"]
 organization_id = "org_isolation_b"
 "#
     )
+}
+
+fn psql_exec(dsn: &str, statement: &str) {
+    let output = Command::new("psql")
+        .arg(dsn)
+        .arg("-t")
+        .arg("-A")
+        .arg("-c")
+        .arg(statement)
+        .output()
+        .expect("psql must be installed for this test's direct DB tampering");
+    if !output.status.success() {
+        std::io::stderr().write_all(&output.stderr).ok();
+        panic!("psql statement failed: {statement}");
+    }
 }
