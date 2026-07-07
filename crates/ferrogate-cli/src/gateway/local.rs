@@ -11,6 +11,7 @@ use ferrogate_runtime::{
     SelfHostedRunAckRequest, SelfHostedRunPollRequest, SelfHostedWorkerError,
     SelfHostedWorkerIdentity, SelfHostedWorkerTransportFrame, SELF_HOSTED_WORKER_PROTOCOL_VERSION,
 };
+use ferrogate_storage::StoredPlan;
 use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use std::collections::BTreeMap;
@@ -2827,43 +2828,63 @@ impl FerroGateway {
             }
         };
 
-        // Plan/permission gate for MCP tool execution specifically (issue
-        // #168's originally-scoped enforcement point, never wired until
-        // #182): either the tenant's plan enables mcp_enabled, or a bound
-        // role grants the mcp.execute permission. Extension-backend tool
-        // execution (/v1/tools/execute) is unaffected -- it isn't MCP.
+        // Plan/permission gate for tool execution (issue #168's
+        // originally-scoped enforcement point, wired for the Mcp backend in
+        // #182; extended to the Extension backend in #183 after auditing
+        // found it was the same endpoint family with the same resource-cost
+        // shape but no equivalent gate -- a plan disabling MCP had zero
+        // protection against identical traffic routed through
+        // /v1/tools/execute instead of /v1/mcp/tool/execute).
         //
         // Only enforced when a StoredTenantAccount actually exists for this
         // tenant_id: a virtual key's organization_id is free-form
         // attribution, not a foreign key, and plenty of legitimate setups
         // (and most of this repo's own test fixtures) tag a key with an
         // organization_id without ever registering it through
-        // /admin/v1/tenant-accounts. Since mcp_enabled was dead/unchecked
-        // until now, treating "no formal tenant record" as an implicit
+        // /admin/v1/tenant-accounts. Since these flags were dead/unchecked
+        // until #182, treating "no formal tenant record" as an implicit
         // denial would be a silent breaking change for exactly that setup;
         // role-based grants still apply regardless of tenant-account
         // existence, since bindings are keyed by tenant_id directly.
-        if backend == ToolExecuteBackend::Mcp {
-            if let Some(tenant_id) = auth.organization_id.as_deref() {
-                let tenant_account_exists =
-                    state.get_tenant_account(tenant_id).ok().flatten().is_some();
-                let plan_grants_access = state
-                    .resolve_tenant_plan(tenant_id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|plan| plan.mcp_enabled);
-                let role_grants_access = state.tenant_has_permission(tenant_id, "mcp.execute");
-                if tenant_account_exists && !plan_grants_access && !role_grants_access {
-                    return write_json_error(
-                        session,
-                        StatusCode::FORBIDDEN,
-                        "mcp_tools_disabled",
-                        "the tenant's plan does not enable MCP tool execution and no bound \
-                         role grants the mcp.execute permission",
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
+        let (plan_enabled, permission_key, error_code, error_message): (
+            fn(&StoredPlan) -> bool,
+            &str,
+            &str,
+            &str,
+        ) = match backend {
+            ToolExecuteBackend::Mcp => (
+                |plan| plan.mcp_enabled,
+                "mcp.execute",
+                "mcp_tools_disabled",
+                "the tenant's plan does not enable MCP tool execution and no bound role \
+                 grants the mcp.execute permission",
+            ),
+            ToolExecuteBackend::Extension => (
+                |plan| plan.extension_tools_enabled,
+                "extensions.execute",
+                "extension_tools_disabled",
+                "the tenant's plan does not enable extension tool execution and no bound \
+                 role grants the extensions.execute permission",
+            ),
+        };
+        if let Some(tenant_id) = auth.organization_id.as_deref() {
+            let tenant_account_exists =
+                state.get_tenant_account(tenant_id).ok().flatten().is_some();
+            let plan_grants_access = state
+                .resolve_tenant_plan(tenant_id)
+                .ok()
+                .flatten()
+                .is_some_and(|plan| plan_enabled(&plan));
+            let role_grants_access = state.tenant_has_permission(tenant_id, permission_key);
+            if tenant_account_exists && !plan_grants_access && !role_grants_access {
+                return write_json_error(
+                    session,
+                    StatusCode::FORBIDDEN,
+                    error_code,
+                    error_message,
+                    &ctx.request_id,
+                )
+                .await;
             }
         }
 

@@ -842,6 +842,14 @@ ALTER TABLE plans
 ALTER TABLE plans
     ADD COLUMN IF NOT EXISTS default_asset_storage_quota_bytes BIGINT;
 
+-- Gates Extension-backend /v1/tools/execute (issue #183) the same way
+-- mcp_enabled gates the Mcp backend at the same endpoint family -- closes
+-- a gap where a plan disabling mcp_enabled had no equivalent protection
+-- against identical tool-execution traffic routed through the Extension
+-- backend instead.
+ALTER TABLE plans
+    ADD COLUMN IF NOT EXISTS extension_tools_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Every tenant lands on this plan unless explicitly assigned another one --
 -- seeded before the `tenants.plan_id` foreign key below is added, since that
 -- column's default value must reference a row that already exists.
@@ -1140,5 +1148,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (21, '021_usage_metadata_rollups')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (22, '022_plans_extension_tools_enabled')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

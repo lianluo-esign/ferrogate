@@ -1548,8 +1548,10 @@ impl PostgresControlPlaneStore {
                  (id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                   admin_console_seats, default_model_allowlist_json, default_rpm_limit, \
                   default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
-                  updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12, $13, $14) \
+                  updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
+                  extension_tools_enabled) \
+                 VALUES \
+                 ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12, $13, $14, $15) \
                  ON CONFLICT (id) DO UPDATE SET \
                  name = EXCLUDED.name, slug = EXCLUDED.slug, \
                  mcp_enabled = EXCLUDED.mcp_enabled, \
@@ -1561,7 +1563,8 @@ impl PostgresControlPlaneStore {
                  default_monthly_budget_usd = EXCLUDED.default_monthly_budget_usd, \
                  updated_at_unix = EXCLUDED.updated_at_unix, \
                  asset_hosting_enabled = EXCLUDED.asset_hosting_enabled, \
-                 default_asset_storage_quota_bytes = EXCLUDED.default_asset_storage_quota_bytes",
+                 default_asset_storage_quota_bytes = EXCLUDED.default_asset_storage_quota_bytes, \
+                 extension_tools_enabled = EXCLUDED.extension_tools_enabled",
                 &[
                     &plan.id,
                     &plan.name,
@@ -1577,6 +1580,7 @@ impl PostgresControlPlaneStore {
                     &plan.updated_at_unix,
                     &plan.asset_hosting_enabled,
                     &default_asset_storage_quota_bytes,
+                    &plan.extension_tools_enabled,
                 ],
             )?;
             Ok(())
@@ -1589,7 +1593,8 @@ impl PostgresControlPlaneStore {
                 "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                  admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
-                 updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes \
+                 updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
+                 extension_tools_enabled \
                  FROM plans WHERE id = $1",
                 &[&id],
             )
@@ -1603,7 +1608,8 @@ impl PostgresControlPlaneStore {
                 "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
                  admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
-                 updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes \
+                 updated_at_unix, asset_hosting_enabled, default_asset_storage_quota_bytes, \
+                 extension_tools_enabled \
                  FROM plans ORDER BY id ASC",
                 &[],
             )
@@ -4359,6 +4365,7 @@ fn plan_from_row(row: &PostgresRow) -> Result<StoredPlan, StorageError> {
         updated_at_unix: row.get::<_, i64>(11),
         asset_hosting_enabled: row.get::<_, bool>(12),
         default_asset_storage_quota_bytes: row.get::<_, Option<i64>>(13).map(nonnegative_u64),
+        extension_tools_enabled: row.get::<_, bool>(14),
     })
 }
 
@@ -6025,6 +6032,9 @@ fn default_free_plan() -> StoredPlan {
         // the `stored_assets` schema.
         asset_hosting_enabled: true,
         default_asset_storage_quota_bytes: Some(10 * 1024 * 1024),
+        // Compute-adjacent like mcp_enabled/self_hosted_workers_enabled --
+        // gated off by default (issue #183).
+        extension_tools_enabled: false,
     }
 }
 
@@ -6062,6 +6072,15 @@ pub struct StoredPlan {
     pub asset_hosting_enabled: bool,
     #[serde(default)]
     pub default_asset_storage_quota_bytes: Option<u64>,
+    /// Gates Extension-backend `/v1/tools/execute` (issue #183) the same
+    /// way `mcp_enabled` gates the Mcp backend at the same endpoint --
+    /// before this field existed, a tenant whose plan disabled
+    /// `mcp_enabled` had no equivalent protection against routing
+    /// identical tool-execution traffic through the Extension backend
+    /// instead, since only the Mcp branch was ever checked. Fail closed
+    /// when absent or `false`, same as every other plan flag.
+    #[serde(default)]
+    pub extension_tools_enabled: bool,
 }
 
 /// A tenant-scoped static asset (issue #176): the storage primitive behind

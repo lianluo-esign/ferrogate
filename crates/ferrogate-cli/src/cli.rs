@@ -401,6 +401,9 @@ pub(crate) struct PlansCreateArgs {
     /// Grant /v1/assets/* hosting access.
     #[arg(long)]
     pub(crate) asset_hosting_enabled: bool,
+    /// Grant Extension-backend /v1/tools/execute access.
+    #[arg(long)]
+    pub(crate) extension_tools_enabled: bool,
     /// Default requests-per-minute cap for tenants on this plan.
     #[arg(long)]
     pub(crate) default_rpm_limit: Option<u64>,

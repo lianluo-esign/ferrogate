@@ -957,6 +957,7 @@ pub(crate) struct AdminPlan {
     pub(crate) default_monthly_budget_usd: Option<f64>,
     pub(crate) asset_hosting_enabled: bool,
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+    pub(crate) extension_tools_enabled: bool,
     pub(crate) created_at_unix: i64,
     pub(crate) updated_at_unix: i64,
 }
@@ -991,6 +992,8 @@ pub(crate) struct AdminPlanMutation {
     pub(crate) asset_hosting_enabled: Option<bool>,
     #[serde(default)]
     pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) extension_tools_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

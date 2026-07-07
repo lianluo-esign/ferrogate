@@ -237,6 +237,7 @@ impl FerroGateway {
             default_monthly_budget_usd: payload.default_monthly_budget_usd,
             asset_hosting_enabled: payload.asset_hosting_enabled.unwrap_or(false),
             default_asset_storage_quota_bytes: payload.default_asset_storage_quota_bytes,
+            extension_tools_enabled: payload.extension_tools_enabled.unwrap_or(false),
             created_at_unix: now,
             updated_at_unix: now,
         };
@@ -303,6 +304,7 @@ impl FerroGateway {
                 default_monthly_budget_usd: None,
                 asset_hosting_enabled: false,
                 default_asset_storage_quota_bytes: None,
+                extension_tools_enabled: false,
                 created_at_unix: now,
                 updated_at_unix: now,
             });
@@ -329,6 +331,9 @@ impl FerroGateway {
                 default_asset_storage_quota_bytes: payload
                     .default_asset_storage_quota_bytes
                     .or(existing.default_asset_storage_quota_bytes),
+                extension_tools_enabled: payload
+                    .extension_tools_enabled
+                    .unwrap_or(existing.extension_tools_enabled),
                 created_at_unix,
                 updated_at_unix: now,
             }
@@ -346,6 +351,7 @@ impl FerroGateway {
                 default_monthly_budget_usd: payload.default_monthly_budget_usd,
                 asset_hosting_enabled: payload.asset_hosting_enabled.unwrap_or(false),
                 default_asset_storage_quota_bytes: payload.default_asset_storage_quota_bytes,
+                extension_tools_enabled: payload.extension_tools_enabled.unwrap_or(false),
                 created_at_unix,
                 updated_at_unix: now,
             }
@@ -445,6 +451,7 @@ fn admin_plan(plan: &StoredPlan) -> AdminPlan {
         default_monthly_budget_usd: plan.default_monthly_budget_usd,
         asset_hosting_enabled: plan.asset_hosting_enabled,
         default_asset_storage_quota_bytes: plan.default_asset_storage_quota_bytes,
+        extension_tools_enabled: plan.extension_tools_enabled,
         created_at_unix: plan.created_at_unix,
         updated_at_unix: plan.updated_at_unix,
     }

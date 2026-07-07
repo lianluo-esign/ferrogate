@@ -28,6 +28,7 @@ fn execute_create(args: PlansCreateArgs) -> AnyResult<()> {
         "mcp_enabled": args.mcp_enabled,
         "self_hosted_workers_enabled": args.self_hosted_workers_enabled,
         "asset_hosting_enabled": args.asset_hosting_enabled,
+        "extension_tools_enabled": args.extension_tools_enabled,
         "default_rpm_limit": args.default_rpm_limit,
         "default_tpm_limit": args.default_tpm_limit,
         "default_monthly_budget_usd": args.default_monthly_budget_usd,
