@@ -129,4 +129,5 @@ see [`.github/workflows/rust-quality.yml`](../.github/workflows/rust-quality.yml
 FerroGate does not currently hold SOC 2, HIPAA, ISO 27001, or GDPR-specific
 certifications. This page documents the underlying controls; a formal audit
 program is a separate, future initiative from the documentation groundwork
-here.
+here. See [`soc2-audit-scoping.md`](soc2-audit-scoping.md) for a scoped
+recommendation on audit path, cost/timeline, and vendor options.

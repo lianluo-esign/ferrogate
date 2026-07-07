@@ -485,6 +485,7 @@ git diff --check
 - Auth service contract: [`docs/auth-service-contract.md`](docs/auth-service-contract.md)
 - Performance testing: [`docs/performance-testing.md`](docs/performance-testing.md)
 - Security controls: [`docs/security-controls.md`](docs/security-controls.md)
+- SOC 2 audit scoping: [`docs/soc2-audit-scoping.md`](docs/soc2-audit-scoping.md)
 - Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 
 ## Contributing
