@@ -20,7 +20,7 @@ use super::FerroGateway;
 use crate::{
     auth::authenticate,
     responses::{
-        write_json_error, write_json_error_and_close, write_raw_response, write_json_response,
+        write_json_error, write_json_error_and_close, write_json_response, write_raw_response,
         AdminDeleteResponse, AdminList, AssetMutationResponse, AssetSummary,
     },
 };
@@ -254,11 +254,9 @@ impl FerroGateway {
         // FerroGate is the origin server vouching for this content once
         // stored, not just proxying it, so this runs before anything is
         // durably written.
-        if let Err(message) = super::asset_security::validate_asset_content(
-            asset_type,
-            &content_type,
-            &content,
-        ) {
+        if let Err(message) =
+            super::asset_security::validate_asset_content(asset_type, &content_type, &content)
+        {
             return write_json_error(
                 session,
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -269,22 +267,28 @@ impl FerroGateway {
             .await;
         }
 
-        if let Some(default_quota) = plan.as_ref().and_then(|plan| plan.default_asset_storage_quota_bytes) {
-            let existing = match state.get_asset(&stored_asset_id(&tenant_id, asset_type, name, version)) {
-                Ok(existing) => existing,
-                Err(error) => {
-                    return write_json_error(
-                        session,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "storage_unavailable",
-                        error.to_string(),
-                        &ctx.request_id,
-                    )
-                    .await;
-                }
-            };
+        if let Some(default_quota) = plan
+            .as_ref()
+            .and_then(|plan| plan.default_asset_storage_quota_bytes)
+        {
+            let existing =
+                match state.get_asset(&stored_asset_id(&tenant_id, asset_type, name, version)) {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                };
             let used_by_others = match state.tenant_asset_storage_bytes_used(&tenant_id) {
-                Ok(used) => used.saturating_sub(existing.map(|asset| asset.size_bytes).unwrap_or(0)),
+                Ok(used) => {
+                    used.saturating_sub(existing.map(|asset| asset.size_bytes).unwrap_or(0))
+                }
                 Err(error) => {
                     return write_json_error(
                         session,

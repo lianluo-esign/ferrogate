@@ -107,7 +107,11 @@ fn content_type_allowed(asset_type: &str, content_type: &str) -> bool {
         // content-type alone (the EICAR/mcp_manifest checks still apply).
         _ => return true,
     };
-    let base_type = content_type.split(';').next().unwrap_or(content_type).trim();
+    let base_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
     allowed.contains(&base_type)
 }
 
@@ -143,9 +147,7 @@ mod tests {
 
     #[test]
     fn allows_clean_cli_tool_content() {
-        assert!(
-            validate_asset_content("cli_tool", "text/plain", b"#!/bin/sh\necho hi\n").is_ok()
-        );
+        assert!(validate_asset_content("cli_tool", "text/plain", b"#!/bin/sh\necho hi\n").is_ok());
     }
 
     #[test]

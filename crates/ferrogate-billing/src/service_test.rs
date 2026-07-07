@@ -89,7 +89,14 @@ fn charge_route_records_and_returns_ledger_entry() {
     assert_eq!(response.status, 200);
     let entry: LedgerEntry = serde_json::from_slice(&response.body).unwrap();
     assert!((entry.cost.total_cost - 0.035).abs() < 1e-9);
-    assert_eq!(service.sink.list(&LedgerListFilter::default(), 0, 10).unwrap().len(), 1);
+    assert_eq!(
+        service
+            .sink
+            .list(&LedgerListFilter::default(), 0, 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -171,7 +178,14 @@ fn auth_required_rejects_missing_or_wrong_token() {
     );
     assert_eq!(charge.status, 401);
     // Nothing was recorded.
-    assert_eq!(service.sink.list(&LedgerListFilter::default(), 0, 10).unwrap().len(), 0);
+    assert_eq!(
+        service
+            .sink
+            .list(&LedgerListFilter::default(), 0, 10)
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -212,13 +226,21 @@ fn ledger_read_scopes_by_tenant_query() {
         service.charge_and_record(&event).unwrap();
     }
     // Unfiltered: both orgs.
-    let all = route_request(&service, &request("GET", "/v1/billing/ledger", "", Vec::new()));
+    let all = route_request(
+        &service,
+        &request("GET", "/v1/billing/ledger", "", Vec::new()),
+    );
     let all: serde_json::Value = serde_json::from_slice(&all.body).unwrap();
     assert_eq!(all["entries"].as_array().unwrap().len(), 2);
     // Scoped to org-a: only that tenant's row.
     let scoped = route_request(
         &service,
-        &request("GET", "/v1/billing/ledger", "organization_id=org-a", Vec::new()),
+        &request(
+            "GET",
+            "/v1/billing/ledger",
+            "organization_id=org-a",
+            Vec::new(),
+        ),
     );
     let scoped: serde_json::Value = serde_json::from_slice(&scoped.body).unwrap();
     let entries = scoped["entries"].as_array().unwrap();

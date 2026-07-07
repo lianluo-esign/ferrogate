@@ -157,6 +157,7 @@ mod tests {
             rpm_limit,
             tpm_limit,
             monthly_budget_usd,
+            alert_threshold_pcts: Vec::new(),
             enabled,
             created_at_unix: 1,
             updated_at_unix: 1,

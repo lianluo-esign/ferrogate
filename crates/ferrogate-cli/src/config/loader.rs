@@ -174,6 +174,7 @@ impl Config {
             mcp_servers: Vec::new(),
             agent_upstreams: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            billing_alerts: crate::config::BillingAlertsConfig::default(),
             observability: crate::config::ObservabilityConfig::default(),
             analytics: crate::config::AnalyticsConfig::default(),
             metering: crate::config::MeteringConfig::default(),

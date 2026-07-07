@@ -57,8 +57,9 @@ impl BillingReporter {
 }
 
 fn resolve_token(config: &BillingServiceConfig) -> anyhow::Result<String> {
-    Ok(
-        crate::service_storage::resolve_secret(config.token.as_deref(), config.token_env.as_deref())?
-            .unwrap_or_default(),
-    )
+    Ok(crate::service_storage::resolve_secret(
+        config.token.as_deref(),
+        config.token_env.as_deref(),
+    )?
+    .unwrap_or_default())
 }

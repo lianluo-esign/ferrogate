@@ -55,6 +55,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) telemetry: TelemetryConfig,
     #[serde(default)]
+    pub(crate) billing_alerts: BillingAlertsConfig,
+    #[serde(default)]
     pub(crate) observability: ObservabilityConfig,
     #[serde(default)]
     pub(crate) analytics: AnalyticsConfig,
@@ -905,6 +907,37 @@ pub(crate) struct TelemetryConfig {
     pub(crate) otlp_endpoint: Option<String>,
 }
 
+/// Outbound notification channel for proactive budget-threshold alerting
+/// (issue #170) -- fired once per `StoredQuotaPolicy::alert_threshold_pcts`
+/// tier per scope per billing period, strictly before the unconditional
+/// `monthly_budget_exceeded` 429 hard-deny at 100%. Webhook is the only
+/// channel implemented today; `webhook_url` is the documented extension
+/// point other channels (email/Slack) would plug into alongside.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct BillingAlertsConfig {
+    /// POST target for budget-threshold-crossing notifications. `None`
+    /// (the default) disables dispatch entirely -- threshold crossings are
+    /// still detected and recorded (so a later-configured webhook doesn't
+    /// replay history), just not delivered anywhere.
+    #[serde(default)]
+    pub(crate) webhook_url: Option<String>,
+    #[serde(default = "default_billing_alerts_webhook_timeout_secs")]
+    pub(crate) webhook_timeout_secs: u64,
+}
+
+fn default_billing_alerts_webhook_timeout_secs() -> u64 {
+    5
+}
+
+impl Default for BillingAlertsConfig {
+    fn default() -> Self {
+        Self {
+            webhook_url: None,
+            webhook_timeout_secs: default_billing_alerts_webhook_timeout_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ObservabilityConfig {
     #[serde(default)]
@@ -1695,6 +1728,7 @@ impl Default for Config {
             mcp_servers: Vec::new(),
             agent_upstreams: Vec::new(),
             telemetry: TelemetryConfig::default(),
+            billing_alerts: BillingAlertsConfig::default(),
             observability: ObservabilityConfig::default(),
             analytics: AnalyticsConfig::default(),
             metering: MeteringConfig::default(),

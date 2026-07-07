@@ -267,7 +267,8 @@ struct HttpRequest {
 
 impl HttpRequest {
     fn query_param(&self, key: &str) -> Option<usize> {
-        self.query_str(key).and_then(|value| value.parse::<usize>().ok())
+        self.query_str(key)
+            .and_then(|value| value.parse::<usize>().ok())
     }
 
     fn query_str(&self, key: &str) -> Option<&str> {

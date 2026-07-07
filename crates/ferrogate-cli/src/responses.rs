@@ -1089,6 +1089,11 @@ pub(crate) struct AdminQuotaPolicy {
     pub(crate) rpm_limit: Option<u64>,
     pub(crate) tpm_limit: Option<u64>,
     pub(crate) monthly_budget_usd: Option<f64>,
+    /// Percent-of-`monthly_budget_usd` tiers (e.g. `[50, 90]`) that fire a
+    /// one-time proactive alert webhook when spend first crosses them
+    /// (issue #170) -- distinct from the unconditional 100% hard-deny in
+    /// `AppState::monthly_budget_exceeded`.
+    pub(crate) alert_threshold_pcts: Vec<u8>,
     pub(crate) enabled: bool,
     pub(crate) created_at_unix: i64,
     pub(crate) updated_at_unix: i64,
@@ -1108,6 +1113,8 @@ pub(crate) struct AdminQuotaPolicyMutation {
     pub(crate) tpm_limit: Option<u64>,
     #[serde(default)]
     pub(crate) monthly_budget_usd: Option<f64>,
+    #[serde(default)]
+    pub(crate) alert_threshold_pcts: Option<Vec<u8>>,
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
 }

@@ -64,18 +64,18 @@ use ferrogate_runtime::{
     SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{
-    ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig, QuotaScopeKind,
-    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
+    budget_alert_notification_id, ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig,
+    QuotaScopeKind, RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
     RuntimeStorageRepositories, StorageBackendEvidence, StorageError, StoredAgentRun,
     StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
-    StoredBillingReportOutboxEntry, StoredManagedWorkerIsolationEvidence,
-    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
-    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredPermission, StoredPlan,
-    StoredProject, StoredQuotaPolicy, StoredRequestLog, StoredRole, StoredSelfHostedRunDispatch,
-    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
-    StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
-    StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredTenantRoleBinding,
-    StoredUsageAggregate, StoredUsageMonthlyRollup, StoredWorkspace,
+    StoredBillingReportOutboxEntry, StoredBudgetAlertNotification,
+    StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
+    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
+    StoredManagedWorkerSession, StoredPermission, StoredPlan, StoredProject, StoredQuotaPolicy,
+    StoredRequestLog, StoredRole, StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact,
+    StoredSelfHostedWorkerCheckpoint, StoredSelfHostedWorkerHeartbeat,
+    StoredSelfHostedWorkerRegistration, StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount,
+    StoredTenantRoleBinding, StoredUsageAggregate, StoredUsageMonthlyRollup, StoredWorkspace,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
@@ -4517,7 +4517,10 @@ impl AppState {
     /// which case this returns `Ok(None)` rather than an error, matching
     /// [`resolve_effective_quota`]'s existing fail-open-to-no-plan-defaults
     /// behavior for a missing plan row.
-    pub(crate) fn resolve_tenant_plan(&self, tenant_id: &str) -> anyhow::Result<Option<StoredPlan>> {
+    pub(crate) fn resolve_tenant_plan(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<Option<StoredPlan>> {
         let Some(account) = self.repositories.get_tenant_account(tenant_id)? else {
             return Ok(None);
         };
@@ -4669,7 +4672,11 @@ impl AppState {
         Ok(self.repositories.list_tenant_role_bindings(tenant_id)?)
     }
 
-    pub(crate) fn unbind_tenant_role(&self, tenant_id: &str, role_id: &str) -> anyhow::Result<bool> {
+    pub(crate) fn unbind_tenant_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+    ) -> anyhow::Result<bool> {
         Ok(self.repositories.unbind_tenant_role(tenant_id, role_id)?)
     }
 
@@ -4688,11 +4695,7 @@ impl AppState {
                 .get_role(&binding.role_id)
                 .ok()
                 .flatten()
-                .is_some_and(|role| {
-                    role.permission_keys
-                        .iter()
-                        .any(|key| key == permission_key)
-                })
+                .is_some_and(|role| role.permission_keys.iter().any(|key| key == permission_key))
         })
     }
 
@@ -4761,6 +4764,158 @@ impl AppState {
             .map(|rollup| rollup.cost_usd)
             .unwrap_or(0.0);
         Ok(spent >= budget_usd)
+    }
+
+    /// Best-effort proactive budget-threshold alerting (issue #170): checks
+    /// every attributed scope's `StoredQuotaPolicy::alert_threshold_pcts`
+    /// against its current-period spend and fires a webhook the first time
+    /// each tier is crossed -- strictly before [`Self::monthly_budget_exceeded`]'s
+    /// unconditional 100% hard-deny. Unlike that hard-deny (which stops at
+    /// the *nearest* attributed scope), every scope in the chain is checked
+    /// independently, since a key-level and tenant-level policy may each
+    /// configure different tiers.
+    ///
+    /// An alert is a courtesy notice, not a governance decision: any
+    /// failure here (storage error, unreachable webhook) is logged and
+    /// swallowed rather than propagated, so it can never affect whether the
+    /// triggering request succeeded.
+    fn dispatch_budget_threshold_alerts(&self, tenant: &ferrogate_core::TenantContext) {
+        let Some(webhook_url) = self.config.billing_alerts.webhook_url.clone() else {
+            return;
+        };
+        let period_month = self.current_period_month();
+        let timeout = Duration::from_secs(self.config.billing_alerts.webhook_timeout_secs);
+        let scopes: [(QuotaScopeKind, Option<&str>); 4] = [
+            (QuotaScopeKind::Key, tenant.api_key_id.as_deref()),
+            (QuotaScopeKind::Workspace, tenant.workspace_id.as_deref()),
+            (QuotaScopeKind::Project, tenant.project_id.as_deref()),
+            (QuotaScopeKind::Tenant, tenant.organization_id.as_deref()),
+        ];
+        for (scope_type, scope_id) in scopes.into_iter() {
+            let Some(scope_id) = scope_id else { continue };
+            self.dispatch_budget_threshold_alerts_for_scope(
+                scope_type,
+                scope_id,
+                &period_month,
+                &webhook_url,
+                timeout,
+            );
+        }
+    }
+
+    fn dispatch_budget_threshold_alerts_for_scope(
+        &self,
+        scope_type: QuotaScopeKind,
+        scope_id: &str,
+        period_month: &str,
+        webhook_url: &str,
+        timeout: Duration,
+    ) {
+        let policy = match self.repositories.get_quota_policy(scope_type, scope_id) {
+            Ok(Some(policy)) => policy,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(
+                    scope_type = %scope_type.as_str(),
+                    scope_id = %scope_id,
+                    error = %error,
+                    "failed to load quota policy for budget threshold alert check"
+                );
+                return;
+            }
+        };
+        let Some(budget_usd) = policy.monthly_budget_usd.filter(|budget| *budget > 0.0) else {
+            return;
+        };
+        if policy.alert_threshold_pcts.is_empty() {
+            return;
+        }
+        let spent_usd =
+            match self
+                .repositories
+                .get_usage_monthly_rollup(scope_type, scope_id, period_month)
+            {
+                Ok(rollup) => rollup.map(|rollup| rollup.cost_usd).unwrap_or(0.0),
+                Err(error) => {
+                    warn!(
+                        scope_type = %scope_type.as_str(),
+                        scope_id = %scope_id,
+                        error = %error,
+                        "failed to load usage rollup for budget threshold alert check"
+                    );
+                    return;
+                }
+            };
+        let percent_spent = (spent_usd / budget_usd) * 100.0;
+        for threshold_pct in policy.alert_threshold_pcts.iter().copied() {
+            if percent_spent + f64::EPSILON < f64::from(threshold_pct) {
+                continue;
+            }
+            let notification_id =
+                budget_alert_notification_id(scope_type, scope_id, period_month, threshold_pct);
+            match self
+                .repositories
+                .budget_alert_already_notified(&notification_id)
+            {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(
+                        scope_type = %scope_type.as_str(),
+                        scope_id = %scope_id,
+                        threshold_pct,
+                        error = %error,
+                        "failed to check budget alert idempotency ledger"
+                    );
+                    continue;
+                }
+            }
+            let fired_at_unix = now_unix_seconds().unwrap_or_default() as i64;
+            let payload = crate::budget_alerts::BudgetAlertWebhookPayload::new(
+                scope_type,
+                scope_id,
+                period_month,
+                threshold_pct,
+                spent_usd,
+                budget_usd,
+                fired_at_unix,
+            );
+            if let Err(error) =
+                crate::budget_alerts::dispatch_budget_alert_webhook(webhook_url, timeout, &payload)
+            {
+                warn!(
+                    scope_type = %scope_type.as_str(),
+                    scope_id = %scope_id,
+                    threshold_pct,
+                    error = %error,
+                    "failed to deliver budget threshold alert webhook"
+                );
+            }
+            // Recorded regardless of delivery success: retrying a
+            // permanently-unreachable webhook on every subsequent request
+            // for the rest of the billing period would be worse than a
+            // single missed notification, and this matches the "fire
+            // (attempt) exactly once per tier" contract in issue #170.
+            if let Err(error) =
+                self.repositories
+                    .record_budget_alert_notification(StoredBudgetAlertNotification {
+                        id: notification_id,
+                        scope_type,
+                        scope_id: scope_id.to_string(),
+                        period_month: period_month.to_string(),
+                        threshold_pct,
+                        notified_at_unix: fired_at_unix,
+                    })
+            {
+                warn!(
+                    scope_type = %scope_type.as_str(),
+                    scope_id = %scope_id,
+                    threshold_pct,
+                    error = %error,
+                    "failed to record budget alert notification"
+                );
+            }
+        }
     }
 
     /// Filters (and optionally aggregates) the P1-4 monthly usage/cost
@@ -5176,6 +5331,11 @@ impl AppState {
                 );
             }
         }
+        // Runs after the rollup update this settled request just committed
+        // (both `append_billing_event` paths increment
+        // `usage_monthly_rollups` synchronously), so spend read here
+        // reflects this request (issue #170).
+        self.dispatch_budget_threshold_alerts(&draft.request.tenant);
         Ok(())
     }
 
@@ -9016,6 +9176,245 @@ mod tests {
         });
 
         (endpoint, captured)
+    }
+
+    /// Spawns a plain-HTTP mock webhook receiver on `127.0.0.1` that
+    /// accepts any number of sequential `Connection: close` requests
+    /// (unlike [`spawn_guardrail_provider_mock`], which is one-shot),
+    /// recording each JSON body in arrival order (issue #170).
+    fn spawn_webhook_capture_server() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/budget-alerts", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let server_captured = Arc::clone(&captured);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut raw = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let header_end = loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        return;
+                    }
+                    raw.extend_from_slice(&buffer[..read]);
+                    if let Some(position) = raw.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        break position + 4;
+                    }
+                };
+                let content_length: usize = String::from_utf8_lossy(&raw[..header_end])
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                while raw.len() < header_end + content_length {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0, "connection closed before body was complete");
+                    raw.extend_from_slice(&buffer[..read]);
+                }
+                let body = &raw[header_end..header_end + content_length];
+                server_captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(body).unwrap());
+
+                let response =
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        (endpoint, captured)
+    }
+
+    fn budget_alert_test_request(request_id: &str) -> RequestContext {
+        RequestContext {
+            request_id: request_id.into(),
+            trace_id: None,
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            route: Some("openai.chat.completions".into()),
+            upstream: Some("openai".into()),
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some("tenant-budget-alerts".into()),
+                team_id: None,
+                project_id: Some("project-budget-alerts".into()),
+                workspace_id: Some("workspace-budget-alerts".into()),
+                user_id: None,
+                api_key_id: Some("vk-budget-alerts".into()),
+            },
+        }
+    }
+
+    /// Settles `prompt_tokens` worth of spend (at the fixed $1/1M input
+    /// price configured in the test's `Model`, zero output cost) against
+    /// the fixed tenant/project/workspace/key attribution from
+    /// [`budget_alert_test_request`].
+    fn settle_budget_alert_spend(state: &AppState, request_id: &str, prompt_tokens: u64) {
+        let request = budget_alert_test_request(request_id);
+        state
+            .record_billing_event(
+                BillingEventDraft {
+                    request: &request,
+                    logical_model: "fast-chat",
+                    provider: "openai",
+                    provider_model: "gpt-test",
+                    status_code: 200,
+                    latency_ms: Some(10),
+                },
+                &ProviderUsage {
+                    prompt_tokens: Some(prompt_tokens),
+                    completion_tokens: Some(0),
+                    total_tokens: Some(prompt_tokens),
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn budget_threshold_alert_fires_once_per_tier_and_is_idempotent() {
+        let (webhook_url, captured) = spawn_webhook_capture_server();
+        let state = AppState::new(Config {
+            providers: vec![test_provider()],
+            models: vec![Model {
+                input_price_per_1m: Some(1.0),
+                output_price_per_1m: Some(0.0),
+                ..test_model()
+            }],
+            billing_alerts: crate::config::BillingAlertsConfig {
+                webhook_url: Some(webhook_url),
+                webhook_timeout_secs: 5,
+            },
+            ..Config::default()
+        });
+        state
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: "tenant:tenant-budget-alerts".into(),
+                scope_type: QuotaScopeKind::Tenant,
+                scope_id: "tenant-budget-alerts".into(),
+                model_allowlist: vec![],
+                rpm_limit: None,
+                tpm_limit: None,
+                monthly_budget_usd: Some(1.0),
+                alert_threshold_pcts: vec![50, 90],
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        // 500_000 prompt tokens at $1/1M = $0.50 spend = 50% of the $1
+        // budget: crosses the 50% tier, not yet the 90% one.
+        settle_budget_alert_spend(&state, "req-1", 500_000);
+        {
+            let captured = captured.lock().unwrap();
+            assert_eq!(
+                captured.len(),
+                1,
+                "crossing 50% must fire exactly one webhook: {captured:?}"
+            );
+            assert_eq!(captured[0]["threshold_pct"], 50);
+            assert_eq!(captured[0]["scope_type"], "tenant");
+            assert_eq!(captured[0]["scope_id"], "tenant-budget-alerts");
+            assert_eq!(captured[0]["event"], "budget_threshold_crossed");
+        }
+
+        // +450_000 more prompt tokens = $0.95 total = 95%: crosses the 90%
+        // tier. The already-notified 50% tier must not refire.
+        settle_budget_alert_spend(&state, "req-2", 450_000);
+        {
+            let captured = captured.lock().unwrap();
+            assert_eq!(
+                captured.len(),
+                2,
+                "crossing 90% must fire exactly one more webhook, and 50% must not repeat: {captured:?}"
+            );
+            assert_eq!(captured[1]["threshold_pct"], 90);
+        }
+
+        // A further request that keeps spend above both already-crossed
+        // tiers (and even past the 100% hard-deny threshold, though that's
+        // enforced separately in auth.rs) must not fire either tier again.
+        settle_budget_alert_spend(&state, "req-3", 100_000);
+        {
+            let captured = captured.lock().unwrap();
+            assert_eq!(
+                captured.len(),
+                2,
+                "no tier may fire twice in the same billing period: {captured:?}"
+            );
+        }
+
+        assert!(state
+            .repositories
+            .budget_alert_already_notified(&budget_alert_notification_id(
+                QuotaScopeKind::Tenant,
+                "tenant-budget-alerts",
+                &state.current_period_month(),
+                50,
+            ))
+            .unwrap());
+        assert!(state
+            .repositories
+            .budget_alert_already_notified(&budget_alert_notification_id(
+                QuotaScopeKind::Tenant,
+                "tenant-budget-alerts",
+                &state.current_period_month(),
+                90,
+            ))
+            .unwrap());
+    }
+
+    #[test]
+    fn budget_threshold_alert_never_fires_when_thresholds_are_unset() {
+        let (webhook_url, captured) = spawn_webhook_capture_server();
+        let state = AppState::new(Config {
+            providers: vec![test_provider()],
+            models: vec![Model {
+                input_price_per_1m: Some(1.0),
+                output_price_per_1m: Some(0.0),
+                ..test_model()
+            }],
+            billing_alerts: crate::config::BillingAlertsConfig {
+                webhook_url: Some(webhook_url),
+                webhook_timeout_secs: 5,
+            },
+            ..Config::default()
+        });
+        // No alert_threshold_pcts configured -- backward compatible with
+        // pre-#170 StoredQuotaPolicy rows/tests: a budget cap alone must
+        // never imply implicit alert tiers.
+        state
+            .upsert_quota_policy(StoredQuotaPolicy {
+                id: "tenant:tenant-budget-alerts".into(),
+                scope_type: QuotaScopeKind::Tenant,
+                scope_id: "tenant-budget-alerts".into(),
+                model_allowlist: vec![],
+                rpm_limit: None,
+                tpm_limit: None,
+                monthly_budget_usd: Some(1.0),
+                alert_threshold_pcts: vec![],
+                enabled: true,
+                created_at_unix: 1,
+                updated_at_unix: 1,
+            })
+            .unwrap();
+
+        // Spend well past 100% of budget -- the hard-deny is a separate
+        // concern (auth.rs); this call itself must not fire any webhook.
+        settle_budget_alert_spend(&state, "req-1", 2_000_000);
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "no alert_threshold_pcts configured means no webhook ever fires"
+        );
     }
 
     fn custom_http_guardrail_rule(provider_endpoint: String) -> crate::config::GuardrailRule {

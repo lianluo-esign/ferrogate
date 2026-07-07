@@ -44,9 +44,8 @@ impl FerroGateway {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
                     Ok(_) => match state.list_permissions() {
                         Ok(permissions) => {
-                            let body = AdminList::new(
-                                permissions.iter().map(admin_permission).collect(),
-                            );
+                            let body =
+                                AdminList::new(permissions.iter().map(admin_permission).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                                 .await
                         }
@@ -72,7 +71,10 @@ impl FerroGateway {
                         .await
                     }
                 },
-                Method::POST => self.handle_admin_permission_upsert(session, ctx, headers).await,
+                Method::POST => {
+                    self.handle_admin_permission_upsert(session, ctx, headers)
+                        .await
+                }
                 _ => {
                     write_json_error(
                         session,
@@ -614,36 +616,39 @@ impl FerroGateway {
         let role_id_segment = segments.next();
 
         match (method, role_id_segment) {
-            (&Method::GET, None) => match authenticate(&state, headers, "admin.read", &ctx.request_id)
-            {
-                Ok(_) => match state.list_tenant_role_bindings(tenant_id) {
-                    Ok(bindings) => {
-                        let body =
-                            AdminList::new(bindings.iter().map(admin_tenant_role_binding).collect());
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
+            (&Method::GET, None) => {
+                match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+                    Ok(_) => match state.list_tenant_role_bindings(tenant_id) {
+                        Ok(bindings) => {
+                            let body = AdminList::new(
+                                bindings.iter().map(admin_tenant_role_binding).collect(),
+                            );
+                            write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                                .await
+                        }
+                        Err(error) => {
+                            write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
+                    },
                     Err(error) => {
                         write_json_error(
                             session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
+                            error.status,
+                            error.code,
+                            error.message,
                             &ctx.request_id,
                         )
                         .await
                     }
-                },
-                Err(error) => {
-                    write_json_error(
-                        session,
-                        error.status,
-                        error.code,
-                        error.message,
-                        &ctx.request_id,
-                    )
-                    .await
                 }
-            },
+            }
             (&Method::POST, None) => {
                 let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
                     Ok(auth) => auth,
@@ -658,15 +663,13 @@ impl FerroGateway {
                         .await;
                     }
                 };
-                let payload = match read_json_body::<AdminTenantRoleBindingRequest>(
-                    session,
-                    &ctx.request_id,
-                )
-                .await?
-                {
-                    Ok(payload) => payload,
-                    Err(()) => return Ok(()),
-                };
+                let payload =
+                    match read_json_body::<AdminTenantRoleBindingRequest>(session, &ctx.request_id)
+                        .await?
+                    {
+                        Ok(payload) => payload,
+                        Err(()) => return Ok(()),
+                    };
                 if state.get_role(&payload.role_id).ok().flatten().is_none() {
                     return write_json_error(
                         session,

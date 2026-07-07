@@ -1208,7 +1208,12 @@ fn push_optional_attribute(
     }
 }
 
-fn dispatch_otlp_request(request: &OtlpHttpRequest, timeout: Duration) -> AnyResult<()> {
+/// Generic "POST bytes to an http(s) URL" client (raw TCP/TLS, no
+/// `reqwest`) originally built for OTLP export -- reused as-is by
+/// `billing_alerts::dispatch_budget_alert_webhook` (issue #170) since the
+/// two have identical transport needs and there's no reason to duplicate
+/// the TCP-connect/TLS-handshake/status-line-parsing logic.
+pub(crate) fn dispatch_otlp_request(request: &OtlpHttpRequest, timeout: Duration) -> AnyResult<()> {
     let target = parse_otlp_target(&request.url)?;
     let mut stream = TcpStream::connect((target.host.as_str(), target.port))
         .with_context(|| format!("failed to connect OTLP collector {}", target.authority))?;

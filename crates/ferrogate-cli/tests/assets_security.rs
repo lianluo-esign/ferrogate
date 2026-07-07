@@ -18,14 +18,15 @@ use support::{free_addr, http_request, start_gateway, wait_for_gateway};
 #[test]
 fn eicar_test_payload_is_rejected_at_push() {
     let Ok(dsn) = std::env::var("FERROGATE_SUPABASE_DSN") else {
-        eprintln!("skipping eicar_test_payload_is_rejected_at_push: FERROGATE_SUPABASE_DSN is not set");
+        eprintln!(
+            "skipping eicar_test_payload_is_rejected_at_push: FERROGATE_SUPABASE_DSN is not set"
+        );
         return;
     };
 
     let (gateway_addr, mut gateway) = start_registered_gateway(&dsn, "org_asset_security");
 
-    let eicar =
-        "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    let eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
     let push = http_request(
         &gateway_addr,
         "PUT",

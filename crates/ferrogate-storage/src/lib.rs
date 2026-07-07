@@ -32,9 +32,10 @@ use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 
 mod rbac;
-pub use rbac::{
-    tenant_role_binding_id, StoredPermission, StoredRole, StoredTenantRoleBinding,
-};
+pub use rbac::{tenant_role_binding_id, StoredPermission, StoredRole, StoredTenantRoleBinding};
+
+mod budget_alerts;
+pub use budget_alerts::{budget_alert_notification_id, StoredBudgetAlertNotification};
 
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
     StorageProviderKind::Supabase,
@@ -766,6 +767,7 @@ pub struct RuntimeControlPlaneState {
     tenant_role_bindings: InMemoryRepository<StoredTenantRoleBinding>,
     usage_monthly_rollups: InMemoryRepository<StoredUsageMonthlyRollup>,
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
+    budget_alert_notifications: InMemoryRepository<StoredBudgetAlertNotification>,
 }
 
 struct PostgresControlPlaneStore {
@@ -1447,6 +1449,7 @@ impl PostgresControlPlaneStore {
 
     fn upsert_quota_policy(&self, policy: &StoredQuotaPolicy) -> Result<(), StorageError> {
         let model_allowlist_json = serialize_storage_document(&policy.model_allowlist)?;
+        let alert_threshold_pcts_json = serialize_storage_document(&policy.alert_threshold_pcts)?;
         let rpm_limit = policy.rpm_limit.map(saturating_i64);
         let tpm_limit = policy.tpm_limit.map(saturating_i64);
         let created_at_unix = policy.created_at_unix;
@@ -1455,13 +1458,15 @@ impl PostgresControlPlaneStore {
             client.execute(
                 "INSERT INTO quota_policies \
                  (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
-                  monthly_budget_usd, enabled, created_at_unix, updated_at_unix) \
-                 VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10) \
+                  monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
+                  alert_threshold_pcts_json) \
+                 VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
                  ON CONFLICT (scope_type, scope_id) DO UPDATE SET \
                  model_allowlist_json = EXCLUDED.model_allowlist_json, \
                  rpm_limit = EXCLUDED.rpm_limit, tpm_limit = EXCLUDED.tpm_limit, \
                  monthly_budget_usd = EXCLUDED.monthly_budget_usd, \
-                 enabled = EXCLUDED.enabled, updated_at_unix = EXCLUDED.updated_at_unix",
+                 enabled = EXCLUDED.enabled, updated_at_unix = EXCLUDED.updated_at_unix, \
+                 alert_threshold_pcts_json = EXCLUDED.alert_threshold_pcts_json",
                 &[
                     &policy.id,
                     &policy.scope_type.as_str(),
@@ -1473,6 +1478,7 @@ impl PostgresControlPlaneStore {
                     &policy.enabled,
                     &created_at_unix,
                     &updated_at_unix,
+                    &alert_threshold_pcts_json,
                 ],
             )?;
             Ok(())
@@ -1487,7 +1493,8 @@ impl PostgresControlPlaneStore {
         let row = self.with_client(|client| {
             client.query_opt(
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
-                 tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix \
+                 tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
+                 alert_threshold_pcts_json::text \
                  FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
                 &[&scope_type.as_str(), &scope_id],
             )
@@ -1499,7 +1506,8 @@ impl PostgresControlPlaneStore {
         let rows = self.with_client(|client| {
             client.query(
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
-                 tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix \
+                 tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
+                 alert_threshold_pcts_json::text \
                  FROM quota_policies ORDER BY id ASC",
                 &[],
             )
@@ -1522,7 +1530,8 @@ impl PostgresControlPlaneStore {
     }
 
     fn upsert_plan(&self, plan: &StoredPlan) -> Result<(), StorageError> {
-        let default_model_allowlist_json = serialize_storage_document(&plan.default_model_allowlist)?;
+        let default_model_allowlist_json =
+            serialize_storage_document(&plan.default_model_allowlist)?;
         let default_rpm_limit = plan.default_rpm_limit.map(saturating_i64);
         let default_tpm_limit = plan.default_tpm_limit.map(saturating_i64);
         let admin_console_seats = plan.admin_console_seats.map(i64::from);
@@ -1665,8 +1674,9 @@ impl PostgresControlPlaneStore {
     }
 
     fn delete_asset(&self, id: &str) -> Result<bool, StorageError> {
-        let affected =
-            self.with_client(|client| client.execute("DELETE FROM stored_assets WHERE id = $1", &[&id]))?;
+        let affected = self.with_client(|client| {
+            client.execute("DELETE FROM stored_assets WHERE id = $1", &[&id])
+        })?;
         Ok(affected > 0)
     }
 
@@ -3978,6 +3988,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "permissions",
         "roles",
         "tenant_role_bindings",
+        "budget_alert_notifications",
     ];
     for table in TABLES {
         let exists = client
@@ -4294,6 +4305,7 @@ fn quota_policy_from_row(row: &PostgresRow) -> Result<StoredQuotaPolicy, Storage
         ))
     })?;
     let model_allowlist = deserialize_storage_document(&row.get::<_, String>(3))?;
+    let alert_threshold_pcts = deserialize_storage_document(&row.get::<_, String>(10))?;
     Ok(StoredQuotaPolicy {
         id: row.get::<_, String>(0),
         scope_type,
@@ -4305,6 +4317,7 @@ fn quota_policy_from_row(row: &PostgresRow) -> Result<StoredQuotaPolicy, Storage
         enabled: row.get::<_, bool>(7),
         created_at_unix: row.get::<_, i64>(8),
         updated_at_unix: row.get::<_, i64>(9),
+        alert_threshold_pcts,
     })
 }
 
@@ -5201,6 +5214,7 @@ impl RuntimeControlPlaneState {
             tenant_role_bindings: InMemoryRepository::new(),
             usage_monthly_rollups: InMemoryRepository::new(),
             billing_report_outbox: InMemoryRepository::new(),
+            budget_alert_notifications: InMemoryRepository::new(),
         }
     }
 
@@ -6211,6 +6225,13 @@ pub struct StoredQuotaPolicy {
     pub tpm_limit: Option<u64>,
     #[serde(default)]
     pub monthly_budget_usd: Option<f64>,
+    /// Percent-of-`monthly_budget_usd` tiers (e.g. `[75, 90, 95]`) that fire
+    /// a one-time webhook notification each, strictly before the 100% hard
+    /// deny in `AppState::monthly_budget_exceeded` (issue #170). Empty
+    /// means no proactive alerting -- unaffected existing policies keep
+    /// today's "allowed, then a hard 429 at 100%" behavior.
+    #[serde(default)]
+    pub alert_threshold_pcts: Vec<u8>,
     #[serde(default = "default_true_bool")]
     pub enabled: bool,
     #[serde(default)]
@@ -7600,7 +7621,9 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert_asset(&asset),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.upsert_asset(&asset)
+            }
             RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
         }
     }
@@ -10446,6 +10469,7 @@ mod tests {
                 rpm_limit: Some(1_000),
                 tpm_limit: Some(500_000),
                 monthly_budget_usd: Some(250.0),
+                alert_threshold_pcts: vec![],
                 enabled: true,
                 created_at_unix: 1,
                 updated_at_unix: 1,
@@ -10460,6 +10484,7 @@ mod tests {
                 rpm_limit: Some(60),
                 tpm_limit: None,
                 monthly_budget_usd: None,
+                alert_threshold_pcts: vec![],
                 enabled: true,
                 created_at_unix: 1,
                 updated_at_unix: 1,
@@ -10504,6 +10529,7 @@ mod tests {
                 rpm_limit: Some(100),
                 tpm_limit: None,
                 monthly_budget_usd: None,
+                alert_threshold_pcts: vec![],
                 enabled: true,
                 created_at_unix: 1,
                 updated_at_unix: 1,
@@ -10519,6 +10545,7 @@ mod tests {
                 rpm_limit: Some(50),
                 tpm_limit: Some(10_000),
                 monthly_budget_usd: Some(10.0),
+                alert_threshold_pcts: vec![],
                 enabled: false,
                 created_at_unix: 1,
                 updated_at_unix: 2,

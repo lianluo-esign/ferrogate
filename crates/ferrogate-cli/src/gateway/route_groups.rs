@@ -78,9 +78,9 @@ pub(super) fn match_route_group(path: &str) -> Option<RouteGroup> {
 fn build_route_group_router() -> Router<RouteGroup> {
     let mut router = Router::new();
     let mut insert = |pattern: &'static str, group: RouteGroup| {
-        router
-            .insert(pattern, group)
-            .unwrap_or_else(|error| panic!("invalid or conflicting route pattern {pattern}: {error}"));
+        router.insert(pattern, group).unwrap_or_else(|error| {
+            panic!("invalid or conflicting route pattern {pattern}: {error}")
+        });
     };
 
     insert("/admin", RouteGroup::AdminOverview);
@@ -112,7 +112,10 @@ fn build_route_group_router() -> Router<RouteGroup> {
         "/v1/self-hosted-workers/heartbeat",
         RouteGroup::SelfHostedWorker,
     );
-    insert("/v1/self-hosted-workers/events", RouteGroup::SelfHostedWorker);
+    insert(
+        "/v1/self-hosted-workers/events",
+        RouteGroup::SelfHostedWorker,
+    );
     insert(
         "/v1/self-hosted-workers/artifacts",
         RouteGroup::SelfHostedWorker,
@@ -129,7 +132,10 @@ fn build_route_group_router() -> Router<RouteGroup> {
         "/v1/self-hosted-workers/runs/ack",
         RouteGroup::SelfHostedWorker,
     );
-    insert("/admin/v1/self-hosted-workers", RouteGroup::SelfHostedWorker);
+    insert(
+        "/admin/v1/self-hosted-workers",
+        RouteGroup::SelfHostedWorker,
+    );
     insert(
         "/admin/v1/self-hosted-workers/{*rest}",
         RouteGroup::SelfHostedWorker,
@@ -165,7 +171,10 @@ fn build_route_group_router() -> Router<RouteGroup> {
         "/admin/v1/managed-worker-sessions",
         RouteGroup::AdminManagedWorker,
     );
-    insert("/admin/v1/framework-adapters", RouteGroup::AdminManagedWorker);
+    insert(
+        "/admin/v1/framework-adapters",
+        RouteGroup::AdminManagedWorker,
+    );
 
     insert("/admin/v1/agent-upstreams", RouteGroup::AdminAgentUpstream);
     insert(
@@ -211,7 +220,10 @@ fn build_route_group_router() -> Router<RouteGroup> {
     insert("/admin/v1/tenants", RouteGroup::TenantHierarchy);
 
     insert("/admin/v1/virtual-keys", RouteGroup::AdminVirtualKey);
-    insert("/admin/v1/virtual-keys/{*rest}", RouteGroup::AdminVirtualKey);
+    insert(
+        "/admin/v1/virtual-keys/{*rest}",
+        RouteGroup::AdminVirtualKey,
+    );
 
     insert("/admin/v1/quota-policies", RouteGroup::QuotaPolicy);
     insert("/admin/v1/quota-policies/{*rest}", RouteGroup::QuotaPolicy);
@@ -263,9 +275,7 @@ impl FerroGateway {
             RouteGroup::AdminRequestLog => {
                 self.try_admin_request_log_routes(session, ctx, req).await
             }
-            RouteGroup::AdminConfigOps => {
-                self.try_admin_config_ops_routes(session, ctx, req).await
-            }
+            RouteGroup::AdminConfigOps => self.try_admin_config_ops_routes(session, ctx, req).await,
             RouteGroup::AdminProvider => self.try_admin_provider_routes(session, ctx, req).await,
             RouteGroup::AdminManagedWorker => {
                 self.try_admin_managed_worker_routes(session, ctx, req)
@@ -277,9 +287,7 @@ impl FerroGateway {
             }
             RouteGroup::AdminPlugin => self.try_admin_plugin_routes(session, ctx, req).await,
             RouteGroup::AdminTool => self.try_admin_tool_routes(session, ctx, req).await,
-            RouteGroup::AdminMcpServer => {
-                self.try_admin_mcp_server_routes(session, ctx, req).await
-            }
+            RouteGroup::AdminMcpServer => self.try_admin_mcp_server_routes(session, ctx, req).await,
             RouteGroup::AdminModel => self.try_admin_model_routes(session, ctx, req).await,
             RouteGroup::AdminGatewayConfig => {
                 self.try_admin_gateway_config_routes(session, ctx, req)
@@ -463,7 +471,8 @@ impl FerroGateway {
                 .await?;
             return Ok(true);
         }
-        if req.path == "/admin/v1/skill-packages" || req.path.starts_with("/admin/v1/skill-packages/")
+        if req.path == "/admin/v1/skill-packages"
+            || req.path.starts_with("/admin/v1/skill-packages/")
         {
             self.handle_admin_skill_packages(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
@@ -633,7 +642,8 @@ impl FerroGateway {
         ctx: &ProxyContext,
         req: &RequestParts,
     ) -> PingoraResult<bool> {
-        if req.path == "/admin/v1/agent-upstreams" || req.path.starts_with("/admin/v1/agent-upstreams/")
+        if req.path == "/admin/v1/agent-upstreams"
+            || req.path.starts_with("/admin/v1/agent-upstreams/")
         {
             self.handle_admin_agent_upstreams(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
@@ -669,7 +679,8 @@ impl FerroGateway {
             self.handle_admin_tools(session, ctx, &req.headers).await?;
             return Ok(true);
         }
-        if req.path == "/admin/v1/tool-approvals" || req.path.starts_with("/admin/v1/tool-approvals/")
+        if req.path == "/admin/v1/tool-approvals"
+            || req.path.starts_with("/admin/v1/tool-approvals/")
         {
             self.handle_admin_tool_approvals(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
@@ -716,7 +727,8 @@ impl FerroGateway {
         ctx: &ProxyContext,
         req: &RequestParts,
     ) -> PingoraResult<bool> {
-        if req.path == "/admin/v1/gateway-configs" || req.path.starts_with("/admin/v1/gateway-configs/")
+        if req.path == "/admin/v1/gateway-configs"
+            || req.path.starts_with("/admin/v1/gateway-configs/")
         {
             self.handle_admin_gateway_configs(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
@@ -791,7 +803,8 @@ impl FerroGateway {
             return Ok(true);
         }
         if req.path == "/admin/v1/tenants" {
-            self.handle_admin_tenants(session, ctx, &req.headers).await?;
+            self.handle_admin_tenants(session, ctx, &req.headers)
+                .await?;
             return Ok(true);
         }
         Ok(false)
@@ -817,7 +830,8 @@ impl FerroGateway {
         ctx: &ProxyContext,
         req: &RequestParts,
     ) -> PingoraResult<bool> {
-        if req.path == "/admin/v1/quota-policies" || req.path.starts_with("/admin/v1/quota-policies/")
+        if req.path == "/admin/v1/quota-policies"
+            || req.path.starts_with("/admin/v1/quota-policies/")
         {
             self.handle_admin_quota_policies(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;

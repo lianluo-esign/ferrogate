@@ -189,7 +189,8 @@ pub(crate) fn serve(config: Config, source_path: Option<PathBuf>, upgrade: bool)
     let mut server = Server::new_with_opt_and_conf(Some(pingora_opt), server_conf);
     server.bootstrap();
 
-    let mut service = http_proxy_service_with_name(&server.configuration, gateway, GATEWAY_SERVICE_NAME);
+    let mut service =
+        http_proxy_service_with_name(&server.configuration, gateway, GATEWAY_SERVICE_NAME);
     if let Some(paths) = resolved_tls {
         let mut tls_settings = TlsSettings::intermediate(&paths.cert_path, &paths.key_path)
             .context("failed to configure TLS listener")?;

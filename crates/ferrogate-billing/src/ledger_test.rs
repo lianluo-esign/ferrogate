@@ -83,7 +83,12 @@ fn sink_lists_and_gets() {
     let sink = InMemoryLedgerSink::default();
     let entry = charge(&book(), &event("req-4", "openai", "gpt-5.5")).unwrap();
     sink.record(&entry).unwrap();
-    assert_eq!(sink.list(&LedgerListFilter::default(), 0, 10).unwrap().len(), 1);
+    assert_eq!(
+        sink.list(&LedgerListFilter::default(), 0, 10)
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(sink.get(&entry.id).unwrap().unwrap().request_id, "req-4");
     assert!(sink.get("missing").unwrap().is_none());
 }

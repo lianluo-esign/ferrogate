@@ -118,7 +118,10 @@ fn assets_cli_push_pull_list_delete_round_trip_through_real_postgres() {
     ]);
     assert!(pull.status.success(), "pull failed: {}", stderr(&pull));
     let pulled_content = std::fs::read_to_string(&pulled_path).unwrap();
-    assert_eq!(pulled_content, content, "pulled content does not match what was pushed");
+    assert_eq!(
+        pulled_content, content,
+        "pulled content does not match what was pushed"
+    );
 
     // Independently verify the row landed in the real database.
     let db_row = psql_query(
@@ -146,7 +149,11 @@ fn assets_cli_push_pull_list_delete_round_trip_through_real_postgres() {
         "--api-key",
         "cli-e2e-secret",
     ]);
-    assert!(delete.status.success(), "delete failed: {}", stderr(&delete));
+    assert!(
+        delete.status.success(),
+        "delete failed: {}",
+        stderr(&delete)
+    );
 
     let db_row_after_delete = psql_query(
         &dsn,

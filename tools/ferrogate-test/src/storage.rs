@@ -919,8 +919,8 @@ fn run_control_plane_restart(
 
     {
         let provider_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (provider_addr, provider) =
-            spawn_local_provider_upstream(1, provider_stop).context("start durable metering provider")?;
+        let (provider_addr, provider) = spawn_local_provider_upstream(1, provider_stop)
+            .context("start durable metering provider")?;
         let provider_base_url = format!("http://{provider_addr}/v1");
         let case = TursoRestartHarness::start_with_migration_mode(
             ferrogate_bin,

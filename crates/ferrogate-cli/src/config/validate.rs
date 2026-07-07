@@ -112,6 +112,7 @@ impl Config {
         self.validate_guardrails(&api_key_ids, &model_names, &provider_names)?;
         self.validate_tls()?;
         self.validate_telemetry()?;
+        self.validate_billing_alerts()?;
         self.validate_observability()?;
         self.validate_analytics()?;
         self.validate_metering()?;
@@ -327,6 +328,21 @@ impl Config {
             }
             if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
                 bail!("field telemetry.otlp_endpoint: must start with http:// or https://");
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_billing_alerts(&self) -> AnyResult<()> {
+        if self.billing_alerts.webhook_timeout_secs == 0 {
+            bail!("field billing_alerts.webhook_timeout_secs: must be greater than zero");
+        }
+        if let Some(webhook_url) = &self.billing_alerts.webhook_url {
+            if webhook_url.trim().is_empty() {
+                bail!("field billing_alerts.webhook_url: cannot be empty");
+            }
+            if !webhook_url.starts_with("http://") && !webhook_url.starts_with("https://") {
+                bail!("field billing_alerts.webhook_url: must start with http:// or https://");
             }
         }
         Ok(())
@@ -1105,7 +1121,9 @@ impl Config {
             // usable routes at request time.
             for region in &key.region_allowlist {
                 if region.trim().is_empty() {
-                    bail!("field api_keys[{index}].region_allowlist: cannot contain an empty value");
+                    bail!(
+                        "field api_keys[{index}].region_allowlist: cannot contain an empty value"
+                    );
                 }
                 if !self
                     .providers

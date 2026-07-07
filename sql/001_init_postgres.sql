@@ -760,6 +760,29 @@ CREATE TABLE IF NOT EXISTS quota_policies (
 CREATE INDEX IF NOT EXISTS idx_quota_policies_scope
     ON quota_policies(scope_type, scope_id);
 
+-- Percent-of-monthly_budget_usd tiers (e.g. [75, 90, 95], issue #170) that
+-- each fire a one-time webhook notification strictly before the 100% hard
+-- deny in AppState::monthly_budget_exceeded. Added via ALTER (not the
+-- CREATE TABLE above) so this migration stays idempotent against
+-- already-provisioned quota_policies tables.
+ALTER TABLE quota_policies
+    ADD COLUMN IF NOT EXISTS alert_threshold_pcts_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- budget_alert_notifications: idempotency ledger for issue #170 -- exactly
+-- one row per (scope, period, tier) means a threshold fires its webhook
+-- once per billing period, not on every subsequent request after crossing
+-- it. The deterministic id (see budget_alert_notification_id in
+-- ferrogate-storage) makes "insert if absent" the natural check.
+CREATE TABLE IF NOT EXISTS budget_alert_notifications (
+    id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL CHECK (scope_type IN ('tenant', 'project', 'workspace', 'key')),
+    scope_id TEXT NOT NULL,
+    period_month TEXT NOT NULL,
+    threshold_pct SMALLINT NOT NULL,
+    notified_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (scope_type, scope_id, period_month, threshold_pct)
+);
+
 -- plans: sellable subscription tiers (issue #168). A named bundle of feature
 -- flags plus default quota values that seed the effective-quota merge chain
 -- as its floor, below any explicit scope-level quota_policies row. Shared
@@ -1076,5 +1099,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (19, '019_rbac_tenant_entitlements')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (20, '020_budget_alert_notifications')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

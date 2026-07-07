@@ -29,8 +29,11 @@ fn self_hosted_worker_type_maps_to_self_hosted_framework_adapter_mode() {
 
 #[test]
 fn cloud_worker_type_is_allowed_on_every_subcommand() {
-    reject_unsupported_self_hosted_execution(WorkerType::Cloud, &Command::GovernedToolExecutionSmoke)
-        .expect("cloud must be allowed on a real execution subcommand");
+    reject_unsupported_self_hosted_execution(
+        WorkerType::Cloud,
+        &Command::GovernedToolExecutionSmoke,
+    )
+    .expect("cloud must be allowed on a real execution subcommand");
     reject_unsupported_self_hosted_execution(WorkerType::Cloud, &Command::WorkerType)
         .expect("cloud must be allowed on the diagnostic command");
 }

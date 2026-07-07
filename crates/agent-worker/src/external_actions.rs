@@ -711,8 +711,7 @@ pub(crate) fn governed_network_egress_execution_smoke_command(
             ..CapabilityPolicy::default()
         },
     ));
-    let events =
-        execute_governed_network_egress_action(&gate, smoke_session(mode), action, false)?;
+    let events = execute_governed_network_egress_action(&gate, smoke_session(mode), action, false)?;
     let received_payload = server.join()?;
     let output = serde_json::json!({
         "events": events

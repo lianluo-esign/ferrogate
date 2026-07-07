@@ -122,7 +122,10 @@ fn rbac_supabase_only_error() -> StorageError {
 }
 
 impl PostgresControlPlaneStore {
-    pub(super) fn upsert_permission(&self, permission: &StoredPermission) -> Result<(), StorageError> {
+    pub(super) fn upsert_permission(
+        &self,
+        permission: &StoredPermission,
+    ) -> Result<(), StorageError> {
         self.with_client(|client| {
             client.execute(
                 "INSERT INTO permissions (id, key, name, description, created_at_unix, updated_at_unix) \
@@ -143,7 +146,10 @@ impl PostgresControlPlaneStore {
         })
     }
 
-    pub(super) fn get_permission(&self, id: &str) -> Result<Option<StoredPermission>, StorageError> {
+    pub(super) fn get_permission(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPermission>, StorageError> {
         let row = self.with_client(|client| {
             client.query_opt(
                 "SELECT id, key, name, description, created_at_unix, updated_at_unix \
@@ -166,8 +172,9 @@ impl PostgresControlPlaneStore {
     }
 
     pub(super) fn delete_permission(&self, id: &str) -> Result<bool, StorageError> {
-        let affected = self
-            .with_client(|client| client.execute("DELETE FROM permissions WHERE id = $1", &[&id]))?;
+        let affected = self.with_client(|client| {
+            client.execute("DELETE FROM permissions WHERE id = $1", &[&id])
+        })?;
         Ok(affected > 0)
     }
 
@@ -226,7 +233,10 @@ impl PostgresControlPlaneStore {
         Ok(affected > 0)
     }
 
-    pub(super) fn bind_tenant_role(&self, binding: &StoredTenantRoleBinding) -> Result<(), StorageError> {
+    pub(super) fn bind_tenant_role(
+        &self,
+        binding: &StoredTenantRoleBinding,
+    ) -> Result<(), StorageError> {
         self.with_client(|client| {
             client.execute(
                 "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) \
@@ -257,7 +267,11 @@ impl PostgresControlPlaneStore {
         Ok(rows.iter().map(tenant_role_binding_from_row).collect())
     }
 
-    pub(super) fn unbind_tenant_role(&self, tenant_id: &str, role_id: &str) -> Result<bool, StorageError> {
+    pub(super) fn unbind_tenant_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+    ) -> Result<bool, StorageError> {
         let affected = self.with_client(|client| {
             client.execute(
                 "DELETE FROM tenant_role_bindings WHERE id = $1",
@@ -367,7 +381,9 @@ impl RuntimeStorageRepositories {
                 .lock()
                 .map(|mut control_plane| control_plane.delete_permission(id))
                 .unwrap_or(false)),
-            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.delete_permission(id),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.delete_permission(id)
+            }
             RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }

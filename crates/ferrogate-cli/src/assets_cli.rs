@@ -35,7 +35,10 @@ fn execute_push(args: AssetsPushArgs) -> AnyResult<()> {
         .content_type
         .unwrap_or_else(|| guess_content_type(&args.path));
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
-    let path = format!("/v1/assets/{}/{}/{}", args.asset_type, args.name, args.version);
+    let path = format!(
+        "/v1/assets/{}/{}/{}",
+        args.asset_type, args.name, args.version
+    );
     let response = send_request(
         &endpoint,
         "PUT",
@@ -49,7 +52,10 @@ fn execute_push(args: AssetsPushArgs) -> AnyResult<()> {
 
 fn execute_pull(args: AssetsIdentityArgs) -> AnyResult<()> {
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
-    let path = format!("/v1/assets/{}/{}/{}", args.asset_type, args.name, args.version);
+    let path = format!(
+        "/v1/assets/{}/{}/{}",
+        args.asset_type, args.name, args.version
+    );
     let response = send_request(&endpoint, "GET", &path, &args.connection.api_key, None, &[])?;
     if !(200..300).contains(&response.status) {
         bail!(
@@ -85,8 +91,18 @@ fn execute_list(args: AssetsListArgs) -> AnyResult<()> {
 
 fn execute_delete(args: AssetsIdentityArgs) -> AnyResult<()> {
     let endpoint = GatewayEndpoint::parse(&args.connection.gateway_url)?;
-    let path = format!("/v1/assets/{}/{}/{}", args.asset_type, args.name, args.version);
-    let response = send_request(&endpoint, "DELETE", &path, &args.connection.api_key, None, &[])?;
+    let path = format!(
+        "/v1/assets/{}/{}/{}",
+        args.asset_type, args.name, args.version
+    );
+    let response = send_request(
+        &endpoint,
+        "DELETE",
+        &path,
+        &args.connection.api_key,
+        None,
+        &[],
+    )?;
     print_json_or_raise(&response, "delete")
 }
 
@@ -167,8 +183,12 @@ fn send_request(
     content_type: Option<&str>,
     body: &[u8],
 ) -> AnyResult<RawHttpResponse> {
-    let mut stream = TcpStream::connect(endpoint.connect_addr())
-        .with_context(|| format!("failed to connect to gateway at {}", endpoint.connect_addr()))?;
+    let mut stream = TcpStream::connect(endpoint.connect_addr()).with_context(|| {
+        format!(
+            "failed to connect to gateway at {}",
+            endpoint.connect_addr()
+        )
+    })?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .context("failed to set gateway read timeout")?;

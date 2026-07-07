@@ -8,6 +8,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -98,6 +99,38 @@ pub fn spawn_provider_upstream_response(
         requests
     });
     (addr, handle)
+}
+
+/// Spawns a plain-HTTP mock webhook receiver on `127.0.0.1` that accepts
+/// any number of sequential `Connection: close` JSON POSTs, recording each
+/// body in arrival order. Used to prove outbound webhook dispatch (e.g. the
+/// proactive budget-threshold alerting in issue #170) against a real
+/// gateway process rather than by reading the dispatch code.
+#[allow(dead_code)]
+pub fn spawn_webhook_capture_server() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/webhook", listener.local_addr().unwrap());
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let server_captured = Arc::clone(&captured);
+
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let request = read_http_request(&mut stream);
+            let Some(header_end) = find_header_end(request.as_bytes()) else {
+                continue;
+            };
+            let body = &request.as_bytes()[header_end + 4..];
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+                server_captured.lock().unwrap().push(value);
+            }
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    (endpoint, captured)
 }
 
 fn read_http_request(stream: &mut TcpStream) -> String {

@@ -308,7 +308,8 @@ fn cleanup(dsn: &str, tenant_id: &str) {
 
 fn response_json(response: String) -> serde_json::Value {
     let body = response.split("\r\n\r\n").nth(1).unwrap_or_default();
-    serde_json::from_str(body).unwrap_or_else(|error| panic!("invalid JSON body: {error}\n{response}"))
+    serde_json::from_str(body)
+        .unwrap_or_else(|error| panic!("invalid JSON body: {error}\n{response}"))
 }
 
 fn psql_exec(dsn: &str, statement: &str) {

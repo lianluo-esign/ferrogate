@@ -108,7 +108,9 @@ pub fn ledger_entry_id(event: &BillingEvent) -> String {
 /// (`(provider, provider_model)`), so it never bills zero.
 pub fn charge(book: &PriceBook, event: &BillingEvent) -> Result<LedgerEntry, BillingError> {
     let usage = event.usage.clone().reconcile_split();
-    let price_opt = book.price_for(&event.provider, &event.provider_model).cloned();
+    let price_opt = book
+        .price_for(&event.provider, &event.provider_model)
+        .cloned();
 
     let (cost, unit_price, cost_source) = match authoritative_cost(event) {
         Some(total) => {
@@ -251,8 +253,10 @@ impl LedgerListFilter {
     /// Whether a tenant matches this filter (used by the in-memory sink,
     /// which has no separate query layer to push the filter into).
     pub fn matches(&self, tenant: &TenantContext) -> bool {
-        Self::field_matches(self.organization_id.as_deref(), tenant.organization_id.as_deref())
-            && Self::field_matches(self.project_id.as_deref(), tenant.project_id.as_deref())
+        Self::field_matches(
+            self.organization_id.as_deref(),
+            tenant.organization_id.as_deref(),
+        ) && Self::field_matches(self.project_id.as_deref(), tenant.project_id.as_deref())
             && Self::field_matches(self.api_key_id.as_deref(), tenant.api_key_id.as_deref())
     }
 

@@ -10,6 +10,7 @@ mod assets_cli;
 mod auth;
 mod billing;
 mod billing_client;
+mod budget_alerts;
 mod cli;
 mod config;
 mod dashboard;

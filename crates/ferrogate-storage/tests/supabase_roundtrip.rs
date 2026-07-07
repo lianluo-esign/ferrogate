@@ -542,6 +542,7 @@ fn quota_policy_round_trips_through_real_supabase() {
             rpm_limit: Some(1_000),
             tpm_limit: Some(500_000),
             monthly_budget_usd: Some(250.5),
+            alert_threshold_pcts: vec![50, 90],
             enabled: true,
             created_at_unix: 1,
             updated_at_unix: 1,
@@ -559,6 +560,7 @@ fn quota_policy_round_trips_through_real_supabase() {
             rpm_limit: Some(500),
             tpm_limit: None,
             monthly_budget_usd: None,
+            alert_threshold_pcts: vec![],
             enabled: false,
             created_at_unix: 1,
             updated_at_unix: 2,
@@ -871,7 +873,10 @@ fn billing_report_outbox_round_trips_through_real_supabase() {
     storage
         .reschedule_billing_report("ferrogate:trace-outbox-rt:req-outbox-rt", 5_000)
         .expect("reschedule must succeed");
-    assert!(storage.list_due_billing_reports(100, 10).unwrap().is_empty());
+    assert!(storage
+        .list_due_billing_reports(100, 10)
+        .unwrap()
+        .is_empty());
     let rescheduled = storage.list_due_billing_reports(5_000, 10).unwrap();
     assert_eq!(rescheduled[0].attempts, 1);
 
@@ -928,7 +933,10 @@ fn billing_report_dead_letter_round_trips_through_real_supabase() {
     storage
         .dead_letter_billing_report(id, 200)
         .expect("dead-letter must succeed");
-    assert!(storage.list_due_billing_reports(1_000_000, 10).unwrap().is_empty());
+    assert!(storage
+        .list_due_billing_reports(1_000_000, 10)
+        .unwrap()
+        .is_empty());
 
     // ...but keeps the row visible for operator inspection.
     let reopened =

@@ -415,6 +415,23 @@ impl FerroGateway {
             scope_id,
             merge,
         } = scope;
+        if let Some(alert_threshold_pcts) = payload.alert_threshold_pcts.as_ref() {
+            if let Some(invalid) = alert_threshold_pcts
+                .iter()
+                .find(|threshold_pct| !(1..=100).contains(*threshold_pct))
+            {
+                return write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_quota_policy",
+                    format!(
+                        "alert_threshold_pcts entries must be between 1 and 100; got {invalid}"
+                    ),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        }
         let now = now_unix_seconds();
         let existing = state.get_quota_policy(scope_type, scope_id).ok().flatten();
         // Preserve the original created_at_unix across re-upserts of the
@@ -444,6 +461,12 @@ impl FerroGateway {
                         .as_ref()
                         .and_then(|existing| existing.monthly_budget_usd)
                 }),
+                alert_threshold_pcts: payload.alert_threshold_pcts.unwrap_or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|existing| existing.alert_threshold_pcts.clone())
+                        .unwrap_or_default()
+                }),
                 enabled: payload
                     .enabled
                     .unwrap_or_else(|| existing.as_ref().is_none_or(|existing| existing.enabled)),
@@ -459,6 +482,7 @@ impl FerroGateway {
                 rpm_limit: payload.rpm_limit,
                 tpm_limit: payload.tpm_limit,
                 monthly_budget_usd: payload.monthly_budget_usd,
+                alert_threshold_pcts: payload.alert_threshold_pcts.unwrap_or_default(),
                 enabled: payload.enabled.unwrap_or(true),
                 created_at_unix,
                 updated_at_unix: now,
@@ -541,6 +565,7 @@ fn admin_quota_policy(policy: &StoredQuotaPolicy) -> AdminQuotaPolicy {
         rpm_limit: policy.rpm_limit,
         tpm_limit: policy.tpm_limit,
         monthly_budget_usd: policy.monthly_budget_usd,
+        alert_threshold_pcts: policy.alert_threshold_pcts.clone(),
         enabled: policy.enabled,
         created_at_unix: policy.created_at_unix,
         updated_at_unix: policy.updated_at_unix,
