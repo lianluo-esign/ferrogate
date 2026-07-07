@@ -1120,6 +1120,29 @@ pub(crate) struct AdminTenantAccountMutationResponse {
     pub(crate) tenant: AdminTenantAccount,
 }
 
+/// `GET /admin/v1/tenant-accounts/{id}/resolved-defaults` (issue #168):
+/// the merged, effective quota and feature entitlements a request
+/// attributed to this tenant alone (no project/workspace/key overrides)
+/// would actually get -- i.e. the tenant's plan defaults as they apply
+/// today, not just the plan_id pointer. `effective_quota` mirrors
+/// `ferrogate_policy::EffectiveQuota`; `None` fields mean "no limit
+/// configured at any scope in the chain", not zero.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminTenantResolvedDefaults {
+    pub(crate) object: &'static str,
+    pub(crate) tenant_id: String,
+    pub(crate) plan_id: String,
+    pub(crate) model_allowlist: Option<Vec<String>>,
+    pub(crate) rpm_limit: Option<u64>,
+    pub(crate) tpm_limit: Option<u64>,
+    pub(crate) monthly_budget_usd: Option<f64>,
+    pub(crate) mcp_enabled: bool,
+    pub(crate) extension_tools_enabled: bool,
+    pub(crate) self_hosted_workers_enabled: bool,
+    pub(crate) asset_hosting_enabled: bool,
+    pub(crate) default_asset_storage_quota_bytes: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AdminProject {
     pub(crate) id: String,

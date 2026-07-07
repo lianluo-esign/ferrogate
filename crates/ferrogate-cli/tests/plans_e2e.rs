@@ -188,7 +188,22 @@ fn plans_admin_surface_creates_lists_and_assigns_to_a_tenant() {
     ));
     assert_eq!(reread["tenant"]["plan_id"], "pro");
 
-    // 10. PUT is accepted with identical merge semantics to PATCH (issue
+    // 10. Resolved defaults (issue #168) reflect the "pro" plan's merged
+    // feature flags and quota, not just the plan_id pointer.
+    let resolved_pro = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/tenant-accounts/{tenant_id}/resolved-defaults"),
+        &admin_headers(),
+        "",
+    ));
+    assert_eq!(resolved_pro["plan_id"], "pro");
+    assert_eq!(resolved_pro["mcp_enabled"], true);
+    assert_eq!(resolved_pro["self_hosted_workers_enabled"], true);
+    assert_eq!(resolved_pro["rpm_limit"], 1000);
+    assert_eq!(resolved_pro["tpm_limit"], 750000);
+
+    // 11. PUT is accepted with identical merge semantics to PATCH (issue
     // #168): the admin-console's generic resource-edit form always sends
     // PUT, so this is what actually lets an operator reassign a tenant's
     // plan through the UI rather than only via a raw PATCH call.
@@ -203,6 +218,21 @@ fn plans_admin_surface_creates_lists_and_assigns_to_a_tenant() {
     assert_eq!(
         reassigned_via_put["tenant"]["name"], "Tenant Plans E2E",
         "PUT must merge just like PATCH: name must survive an unrelated plan_id update"
+    );
+
+    // 12. Resolved defaults update immediately after reassignment -- back
+    // to "free"'s (compute-adjacent-features-off) baseline.
+    let resolved_free = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/tenant-accounts/{tenant_id}/resolved-defaults"),
+        &admin_headers(),
+        "",
+    ));
+    assert_eq!(resolved_free["plan_id"], "free");
+    assert_eq!(
+        resolved_free["mcp_enabled"], false,
+        "the free plan must not carry pro's mcp_enabled=true over: {resolved_free}"
     );
 
     gateway.kill().unwrap();

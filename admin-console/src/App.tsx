@@ -8,6 +8,7 @@ import { AuthProvider } from "@/hooks/use-auth";
 import DashboardPage from "@/pages/dashboard";
 import LoginPage from "@/pages/login";
 import RegisterPage from "@/pages/register";
+import TenantResolvedDefaultsPage from "@/pages/tenant-resolved-defaults";
 import { RESOURCE_ROUTES } from "@/resources";
 
 const queryClient = new QueryClient({
@@ -30,6 +31,10 @@ function App() {
             <Route element={<ProtectedRoute />}>
               <Route element={<AppShell />}>
                 <Route path="/app" element={<DashboardPage />} />
+                <Route
+                  path="/app/tenant-resolved-defaults"
+                  element={<TenantResolvedDefaultsPage />}
+                />
                 {RESOURCE_ROUTES.map(({ path, config }) => (
                   <Route key={path} path={path} element={<ResourcePage config={config} />} />
                 ))}

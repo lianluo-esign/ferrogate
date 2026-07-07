@@ -56,6 +56,21 @@ impl FerroGateway {
                 )
                 .await;
             };
+            if let Some(tenant_id) = id.strip_suffix("/resolved-defaults") {
+                if tenant_id.is_empty() {
+                    return write_json_error(
+                        session,
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "tenant account endpoint not found",
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+                return self
+                    .handle_admin_tenant_resolved_defaults(session, ctx, headers, method, tenant_id)
+                    .await;
+            }
             return self
                 .handle_admin_tenant_account_by_id(session, ctx, headers, method, id)
                 .await;
@@ -363,6 +378,92 @@ impl FerroGateway {
                 .await
             }
         }
+    }
+
+    /// `GET /admin/v1/tenant-accounts/{id}/resolved-defaults` (issue
+    /// #168): resolves the same `EffectiveQuota` merge chain the auth
+    /// path uses at request time, scoped to the tenant alone (no
+    /// project/workspace/key in the `TenantContext`), plus the plan's
+    /// feature-entitlement flags -- so an operator can see what a plan
+    /// actually grants without cross-referencing the Plans page and
+    /// mentally re-deriving the merge.
+    async fn handle_admin_tenant_resolved_defaults(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        tenant_id: &str,
+    ) -> PingoraResult<()> {
+        if *method != Method::GET {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "tenant resolved-defaults endpoint supports GET",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let state = self.state.current();
+        if let Err(error) = authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let Some(account) = state.get_tenant_account(tenant_id).ok().flatten() else {
+            return write_json_error(
+                session,
+                StatusCode::NOT_FOUND,
+                "tenant_account_not_found",
+                format!("no tenant account with id {tenant_id}"),
+                &ctx.request_id,
+            )
+            .await;
+        };
+        let effective_quota = match state.resolve_effective_quota(&TenantContext {
+            organization_id: Some(tenant_id.to_string()),
+            ..Default::default()
+        }) {
+            Ok(quota) => quota,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        let plan = state.resolve_tenant_plan(tenant_id).ok().flatten();
+        let body = crate::responses::AdminTenantResolvedDefaults {
+            object: "tenant_resolved_defaults",
+            tenant_id: tenant_id.to_string(),
+            plan_id: account.plan_id,
+            model_allowlist: effective_quota.model_allowlist,
+            rpm_limit: effective_quota.rpm_limit,
+            tpm_limit: effective_quota.tpm_limit,
+            monthly_budget_usd: effective_quota.monthly_budget_usd,
+            mcp_enabled: plan.as_ref().is_some_and(|plan| plan.mcp_enabled),
+            extension_tools_enabled: plan
+                .as_ref()
+                .is_some_and(|plan| plan.extension_tools_enabled),
+            self_hosted_workers_enabled: plan
+                .as_ref()
+                .is_some_and(|plan| plan.self_hosted_workers_enabled),
+            asset_hosting_enabled: plan.as_ref().is_some_and(|plan| plan.asset_hosting_enabled),
+            default_asset_storage_quota_bytes: plan
+                .as_ref()
+                .and_then(|plan| plan.default_asset_storage_quota_bytes),
+        };
+        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
     }
 
     pub(super) async fn handle_admin_projects(

@@ -45,6 +45,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "API / virtual keys", url: "/app/api-keys" },
       { title: "Quota policies", url: "/app/quota-policies" },
       { title: "Plans", url: "/app/plans" },
+      { title: "Resolved tenant defaults", url: "/app/tenant-resolved-defaults" },
     ],
   },
   {
