@@ -4614,6 +4614,13 @@ impl AppState {
         Ok(self.repositories.list_payment_methods(tenant_id)?)
     }
 
+    pub(crate) fn get_payment_method(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<StoredPaymentMethod>> {
+        Ok(self.repositories.get_payment_method(id)?)
+    }
+
     pub(crate) fn upsert_payment_method(
         &self,
         payment_method: StoredPaymentMethod,
@@ -4639,6 +4646,10 @@ impl AppState {
 
     pub(crate) fn list_workspaces(&self) -> anyhow::Result<Vec<StoredWorkspace>> {
         Ok(self.repositories.list_workspaces()?)
+    }
+
+    pub(crate) fn get_workspace(&self, id: &str) -> anyhow::Result<Option<StoredWorkspace>> {
+        Ok(self.repositories.get_workspace(id)?)
     }
 
     pub(crate) fn upsert_workspace(&self, workspace: StoredWorkspace) -> anyhow::Result<()> {
@@ -5907,10 +5918,43 @@ impl AppState {
         }
     }
 
+    /// See [`AppState::request_logs_page`]'s `tenant_scope` doc (issue
+    /// #185); same rationale applies to metering/billing events.
     pub(crate) fn metering_events_page(
         &self,
         pagination: AdminPagination,
+        tenant_scope: Option<&str>,
     ) -> AdminPage<BillingEvent> {
+        if let Some(tenant_id) = tenant_scope {
+            let filtered: Vec<BillingEvent> = self
+                .repositories
+                .billing_events()
+                .into_iter()
+                .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
+                .collect();
+            let filtered = if filtered.is_empty() {
+                self.metering_events
+                    .list()
+                    .into_iter()
+                    .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
+                    .collect()
+            } else {
+                filtered
+            };
+            let total = filtered.len();
+            let data = filtered
+                .into_iter()
+                .skip(pagination.offset)
+                .take(pagination.limit)
+                .collect();
+            return AdminPage {
+                data,
+                total,
+                offset: pagination.offset,
+                limit: pagination.limit,
+            };
+        }
+
         let page = self
             .repositories
             .billing_events_page(pagination.offset, pagination.limit);
@@ -5933,15 +5977,51 @@ impl AppState {
         }
     }
 
-    pub(crate) fn metering_export_status(&self) -> Vec<MeteringExportStatus> {
-        self.metering_exporter
+    /// `tenant_scope`: export-status rows only carry a bare `request_id`, no
+    /// tenant field directly, so a tenant-scoped caller (issue #185) is
+    /// narrowed by cross-referencing each row's `request_id` against the
+    /// owning metering event's tenant; a `request_id` that can't be
+    /// resolved is dropped (fail closed) rather than shown.
+    pub(crate) fn metering_export_status(
+        &self,
+        tenant_scope: Option<&str>,
+    ) -> Vec<MeteringExportStatus> {
+        let statuses = self
+            .metering_exporter
             .as_ref()
             .map(|exporter| exporter.statuses())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let Some(tenant_id) = tenant_scope else {
+            return statuses;
+        };
+        let tenant_by_request_id: HashMap<String, Option<String>> = self
+            .metering_events
+            .list()
+            .into_iter()
+            .map(|event| (event.request_id, event.tenant.organization_id))
+            .collect();
+        statuses
+            .into_iter()
+            .filter(|status| {
+                tenant_by_request_id
+                    .get(&status.request_id)
+                    .and_then(|organization_id| organization_id.as_deref())
+                    == Some(tenant_id)
+            })
+            .collect()
     }
 
-    pub(crate) fn usage_aggregates(&self) -> Vec<StoredUsageAggregate> {
-        self.repositories.usage_aggregates()
+    /// `tenant_scope`: narrows to a single tenant's usage aggregates (issue
+    /// #185); `None` (platform operator) is unfiltered, same as before.
+    pub(crate) fn usage_aggregates(&self, tenant_scope: Option<&str>) -> Vec<StoredUsageAggregate> {
+        let aggregates = self.repositories.usage_aggregates();
+        let Some(tenant_id) = tenant_scope else {
+            return aggregates;
+        };
+        aggregates
+            .into_iter()
+            .filter(|aggregate| aggregate.organization_id.as_deref() == Some(tenant_id))
+            .collect()
     }
 
     pub(crate) fn record_request_log(&self, mut log: StoredRequestLog) {
@@ -6477,10 +6557,38 @@ impl AppState {
         None
     }
 
+    /// `tenant_scope` narrows the page to a single tenant's request logs
+    /// (issue #185): a tenant-scoped admin key must never see another
+    /// tenant's request logs, so this bypasses the (efficient, but
+    /// unfiltered) storage-level pagination in favor of filtering the full
+    /// unbounded log set before paginating in memory. `None` (a
+    /// platform-operator caller) keeps the original storage-pushed-down
+    /// pagination unchanged.
     pub(crate) fn request_logs_page(
         &self,
         pagination: AdminPagination,
+        tenant_scope: Option<&str>,
     ) -> AdminPage<StoredRequestLog> {
+        if let Some(tenant_id) = tenant_scope {
+            let filtered: Vec<StoredRequestLog> = self
+                .repositories
+                .request_logs()
+                .into_iter()
+                .filter(|log| log.tenant.organization_id.as_deref() == Some(tenant_id))
+                .collect();
+            let total = filtered.len();
+            let data = filtered
+                .into_iter()
+                .skip(pagination.offset)
+                .take(pagination.limit)
+                .collect();
+            return AdminPage {
+                data,
+                total,
+                offset: pagination.offset,
+                limit: pagination.limit,
+            };
+        }
         let page = self
             .repositories
             .request_logs_page(pagination.offset, pagination.limit);
@@ -6514,10 +6622,33 @@ impl AppState {
             .collect()
     }
 
+    /// See [`AppState::request_logs_page`]'s `tenant_scope` doc (issue
+    /// #185); same rationale applies to audit events.
     pub(crate) fn audit_events_page(
         &self,
         pagination: AdminPagination,
+        tenant_scope: Option<&str>,
     ) -> AdminPage<StoredAuditEvent> {
+        if let Some(tenant_id) = tenant_scope {
+            let filtered: Vec<StoredAuditEvent> = self
+                .repositories
+                .audit_events()
+                .into_iter()
+                .filter(|event| event.tenant.organization_id.as_deref() == Some(tenant_id))
+                .collect();
+            let total = filtered.len();
+            let data = filtered
+                .into_iter()
+                .skip(pagination.offset)
+                .take(pagination.limit)
+                .collect();
+            return AdminPage {
+                data,
+                total,
+                offset: pagination.offset,
+                limit: pagination.limit,
+            };
+        }
         let page = self
             .repositories
             .audit_events_page(pagination.offset, pagination.limit);
@@ -7237,9 +7368,16 @@ impl AppState {
             .collect()
     }
 
+    /// `tenant_scope`: a tenant-scoped caller only sees telemetry events for
+    /// this run that belong to their own tenant (issue #185); if that
+    /// leaves no matching events (either the run doesn't exist, or it
+    /// belongs to a different tenant), this returns `None` -- the same
+    /// "not found" response either way, so a denial never confirms whether
+    /// the run exists under another tenant.
     pub(crate) fn self_hosted_run_timeline(
         &self,
         run_id: &str,
+        tenant_scope: Option<&str>,
     ) -> Option<crate::responses::AdminSelfHostedRunTimeline> {
         if run_id.trim().is_empty() {
             return None;
@@ -7249,6 +7387,11 @@ impl AppState {
             .self_hosted_worker_telemetry_events()
             .into_iter()
             .filter(|event| event.run_id.as_deref() == Some(run_id))
+            .filter(|event| {
+                tenant_scope.is_none_or(|tenant_id| {
+                    event.tenant.organization_id.as_deref() == Some(tenant_id)
+                })
+            })
             .collect::<Vec<_>>();
         if events.is_empty() {
             return None;
@@ -7323,7 +7466,15 @@ impl AppState {
         id: &str,
         filter: AgentRunFilter,
     ) -> Option<AgentRunTimeline> {
-        let run = self.repositories.agent_run(id);
+        // Filtering `run` itself (not just the related events below) closes
+        // a leak (issue #185): without this, a run belonging to a different
+        // tenant than `filter.organization_id` would still surface via
+        // `run` even though every related collection below is empty for
+        // that tenant.
+        let run = self
+            .repositories
+            .agent_run(id)
+            .filter(|run| agent_run_matches_filter(&run.request_id, &run.tenant, &filter));
         let agent_events = self
             .repositories
             .agent_run_events()
@@ -7407,7 +7558,14 @@ impl AppState {
         run_ids
             .into_iter()
             .filter_map(|id| {
-                let run = runs.iter().find(|run| run.id == id).cloned();
+                // See the matching comment in `agent_run_timeline` (issue
+                // #185): `run` must be filtered too, not just the related
+                // event collections below.
+                let run = runs
+                    .iter()
+                    .find(|run| run.id == id)
+                    .filter(|run| agent_run_matches_filter(&run.request_id, &run.tenant, filter))
+                    .cloned();
                 let run_agent_events = agent_events
                     .iter()
                     .filter(|event| event.run_id == id)
@@ -11003,7 +11161,7 @@ mod tests {
         assert!((events[0].cost_usd.unwrap() - 0.000_013).abs() < 1e-9);
         assert_eq!(events[0].latency_ms, Some(120));
 
-        let aggregates = state.usage_aggregates();
+        let aggregates = state.usage_aggregates(None);
         assert_eq!(aggregates.len(), 1);
         assert_eq!(aggregates[0].organization_id.as_deref(), Some("org"));
         assert_eq!(aggregates[0].project_id.as_deref(), Some("project"));
@@ -11706,7 +11864,7 @@ mod tests {
             .unwrap();
 
         let timeline = state
-            .self_hosted_run_timeline("run-1")
+            .self_hosted_run_timeline("run-1", None)
             .expect("self-hosted run timeline should be visible");
 
         assert_eq!(timeline.object, "self_hosted_run_timeline");
@@ -11725,7 +11883,9 @@ mod tests {
         assert_eq!(timeline.events[0].id, "event-tool");
         assert_eq!(timeline.events[1].id, "event-lifecycle");
         assert_eq!(timeline.events[1].event_json, r#"{"state":"completed"}"#);
-        assert!(state.self_hosted_run_timeline("missing-run").is_none());
+        assert!(state
+            .self_hosted_run_timeline("missing-run", None)
+            .is_none());
     }
 
     #[test]
@@ -12920,21 +13080,22 @@ mod tests {
                 .unwrap();
         }
 
-        let first_page = state.request_logs_page(state.admin_pagination(None));
+        let first_page = state.request_logs_page(state.admin_pagination(None), None);
         assert_eq!(first_page.total, 2);
         assert_eq!(first_page.limit, 1);
         assert_eq!(first_page.data[0].request_id, "fg-2");
 
-        let second_page = state.request_logs_page(state.admin_pagination(Some("offset=1&limit=9")));
+        let second_page =
+            state.request_logs_page(state.admin_pagination(Some("offset=1&limit=9")), None);
         assert_eq!(second_page.limit, 2);
         assert_eq!(second_page.data.len(), 1);
         assert_eq!(second_page.data[0].request_id, "fg-3");
 
-        let audit_page = state.audit_events_page(state.admin_pagination(None));
+        let audit_page = state.audit_events_page(state.admin_pagination(None), None);
         assert_eq!(audit_page.total, 2);
         assert_eq!(audit_page.data[0].request_id, "fg-2");
 
-        let metering_page = state.metering_events_page(state.admin_pagination(None));
+        let metering_page = state.metering_events_page(state.admin_pagination(None), None);
         assert_eq!(metering_page.total, 2);
         assert_eq!(metering_page.data[0].request_id, "fg-2");
 
@@ -13103,7 +13264,7 @@ mod tests {
         assert_eq!(snapshot.token_totals.total_tokens, 26);
         assert_eq!(snapshot.model_provider_totals[0].logical_model, "fast-chat");
 
-        let aggregates = state.usage_aggregates();
+        let aggregates = state.usage_aggregates(None);
         assert_eq!(aggregates.len(), 1);
         assert_eq!(aggregates[0].usage.prompt_tokens, 10);
         assert_eq!(aggregates[0].usage.completion_tokens, 16);

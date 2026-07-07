@@ -26,8 +26,11 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => match state.billing_outbox_dead_letters() {
+            Ok(auth) => match state.billing_outbox_dead_letters() {
                 Ok(rows) => {
+                    let rows = crate::auth::filter_by_tenant_scope(&auth, rows, |row| {
+                        row.event.tenant.organization_id.as_deref().unwrap_or("")
+                    });
                     let body = AdminList::new(rows);
                     write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                 }

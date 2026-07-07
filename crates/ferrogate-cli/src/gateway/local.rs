@@ -3301,8 +3301,11 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let page = state.request_logs_page(state.admin_pagination(query));
+            Ok(auth) => {
+                let page = state.request_logs_page(
+                    state.admin_pagination(query),
+                    auth.organization_id.as_deref(),
+                );
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -3328,9 +3331,11 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let records =
-                    state.request_log_export_records(RequestLogExportFilter::from_query(query));
+            Ok(auth) => {
+                let mut filter = RequestLogExportFilter::from_query(query);
+                filter.organization_id =
+                    crate::auth::enforce_tenant_filter(&auth, filter.organization_id);
+                let records = state.request_log_export_records(filter);
                 let body = render_request_log_export_jsonl(&records);
                 write_raw_response(
                     session,
@@ -3364,12 +3369,12 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
+            Ok(auth) => {
                 if path == "/admin/v1/agent-runs" {
-                    let page = state.agent_runs_page(
-                        state.admin_pagination(query),
-                        crate::state::AgentRunFilter::from_query(query),
-                    );
+                    let mut filter = crate::state::AgentRunFilter::from_query(query);
+                    filter.organization_id =
+                        crate::auth::enforce_tenant_filter(&auth, filter.organization_id);
+                    let page = state.agent_runs_page(state.admin_pagination(query), filter);
                     let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                     return write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                         .await;
@@ -3385,9 +3390,10 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                let Some(timeline) = state
-                    .agent_run_timeline(run_id, crate::state::AgentRunFilter::from_query(query))
-                else {
+                let mut filter = crate::state::AgentRunFilter::from_query(query);
+                filter.organization_id =
+                    crate::auth::enforce_tenant_filter(&auth, filter.organization_id);
+                let Some(timeline) = state.agent_run_timeline(run_id, filter) else {
                     return write_json_error(
                         session,
                         StatusCode::NOT_FOUND,
@@ -3421,7 +3427,7 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
+            Ok(auth) => {
                 let run_id = path.trim_start_matches("/admin/v1/self-hosted-runs/");
                 if run_id.is_empty() || run_id.contains('/') {
                     return write_json_error(
@@ -3433,7 +3439,9 @@ impl FerroGateway {
                     )
                     .await;
                 }
-                let Some(timeline) = state.self_hosted_run_timeline(run_id) else {
+                let Some(timeline) =
+                    state.self_hosted_run_timeline(run_id, auth.organization_id.as_deref())
+                else {
                     return write_json_error(
                         session,
                         StatusCode::NOT_FOUND,
@@ -3467,8 +3475,11 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let page = state.audit_events_page(state.admin_pagination(query));
+            Ok(auth) => {
+                let page = state.audit_events_page(
+                    state.admin_pagination(query),
+                    auth.organization_id.as_deref(),
+                );
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -7509,8 +7520,11 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let page = state.metering_events_page(state.admin_pagination(query));
+            Ok(auth) => {
+                let page = state.metering_events_page(
+                    state.admin_pagination(query),
+                    auth.organization_id.as_deref(),
+                );
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -7546,8 +7560,9 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let body = AdminList::new(state.metering_export_status());
+            Ok(auth) => {
+                let body =
+                    AdminList::new(state.metering_export_status(auth.organization_id.as_deref()));
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {
@@ -7571,8 +7586,8 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let body = AdminList::new(state.usage_aggregates());
+            Ok(auth) => {
+                let body = AdminList::new(state.usage_aggregates(auth.organization_id.as_deref()));
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {

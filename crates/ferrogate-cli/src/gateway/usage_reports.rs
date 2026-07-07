@@ -27,8 +27,34 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let filter = UsageReportFilter::from_query(query);
+            Ok(auth) => {
+                let mut filter = UsageReportFilter::from_query(query);
+                if let Some(tenant_id) = auth.organization_id.clone() {
+                    match (filter.scope_type, filter.scope_id.as_deref()) {
+                        (Some(scope_type), Some(scope_id)) => {
+                            if let Err(error) = crate::auth::authorize_scoped_resource(
+                                &state, &auth, scope_type, scope_id,
+                            ) {
+                                return write_json_error(
+                                    session,
+                                    error.status,
+                                    error.code,
+                                    error.message,
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
+                        }
+                        _ => {
+                            // No scope filter (or a scope_type without an id) was
+                            // supplied: a tenant-scoped caller gets narrowed to
+                            // their own tenant rather than an unscoped report
+                            // spanning every tenant (issue #185).
+                            filter.scope_type = Some(ferrogate_storage::QuotaScopeKind::Tenant);
+                            filter.scope_id = Some(tenant_id);
+                        }
+                    }
+                }
                 match state.usage_report(&filter) {
                     Ok(rows) => {
                         let body = AdminList::new(rows);

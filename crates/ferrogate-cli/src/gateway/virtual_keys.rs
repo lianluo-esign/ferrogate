@@ -78,8 +78,12 @@ impl FerroGateway {
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.list_tenant_accounts() {
+                Ok(auth) => match state.list_tenant_accounts() {
                     Ok(tenants) => {
+                        let tenants =
+                            crate::auth::filter_by_tenant_scope(&auth, tenants, |tenant| {
+                                tenant.id.as_str()
+                            });
                         let body =
                             AdminList::new(tenants.iter().map(admin_tenant_account).collect());
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -106,6 +110,14 @@ impl FerroGateway {
                     .await
                 }
             },
+            // POST (create a new tenant) is deliberately NOT tenant-scope
+            // checked here -- there is no existing tenant to check
+            // ownership against, and whether a tenant-scoped console
+            // session should be allowed to create unrelated new tenants
+            // at all is a separate product/policy question from the
+            // cross-tenant data leak this pass fixes (issue #185's scope
+            // is read/write access to *existing* tenant data). Tracked as
+            // a follow-up, not silently ignored.
             Method::POST => {
                 let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
                     Ok(auth) => auth,
@@ -229,35 +241,48 @@ impl FerroGateway {
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.get_tenant_account(id) {
-                    Ok(Some(account)) => {
-                        let body = AdminTenantAccountMutationResponse {
-                            object: "tenant_account",
-                            tenant: admin_tenant_account(&account),
-                        };
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
-                    Ok(None) => {
-                        write_json_error(
+                Ok(auth) => {
+                    if let Err(error) = crate::auth::authorize_tenant_scope(&auth, id) {
+                        return write_json_error(
                             session,
-                            StatusCode::NOT_FOUND,
-                            "tenant_account_not_found",
-                            format!("no tenant account with id {id}"),
+                            error.status,
+                            error.code,
+                            error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
-                    Err(error) => {
-                        write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await
+                    match state.get_tenant_account(id) {
+                        Ok(Some(account)) => {
+                            let body = AdminTenantAccountMutationResponse {
+                                object: "tenant_account",
+                                tenant: admin_tenant_account(&account),
+                            };
+                            write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                                .await
+                        }
+                        Ok(None) => {
+                            write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "tenant_account_not_found",
+                                format!("no tenant account with id {id}"),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     write_json_error(
                         session,
@@ -289,6 +314,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, id) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 let payload = match read_json_body::<AdminTenantAccountCreateRequest>(
                     session,
                     &ctx.request_id,
@@ -406,7 +441,20 @@ impl FerroGateway {
             .await;
         }
         let state = self.state.current();
-        if let Err(error) = authenticate(&state, headers, "admin.read", &ctx.request_id) {
+        let auth = match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
             return write_json_error(
                 session,
                 error.status,
@@ -476,8 +524,12 @@ impl FerroGateway {
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.list_projects() {
+                Ok(auth) => match state.list_projects() {
                     Ok(projects) => {
+                        let projects =
+                            crate::auth::filter_by_tenant_scope(&auth, projects, |project| {
+                                project.tenant_id.as_str()
+                            });
                         let body = AdminList::new(projects.iter().map(admin_project).collect());
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
@@ -540,6 +592,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &tenant_id) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 if state
                     .get_tenant_account(&tenant_id)
                     .ok()
@@ -647,8 +709,12 @@ impl FerroGateway {
         let state = self.state.current();
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.list_workspaces() {
+                Ok(auth) => match state.list_workspaces() {
                     Ok(workspaces) => {
+                        let workspaces =
+                            crate::auth::filter_by_tenant_scope(&auth, workspaces, |workspace| {
+                                workspace.tenant_id.as_str()
+                            });
                         let body = AdminList::new(workspaces.iter().map(admin_workspace).collect());
                         write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
                     }
@@ -721,6 +787,16 @@ impl FerroGateway {
                     )
                     .await;
                 };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &project.tenant_id) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 let name = match payload.name.filter(|name| !name.trim().is_empty()) {
                     Some(name) => name,
                     None => {
@@ -818,8 +894,11 @@ impl FerroGateway {
         if path == "/admin/v1/virtual-keys" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_virtual_api_keys() {
+                    Ok(auth) => match state.list_virtual_api_keys() {
                         Ok(keys) => {
+                            let keys = crate::auth::filter_by_tenant_scope(&auth, keys, |key| {
+                                key.tenant_id.as_str()
+                            });
                             let body =
                                 AdminList::new(keys.iter().map(admin_virtual_api_key).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
@@ -891,8 +970,20 @@ impl FerroGateway {
         match (method.clone(), action) {
             (Method::GET, None) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.get_virtual_api_key(id) {
+                    Ok(auth) => match state.get_virtual_api_key(id) {
                         Ok(Some(key)) => {
+                            if let Err(error) =
+                                crate::auth::authorize_tenant_scope(&auth, &key.tenant_id)
+                            {
+                                return write_json_error(
+                                    session,
+                                    error.status,
+                                    error.code,
+                                    error.message,
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
                             let body = AdminVirtualApiKeyMutationResponse {
                                 object: "virtual_key",
                                 key: admin_virtual_api_key(&key),
@@ -1042,6 +1133,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &scope.tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let id = payload
             .id
@@ -1173,6 +1274,16 @@ impl FerroGateway {
             )
             .await;
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &key.tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let secret = match ferrogate_auth::generate_virtual_api_key_secret() {
             Ok(secret) => secret,
@@ -1278,6 +1389,16 @@ impl FerroGateway {
             )
             .await;
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &key.tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         key.enabled = enabled;
         key.updated_at_unix = now_unix_seconds() as u64;
 
@@ -1359,6 +1480,16 @@ impl FerroGateway {
             )
             .await;
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &key.tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let now = now_unix_seconds() as u64;
         key.enabled = false;
         key.revoked_at_unix = Some(now);

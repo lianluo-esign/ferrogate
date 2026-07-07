@@ -14,7 +14,7 @@ use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
 use super::FerroGateway;
 use crate::{
-    auth::authenticate,
+    auth::{authenticate, authorize_scoped_resource as authorize_quota_policy_scope},
     responses::{
         write_json_error, write_json_error_and_close, write_json_response, AdminList,
         AdminQuotaPolicy, AdminQuotaPolicyMutation, AdminQuotaPolicyMutationResponse,
@@ -46,8 +46,20 @@ impl FerroGateway {
         if path == "/admin/v1/quota-policies" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_quota_policies() {
+                    Ok(auth) => match state.list_quota_policies() {
                         Ok(policies) => {
+                            let policies: Vec<_> = policies
+                                .into_iter()
+                                .filter(|policy| {
+                                    authorize_quota_policy_scope(
+                                        &state,
+                                        &auth,
+                                        policy.scope_type,
+                                        &policy.scope_id,
+                                    )
+                                    .is_ok()
+                                })
+                                .collect();
                             let body =
                                 AdminList::new(policies.iter().map(admin_quota_policy).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
@@ -137,35 +149,50 @@ impl FerroGateway {
 
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.get_quota_policy(scope_type, scope_id) {
-                    Ok(Some(policy)) => {
-                        let body = AdminQuotaPolicyMutationResponse {
-                            object: "quota_policy",
-                            policy: admin_quota_policy(&policy),
-                        };
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
-                    Ok(None) => {
-                        write_json_error(
+                Ok(auth) => {
+                    if let Err(error) =
+                        authorize_quota_policy_scope(&state, &auth, scope_type, scope_id)
+                    {
+                        return write_json_error(
                             session,
-                            StatusCode::NOT_FOUND,
-                            "quota_policy_not_found",
-                            format!("no quota policy at scope {scope_type_raw}/{scope_id}"),
+                            error.status,
+                            error.code,
+                            error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
-                    Err(error) => {
-                        write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await
+                    match state.get_quota_policy(scope_type, scope_id) {
+                        Ok(Some(policy)) => {
+                            let body = AdminQuotaPolicyMutationResponse {
+                                object: "quota_policy",
+                                policy: admin_quota_policy(&policy),
+                            };
+                            write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                                .await
+                        }
+                        Ok(None) => {
+                            write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "quota_policy_not_found",
+                                format!("no quota policy at scope {scope_type_raw}/{scope_id}"),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     write_json_error(
                         session,
@@ -203,6 +230,18 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) =
+                    authorize_quota_policy_scope(&state, &auth, scope_type, scope_id)
+                {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 let target = format!("{scope_type_raw}/{scope_id}");
                 match state.delete_quota_policy(scope_type, scope_id) {
                     Ok(true) => {
@@ -415,6 +454,16 @@ impl FerroGateway {
             scope_id,
             merge,
         } = scope;
+        if let Err(error) = authorize_quota_policy_scope(state, auth, scope_type, scope_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         if let Some(alert_threshold_pcts) = payload.alert_threshold_pcts.as_ref() {
             if let Some(invalid) = alert_threshold_pcts
                 .iter()

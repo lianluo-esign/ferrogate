@@ -618,25 +618,37 @@ impl FerroGateway {
         match (method, role_id_segment) {
             (&Method::GET, None) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_tenant_role_bindings(tenant_id) {
-                        Ok(bindings) => {
-                            let body = AdminList::new(
-                                bindings.iter().map(admin_tenant_role_binding).collect(),
-                            );
-                            write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
-                                .await
-                        }
-                        Err(error) => {
-                            write_json_error(
+                    Ok(auth) => {
+                        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                            return write_json_error(
                                 session,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "storage_unavailable",
-                                error.to_string(),
+                                error.status,
+                                error.code,
+                                error.message,
                                 &ctx.request_id,
                             )
-                            .await
+                            .await;
                         }
-                    },
+                        match state.list_tenant_role_bindings(tenant_id) {
+                            Ok(bindings) => {
+                                let body = AdminList::new(
+                                    bindings.iter().map(admin_tenant_role_binding).collect(),
+                                );
+                                write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                                    .await
+                            }
+                            Err(error) => {
+                                write_json_error(
+                                    session,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "storage_unavailable",
+                                    error.to_string(),
+                                    &ctx.request_id,
+                                )
+                                .await
+                            }
+                        }
+                    }
                     Err(error) => {
                         write_json_error(
                             session,
@@ -663,6 +675,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 let payload =
                     match read_json_body::<AdminTenantRoleBindingRequest>(session, &ctx.request_id)
                         .await?
@@ -726,6 +748,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 match state.unbind_tenant_role(tenant_id, role_id) {
                     Ok(true) => {
                         let target = format!("{tenant_id}/{role_id}");

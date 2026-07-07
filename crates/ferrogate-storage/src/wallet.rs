@@ -242,6 +242,25 @@ impl PostgresControlPlaneStore {
         Ok(rows.iter().map(payment_method_from_row).collect())
     }
 
+    /// Single-row lookup by id (issue #185): callers that only have a
+    /// payment-method id (e.g. a DELETE request) need this to discover
+    /// which tenant owns it *before* authorizing the request, since
+    /// `list_payment_methods` requires already knowing the tenant.
+    pub(super) fn get_payment_method(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentMethod>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, tenant_id, provider, provider_customer_id, \
+                 provider_payment_method_id, is_default, created_at_unix \
+                 FROM payment_methods WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        Ok(row.as_ref().map(payment_method_from_row))
+    }
+
     pub(super) fn delete_payment_method(&self, id: &str) -> Result<bool, StorageError> {
         let affected = self.with_client(|client| {
             client.execute("DELETE FROM payment_methods WHERE id = $1", &[&id])
@@ -295,6 +314,10 @@ impl RuntimeControlPlaneState {
             .into_iter()
             .filter(|payment_method| payment_method.tenant_id == tenant_id)
             .collect()
+    }
+
+    pub fn get_payment_method(&self, id: &str) -> Option<StoredPaymentMethod> {
+        self.payment_methods.get(id)
     }
 
     pub fn delete_payment_method(&mut self, id: &str) -> bool {
@@ -419,6 +442,22 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_payment_methods(tenant_id)
+            }
+            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
+        }
+    }
+
+    pub fn get_payment_method(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredPaymentMethod>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_payment_method(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.get_payment_method(id)
             }
             RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }

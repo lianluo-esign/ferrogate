@@ -182,7 +182,7 @@ fn export_analytics_once_since(cursor: AnalyticsExportCursor<'_>) -> AnyResult<(
     let request_logs = cursor.state.request_logs();
     let audit_events = cursor.state.audit_events();
     let billing_events = cursor.state.metering_events();
-    let usage_aggregates = cursor.state.usage_aggregates();
+    let usage_aggregates = cursor.state.usage_aggregates(None);
 
     let mut records = Vec::new();
     records.extend(

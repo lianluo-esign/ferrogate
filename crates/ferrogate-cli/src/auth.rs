@@ -92,6 +92,124 @@ pub(crate) struct AuthError {
     pub(crate) message: String,
 }
 
+/// Denies cross-tenant access to a specific tenant's resource (issue
+/// #185): `authenticate()` only ever checks *scope* (`admin.read`/
+/// `admin.write`), never whether the caller's own tenant matches the
+/// tenant the request actually targets. `provision_gateway_api_key`
+/// (`ferrogate-auth`) mints an `admin.read`+`admin.write`-scoped key tied
+/// to the logging-in user's own tenant on every admin-console login --
+/// without this check, any tenant's console user could read and mutate
+/// every *other* tenant's wallets, virtual keys, quota policies, and RBAC
+/// bindings (confirmed live before this fix: a tenant-A-scoped key could
+/// read AND financially adjust tenant B's wallet balance via `POST
+/// /admin/v1/wallets/{other_tenant}/adjust`).
+///
+/// A platform-operator key (`organization_id: None` -- the "root/
+/// bootstrap key manages every tenant" shape this codebase's entire test
+/// suite already relies on, and the only way to legitimately administer
+/// more than one tenant) is always allowed through unrestricted, exactly
+/// as before this check existed. A tenant-scoped key (`organization_id:
+/// Some(_)`) is denied whenever the resource it's trying to reach
+/// belongs to a *different* tenant.
+pub(crate) fn authorize_tenant_scope(
+    auth: &AuthContext,
+    target_tenant_id: &str,
+) -> Result<(), AuthError> {
+    match auth.organization_id.as_deref() {
+        Some(caller_tenant_id) if caller_tenant_id != target_tenant_id => Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "tenant_scope_denied",
+            message: "API key is not authorized to access this tenant's resources".into(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// The list-endpoint counterpart to [`authorize_tenant_scope`] (issue
+/// #185): rather than deny outright, a bulk `GET /admin/v1/<resource>`
+/// listing narrows down to the caller's own tenant when the key is
+/// tenant-scoped. A platform-operator key (no `organization_id`) sees
+/// every row unfiltered, same as before this existed.
+pub(crate) fn filter_by_tenant_scope<T>(
+    auth: &AuthContext,
+    rows: Vec<T>,
+    tenant_id: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    match auth.organization_id.as_deref() {
+        Some(caller_tenant_id) => rows
+            .into_iter()
+            .filter(|row| tenant_id(row) == caller_tenant_id)
+            .collect(),
+        None => rows,
+    }
+}
+
+/// The `QuotaScopeKind`-aware counterpart to [`authorize_tenant_scope`]
+/// (issue #185): scopes that aren't already a bare tenant_id (project,
+/// workspace, key) have to be resolved to their owning tenant first via a
+/// storage lookup. Shared by `/admin/v1/quota-policies` and
+/// `/admin/v1/usage-reports`, the two admin surfaces addressed by scope
+/// kind. Fails closed: a tenant-scoped caller is denied both when the
+/// resolved tenant differs from their own AND when resolution fails
+/// entirely (the referenced project/workspace/key doesn't exist) --
+/// "nonexistent means safe to touch" is explicitly the wrong default here.
+pub(crate) fn authorize_scoped_resource(
+    state: &AppState,
+    auth: &AuthContext,
+    scope_type: ferrogate_storage::QuotaScopeKind,
+    scope_id: &str,
+) -> Result<(), AuthError> {
+    use ferrogate_storage::QuotaScopeKind;
+    let Some(caller_tenant_id) = auth.organization_id.as_deref() else {
+        return Ok(());
+    };
+    let resolved_tenant_id = match scope_type {
+        QuotaScopeKind::Tenant => Some(scope_id.to_string()),
+        QuotaScopeKind::Project => state
+            .get_project(scope_id)
+            .ok()
+            .flatten()
+            .map(|project| project.tenant_id),
+        QuotaScopeKind::Workspace => state
+            .get_workspace(scope_id)
+            .ok()
+            .flatten()
+            .map(|workspace| workspace.tenant_id),
+        QuotaScopeKind::Key => state
+            .get_virtual_api_key(scope_id)
+            .ok()
+            .flatten()
+            .map(|key| key.tenant_id),
+    };
+    if resolved_tenant_id.as_deref() == Some(caller_tenant_id) {
+        Ok(())
+    } else {
+        Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "tenant_scope_denied",
+            message: "API key is not authorized to access this tenant's resources".into(),
+        })
+    }
+}
+
+/// Forces a caller-suppliable tenant filter (e.g. the `?tenant=`/
+/// `organization_id` query params accepted by the request-log, audit-event,
+/// agent-run, and usage-aggregate admin read endpoints) to the caller's own
+/// tenant when the caller is tenant-scoped (issue #185) -- otherwise a
+/// tenant-scoped key could pass an explicit cross-tenant filter, or omit
+/// the filter entirely, to read every tenant's logs/events. A
+/// platform-operator key's requested filter passes through unchanged
+/// (`None` legitimately means "show every tenant").
+pub(crate) fn enforce_tenant_filter(
+    auth: &AuthContext,
+    requested: Option<String>,
+) -> Option<String> {
+    match auth.organization_id.as_ref() {
+        Some(tenant_id) => Some(tenant_id.clone()),
+        None => requested,
+    }
+}
+
 pub(crate) fn authenticate(
     state: &AppState,
     headers: &HeaderMap,

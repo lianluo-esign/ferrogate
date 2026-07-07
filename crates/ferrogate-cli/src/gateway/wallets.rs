@@ -43,8 +43,12 @@ impl FerroGateway {
         if path == "/admin/v1/wallets" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.list_wallets() {
+                    Ok(auth) => match state.list_wallets() {
                         Ok(wallets) => {
+                            let wallets =
+                                crate::auth::filter_by_tenant_scope(&auth, wallets, |wallet| {
+                                    wallet.tenant_id.as_str()
+                                });
                             let body = AdminList::new(wallets.iter().map(admin_wallet).collect());
                             write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
                                 .await
@@ -154,35 +158,48 @@ impl FerroGateway {
 
         match *method {
             Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => match state.get_wallet(tenant_id) {
-                    Ok(Some(wallet)) => {
-                        let body = AdminWalletMutationResponse {
-                            object: "wallet",
-                            wallet: admin_wallet(&wallet),
-                        };
-                        write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
-                    }
-                    Ok(None) => {
-                        write_json_error(
+                Ok(auth) => {
+                    if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                        return write_json_error(
                             session,
-                            StatusCode::NOT_FOUND,
-                            "wallet_not_found",
-                            format!("no wallet for tenant {tenant_id}"),
+                            error.status,
+                            error.code,
+                            error.message,
                             &ctx.request_id,
                         )
-                        .await
+                        .await;
                     }
-                    Err(error) => {
-                        write_json_error(
-                            session,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "storage_unavailable",
-                            error.to_string(),
-                            &ctx.request_id,
-                        )
-                        .await
+                    match state.get_wallet(tenant_id) {
+                        Ok(Some(wallet)) => {
+                            let body = AdminWalletMutationResponse {
+                                object: "wallet",
+                                wallet: admin_wallet(&wallet),
+                            };
+                            write_json_response(session, StatusCode::OK, &body, &ctx.request_id)
+                                .await
+                        }
+                        Ok(None) => {
+                            write_json_error(
+                                session,
+                                StatusCode::NOT_FOUND,
+                                "wallet_not_found",
+                                format!("no wallet for tenant {tenant_id}"),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "storage_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     write_json_error(
                         session,
@@ -249,6 +266,16 @@ impl FerroGateway {
             )
             .await;
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         if state
             .get_tenant_account(&tenant_id)
             .ok()
@@ -322,6 +349,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let payload = match read_json_body::<AdminWalletMutation>(session, &ctx.request_id).await? {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
@@ -392,6 +429,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let payload =
             match read_json_body::<AdminWalletAdjustRequest>(session, &ctx.request_id).await? {
                 Ok(payload) => payload,
@@ -489,6 +536,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let payload = match read_json_body::<crate::responses::AdminWalletChargeRequest>(
             session,
             &ctx.request_id,
@@ -694,7 +751,17 @@ impl FerroGateway {
         }
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
+            Ok(auth) => {
+                if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 let events = state.wallet_ledger_events(tenant_id);
                 let body = AdminList::new(events);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
@@ -765,7 +832,7 @@ impl FerroGateway {
         if path == "/admin/v1/payment-methods" {
             return match *method {
                 Method::GET => match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => {
+                    Ok(auth) => {
                         let Some(tenant_id) = query
                             .and_then(|query| {
                                 query
@@ -783,6 +850,16 @@ impl FerroGateway {
                             )
                             .await;
                         };
+                        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
                         match state.list_payment_methods(tenant_id) {
                             Ok(payment_methods) => {
                                 let body = AdminList::new(
@@ -860,6 +937,47 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                // Issue #185: the id alone doesn't reveal which tenant owns
+                // this payment method, so it must be looked up before the
+                // tenant-ownership check can run -- unlike every other
+                // handler here, where the tenant_id is already known from
+                // the path/query/body.
+                match state.get_payment_method(id) {
+                    Ok(Some(existing)) => {
+                        if let Err(error) =
+                            crate::auth::authorize_tenant_scope(&auth, &existing.tenant_id)
+                        {
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(None) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "payment_method_not_found",
+                            format!("no payment method with id {id}"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "storage_unavailable",
+                            error.to_string(),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                }
                 match state.delete_payment_method(id) {
                     Ok(true) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -952,6 +1070,16 @@ impl FerroGateway {
             )
             .await;
         };
+        if let Err(error) = crate::auth::authorize_tenant_scope(&auth, &tenant_id) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let Some(provider) = payload.provider.filter(|value| !value.trim().is_empty()) else {
             return write_json_error(
                 session,

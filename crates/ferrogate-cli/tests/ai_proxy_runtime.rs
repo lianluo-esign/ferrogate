@@ -1419,6 +1419,12 @@ key = "other-secret"
 scopes = ["chat.completions"]
 allowed_models = ["fast-chat"]
 
+[[api_keys]]
+id = "admin"
+name = "Platform operator"
+key = "admin-secret"
+scopes = ["admin.read"]
+
 [[gateway_configs]]
 id = "no-cache-agent"
 name = "No-cache agent workflow"
@@ -1516,11 +1522,15 @@ cache_enabled = false
     assert!(profiles.contains("\"cache_enabled\":false"), "{profiles}");
     assert!(!profiles.contains("client-secret"), "{profiles}");
 
+    // A platform-operator key (issue #185: a tenant-scoped key like
+    // client-secret now only sees its own tenant's logs) is used here
+    // since this assertion spans logs from both client-secret and the
+    // unscoped other-secret key.
     let logs = http_request(
         &gateway_addr,
         "GET",
         "/admin/v1/request-logs",
-        &["Authorization: Bearer client-secret"],
+        &["Authorization: Bearer admin-secret"],
         "",
     );
     assert!(logs.contains("200 OK"), "{logs}");
