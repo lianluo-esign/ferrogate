@@ -16,14 +16,13 @@ export const tenantAccountsConfig: ResourceConfig<AdminTenantAccount> = {
   description: "Top-level organizations in the control plane.",
   basePath: "/admin/v1/tenant-accounts",
   idField: "id",
-  // The create form only supports POST (creates fine without a plan_id,
-  // which the backend then defaults to "free"). Reassigning a tenant's
-  // plan after creation is a PATCH-only backend operation
-  // (GET/PATCH /admin/v1/tenant-accounts/{id}) that this generic
-  // create/PUT/delete resource form doesn't model -- see the Plans page
-  // (/app/plans) for viewing plan definitions themselves. Tracked as
-  // follow-up UI work on issue #168.
-  noEditDelete: true,
+  // Deleting a tenant is a large, cascading, destructive operation this
+  // console deliberately never offers -- the backend has no DELETE
+  // handler for /admin/v1/tenant-accounts/{id} either (GET/PUT/PATCH
+  // only). Edit IS supported: PUT is accepted with the same
+  // field-optional merge semantics as PATCH specifically so this
+  // generic edit form (which always sends PUT) can reassign plan_id.
+  noDelete: true,
   columns: [
     { key: "name", header: "Name" },
     { key: "slug", header: "Slug" },
@@ -35,5 +34,11 @@ export const tenantAccountsConfig: ResourceConfig<AdminTenantAccount> = {
     { name: "name", label: "Name", type: "text", required: true },
     { name: "slug", label: "Slug", type: "text", required: true },
     { name: "status", label: "Status", type: "text", placeholder: "active" },
+    {
+      name: "plan_id",
+      label: "Plan ID",
+      type: "text",
+      description: "Must match an existing plan's id/slug -- see the Plans page.",
+    },
   ],
 };

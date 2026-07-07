@@ -254,7 +254,13 @@ impl FerroGateway {
                     .await
                 }
             },
-            Method::PATCH => {
+            // PUT and PATCH share identical merge semantics here (every
+            // field optional, falls back to the existing value) -- PUT is
+            // accepted alongside PATCH specifically so the admin-console's
+            // generic resource-edit form (which always sends PUT) can
+            // reassign a tenant's plan_id without a bespoke endpoint or
+            // frontend special-case (issue #168).
+            Method::PUT | Method::PATCH => {
                 let auth = match authenticate(&state, headers, "admin.write", &ctx.request_id) {
                     Ok(auth) => auth,
                     Err(error) => {
@@ -351,7 +357,7 @@ impl FerroGateway {
                     session,
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method_not_allowed",
-                    "tenant account endpoint supports GET and PATCH",
+                    "tenant account endpoint supports GET, PUT, and PATCH",
                     &ctx.request_id,
                 )
                 .await

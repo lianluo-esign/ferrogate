@@ -188,6 +188,23 @@ fn plans_admin_surface_creates_lists_and_assigns_to_a_tenant() {
     ));
     assert_eq!(reread["tenant"]["plan_id"], "pro");
 
+    // 10. PUT is accepted with identical merge semantics to PATCH (issue
+    // #168): the admin-console's generic resource-edit form always sends
+    // PUT, so this is what actually lets an operator reassign a tenant's
+    // plan through the UI rather than only via a raw PATCH call.
+    let reassigned_via_put = response_json(http_request(
+        &gateway_addr,
+        "PUT",
+        &format!("/admin/v1/tenant-accounts/{tenant_id}"),
+        &admin_headers(),
+        r#"{"plan_id":"free"}"#,
+    ));
+    assert_eq!(reassigned_via_put["tenant"]["plan_id"], "free");
+    assert_eq!(
+        reassigned_via_put["tenant"]["name"], "Tenant Plans E2E",
+        "PUT must merge just like PATCH: name must survive an unrelated plan_id update"
+    );
+
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }

@@ -34,8 +34,16 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
   fields: FieldConfig[];
   /** View-only resources (logs, audit events, usage/billing history) hide create/edit/delete. */
   readOnly?: boolean;
-  /** Resources that support create but no update/delete API (e.g. tenant accounts). */
+  /** Resources that support create but no update/delete API. */
   noEditDelete?: boolean;
+  /**
+   * Resources that support edit but not delete (e.g. tenant accounts,
+   * where deleting a tenant is a large destructive operation this
+   * console deliberately doesn't expose at all -- the backend has no
+   * DELETE handler for it either). Independent of `noEditDelete`, which
+   * disables both.
+   */
+  noDelete?: boolean;
   /** Path segment appended to basePath for update/delete; defaults to row[idField]. */
   resolveDetailPath?: (row: T) => string;
   /** Unwraps a nested list envelope, e.g. row => row.workflow for agent-workflows. */

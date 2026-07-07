@@ -92,6 +92,8 @@ export function ResourcePage<T extends Record<string, unknown>>({
   });
 
   const rows = data?.data ?? [];
+  const canEdit = !config.readOnly && !config.noEditDelete;
+  const canDelete = canEdit && !config.noDelete;
 
   return (
     <div className="flex flex-col gap-4">
@@ -125,18 +127,16 @@ export function ResourcePage<T extends Record<string, unknown>>({
         columns={config.columns}
         rows={rows}
         isLoading={isLoading}
-        readOnly={config.readOnly || config.noEditDelete}
+        readOnly={!canEdit && !canDelete}
         onEdit={
-          config.readOnly || config.noEditDelete
-            ? undefined
-            : (row) => {
+          canEdit
+            ? (row) => {
                 setEditingRow(row);
                 setFormOpen(true);
               }
+            : undefined
         }
-        onDelete={
-          config.readOnly || config.noEditDelete ? undefined : (row) => setDeletingRow(row)
-        }
+        onDelete={canDelete ? (row) => setDeletingRow(row) : undefined}
       />
 
       <Sheet open={formOpen} onOpenChange={setFormOpen}>
