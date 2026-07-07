@@ -125,6 +125,21 @@ impl FerroGateway {
                 .handle_admin_wallet_charge(session, ctx, headers, method, tenant_id)
                 .await;
         }
+        if let Some(tenant_id) = rest.strip_suffix("/ledger") {
+            if tenant_id.is_empty() {
+                return write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "wallet endpoint not found",
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            return self
+                .handle_admin_wallet_ledger(session, ctx, headers, method, tenant_id)
+                .await;
+        }
         let tenant_id = rest;
         if tenant_id.is_empty() {
             return write_json_error(
@@ -651,6 +666,49 @@ impl FerroGateway {
                 &ctx.request_id,
             )
             .await
+        }
+    }
+
+    /// Wallet transaction ledger (issue #169): every recorded balance
+    /// change for `tenant_id` -- manual adjustments and live charges from
+    /// this file's own handlers, plus settlement debits and auto-recharge
+    /// attempts recorded from `state.rs`'s background settlement path.
+    /// Read-only, so `admin.read` rather than `admin.write`.
+    async fn handle_admin_wallet_ledger(
+        &self,
+        session: &mut Session,
+        ctx: &super::ProxyContext,
+        headers: &http::HeaderMap,
+        method: &Method,
+        tenant_id: &str,
+    ) -> PingoraResult<()> {
+        if *method != Method::GET {
+            return write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "wallet ledger endpoint supports GET",
+                &ctx.request_id,
+            )
+            .await;
+        }
+        let state = self.state.current();
+        match authenticate(&state, headers, "admin.read", &ctx.request_id) {
+            Ok(_) => {
+                let events = state.wallet_ledger_events(tenant_id);
+                let body = AdminList::new(events);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                write_json_error(
+                    session,
+                    error.status,
+                    error.code,
+                    error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
         }
     }
 

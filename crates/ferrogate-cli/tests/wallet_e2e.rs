@@ -255,6 +255,33 @@ fn wallet_admission_gate_drains_via_real_settlement_then_rejects_then_recovers_a
         "PATCH must merge: the amount set at creation must survive an unrelated threshold update"
     );
 
+    // 8. The ledger shows both operator-driven adjustments (steps 3 and 6)
+    // and the real settlement debit (step 4) -- proving GET .../ledger
+    // (issue #169) surfaces every balance-changing event, not just the
+    // ones made through /adjust.
+    let ledger = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/wallets/tenant-wallet-e2e/ledger",
+        &admin_headers(),
+        "",
+    ));
+    let actions: Vec<&str> = ledger["data"]
+        .as_array()
+        .expect("ledger must be a list")
+        .iter()
+        .map(|entry| entry["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        actions.iter().filter(|a| **a == "wallet.adjust").count(),
+        2,
+        "expected exactly the two manual /adjust calls from this test: {ledger}"
+    );
+    assert!(
+        actions.contains(&"wallet.settle"),
+        "ledger must record the real settlement debit: {ledger}"
+    );
+
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }

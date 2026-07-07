@@ -327,6 +327,44 @@ fn wallet_auto_recharge_fires_in_the_background_and_credits_the_wallet_on_succes
         "idempotency key must be derived from the tenant id: {idempotency_key}"
     );
 
+    // The ledger must show both the settlement debit (from the real chat
+    // completion) and the auto-recharge credit, in that causal order --
+    // proving background/non-admin-handler code paths write to the same
+    // audit-event log the admin-initiated /adjust and /charge endpoints
+    // already do.
+    let ledger = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/wallets/tenant-recharge-e2e/ledger",
+        &admin_headers(),
+        "",
+    ));
+    let entries = ledger["data"].as_array().expect("ledger must be a list");
+    let actions: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry["action"].as_str().unwrap())
+        .collect();
+    assert!(
+        actions.contains(&"wallet.settle"),
+        "ledger must record the settlement debit: {ledger}"
+    );
+    assert!(
+        actions.contains(&"wallet.auto_recharge"),
+        "ledger must record the auto-recharge charge: {ledger}"
+    );
+    let settle_index = actions.iter().position(|a| *a == "wallet.settle").unwrap();
+    let recharge_index = actions
+        .iter()
+        .position(|a| *a == "wallet.auto_recharge")
+        .unwrap();
+    assert!(
+        settle_index < recharge_index,
+        "the debit must be recorded before the recharge it triggered: {ledger}"
+    );
+    let recharge_entry = &entries[recharge_index];
+    assert_eq!(recharge_entry["outcome"], "committed");
+    assert_eq!(recharge_entry["target"], "tenant-recharge-e2e");
+
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }

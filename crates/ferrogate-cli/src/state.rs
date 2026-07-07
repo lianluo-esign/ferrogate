@@ -4912,7 +4912,18 @@ impl AppState {
             .adjust_wallet_balance(tenant_id, delta_credits, now)
         {
             Ok(None) => {} // no wallet for this tenant; nothing to do
-            Ok(Some(wallet)) => self.maybe_trigger_auto_recharge(wallet),
+            Ok(Some(wallet)) => {
+                self.record_wallet_ledger_event(
+                    tenant_id,
+                    "wallet.settle",
+                    "debited",
+                    format!(
+                        "settled request cost ${cost_usd:.6} debited {} credits; balance now {}",
+                        -delta_credits, wallet.balance_credits
+                    ),
+                );
+                self.maybe_trigger_auto_recharge(wallet)
+            }
             Err(error) => {
                 warn!(
                     tenant_id = %tenant_id,
@@ -4921,6 +4932,64 @@ impl AppState {
                 );
             }
         }
+    }
+
+    /// Records a wallet balance-changing event to the same admin
+    /// audit-event log every `/admin/v1/wallets/*` handler already
+    /// writes to (issue #169's ledger surfacing) -- specifically so
+    /// `GET /admin/v1/wallets/{tenant_id}/ledger` (`wallet_ledger_events`
+    /// below) shows a complete transaction history, not just the
+    /// operator-initiated ones that happen to go through an admin
+    /// handler. Called from background/settlement code paths that have
+    /// no live `AuthContext`/`ProxyContext` (unlike
+    /// `admin_audit_event_draft_for_target`, which requires both), so
+    /// this builds the draft directly with `actor_api_key_id: None` --
+    /// the struct itself has no such requirement, only the admin-handler
+    /// convenience wrapper does.
+    fn record_wallet_ledger_event(
+        &self,
+        tenant_id: &str,
+        action: &'static str,
+        outcome: &'static str,
+        message: String,
+    ) {
+        self.record_admin_audit_event(AdminAuditEventDraft {
+            request_id: self.next_request_id(),
+            trace_id: None,
+            agent_run_id: None,
+            workflow_id: None,
+            workflow_version: None,
+            workflow_node_id: None,
+            actor_api_key_id: None,
+            tenant: ferrogate_core::TenantContext {
+                organization_id: Some(tenant_id.to_string()),
+                ..Default::default()
+            },
+            action: action.to_string(),
+            target: tenant_id.to_string(),
+            outcome: outcome.to_string(),
+            message,
+        });
+    }
+
+    /// Wallet transaction ledger (issue #169): every `"wallet.*"`-actioned
+    /// audit event recorded for `tenant_id` -- manual adjustments and
+    /// live charges (both recorded by the `/admin/v1/wallets/*` HTTP
+    /// handlers), plus settlement debits and auto-recharge attempts
+    /// (recorded via `record_wallet_ledger_event` above). Same
+    /// fetch-then-filter-in-Rust pattern `tool_session_events` already
+    /// uses for the same audit-event store; unpaginated like that
+    /// precedent, since a per-tenant wallet's event volume is expected
+    /// to be small relative to the full audit-event table.
+    pub(crate) fn wallet_ledger_events(
+        &self,
+        tenant_id: &str,
+    ) -> Vec<ferrogate_storage::StoredAuditEvent> {
+        self.repositories
+            .audit_events()
+            .into_iter()
+            .filter(|event| event.action.starts_with("wallet.") && event.target == tenant_id)
+            .collect()
     }
 
     /// Fires an auto-recharge charge in the background when a debit just
@@ -5017,6 +5086,16 @@ impl AppState {
                         "auto-recharge charge succeeded but crediting the wallet failed"
                     );
                 }
+                self.record_wallet_ledger_event(
+                    tenant_id,
+                    "wallet.auto_recharge",
+                    "committed",
+                    format!(
+                        "auto-recharge credited {amount_credits} credits \
+                         ({amount_usd_cents} USD cents charged, provider_charge_id={})",
+                        outcome.provider_charge_id
+                    ),
+                );
             }
             Ok(outcome) => {
                 warn!(
@@ -5025,6 +5104,18 @@ impl AppState {
                     "auto-recharge charge was declined"
                 );
                 let _ = self.set_wallet_dunning(tenant_id, true);
+                self.record_wallet_ledger_event(
+                    tenant_id,
+                    "wallet.auto_recharge",
+                    "declined",
+                    format!(
+                        "auto-recharge charge for {amount_credits} credits declined: {}",
+                        outcome
+                            .decline_reason
+                            .as_deref()
+                            .unwrap_or("no reason given")
+                    ),
+                );
             }
             Err(error) => {
                 warn!(
@@ -5033,6 +5124,12 @@ impl AppState {
                     "auto-recharge charge request failed"
                 );
                 let _ = self.set_wallet_dunning(tenant_id, true);
+                self.record_wallet_ledger_event(
+                    tenant_id,
+                    "wallet.auto_recharge",
+                    "error",
+                    format!("auto-recharge charge for {amount_credits} credits failed: {error}"),
+                );
             }
         }
     }
