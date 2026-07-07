@@ -78,6 +78,35 @@ pub(crate) struct Config {
     pub(crate) routes: Vec<RouteRule>,
     #[serde(default)]
     pub(crate) network_access: NetworkAccessConfig,
+    #[serde(default)]
+    pub(crate) asset_bucket: AssetBucketConfig,
+}
+
+/// S3-compatible object-storage bucket for `/v1/assets/*` content (issue
+/// #176). Optional and additive: `enabled = false` (the default) keeps
+/// every asset's bytes inline in `stored_assets.content`, the original
+/// #176 design -- unset entirely, this whole feature is a no-op. Supabase
+/// Storage exposes an S3-compatible endpoint using the same SigV4 auth
+/// scheme AWS S3 does, so this also works against a real AWS S3 bucket or
+/// any other S3-compatible service (MinIO, etc.), not only Supabase.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct AssetBucketConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// `scheme://host[:port]`, no trailing slash, no bucket/key suffix --
+    /// e.g. `https://<project>.supabase.co/storage/v1/s3`.
+    #[serde(default)]
+    pub(crate) endpoint: Option<String>,
+    #[serde(default)]
+    pub(crate) bucket: Option<String>,
+    #[serde(default)]
+    pub(crate) region: Option<String>,
+    /// Not a secret itself -- paired with `secret_access_key_env` for the
+    /// actual secret, mirroring `Provider::aws_access_key_id`'s split.
+    #[serde(default)]
+    pub(crate) access_key_id: Option<String>,
+    #[serde(default)]
+    pub(crate) secret_access_key_env: Option<String>,
 }
 
 /// Pre-authentication network controls (issue #166), applied to every
@@ -1777,6 +1806,7 @@ impl Default for Config {
             upstreams: Vec::new(),
             routes: Vec::new(),
             network_access: NetworkAccessConfig::default(),
+            asset_bucket: AssetBucketConfig::default(),
         }
     }
 }

@@ -124,6 +124,57 @@ impl Config {
         self.validate_network_access()?;
         let upstream_names = self.validate_upstreams()?;
         self.validate_routes(&upstream_names)?;
+        self.validate_asset_bucket()?;
+        Ok(())
+    }
+
+    /// Validates `[asset_bucket]` (issue #176). A no-op unless `enabled =
+    /// true`, so existing configs (which never set this section at all)
+    /// are unaffected -- once enabled, every credential piece is required
+    /// at config-load time rather than failing silently at first asset
+    /// push, mirroring the bedrock/vertex provider validation blocks
+    /// above.
+    fn validate_asset_bucket(&self) -> AnyResult<()> {
+        let bucket = &self.asset_bucket;
+        if bucket.endpoint.as_deref().is_some_and(str::is_empty) {
+            bail!("field asset_bucket.endpoint: cannot be empty");
+        }
+        if bucket.bucket.as_deref().is_some_and(str::is_empty) {
+            bail!("field asset_bucket.bucket: cannot be empty");
+        }
+        if bucket.region.as_deref().is_some_and(str::is_empty) {
+            bail!("field asset_bucket.region: cannot be empty");
+        }
+        if bucket.access_key_id.as_deref().is_some_and(str::is_empty) {
+            bail!("field asset_bucket.access_key_id: cannot be empty");
+        }
+        if bucket
+            .secret_access_key_env
+            .as_deref()
+            .is_some_and(str::is_empty)
+        {
+            bail!("field asset_bucket.secret_access_key_env: cannot be empty");
+        }
+        if !bucket.enabled {
+            return Ok(());
+        }
+        if bucket.endpoint.is_none() {
+            bail!("field asset_bucket.endpoint: required when asset_bucket.enabled = true");
+        }
+        if bucket.bucket.is_none() {
+            bail!("field asset_bucket.bucket: required when asset_bucket.enabled = true");
+        }
+        if bucket.region.is_none() {
+            bail!("field asset_bucket.region: required when asset_bucket.enabled = true");
+        }
+        if bucket.access_key_id.is_none() {
+            bail!("field asset_bucket.access_key_id: required when asset_bucket.enabled = true");
+        }
+        if bucket.secret_access_key_env.is_none() {
+            bail!(
+                "field asset_bucket.secret_access_key_env: required when asset_bucket.enabled = true"
+            );
+        }
         Ok(())
     }
 

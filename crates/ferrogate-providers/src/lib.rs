@@ -32,6 +32,10 @@ pub use models::{
 pub use openai::OpenAiCompatibleAdapter;
 pub use openrouter::OpenRouterAdapter;
 pub use registry::ProviderAdapterRegistry;
+pub use sigv4::{
+    sign as sign_sigv4, sign_with_content_hash_header as sign_sigv4_with_content_hash_header,
+    AwsCredentials, SignedHeaders, SigningRequest,
+};
 pub use types::{
     is_openai_compatible_provider_kind, provider_compatibility_kind, AdapterError,
     AwsProviderCredentials, ChatCompletionPlan, GcpProviderCredentials, ProviderAdapter,

@@ -307,6 +307,76 @@ fn a_non_vertex_provider_does_not_require_gcp_credentials() {
     config.validate().unwrap();
 }
 
+fn enabled_asset_bucket() -> AssetBucketConfig {
+    AssetBucketConfig {
+        enabled: true,
+        endpoint: Some("https://project.supabase.co/storage/v1/s3".into()),
+        bucket: Some("ferrogate-assets".into()),
+        region: Some("us-east-1".into()),
+        access_key_id: Some("AKIDEXAMPLE".into()),
+        secret_access_key_env: Some("FERROGATE_ASSET_BUCKET_SECRET".into()),
+    }
+}
+
+#[test]
+fn accepts_a_fully_configured_asset_bucket() {
+    let config = Config {
+        asset_bucket: enabled_asset_bucket(),
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn asset_bucket_disabled_by_default_requires_nothing() {
+    assert!(!Config::default().asset_bucket.enabled);
+    Config::default().validate().unwrap();
+}
+
+#[test]
+fn rejects_enabled_asset_bucket_missing_endpoint() {
+    let mut asset_bucket = enabled_asset_bucket();
+    asset_bucket.endpoint = None;
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(
+        error.contains("field asset_bucket.endpoint: required when asset_bucket.enabled = true")
+    );
+}
+
+#[test]
+fn rejects_enabled_asset_bucket_missing_secret_access_key_env() {
+    let mut asset_bucket = enabled_asset_bucket();
+    asset_bucket.secret_access_key_env = None;
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains(
+        "field asset_bucket.secret_access_key_env: required when asset_bucket.enabled = true"
+    ));
+}
+
+#[test]
+fn rejects_empty_asset_bucket_bucket() {
+    let mut asset_bucket = enabled_asset_bucket();
+    asset_bucket.bucket = Some(String::new());
+    let config = Config {
+        asset_bucket,
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field asset_bucket.bucket: cannot be empty"));
+}
+
 #[test]
 fn rejects_api_key_region_allowlist_entry_with_no_matching_provider() {
     let mut provider = provider();

@@ -949,6 +949,14 @@ CREATE TABLE IF NOT EXISTS stored_assets (
 CREATE INDEX IF NOT EXISTS idx_stored_assets_tenant_type_name
     ON stored_assets(tenant_id, asset_type, name, version);
 
+-- Bucket-backed storage (issue #176): when set, this asset's real bytes
+-- live in an S3-compatible bucket at this object key instead of `content`
+-- (which is an empty bytea for these rows) -- see
+-- crates/ferrogate-cli/src/gateway/asset_bucket.rs. NULL (the default)
+-- means `content` holds the real bytes, the original inline-only design.
+ALTER TABLE stored_assets
+    ADD COLUMN IF NOT EXISTS storage_uri TEXT;
+
 -- permissions / roles / tenant_role_bindings: tenant-level entitlement
 -- system (issue #182). A permission is a dynamically-definable,
 -- finest-grained capability unit (string-keyed, e.g. "assets.host") --
@@ -1194,5 +1202,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (23, '023_wallets_and_payment_methods')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (24, '024_stored_assets_storage_uri')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

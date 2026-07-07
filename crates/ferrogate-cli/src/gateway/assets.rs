@@ -321,6 +321,29 @@ impl FerroGateway {
             .ok()
             .flatten()
             .map_or(now, |existing| existing.created_at_unix);
+
+        // Bucket-backed storage (issue #176): when configured, the real
+        // bytes go to the bucket and only a reference (`storage_uri`) is
+        // persisted in Postgres, instead of duplicating them inline. A
+        // bucket PUT failure fails the whole push (not a silent fallback
+        // to inline storage) -- an operator who configured a bucket
+        // expects assets to actually land there.
+        let (stored_content, storage_uri) = if let Some(bucket) = state.asset_bucket_client() {
+            if let Err(error) = bucket.put_object(&id, &content, &content_type).await {
+                return write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "asset_bucket_unavailable",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+            (Vec::new(), Some(id.clone()))
+        } else {
+            (content.to_vec(), None)
+        };
+
         let asset = StoredAsset {
             id: id.clone(),
             tenant_id: tenant_id.clone(),
@@ -331,7 +354,8 @@ impl FerroGateway {
             content_type,
             content_hash: sha256_hex(&content),
             size_bytes: content.len() as u64,
-            content: content.to_vec(),
+            content: stored_content,
+            storage_uri,
             created_at_unix,
             updated_at_unix: now,
         };
@@ -400,10 +424,41 @@ impl FerroGateway {
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
         match state.get_asset(&id) {
             Ok(Some(asset)) => {
+                // Bucket-backed storage (issue #176): the real bytes live
+                // in the bucket, not `asset.content` (which is empty for
+                // these rows) -- fetch them before the same integrity
+                // re-verification every asset read already does.
+                let content = if let Some(storage_uri) = asset.storage_uri.as_deref() {
+                    let Some(bucket) = state.asset_bucket_client() else {
+                        return write_json_error(
+                            session,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "asset_bucket_unavailable",
+                            "this asset is bucket-backed but no asset_bucket is configured",
+                            &ctx.request_id,
+                        )
+                        .await;
+                    };
+                    match bucket.get_object(storage_uri).await {
+                        Ok(content) => content,
+                        Err(error) => {
+                            return write_json_error(
+                                session,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "asset_bucket_unavailable",
+                                error.to_string(),
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    }
+                } else {
+                    asset.content
+                };
                 // Re-verify content integrity on every read (#176/#179):
                 // a mismatch means storage-layer corruption or tampering,
                 // not a client error, so fail closed rather than serve it.
-                if sha256_hex(&asset.content) != asset.content_hash {
+                if sha256_hex(&content) != asset.content_hash {
                     return write_json_error(
                         session,
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -417,7 +472,7 @@ impl FerroGateway {
                     session,
                     StatusCode::OK,
                     &asset.content_type,
-                    Bytes::from(asset.content),
+                    Bytes::from(content),
                     &ctx.request_id,
                 )
                 .await
@@ -479,6 +534,24 @@ impl FerroGateway {
             .await;
         };
         let id = stored_asset_id(&tenant_id, asset_type, name, version);
+        // Bucket-backed storage (issue #176): best-effort delete the
+        // bucket object before the DB row -- a failure here is logged but
+        // doesn't block the delete, since an orphaned bucket object is a
+        // lesser problem than a `stored_assets` row the operator can never
+        // remove because the bucket happens to be unreachable.
+        if let Ok(Some(existing)) = state.get_asset(&id) {
+            if let Some(storage_uri) = existing.storage_uri.as_deref() {
+                if let Some(bucket) = state.asset_bucket_client() {
+                    if let Err(error) = bucket.delete_object(storage_uri).await {
+                        tracing::warn!(
+                            asset_id = %id,
+                            error = %error,
+                            "failed to delete bucket object for asset; deleting the stored_assets row anyway"
+                        );
+                    }
+                }
+            }
+        }
         match state.delete_asset(&id) {
             Ok(true) => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -529,6 +602,7 @@ fn asset_summary(asset: &StoredAsset) -> AssetSummary {
         content_type: asset.content_type.clone(),
         content_hash: asset.content_hash.clone(),
         size_bytes: asset.size_bytes,
+        storage_backed: asset.storage_uri.is_some(),
         created_at_unix: asset.created_at_unix,
         updated_at_unix: asset.updated_at_unix,
     }

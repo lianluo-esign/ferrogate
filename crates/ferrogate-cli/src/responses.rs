@@ -1292,6 +1292,11 @@ pub(crate) struct AssetSummary {
     pub(crate) content_type: String,
     pub(crate) content_hash: String,
     pub(crate) size_bytes: u64,
+    /// `true` when this asset's bytes live in an S3-compatible bucket
+    /// (issue #176) rather than inline in Postgres. Exposes whether
+    /// bucket storage is in play without leaking the raw bucket/key
+    /// reference (`storage_uri`) itself.
+    pub(crate) storage_backed: bool,
     pub(crate) created_at_unix: i64,
     pub(crate) updated_at_unix: i64,
 }

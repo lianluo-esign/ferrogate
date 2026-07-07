@@ -1628,12 +1628,14 @@ impl PostgresControlPlaneStore {
             client.execute(
                 "INSERT INTO stored_assets \
                  (id, tenant_id, project_id, asset_type, name, version, content_type, \
-                  content_hash, size_bytes, content, created_at_unix, updated_at_unix) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                  content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                  storage_uri) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
                  ON CONFLICT (id) DO UPDATE SET \
                  content_type = EXCLUDED.content_type, content_hash = EXCLUDED.content_hash, \
                  size_bytes = EXCLUDED.size_bytes, content = EXCLUDED.content, \
-                 updated_at_unix = EXCLUDED.updated_at_unix",
+                 updated_at_unix = EXCLUDED.updated_at_unix, \
+                 storage_uri = EXCLUDED.storage_uri",
                 &[
                     &asset.id,
                     &asset.tenant_id,
@@ -1647,6 +1649,7 @@ impl PostgresControlPlaneStore {
                     &asset.content,
                     &asset.created_at_unix,
                     &asset.updated_at_unix,
+                    &asset.storage_uri,
                 ],
             )?;
             Ok(())
@@ -1657,7 +1660,8 @@ impl PostgresControlPlaneStore {
         let row = self.with_client(|client| {
             client.query_opt(
                 "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
-                 content_hash, size_bytes, content, created_at_unix, updated_at_unix \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                 storage_uri \
                  FROM stored_assets WHERE id = $1",
                 &[&id],
             )
@@ -1673,14 +1677,16 @@ impl PostgresControlPlaneStore {
         let rows = self.with_client(|client| match asset_type {
             Some(asset_type) => client.query(
                 "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
-                 content_hash, size_bytes, content, created_at_unix, updated_at_unix \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                 storage_uri \
                  FROM stored_assets WHERE tenant_id = $1 AND asset_type = $2 \
                  ORDER BY name ASC, version ASC",
                 &[&tenant_id, &asset_type],
             ),
             None => client.query(
                 "SELECT id, tenant_id, project_id, asset_type, name, version, content_type, \
-                 content_hash, size_bytes, content, created_at_unix, updated_at_unix \
+                 content_hash, size_bytes, content, created_at_unix, updated_at_unix, \
+                 storage_uri \
                  FROM stored_assets WHERE tenant_id = $1 \
                  ORDER BY asset_type ASC, name ASC, version ASC",
                 &[&tenant_id],
@@ -4396,6 +4402,7 @@ fn asset_from_row(row: &PostgresRow) -> StoredAsset {
         content: row.get::<_, Vec<u8>>(9),
         created_at_unix: row.get::<_, i64>(10),
         updated_at_unix: row.get::<_, i64>(11),
+        storage_uri: row.get::<_, Option<String>>(12),
     }
 }
 
@@ -6097,13 +6104,14 @@ pub struct StoredPlan {
 /// connection manifests, Skill bundles, static sites, and config files all
 /// share this one table rather than being special-cased per type.
 ///
-/// Content is stored inline (`content`) rather than referencing a separate
-/// object-storage bucket for this first cut: it keeps every asset
+/// Content is stored inline (`content`) by default: it keeps every asset
 /// operation to a single Postgres/Supabase round trip with no external
 /// bucket credentials required, at the cost of Postgres row size for large
-/// assets. Swapping `content` for a bucket/object-key reference is a
-/// compatible follow-up once Supabase Storage bucket credentials are
-/// available for live verification (see #176).
+/// assets. When `storage_uri` is `Some`, the real bytes live in an
+/// S3-compatible object-storage bucket instead (see
+/// `ferrogate-cli/src/gateway/asset_bucket.rs`, issue #176) and `content`
+/// is empty -- callers must check `storage_uri` before trusting `content`
+/// to hold the actual asset bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredAsset {
     pub id: String,
@@ -6117,6 +6125,12 @@ pub struct StoredAsset {
     pub content_hash: String,
     pub size_bytes: u64,
     pub content: Vec<u8>,
+    /// Bucket object key when this asset's bytes live in an S3-compatible
+    /// bucket rather than the `content` column (issue #176). `None` means
+    /// `content` holds the real bytes (the original, still-supported
+    /// inline path).
+    #[serde(default)]
+    pub storage_uri: Option<String>,
     #[serde(default)]
     pub created_at_unix: i64,
     #[serde(default)]

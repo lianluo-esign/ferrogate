@@ -4725,6 +4725,39 @@ impl AppState {
             .sum())
     }
 
+    /// Resolves the S3-compatible bucket client for `/v1/assets/*` content
+    /// (issue #176) from `[asset_bucket]`. `None` when disabled or any
+    /// required piece is missing -- the same opt-in, fail-closed-only-when
+    /// -misconfigured-while-enabled shape `aws_provider_credentials`/
+    /// `gcp_provider_credentials` already use, except config validation
+    /// (`validate_asset_bucket`) already rejects an incomplete `enabled =
+    /// true` section at load time, so a `None` here in practice only ever
+    /// means "bucket storage isn't configured, use the inline path".
+    pub(crate) fn asset_bucket_client(
+        &self,
+    ) -> Option<crate::gateway::asset_bucket::AssetBucketClient> {
+        let bucket = &self.config.asset_bucket;
+        if !bucket.enabled {
+            return None;
+        }
+        let endpoint = bucket.endpoint.clone()?;
+        let bucket_name = bucket.bucket.clone()?;
+        let region = bucket.region.clone()?;
+        let access_key_id = bucket.access_key_id.clone()?;
+        let secret_access_key = std::env::var(bucket.secret_access_key_env.as_deref()?)
+            .ok()
+            .filter(|value| !value.is_empty())?;
+        Some(crate::gateway::asset_bucket::AssetBucketClient::new(
+            crate::gateway::asset_bucket::AssetBucketConfig {
+                endpoint,
+                bucket: bucket_name,
+                region,
+                access_key_id,
+                secret_access_key,
+            },
+        ))
+    }
+
     // --- Tenant-level RBAC entitlements (issue #182) ---
 
     pub(crate) fn upsert_permission(&self, permission: StoredPermission) -> anyhow::Result<()> {

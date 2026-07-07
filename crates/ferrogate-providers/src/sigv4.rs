@@ -45,8 +45,8 @@ pub struct SigningRequest<'a> {
     pub timestamp_unix: u64,
 }
 
-/// The two headers a signed request must send verbatim, plus the date
-/// header value (also needed as the literal `X-Amz-Date` header).
+/// The headers a signed request must send verbatim, plus the date header
+/// value (also needed as the literal `X-Amz-Date` header).
 pub struct SignedHeaders {
     pub x_amz_date: String,
     pub authorization: String,
@@ -54,6 +54,13 @@ pub struct SignedHeaders {
     /// credentials) -- omitted entirely for long-lived IAM user keys,
     /// matching AWS's own SDKs.
     pub x_amz_security_token: Option<String>,
+    /// Present only when signed via [`sign_with_content_hash_header`] --
+    /// the hex-encoded SHA-256 of the body, which some AWS services (S3
+    /// in particular) require as a literal `x-amz-content-sha256` header
+    /// in addition to using it inside the canonical request, unlike
+    /// Bedrock's Converse/InvokeModel APIs which only need it folded into
+    /// the signature.
+    pub x_amz_content_sha256: Option<String>,
 }
 
 /// Signs `request` with `credentials`, returning the header values to
@@ -63,20 +70,52 @@ pub struct SignedHeaders {
 /// `application/json` POST bodies, so callers don't need to keep every
 /// header they send in sync with what's signed.
 pub fn sign(request: &SigningRequest<'_>, credentials: &AwsCredentials) -> SignedHeaders {
+    sign_internal(request, credentials, false)
+}
+
+/// Same as [`sign`], but also signs and returns a literal
+/// `x-amz-content-sha256` header (`SignedHeaders::x_amz_content_sha256`)
+/// -- required by S3-compatible object-storage APIs (`asset_bucket.rs`,
+/// issue #176), which is why this crate exposes it separately rather than
+/// changing `sign`'s existing behavior for Bedrock.
+pub fn sign_with_content_hash_header(
+    request: &SigningRequest<'_>,
+    credentials: &AwsCredentials,
+) -> SignedHeaders {
+    sign_internal(request, credentials, true)
+}
+
+fn sign_internal(
+    request: &SigningRequest<'_>,
+    credentials: &AwsCredentials,
+    include_content_hash_header: bool,
+) -> SignedHeaders {
     let (amz_date, date_stamp) = format_timestamps(request.timestamp_unix);
     let credential_scope = format!(
         "{date_stamp}/{}/{}/aws4_request",
         request.region, request.service
     );
 
-    let signed_header_names = "host;x-amz-date";
-    let canonical_headers = format!("host:{}\nx-amz-date:{amz_date}\n", request.host);
     let hashed_payload = hex_sha256(request.body);
+    let (signed_header_names, canonical_headers) = if include_content_hash_header {
+        (
+            "host;x-amz-content-sha256;x-amz-date",
+            format!(
+                "host:{}\nx-amz-content-sha256:{hashed_payload}\nx-amz-date:{amz_date}\n",
+                request.host
+            ),
+        )
+    } else {
+        (
+            "host;x-amz-date",
+            format!("host:{}\nx-amz-date:{amz_date}\n", request.host),
+        )
+    };
     let canonical_request = format!(
         "{}\n{}\n{}\n{canonical_headers}\n{signed_header_names}\n{hashed_payload}",
         request.method,
         canonical_uri(request.path),
-        "", // Bedrock Converse/InvokeModel take no query string.
+        "", // Neither Bedrock nor S3 object PUT/GET/DELETE need a query string here.
     );
 
     let string_to_sign = format!(
@@ -101,6 +140,7 @@ pub fn sign(request: &SigningRequest<'_>, credentials: &AwsCredentials) -> Signe
         x_amz_date: amz_date,
         authorization,
         x_amz_security_token: credentials.session_token.clone(),
+        x_amz_content_sha256: include_content_hash_header.then_some(hashed_payload),
     }
 }
 
@@ -182,15 +222,41 @@ fn canonical_uri(path: &str) -> String {
         .join("/")
 }
 
+/// Encodes one path segment, treating an already-well-formed `%XY` escape
+/// (two hex digits) as pre-encoded and passing it through verbatim rather
+/// than re-encoding the `%` itself. This matters because `bedrock.rs`
+/// deliberately pre-percent-encodes an entire model id (including any
+/// embedded `/`, e.g. an ARN-style id) into a single path segment before
+/// this function ever sees it, specifically so a slash inside the model
+/// id can't be mistaken for a path separator -- without this
+/// already-escaped detection, `canonical_uri` would re-encode that
+/// segment's `%` characters into `%25`, producing a signature that
+/// doesn't match what a real AWS-compatible server independently derives
+/// from the (correctly, singly-encoded) wire request.
 fn percent_encode_segment(segment: &str) -> String {
-    let mut out = String::with_capacity(segment.len());
-    for byte in segment.bytes() {
+    let bytes = segment.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            out.push('%');
+            out.push(bytes[index + 1] as char);
+            out.push(bytes[index + 2] as char);
+            index += 3;
+            continue;
+        }
         let ch = byte as char;
         if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
             out.push(ch);
         } else {
             out.push_str(&format!("%{byte:02X}"));
         }
+        index += 1;
     }
     out
 }
@@ -220,6 +286,26 @@ mod tests {
         );
         assert_eq!(canonical_uri(""), "/");
         assert_eq!(canonical_uri("/"), "/");
+    }
+
+    #[test]
+    fn canonical_uri_does_not_double_encode_an_already_escaped_segment() {
+        // bedrock.rs pre-percent-encodes the entire model id (protecting
+        // any embedded `/` in an ARN-style id) before building `path`, so
+        // canonical_uri must treat the resulting `%3A` as already-encoded
+        // rather than re-escaping the `%` into `%25` -- the double-encoded
+        // form would make the signature not match what a real
+        // AWS-compatible server independently derives from the (singly
+        // percent-encoded) request it actually receives on the wire.
+        assert_eq!(
+            canonical_uri("/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse"),
+            "/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse",
+            "an already-escaped %XY sequence must pass through verbatim, not become %253A0"
+        );
+        // A bare, unescaped `%` (not followed by two hex digits) is still
+        // a raw byte needing encoding -- this isn't a blanket "never
+        // touch %" rule, only "don't re-encode a complete escape".
+        assert_eq!(canonical_uri("/100%done"), "/100%25done");
     }
 
     #[test]
@@ -336,6 +422,45 @@ mod tests {
         assert_ne!(
             signed_a.authorization, signed_b.authorization,
             "a different payload must produce a different signature (payload hash is part of the canonical request)"
+        );
+    }
+
+    #[test]
+    fn sign_with_content_hash_header_signs_a_third_header_and_returns_the_payload_hash() {
+        let credentials = AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        };
+        let request = SigningRequest {
+            method: "PUT",
+            path: "/my-bucket/tenant-a/cli_tool/hello/1.0.0",
+            host: "storage.example.test",
+            region: "us-east-1",
+            service: "s3",
+            body: b"asset bytes",
+            timestamp_unix: 1_440_938_160,
+        };
+        let signed = sign_with_content_hash_header(&request, &credentials);
+
+        assert_eq!(
+            signed.x_amz_content_sha256.as_deref(),
+            Some(hex_sha256(b"asset bytes").as_str())
+        );
+        assert!(signed
+            .authorization
+            .contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date, "));
+
+        // The plain sign() variant must remain unaffected: still no
+        // x-amz-content-sha256 header, still only host;x-amz-date signed.
+        let plain = sign(&request, &credentials);
+        assert!(plain.x_amz_content_sha256.is_none());
+        assert!(plain
+            .authorization
+            .contains("SignedHeaders=host;x-amz-date, "));
+        assert_ne!(
+            signed.authorization, plain.authorization,
+            "signing a different header set must produce a different signature"
         );
     }
 }
