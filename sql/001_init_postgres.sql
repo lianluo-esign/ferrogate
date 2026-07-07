@@ -851,6 +851,59 @@ CREATE TABLE IF NOT EXISTS stored_assets (
 CREATE INDEX IF NOT EXISTS idx_stored_assets_tenant_type_name
     ON stored_assets(tenant_id, asset_type, name, version);
 
+-- permissions / roles / tenant_role_bindings: tenant-level entitlement
+-- system (issue #182). A permission is a dynamically-definable,
+-- finest-grained capability unit (string-keyed, e.g. "assets.host") --
+-- creating a new one is a plain INSERT, not a migration. A role is a
+-- named, horizontally-extensible bundle of permission keys (JSONB array,
+-- same pattern as plans.default_model_allowlist_json). A tenant may hold
+-- multiple roles (tenant_role_bindings is many-to-many); its effective
+-- permission set is the union of every bound role's permission_keys.
+-- Granting a tenant a new capability becomes "bind a role" -- one write --
+-- instead of adding a new plans.* boolean column + migration.
+--
+-- Isolation note: like every other multi-tenant table in this schema
+-- (tenants, projects, workspaces, quota_policies, plans, stored_assets),
+-- there is no Postgres RLS here -- FerroGate enforces tenant scoping at
+-- the application layer since it connects as one shared service role, not
+-- per-tenant JWTs.
+CREATE TABLE IF NOT EXISTS permissions (
+    id TEXT PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE TABLE IF NOT EXISTS roles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    permission_keys_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE TABLE IF NOT EXISTS tenant_role_bindings (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    role_id TEXT NOT NULL REFERENCES roles(id),
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    UNIQUE (tenant_id, role_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_role_bindings_tenant
+    ON tenant_role_bindings(tenant_id);
+
+-- No seed data here deliberately: unlike `plans` (which needs a 'free' row
+-- to exist before ALTER TABLE tenants can default plan_id to it),
+-- permissions/roles have no bootstrap dependency, and issue #182's own
+-- closed-loop E2E test (tests/rbac_api.rs) creates its own permission/role
+-- through the admin API -- a stronger proof of "no code change required"
+-- than a SQL fixture would be.
+
 -- billing_ledger: the settled money/credit flow produced by the standalone
 -- billing microservice (issue #129). Each row is one priced charge derived
 -- from a single usage event. `entry_json` carries the full LedgerEntry for
@@ -1018,5 +1071,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (18, '018_stored_assets')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (19, '019_rbac_tenant_entitlements')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

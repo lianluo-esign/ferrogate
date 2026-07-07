@@ -31,6 +31,11 @@ use postgres::{Client as PostgresClient, NoTls};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 
+mod rbac;
+pub use rbac::{
+    tenant_role_binding_id, StoredPermission, StoredRole, StoredTenantRoleBinding,
+};
+
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
     StorageProviderKind::Supabase,
     StorageProviderKind::Postgres,
@@ -756,6 +761,9 @@ pub struct RuntimeControlPlaneState {
     quota_policies: InMemoryRepository<StoredQuotaPolicy>,
     plans: InMemoryRepository<StoredPlan>,
     assets: InMemoryRepository<StoredAsset>,
+    permissions: InMemoryRepository<StoredPermission>,
+    roles: InMemoryRepository<StoredRole>,
+    tenant_role_bindings: InMemoryRepository<StoredTenantRoleBinding>,
     usage_monthly_rollups: InMemoryRepository<StoredUsageMonthlyRollup>,
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
 }
@@ -3967,6 +3975,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "quota_policies",
         "plans",
         "stored_assets",
+        "permissions",
+        "roles",
+        "tenant_role_bindings",
     ];
     for table in TABLES {
         let exists = client
@@ -5185,6 +5196,9 @@ impl RuntimeControlPlaneState {
             quota_policies: InMemoryRepository::new(),
             plans,
             assets: InMemoryRepository::new(),
+            permissions: InMemoryRepository::new(),
+            roles: InMemoryRepository::new(),
+            tenant_role_bindings: InMemoryRepository::new(),
             usage_monthly_rollups: InMemoryRepository::new(),
             billing_report_outbox: InMemoryRepository::new(),
         }

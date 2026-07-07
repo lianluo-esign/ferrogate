@@ -203,13 +203,23 @@ impl FerroGateway {
             .await;
         };
 
+        // Two independent paths can grant this capability (issue #182): the
+        // tenant's StoredPlan boolean (#176/#177, the original mechanism)
+        // or the tenant holding a role bundling the "assets.host" permission
+        // (the general RBAC entitlement system) -- either is sufficient.
+        // New capabilities should prefer the permission path going forward
+        // since it needs no StoredPlan schema change; asset_hosting_enabled
+        // stays supported so existing plan-gated tenants are unaffected.
         let plan = state.resolve_tenant_plan(&tenant_id).ok().flatten();
-        if !plan.as_ref().is_some_and(|plan| plan.asset_hosting_enabled) {
+        let plan_grants_access = plan.as_ref().is_some_and(|plan| plan.asset_hosting_enabled);
+        let role_grants_access = state.tenant_has_permission(&tenant_id, "assets.host");
+        if !plan_grants_access && !role_grants_access {
             return write_json_error(
                 session,
                 StatusCode::FORBIDDEN,
                 "asset_hosting_disabled",
-                "the tenant's plan does not enable asset hosting",
+                "the tenant's plan does not enable asset hosting and no bound role grants \
+                 the assets.host permission",
                 &ctx.request_id,
             )
             .await;

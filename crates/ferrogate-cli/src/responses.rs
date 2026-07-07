@@ -1142,6 +1142,80 @@ pub(crate) struct AssetMutationResponse {
     pub(crate) asset: AssetSummary,
 }
 
+// --- Tenant-level RBAC entitlements (issue #182) ---
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPermission {
+    pub(crate) id: String,
+    pub(crate) key: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminPermissionMutation {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) key: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminPermissionMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) permission: AdminPermission,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminRole {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) slug: String,
+    pub(crate) description: String,
+    pub(crate) permission_keys: Vec<String>,
+    pub(crate) created_at_unix: i64,
+    pub(crate) updated_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminRoleMutation {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) slug: Option<String>,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) permission_keys: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminRoleMutationResponse {
+    pub(crate) object: &'static str,
+    pub(crate) role: AdminRole,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminTenantRoleBinding {
+    pub(crate) id: String,
+    pub(crate) tenant_id: String,
+    pub(crate) role_id: String,
+    pub(crate) created_at_unix: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AdminTenantRoleBindingRequest {
+    pub(crate) role_id: String,
+}
+
 /// One row of the P1-4 usage/cost report: either a raw per-scope-per-month
 /// rollup, or (when `group_by` is requested) a sum across every rollup
 /// sharing that row's `scope_type`/`scope_id`/`period_month` key -- whichever

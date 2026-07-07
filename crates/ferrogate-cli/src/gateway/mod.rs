@@ -17,6 +17,7 @@ mod local;
 mod mcp_rpc;
 mod proxy;
 mod quota_policies;
+mod rbac;
 mod responses_stream;
 mod route_groups;
 mod usage_reports;

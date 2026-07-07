@@ -59,6 +59,7 @@ pub(super) enum RouteGroup {
     QuotaPolicy,
     Asset,
     Billing,
+    Rbac,
 }
 
 /// Built once (first access) and reused for the process lifetime: the
@@ -218,6 +219,12 @@ fn build_route_group_router() -> Router<RouteGroup> {
     insert("/v1/assets", RouteGroup::Asset);
     insert("/v1/assets/{*rest}", RouteGroup::Asset);
 
+    insert("/admin/v1/permissions", RouteGroup::Rbac);
+    insert("/admin/v1/permissions/{*rest}", RouteGroup::Rbac);
+    insert("/admin/v1/roles", RouteGroup::Rbac);
+    insert("/admin/v1/roles/{*rest}", RouteGroup::Rbac);
+    insert("/admin/v1/tenant-roles/{*rest}", RouteGroup::Rbac);
+
     insert("/admin/v1/metering-events", RouteGroup::Billing);
     insert("/admin/v1/billing-events", RouteGroup::Billing);
     insert("/admin/v1/metering-export-status", RouteGroup::Billing);
@@ -293,6 +300,7 @@ impl FerroGateway {
             RouteGroup::QuotaPolicy => self.try_quota_policy_routes(session, ctx, req).await,
             RouteGroup::Asset => self.try_asset_routes(session, ctx, req).await,
             RouteGroup::Billing => self.try_billing_routes(session, ctx, req).await,
+            RouteGroup::Rbac => self.try_rbac_routes(session, ctx, req).await,
         }
     }
 
@@ -826,6 +834,30 @@ impl FerroGateway {
     ) -> PingoraResult<bool> {
         if req.path == "/v1/assets" || req.path.starts_with("/v1/assets/") {
             self.handle_assets(session, ctx, &req.headers, &req.method, &req.path)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn try_rbac_routes(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        req: &RequestParts,
+    ) -> PingoraResult<bool> {
+        if req.path == "/admin/v1/permissions" || req.path.starts_with("/admin/v1/permissions/") {
+            self.handle_admin_permissions(session, ctx, &req.headers, &req.method, &req.path)
+                .await?;
+            return Ok(true);
+        }
+        if req.path == "/admin/v1/roles" || req.path.starts_with("/admin/v1/roles/") {
+            self.handle_admin_roles(session, ctx, &req.headers, &req.method, &req.path)
+                .await?;
+            return Ok(true);
+        }
+        if req.path.starts_with("/admin/v1/tenant-roles/") {
+            self.handle_admin_tenant_roles(session, ctx, &req.headers, &req.method, &req.path)
                 .await?;
             return Ok(true);
         }
