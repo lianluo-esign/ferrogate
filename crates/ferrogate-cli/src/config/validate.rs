@@ -988,6 +988,38 @@ impl Config {
                     );
                 }
             }
+            if provider
+                .gcp_project_id
+                .as_deref()
+                .is_some_and(str::is_empty)
+            {
+                bail!("field providers[{index}].gcp_project_id: cannot be empty");
+            }
+            if provider
+                .gcp_access_token_env
+                .as_deref()
+                .is_some_and(str::is_empty)
+            {
+                bail!("field providers[{index}].gcp_access_token_env: cannot be empty");
+            }
+            // Vertex has no bearer-API-key auth mode -- fail at
+            // config-load time when any piece of the OAuth2 credential
+            // shape is missing, mirroring the Bedrock block above.
+            if matches!(provider.kind.as_str(), "vertex" | "vertex-ai") {
+                if provider.gcp_project_id.is_none() {
+                    bail!("field providers[{index}].gcp_project_id: required when kind = vertex");
+                }
+                if provider.gcp_access_token_env.is_none() {
+                    bail!(
+                        "field providers[{index}].gcp_access_token_env: required when kind = vertex"
+                    );
+                }
+                if provider.region.is_none() {
+                    bail!(
+                        "field providers[{index}].region: required when kind = vertex (this is the GCP location, e.g. us-central1)"
+                    );
+                }
+            }
         }
         Ok(names)
     }

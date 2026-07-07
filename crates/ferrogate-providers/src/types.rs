@@ -22,6 +22,11 @@ pub struct ProviderConfig {
     /// closed at request-preparation time rather than silently sending an
     /// unsigned (and therefore rejected) request.
     pub aws_credentials: Option<AwsProviderCredentials>,
+    /// GCP OAuth2 access token plus project/location for the `vertex`
+    /// adapter (issue #172). `None` for a Vertex provider means the
+    /// adapter fails closed the same way a missing `aws_credentials` does
+    /// for Bedrock.
+    pub gcp_credentials: Option<GcpProviderCredentials>,
 }
 
 /// AWS access-key credentials plus the region a Bedrock provider targets
@@ -46,6 +51,37 @@ impl fmt::Debug for AwsProviderCredentials {
             .field("secret_access_key", &self.secret_access_key)
             .field("session_token", &self.session_token)
             .field("region", &self.region)
+            .finish()
+    }
+}
+
+/// A pre-minted GCP OAuth2 access token (scope
+/// `https://www.googleapis.com/auth/cloud-platform`) plus the project and
+/// location a Vertex AI provider targets (issue #172). Deliberately does
+/// NOT implement the service-account JWT-bearer token-minting flow
+/// in-crate: `ProviderAdapter::prepare_chat_completions` is a synchronous
+/// method (see `types.rs`), and minting a token requires a real network
+/// round trip to `oauth2.googleapis.com`, which can't be done there
+/// without blocking a pingora worker thread. Operators supply an
+/// already-valid access token instead (refreshed by an external process,
+/// e.g. `gcloud auth application-default print-access-token` on a cron,
+/// or a sidecar that implements the full ADC flow) -- the same
+/// externally-resolved-credential shape `aws_credentials` already uses,
+/// just for a bearer token instead of a signing key.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GcpProviderCredentials {
+    pub access_token: SecretValue,
+    pub project_id: String,
+    pub location: String,
+}
+
+impl fmt::Debug for GcpProviderCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GcpProviderCredentials")
+            .field("access_token", &self.access_token)
+            .field("project_id", &self.project_id)
+            .field("location", &self.location)
             .finish()
     }
 }

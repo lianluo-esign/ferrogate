@@ -171,7 +171,7 @@ fn validate_kind(kind: &str) -> Result<(), AdapterError> {
     }
 }
 
-fn ensure_object_body(body: Value) -> Result<Value, AdapterError> {
+pub(crate) fn ensure_object_body(body: Value) -> Result<Value, AdapterError> {
     if body.is_object() {
         Ok(body)
     } else {
@@ -181,7 +181,12 @@ fn ensure_object_body(body: Value) -> Result<Value, AdapterError> {
     }
 }
 
-fn openai_messages_to_gemini_contents(body: &Value) -> Result<Value, AdapterError> {
+/// `pub(crate)` (rather than private) so the `vertex` adapter can reuse
+/// this OpenAI-shaped-request-to-Gemini-body conversion: Vertex AI's
+/// Gemini-model `generateContent` endpoint is documented as sharing the
+/// same `contents`/`systemInstruction`/`generationConfig` request schema
+/// as the public Generative Language API this function targets.
+pub(crate) fn openai_messages_to_gemini_contents(body: &Value) -> Result<Value, AdapterError> {
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
         return Ok(json!([]));
     };
@@ -209,7 +214,7 @@ fn openai_messages_to_gemini_contents(body: &Value) -> Result<Value, AdapterErro
     Ok(Value::Array(contents))
 }
 
-fn system_instruction(body: &Value) -> Result<Option<Value>, AdapterError> {
+pub(crate) fn system_instruction(body: &Value) -> Result<Option<Value>, AdapterError> {
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
         return Ok(None);
     };
@@ -255,7 +260,7 @@ fn content_parts(content: Option<&Value>) -> Result<Vec<Value>, AdapterError> {
     }
 }
 
-fn generation_config(body: &Value) -> Option<Value> {
+pub(crate) fn generation_config(body: &Value) -> Option<Value> {
     let mut config = Map::new();
     copy_config(body, &mut config, "temperature", "temperature");
     copy_config(body, &mut config, "top_p", "topP");
@@ -317,6 +322,7 @@ mod tests {
             openrouter_http_referer: None,
             openrouter_x_title: None,
             aws_credentials: None,
+            gcp_credentials: None,
         }
     }
 

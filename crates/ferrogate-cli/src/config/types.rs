@@ -420,6 +420,21 @@ pub(crate) struct Provider {
     /// keys.
     #[serde(default)]
     pub(crate) aws_session_token_env: Option<String>,
+    /// GCP project id for the `vertex` provider kind (issue #172). Like
+    /// `aws_access_key_id`, not a secret -- safe to store in plain
+    /// config. `region` above doubles as the GCP location (e.g.
+    /// `us-central1`) a Vertex AI provider targets, the same reuse
+    /// `aws_access_key_id`'s doc comment already established for AWS.
+    #[serde(default)]
+    pub(crate) gcp_project_id: Option<String>,
+    /// Environment variable holding a pre-minted GCP OAuth2 access token
+    /// (scope `cloud-platform`). FerroGate does not mint or refresh this
+    /// token itself -- see `GcpProviderCredentials`'s doc comment in
+    /// `ferrogate-providers` for why -- so it must be kept fresh by an
+    /// external process (e.g. a `gcloud auth application-default
+    /// print-access-token` cron, or an ADC-aware sidecar).
+    #[serde(default)]
+    pub(crate) gcp_access_token_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

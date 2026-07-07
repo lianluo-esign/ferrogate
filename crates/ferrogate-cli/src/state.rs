@@ -53,10 +53,10 @@ use ferrogate_policy::{
     PolicyRule, PolicySubject, QuotaScopeChain,
 };
 use ferrogate_providers::{
-    AdapterError, AwsProviderCredentials, ChatCompletionPlan, ModelRegistry, ModelRegistryEntry,
-    ModelRegistryError, ModelRoute, ProviderAdapterRegistry, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResolvedModelRoute, ResponsesPlan, RoutingStrategy,
-    SecretValue,
+    AdapterError, AwsProviderCredentials, ChatCompletionPlan, GcpProviderCredentials,
+    ModelRegistry, ModelRegistryEntry, ModelRegistryError, ModelRoute, ProviderAdapterRegistry,
+    ProviderConfig, ProviderErrorResponse, ProviderHttpRequest, ProviderUsage, ResolvedModelRoute,
+    ResponsesPlan, RoutingStrategy, SecretValue,
 };
 use ferrogate_runtime::{
     InMemorySelfHostedRunQueue, SelfHostedRunAck, SelfHostedRunAckRequest, SelfHostedRunAckStatus,
@@ -4044,6 +4044,7 @@ impl AppState {
             openrouter_http_referer: provider.openrouter_http_referer.clone(),
             openrouter_x_title: provider.openrouter_x_title.clone(),
             aws_credentials: aws_provider_credentials(provider),
+            gcp_credentials: gcp_provider_credentials(provider),
         }
     }
 
@@ -7719,6 +7720,28 @@ fn aws_provider_credentials(provider: &Provider) -> Option<AwsProviderCredential
     })
 }
 
+/// Resolves a static GCP OAuth2 access token for a `vertex`-kind provider
+/// (issue #172) from `gcp_project_id` (plain config) + `region` (reused
+/// from #173's data-residency field, doubling as the GCP location) +
+/// `gcp_access_token_env` (an environment variable holding an
+/// already-valid token). Returns `None` when any required piece is
+/// absent -- same fail-closed shape as `aws_provider_credentials`. No
+/// token-minting or refresh happens here; see `GcpProviderCredentials`'s
+/// doc comment in `ferrogate-providers` for why.
+fn gcp_provider_credentials(provider: &Provider) -> Option<GcpProviderCredentials> {
+    let project_id = provider.gcp_project_id.clone()?;
+    let location = provider.region.clone()?;
+    let token_env = provider.gcp_access_token_env.as_deref()?;
+    let access_token = std::env::var(token_env)
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    Some(GcpProviderCredentials {
+        access_token: SecretValue::new(access_token),
+        project_id,
+        location,
+    })
+}
+
 /// Settled cost in USD for one request, looked up from the model registry's
 /// configured pricing for whichever route (primary or fallback) actually
 /// served `provider`/`provider_model`. `None` when the model is unknown or
@@ -8793,6 +8816,8 @@ mod tests {
             aws_access_key_id: None,
             aws_secret_access_key_env: None,
             aws_session_token_env: None,
+            gcp_project_id: None,
+            gcp_access_token_env: None,
             name: "openai".into(),
             kind: "openai".into(),
             base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9111,6 +9136,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9294,6 +9321,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9374,6 +9403,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9441,6 +9472,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -9930,6 +9963,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10047,6 +10082,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10061,6 +10098,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "backup-a".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -10075,6 +10114,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "backup-b".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -10154,6 +10195,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "eu-primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10168,6 +10211,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "us-fallback".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -10182,6 +10227,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "no-region-fallback".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -10300,6 +10347,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "primary".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10314,6 +10363,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "backup-a".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10002/v1".into(),
@@ -10328,6 +10379,8 @@ mod tests {
                     aws_access_key_id: None,
                     aws_secret_access_key_env: None,
                     aws_session_token_env: None,
+                    gcp_project_id: None,
+                    gcp_access_token_env: None,
                     name: "backup-b".into(),
                     kind: "openai".into(),
                     base_url: "http://127.0.0.1:10003/v1".into(),
@@ -10495,6 +10548,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10525,6 +10580,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10603,6 +10660,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "disabled".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
@@ -10697,6 +10756,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -10928,6 +10989,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10002/v1".into(),
@@ -12398,6 +12461,8 @@ mod tests {
                 aws_access_key_id: None,
                 aws_secret_access_key_env: None,
                 aws_session_token_env: None,
+                gcp_project_id: None,
+                gcp_access_token_env: None,
                 name: "openai".into(),
                 kind: "openai".into(),
                 base_url: "http://127.0.0.1:10001/v1".into(),
@@ -12817,6 +12882,8 @@ mod tests {
             aws_access_key_id: None,
             aws_secret_access_key_env: None,
             aws_session_token_env: None,
+            gcp_project_id: None,
+            gcp_access_token_env: None,
             name: name.into(),
             kind: "openai".into(),
             base_url: base_url.into(),

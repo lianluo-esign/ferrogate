@@ -301,6 +301,7 @@ mod tests {
             openrouter_http_referer: None,
             openrouter_x_title: None,
             aws_credentials: None,
+            gcp_credentials: None,
         }
     }
 

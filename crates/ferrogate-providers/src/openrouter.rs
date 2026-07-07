@@ -129,6 +129,7 @@ mod tests {
             openrouter_http_referer: Some("https://ferrogate.example".into()),
             openrouter_x_title: Some("FerroGate".into()),
             aws_credentials: None,
+            gcp_credentials: None,
         }
     }
 

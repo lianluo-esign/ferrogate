@@ -225,6 +225,88 @@ fn a_non_bedrock_provider_does_not_require_aws_credentials() {
     config.validate().unwrap();
 }
 
+fn vertex_provider() -> Provider {
+    Provider {
+        kind: "vertex".into(),
+        gcp_project_id: Some("my-gcp-project".into()),
+        gcp_access_token_env: Some("VERTEX_ACCESS_TOKEN".into()),
+        region: Some("us-central1".into()),
+        ..provider()
+    }
+}
+
+#[test]
+fn accepts_a_fully_configured_vertex_provider() {
+    let config = Config {
+        providers: vec![vertex_provider()],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_vertex_provider_missing_gcp_project_id() {
+    let mut provider = vertex_provider();
+    provider.gcp_project_id = None;
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].gcp_project_id: required when kind = vertex"));
+}
+
+#[test]
+fn rejects_vertex_provider_missing_gcp_access_token_env() {
+    let mut provider = vertex_provider();
+    provider.gcp_access_token_env = None;
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].gcp_access_token_env: required when kind = vertex"));
+}
+
+#[test]
+fn rejects_vertex_provider_missing_region() {
+    let mut provider = vertex_provider();
+    provider.region = None;
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].region: required when kind = vertex"));
+}
+
+#[test]
+fn rejects_empty_gcp_access_token_env() {
+    let mut provider = vertex_provider();
+    provider.gcp_access_token_env = Some(String::new());
+    let config = Config {
+        providers: vec![provider],
+        ..Config::default()
+    };
+
+    let error = format!("{:#}", config.validate().unwrap_err());
+    assert!(error.contains("field providers[0].gcp_access_token_env: cannot be empty"));
+}
+
+#[test]
+fn a_non_vertex_provider_does_not_require_gcp_credentials() {
+    let config = Config {
+        providers: vec![provider()],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
 #[test]
 fn rejects_api_key_region_allowlist_entry_with_no_matching_provider() {
     let mut provider = provider();
@@ -2942,6 +3024,8 @@ fn provider() -> Provider {
         aws_access_key_id: None,
         aws_secret_access_key_env: None,
         aws_session_token_env: None,
+        gcp_project_id: None,
+        gcp_access_token_env: None,
         name: "openai".into(),
         kind: "openai".into(),
         base_url: "http://127.0.0.1:8081/v1".into(),

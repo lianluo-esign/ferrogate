@@ -12,7 +12,7 @@ use crate::{
     AdapterError, AnthropicAdapter, AzureOpenAiAdapter, BedrockAdapter, ChatCompletionPlan,
     GeminiAdapter, GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter,
     ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResponsesPlan,
+    ProviderHttpRequest, ProviderUsage, ResponsesPlan, VertexAiAdapter,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -24,6 +24,7 @@ pub struct ProviderAdapterRegistry {
     openrouter: OpenRouterAdapter,
     azure_openai: AzureOpenAiAdapter,
     bedrock: BedrockAdapter,
+    vertex: VertexAiAdapter,
 }
 
 impl ProviderAdapterRegistry {
@@ -36,6 +37,7 @@ impl ProviderAdapterRegistry {
             "openrouter" => Ok(&self.openrouter),
             "azure" | "azure-openai" => Ok(&self.azure_openai),
             "bedrock" | "aws-bedrock" => Ok(&self.bedrock),
+            "vertex" | "vertex-ai" => Ok(&self.vertex),
             other => Err(AdapterError::UnsupportedProviderKind {
                 kind: other.to_string(),
             }),
@@ -201,9 +203,20 @@ mod tests {
     }
 
     #[test]
+    fn resolves_vertex_adapter() {
+        // Issue #172: "vertex" was intentionally unsupported until this
+        // adapter landed -- replaces the old
+        // rejects_unknown_provider_kind_before_runtime_dispatch test,
+        // which pinned that as expected behavior.
+        let registry = ProviderAdapterRegistry::default();
+        assert_eq!(registry.adapter_for("vertex").unwrap().kind(), "vertex");
+        assert_eq!(registry.adapter_for("vertex-ai").unwrap().kind(), "vertex");
+    }
+
+    #[test]
     fn rejects_unknown_provider_kind_before_runtime_dispatch() {
         let registry = ProviderAdapterRegistry::default();
-        let error = match registry.adapter_for("vertex") {
+        let error = match registry.adapter_for("cohere") {
             Ok(adapter) => panic!("unexpected provider adapter {}", adapter.kind()),
             Err(error) => error,
         };
@@ -211,7 +224,7 @@ mod tests {
         assert_eq!(
             error,
             AdapterError::UnsupportedProviderKind {
-                kind: "vertex".into()
+                kind: "cohere".into()
             }
         );
     }
@@ -470,6 +483,7 @@ mod tests {
             openrouter_http_referer: None,
             openrouter_x_title: None,
             aws_credentials: None,
+            gcp_credentials: None,
         }
     }
 }

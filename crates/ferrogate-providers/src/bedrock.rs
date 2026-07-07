@@ -319,8 +319,10 @@ fn copy_config(body: &Value, config: &mut Map<String, Value>, source: &str, targ
 /// Extracts `host[:port]` from a configured Bedrock `base_url` (e.g.
 /// `https://bedrock-runtime.us-east-1.amazonaws.com`) -- SigV4 signs
 /// against the bare host, and the same value becomes the literal `Host`
-/// header, so both need it in exactly this form.
-fn extract_host(base_url: &str) -> Result<String, AdapterError> {
+/// header, so both need it in exactly this form. `pub(crate)` so the
+/// `vertex` adapter can reuse the same scheme/host extraction for
+/// building its endpoint URL from `base_url`.
+pub(crate) fn extract_host(base_url: &str) -> Result<String, AdapterError> {
     let trimmed = base_url.trim_end_matches('/');
     let without_scheme = trimmed
         .strip_prefix("https://")
@@ -372,6 +374,7 @@ mod tests {
                 session_token: None,
                 region: "us-east-1".into(),
             }),
+            gcp_credentials: None,
         }
     }
 
