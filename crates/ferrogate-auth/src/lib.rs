@@ -1160,6 +1160,7 @@ fn handle_admin_register(
         name: organization_name.clone(),
         slug: slugify_with_suffix(&organization_name, &tenant_id),
         status: "active".into(),
+        plan_id: "free".into(),
         created_at_unix: now,
         updated_at_unix: now,
     };
@@ -3348,6 +3349,7 @@ mod tests {
             name: "Tenant 1".into(),
             slug: "tenant-1".into(),
             status: "active".into(),
+            plan_id: "free".into(),
             created_at_unix: 1,
             updated_at_unix: 1,
         });

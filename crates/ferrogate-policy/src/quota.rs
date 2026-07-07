@@ -5,7 +5,7 @@
 // description: Multi-level quota/rate-limit policy resolution (P1-3): merges
 // tenant/project/workspace/key scope policies into one effective quota.
 
-use ferrogate_storage::{QuotaScopeKind, StoredQuotaPolicy};
+use ferrogate_storage::{QuotaScopeKind, StoredPlan, StoredQuotaPolicy};
 
 /// The scope chain a request resolves to. Any level may be absent (e.g. a
 /// request authenticated through a key that predates the workspace
@@ -57,9 +57,18 @@ impl EffectiveQuota {
 /// injected so callers can source policies from any backend (durable storage
 /// in production, an in-memory map in tests) without this module depending
 /// on how policies are fetched.
+///
+/// `plan` (issue #168) supplies the *floor* of the merge: a field is only
+/// taken from the plan when no `StoredQuotaPolicy` in the chain sets it at
+/// all. A plan can never make an explicit policy value tighter or looser --
+/// it only fills in what would otherwise be unrestricted. This mirrors how a
+/// plan is meant to be a sellable default bundle, not another cap layer
+/// competing with the existing tenant/project/workspace/key `min`-across-
+/// the-chain rule.
 pub fn resolve_effective_quota(
     chain: QuotaScopeChain<'_>,
     lookup: impl Fn(QuotaScopeKind, &str) -> Option<StoredQuotaPolicy>,
+    plan: Option<&StoredPlan>,
 ) -> EffectiveQuota {
     let scopes: [(QuotaScopeKind, Option<&str>); 4] = [
         (QuotaScopeKind::Tenant, chain.tenant_id),
@@ -94,6 +103,16 @@ pub fn resolve_effective_quota(
         effective.tpm_limit = min_opt_u64(effective.tpm_limit, policy.tpm_limit);
         effective.monthly_budget_usd =
             min_opt_f64(effective.monthly_budget_usd, policy.monthly_budget_usd);
+    }
+    if let Some(plan) = plan {
+        if effective.model_allowlist.is_none() && !plan.default_model_allowlist.is_empty() {
+            effective.model_allowlist = Some(plan.default_model_allowlist.clone());
+        }
+        effective.rpm_limit = effective.rpm_limit.or(plan.default_rpm_limit);
+        effective.tpm_limit = effective.tpm_limit.or(plan.default_tpm_limit);
+        effective.monthly_budget_usd = effective
+            .monthly_budget_usd
+            .or(plan.default_monthly_budget_usd);
     }
     effective
 }
@@ -164,6 +183,7 @@ mod tests {
                 key_id: Some("k1"),
             },
             lookup_from(vec![]),
+            None,
         );
         assert!(!quota.is_denied());
         assert_eq!(quota.model_allowlist, None);
@@ -205,6 +225,7 @@ mod tests {
                 key_id: None,
             },
             lookup_from(policies),
+            None,
         );
         assert_eq!(quota.rpm_limit, Some(1_000));
 
@@ -238,6 +259,7 @@ mod tests {
                 key_id: None,
             },
             lookup_from(policies),
+            None,
         );
         assert_eq!(quota.rpm_limit, Some(200));
     }
@@ -272,6 +294,7 @@ mod tests {
                 key_id: Some("k1"),
             },
             lookup_from(policies),
+            None,
         );
         assert!(quota.allows_model("fast-chat"));
         assert!(quota.allows_model("vision"));
@@ -309,6 +332,7 @@ mod tests {
                 key_id: Some("k1"),
             },
             lookup_from(policies),
+            None,
         );
         assert!(!quota.allows_model("fast-chat"));
         assert!(!quota.allows_model("smart-chat"));
@@ -344,6 +368,7 @@ mod tests {
                 key_id: None,
             },
             lookup_from(policies),
+            None,
         );
         assert!(quota.is_denied());
         assert_eq!(quota.denied_by, Some(QuotaScopeKind::Project));
@@ -379,6 +404,7 @@ mod tests {
                 key_id: Some("k1"),
             },
             lookup_from(policies),
+            None,
         );
         assert_eq!(quota.tpm_limit, Some(50_000));
         assert_eq!(quota.monthly_budget_usd, Some(500.0));
@@ -416,7 +442,105 @@ mod tests {
                 key_id: Some("k1"),
             },
             lookup_from(policies),
+            None,
         );
         assert_eq!(quota.rpm_limit, Some(100));
+    }
+
+    fn sample_plan() -> StoredPlan {
+        StoredPlan {
+            id: "plan-pro".into(),
+            name: "Pro".into(),
+            slug: "pro".into(),
+            mcp_enabled: true,
+            self_hosted_workers_enabled: true,
+            admin_console_seats: Some(5),
+            default_model_allowlist: vec!["fast-chat".into(), "smart-chat".into()],
+            default_rpm_limit: Some(600),
+            default_tpm_limit: Some(100_000),
+            default_monthly_budget_usd: Some(250.0),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+        }
+    }
+
+    #[test]
+    fn plan_defaults_apply_when_no_explicit_policy_exists() {
+        let plan = sample_plan();
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: None,
+            },
+            lookup_from(vec![]),
+            Some(&plan),
+        );
+        assert!(!quota.is_denied());
+        assert_eq!(quota.rpm_limit, Some(600));
+        assert_eq!(quota.tpm_limit, Some(100_000));
+        assert_eq!(quota.monthly_budget_usd, Some(250.0));
+        assert!(quota.allows_model("fast-chat"));
+        assert!(!quota.allows_model("vision"));
+    }
+
+    #[test]
+    fn plan_defaults_are_overridden_by_an_explicit_policy() {
+        let plan = sample_plan();
+        let policies = vec![policy(
+            QuotaScopeKind::Tenant,
+            "t1",
+            vec![],
+            Some(50),
+            None,
+            Some(10.0),
+            true,
+        )];
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: None,
+            },
+            lookup_from(policies),
+            Some(&plan),
+        );
+        // rpm_limit and monthly_budget_usd are set by the explicit tenant
+        // policy, so the plan's defaults for those fields are ignored...
+        assert_eq!(quota.rpm_limit, Some(50));
+        assert_eq!(quota.monthly_budget_usd, Some(10.0));
+        // ...but tpm_limit and model_allowlist are untouched by any policy,
+        // so the plan's defaults still apply.
+        assert_eq!(quota.tpm_limit, Some(100_000));
+        assert!(quota.allows_model("fast-chat"));
+        assert!(!quota.allows_model("vision"));
+    }
+
+    #[test]
+    fn disabled_policy_still_denies_even_with_a_plan_present() {
+        let plan = sample_plan();
+        let policies = vec![policy(
+            QuotaScopeKind::Tenant,
+            "t1",
+            vec![],
+            None,
+            None,
+            None,
+            false,
+        )];
+        let quota = resolve_effective_quota(
+            QuotaScopeChain {
+                tenant_id: Some("t1"),
+                project_id: None,
+                workspace_id: None,
+                key_id: None,
+            },
+            lookup_from(policies),
+            Some(&plan),
+        );
+        assert!(quota.is_denied());
+        assert_eq!(quota.rpm_limit, None);
     }
 }

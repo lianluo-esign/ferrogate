@@ -945,6 +945,7 @@ pub(crate) struct AdminTenantAccount {
     pub(crate) name: String,
     pub(crate) slug: String,
     pub(crate) status: String,
+    pub(crate) plan_id: String,
     pub(crate) created_at_unix: i64,
     pub(crate) updated_at_unix: i64,
 }
@@ -956,6 +957,8 @@ pub(crate) struct AdminTenantAccountCreateRequest {
     pub(crate) slug: Option<String>,
     #[serde(default)]
     pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) plan_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

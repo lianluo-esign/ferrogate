@@ -760,6 +760,35 @@ CREATE TABLE IF NOT EXISTS quota_policies (
 CREATE INDEX IF NOT EXISTS idx_quota_policies_scope
     ON quota_policies(scope_type, scope_id);
 
+-- plans: sellable subscription tiers (issue #168). A named bundle of feature
+-- flags plus default quota values that seed the effective-quota merge chain
+-- as its floor, below any explicit scope-level quota_policies row. Shared
+-- across tenants, like quota_policies is shared across scopes.
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    mcp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    self_hosted_workers_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    admin_console_seats BIGINT,
+    default_model_allowlist_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    default_rpm_limit BIGINT,
+    default_tpm_limit BIGINT,
+    default_monthly_budget_usd DOUBLE PRECISION,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+-- Every tenant lands on this plan unless explicitly assigned another one --
+-- seeded before the `tenants.plan_id` foreign key below is added, since that
+-- column's default value must reference a row that already exists.
+INSERT INTO plans (id, name, slug, mcp_enabled, self_hosted_workers_enabled, admin_console_seats)
+VALUES ('free', 'Free', 'free', FALSE, FALSE, 1)
+ON CONFLICT (id) DO NOTHING;
+
+ALTER TABLE tenants
+    ADD COLUMN IF NOT EXISTS plan_id TEXT NOT NULL DEFAULT 'free' REFERENCES plans(id);
+
 -- billing_ledger: the settled money/credit flow produced by the standalone
 -- billing microservice (issue #129). Each row is one priced charge derived
 -- from a single usage event. `entry_json` carries the full LedgerEntry for
@@ -917,5 +946,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (16, '016_admin_console_users')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (17, '017_plans')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

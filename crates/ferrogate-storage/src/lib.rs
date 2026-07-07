@@ -754,6 +754,7 @@ pub struct RuntimeControlPlaneState {
     admin_user_memberships: InMemoryRepository<StoredAdminUserMembership>,
     admin_user_refresh_tokens: InMemoryRepository<StoredAdminUserRefreshToken>,
     quota_policies: InMemoryRepository<StoredQuotaPolicy>,
+    plans: InMemoryRepository<StoredPlan>,
     usage_monthly_rollups: InMemoryRepository<StoredUsageMonthlyRollup>,
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
 }
@@ -1280,16 +1281,18 @@ impl PostgresControlPlaneStore {
     fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
         self.with_client(|client| {
             client.execute(
-                "INSERT INTO tenants (id, name, slug, status, created_at_unix, updated_at_unix) \
-                 VALUES ($1, $2, $3, $4, $5, $6) \
+                "INSERT INTO tenants \
+                 (id, name, slug, status, plan_id, created_at_unix, updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
                  ON CONFLICT (id) DO UPDATE SET \
                  name = EXCLUDED.name, slug = EXCLUDED.slug, status = EXCLUDED.status, \
-                 updated_at_unix = EXCLUDED.updated_at_unix",
+                 plan_id = EXCLUDED.plan_id, updated_at_unix = EXCLUDED.updated_at_unix",
                 &[
                     &account.id,
                     &account.name,
                     &account.slug,
                     &account.status,
+                    &account.plan_id,
                     &account.created_at_unix,
                     &account.updated_at_unix,
                 ],
@@ -1301,7 +1304,7 @@ impl PostgresControlPlaneStore {
     fn get_tenant_account(&self, id: &str) -> Result<Option<StoredTenantAccount>, StorageError> {
         self.with_client(|client| {
             let row = client.query_opt(
-                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+                "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
                  FROM tenants WHERE id = $1",
                 &[&id],
             )?;
@@ -1312,7 +1315,7 @@ impl PostgresControlPlaneStore {
     fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
         self.with_client(|client| {
             let rows = client.query(
-                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+                "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
                  FROM tenants ORDER BY id ASC",
                 &[],
             )?;
@@ -1507,6 +1510,76 @@ impl PostgresControlPlaneStore {
             )
         })?;
         Ok(affected > 0)
+    }
+
+    fn upsert_plan(&self, plan: &StoredPlan) -> Result<(), StorageError> {
+        let default_model_allowlist_json = serialize_storage_document(&plan.default_model_allowlist)?;
+        let default_rpm_limit = plan.default_rpm_limit.map(saturating_i64);
+        let default_tpm_limit = plan.default_tpm_limit.map(saturating_i64);
+        let admin_console_seats = plan.admin_console_seats.map(saturating_i64);
+        self.with_client(|client| {
+            client.execute(
+                "INSERT INTO plans \
+                 (id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
+                  admin_console_seats, default_model_allowlist_json, default_rpm_limit, \
+                  default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
+                  updated_at_unix) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $9, $10, $11, $12) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                 name = EXCLUDED.name, slug = EXCLUDED.slug, \
+                 mcp_enabled = EXCLUDED.mcp_enabled, \
+                 self_hosted_workers_enabled = EXCLUDED.self_hosted_workers_enabled, \
+                 admin_console_seats = EXCLUDED.admin_console_seats, \
+                 default_model_allowlist_json = EXCLUDED.default_model_allowlist_json, \
+                 default_rpm_limit = EXCLUDED.default_rpm_limit, \
+                 default_tpm_limit = EXCLUDED.default_tpm_limit, \
+                 default_monthly_budget_usd = EXCLUDED.default_monthly_budget_usd, \
+                 updated_at_unix = EXCLUDED.updated_at_unix",
+                &[
+                    &plan.id,
+                    &plan.name,
+                    &plan.slug,
+                    &plan.mcp_enabled,
+                    &plan.self_hosted_workers_enabled,
+                    &admin_console_seats,
+                    &default_model_allowlist_json,
+                    &default_rpm_limit,
+                    &default_tpm_limit,
+                    &plan.default_monthly_budget_usd,
+                    &plan.created_at_unix,
+                    &plan.updated_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
+                 admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
+                 default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
+                 updated_at_unix \
+                 FROM plans WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        row.as_ref().map(plan_from_row).transpose()
+    }
+
+    fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
+        let rows = self.with_client(|client| {
+            client.query(
+                "SELECT id, name, slug, mcp_enabled, self_hosted_workers_enabled, \
+                 admin_console_seats, default_model_allowlist_json::text, default_rpm_limit, \
+                 default_tpm_limit, default_monthly_budget_usd, created_at_unix, \
+                 updated_at_unix \
+                 FROM plans ORDER BY id ASC",
+                &[],
+            )
+        })?;
+        rows.iter().map(plan_from_row).collect()
     }
 
     fn get_usage_monthly_rollup(
@@ -3451,16 +3524,18 @@ impl MySqlControlPlaneStore {
     fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
         self.with_conn(|conn| {
             conn.exec_drop(
-                "INSERT INTO tenants (id, name, slug, status, created_at_unix, updated_at_unix) \
-                 VALUES (:id, :name, :slug, :status, :created_at_unix, :updated_at_unix) \
+                "INSERT INTO tenants \
+                 (id, name, slug, status, plan_id, created_at_unix, updated_at_unix) \
+                 VALUES (:id, :name, :slug, :status, :plan_id, :created_at_unix, :updated_at_unix) \
                  ON DUPLICATE KEY UPDATE \
                  name = VALUES(name), slug = VALUES(slug), status = VALUES(status), \
-                 updated_at_unix = VALUES(updated_at_unix)",
+                 plan_id = VALUES(plan_id), updated_at_unix = VALUES(updated_at_unix)",
                 params! {
                     "id" => &account.id,
                     "name" => &account.name,
                     "slug" => &account.slug,
                     "status" => &account.status,
+                    "plan_id" => &account.plan_id,
                     "created_at_unix" => account.created_at_unix,
                     "updated_at_unix" => account.updated_at_unix,
                 },
@@ -3470,8 +3545,8 @@ impl MySqlControlPlaneStore {
 
     fn get_tenant_account(&self, id: &str) -> Result<Option<StoredTenantAccount>, StorageError> {
         self.with_conn(|conn| {
-            let row: Option<(String, String, String, String, i64, i64)> = conn.exec_first(
-                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+            let row: Option<(String, String, String, String, String, i64, i64)> = conn.exec_first(
+                "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
                  FROM tenants WHERE id = :id",
                 params! { "id" => id },
             )?;
@@ -3481,8 +3556,8 @@ impl MySqlControlPlaneStore {
 
     fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
         self.with_conn(|conn| {
-            let rows: Vec<(String, String, String, String, i64, i64)> = conn.exec(
-                "SELECT id, name, slug, status, created_at_unix, updated_at_unix \
+            let rows: Vec<(String, String, String, String, String, i64, i64)> = conn.exec(
+                "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
                  FROM tenants ORDER BY id ASC",
                 (),
             )?;
@@ -4018,8 +4093,9 @@ fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
         name: row.get::<_, String>(1),
         slug: row.get::<_, String>(2),
         status: row.get::<_, String>(3),
-        created_at_unix: row.get::<_, i64>(4),
-        updated_at_unix: row.get::<_, i64>(5),
+        plan_id: row.get::<_, String>(4),
+        created_at_unix: row.get::<_, i64>(5),
+        updated_at_unix: row.get::<_, i64>(6),
     }
 }
 
@@ -4136,6 +4212,30 @@ fn quota_policy_from_row(row: &PostgresRow) -> Result<StoredQuotaPolicy, Storage
         created_at_unix: row.get::<_, i64>(8),
         updated_at_unix: row.get::<_, i64>(9),
     })
+}
+
+fn plan_from_row(row: &PostgresRow) -> Result<StoredPlan, StorageError> {
+    let default_model_allowlist = deserialize_storage_document(&row.get::<_, String>(6))?;
+    Ok(StoredPlan {
+        id: row.get::<_, String>(0),
+        name: row.get::<_, String>(1),
+        slug: row.get::<_, String>(2),
+        mcp_enabled: row.get::<_, bool>(3),
+        self_hosted_workers_enabled: row.get::<_, bool>(4),
+        admin_console_seats: row.get::<_, Option<i64>>(5).map(nonnegative_u32),
+        default_model_allowlist,
+        default_rpm_limit: row.get::<_, Option<i64>>(7).map(nonnegative_u64),
+        default_tpm_limit: row.get::<_, Option<i64>>(8).map(nonnegative_u64),
+        default_monthly_budget_usd: row.get::<_, Option<f64>>(9),
+        created_at_unix: row.get::<_, i64>(10),
+        updated_at_unix: row.get::<_, i64>(11),
+    })
+}
+
+fn plans_supabase_only_error() -> StorageError {
+    StorageError::Runtime(
+        "plans are Supabase/Postgres-only; set storage.provider = supabase".into(),
+    )
 }
 
 fn quota_policies_supabase_only_error() -> StorageError {
@@ -4273,14 +4373,15 @@ impl ferrogate_billing::LedgerSink for StorageLedgerSink {
 }
 
 fn tenant_account_from_tuple(
-    row: (String, String, String, String, i64, i64),
+    row: (String, String, String, String, String, i64, i64),
 ) -> StoredTenantAccount {
-    let (id, name, slug, status, created_at_unix, updated_at_unix) = row;
+    let (id, name, slug, status, plan_id, created_at_unix, updated_at_unix) = row;
     StoredTenantAccount {
         id,
         name,
         slug,
         status,
+        plan_id,
         created_at_unix,
         updated_at_unix,
     }
@@ -4951,6 +5052,9 @@ enum RuntimeControlPlaneBackend {
 
 impl RuntimeControlPlaneState {
     pub fn new() -> Self {
+        let mut plans = InMemoryRepository::new();
+        let free_plan = default_free_plan();
+        plans.insert(free_plan.id.clone(), free_plan);
         Self {
             api_keys: InMemoryRepository::new(),
             api_key_records: InMemoryRepository::new(),
@@ -4971,6 +5075,7 @@ impl RuntimeControlPlaneState {
             admin_user_memberships: InMemoryRepository::new(),
             admin_user_refresh_tokens: InMemoryRepository::new(),
             quota_policies: InMemoryRepository::new(),
+            plans,
             usage_monthly_rollups: InMemoryRepository::new(),
             billing_report_outbox: InMemoryRepository::new(),
         }
@@ -5135,6 +5240,18 @@ impl RuntimeControlPlaneState {
         self.quota_policies
             .remove(&quota_policy_id(scope_type, scope_id))
             .is_some()
+    }
+
+    pub fn upsert_plan(&mut self, plan: StoredPlan) {
+        self.plans.insert(plan.id.clone(), plan);
+    }
+
+    pub fn get_plan(&self, id: &str) -> Option<StoredPlan> {
+        self.plans.get(id)
+    }
+
+    pub fn list_plans(&self) -> Vec<StoredPlan> {
+        self.plans.list()
     }
 
     /// In-memory counterpart of `increment_usage_monthly_rollups` (Postgres):
@@ -5680,6 +5797,68 @@ pub struct StoredTenantAccount {
     pub slug: String,
     #[serde(default = "default_active_status")]
     pub status: String,
+    /// Subscription/entitlement tier (issue #168), resolved through
+    /// [`StoredPlan`] to supply the default quota bundle and feature flags a
+    /// tenant gets before any explicit [`StoredQuotaPolicy`] override.
+    /// Defaults to the `free` plan seeded by the schema migration, so
+    /// existing rows and callers that don't set it keep prior behavior.
+    #[serde(default = "default_plan_id")]
+    pub plan_id: String,
+    #[serde(default)]
+    pub created_at_unix: i64,
+    #[serde(default)]
+    pub updated_at_unix: i64,
+}
+
+fn default_plan_id() -> String {
+    "free".to_string()
+}
+
+/// The plan every tenant lands on unless explicitly assigned another one --
+/// seeded into both the in-memory backend (here) and the Postgres schema
+/// migration (`sql/001_init_postgres.sql`), so `plan_id = "free"` always
+/// resolves to a real row regardless of storage backend.
+fn default_free_plan() -> StoredPlan {
+    StoredPlan {
+        id: "free".to_string(),
+        name: "Free".to_string(),
+        slug: "free".to_string(),
+        mcp_enabled: false,
+        self_hosted_workers_enabled: false,
+        admin_console_seats: Some(1),
+        default_model_allowlist: Vec::new(),
+        default_rpm_limit: None,
+        default_tpm_limit: None,
+        default_monthly_budget_usd: None,
+        created_at_unix: 0,
+        updated_at_unix: 0,
+    }
+}
+
+/// A sellable subscription tier (issue #168): a named bundle of feature
+/// flags plus default quota values that seed [`EffectiveQuota`] before any
+/// scope-specific [`StoredQuotaPolicy`] override is applied. Plans are
+/// shared across tenants (like [`crate::StoredQuotaPolicy`]'s sibling
+/// concept, a named permission bundle) rather than owned by one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredPlan {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    pub mcp_enabled: bool,
+    #[serde(default)]
+    pub self_hosted_workers_enabled: bool,
+    #[serde(default)]
+    pub admin_console_seats: Option<u32>,
+    #[serde(default)]
+    pub default_model_allowlist: Vec<String>,
+    #[serde(default)]
+    pub default_rpm_limit: Option<u64>,
+    #[serde(default)]
+    pub default_tpm_limit: Option<u64>,
+    #[serde(default)]
+    pub default_monthly_budget_usd: Option<f64>,
     #[serde(default)]
     pub created_at_unix: i64,
     #[serde(default)]
@@ -7163,6 +7342,44 @@ impl RuntimeStorageRepositories {
                 control_plane.delete_quota_policy(scope_type, scope_id)
             }
             RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
+        }
+    }
+
+    /// Creates or replaces a plan (issue #168). Plans are shared across
+    /// tenants, so any authenticated admin-write caller may define one --
+    /// same trust model as [`Self::upsert_quota_policy`].
+    pub fn upsert_plan(&self, plan: StoredPlan) -> Result<(), StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => {
+                if let Ok(mut control_plane) = control_plane.lock() {
+                    control_plane.upsert_plan(plan);
+                }
+                Ok(())
+            }
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert_plan(&plan),
+            RuntimeControlPlaneBackend::Mysql(_) => Err(plans_supabase_only_error()),
+        }
+    }
+
+    pub fn get_plan(&self, id: &str) -> Result<Option<StoredPlan>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.get_plan(id))
+                .unwrap_or(None)),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_plan(id),
+            RuntimeControlPlaneBackend::Mysql(_) => Err(plans_supabase_only_error()),
+        }
+    }
+
+    pub fn list_plans(&self) -> Result<Vec<StoredPlan>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
+                .lock()
+                .map(|control_plane| control_plane.list_plans())
+                .unwrap_or_default()),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_plans(),
+            RuntimeControlPlaneBackend::Mysql(_) => Err(plans_supabase_only_error()),
         }
     }
 

@@ -131,6 +131,10 @@ impl FerroGateway {
                     name,
                     slug,
                     status: payload.status.unwrap_or_else(|| "active".into()),
+                    plan_id: payload
+                        .plan_id
+                        .filter(|plan_id| !plan_id.trim().is_empty())
+                        .unwrap_or_else(|| "free".into()),
                     created_at_unix: now,
                     updated_at_unix: now,
                 };
@@ -1151,6 +1155,7 @@ fn admin_tenant_account(tenant: &StoredTenantAccount) -> AdminTenantAccount {
         name: tenant.name.clone(),
         slug: tenant.slug.clone(),
         status: tenant.status.clone(),
+        plan_id: tenant.plan_id.clone(),
         created_at_unix: tenant.created_at_unix,
         updated_at_unix: tenant.updated_at_unix,
     }
