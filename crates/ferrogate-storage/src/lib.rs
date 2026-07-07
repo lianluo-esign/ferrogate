@@ -1516,7 +1516,7 @@ impl PostgresControlPlaneStore {
         let default_model_allowlist_json = serialize_storage_document(&plan.default_model_allowlist)?;
         let default_rpm_limit = plan.default_rpm_limit.map(saturating_i64);
         let default_tpm_limit = plan.default_tpm_limit.map(saturating_i64);
-        let admin_console_seats = plan.admin_console_seats.map(saturating_i64);
+        let admin_console_seats = plan.admin_console_seats.map(i64::from);
         self.with_client(|client| {
             client.execute(
                 "INSERT INTO plans \
@@ -9941,6 +9941,7 @@ mod tests {
             name: format!("Tenant {id}"),
             slug: slug.into(),
             status: "active".into(),
+            plan_id: "free".into(),
             created_at_unix: 100,
             updated_at_unix: 100,
         }

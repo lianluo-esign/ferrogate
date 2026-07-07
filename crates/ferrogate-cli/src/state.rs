@@ -4699,6 +4699,13 @@ impl AppState {
                 fetched.insert((scope_type, scope_id.to_string()), policy);
             }
         }
+        let plan = match tenant.organization_id.as_deref() {
+            Some(tenant_id) => match self.repositories.get_tenant_account(tenant_id)? {
+                Some(account) => self.repositories.get_plan(&account.plan_id)?,
+                None => None,
+            },
+            None => None,
+        };
         Ok(resolve_effective_quota(
             QuotaScopeChain {
                 tenant_id: tenant.organization_id.as_deref(),
@@ -4707,6 +4714,7 @@ impl AppState {
                 key_id: tenant.api_key_id.as_deref(),
             },
             |scope_type, scope_id| fetched.get(&(scope_type, scope_id.to_string())).cloned(),
+            plan.as_ref(),
         ))
     }
 
