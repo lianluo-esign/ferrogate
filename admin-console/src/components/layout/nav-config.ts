@@ -68,6 +68,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { title: "Self-hosted workers", url: "/app/self-hosted-workers" },
       { title: "Managed workers", url: "/app/managed-workers" },
+      { title: "Assets", url: "/app/assets" },
     ],
   },
   {

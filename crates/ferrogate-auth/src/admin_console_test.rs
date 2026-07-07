@@ -58,8 +58,11 @@ fn register_creates_a_working_session_and_gateway_key() {
     assert!(body["gateway_api_key"].as_str().unwrap().starts_with("fg_"));
 
     // The provisioned virtual key is a real, durable StoredApiKey scoped to
-    // this tenant with admin.read+admin.write, exactly like one created
-    // directly through the gateway's own /admin/v1/virtual-keys endpoint.
+    // this tenant with admin.read+admin.write+assets.read+assets.write,
+    // exactly like one created directly through the gateway's own
+    // /admin/v1/virtual-keys endpoint. The assets.* scopes (issue #178)
+    // don't cross a real privilege boundary beyond what admin.write
+    // already grants (see provision_gateway_api_key's doc comment).
     let gateway_api_key = body["gateway_api_key"].as_str().unwrap();
     let material = virtual_api_key_material(gateway_api_key).unwrap();
     let candidates = console
@@ -67,7 +70,10 @@ fn register_creates_a_working_session_and_gateway_key() {
         .find_api_key_records_by_prefix(&material.key_prefix)
         .unwrap();
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].scopes, ["admin.read", "admin.write"]);
+    assert_eq!(
+        candidates[0].scopes,
+        ["admin.read", "admin.write", "assets.read", "assets.write"]
+    );
     assert!(candidates[0].enabled);
 }
 

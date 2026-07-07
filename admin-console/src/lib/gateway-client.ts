@@ -102,3 +102,53 @@ export function gatewayPatch<T>(
 export function gatewayDelete<T>(apiKey: string, path: string): Promise<T> {
   return gatewayRequest<T>(path, { method: "DELETE" }, apiKey);
 }
+
+/**
+ * Uploads raw bytes (not JSON) to a `/v1/assets/*`-shaped endpoint (issue
+ * #178): unlike every other gateway-client call, the body here is the
+ * file's own bytes with its own Content-Type, not a JSON payload, so this
+ * bypasses `gatewayRequest`'s JSON-serialize-and-set-application/json
+ * behavior entirely rather than trying to make one function cover both
+ * shapes.
+ */
+export async function gatewayPutBinary<T>(
+  apiKey: string,
+  path: string,
+  body: Blob,
+  contentType: string,
+): Promise<T> {
+  const response = await fetch(buildUrl(path), {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": contentType || "application/octet-stream",
+    },
+    body,
+  });
+  const responseBody = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorBody = responseBody as ApiErrorBody | null;
+    throw new ApiError(
+      response.status,
+      errorBody?.error?.code ?? "unknown_error",
+      errorBody?.error?.message ?? response.statusText,
+    );
+  }
+  return responseBody as T;
+}
+
+/** Downloads raw bytes from a `/v1/assets/*`-shaped endpoint (issue #178). */
+export async function gatewayGetBinary(apiKey: string, path: string): Promise<Blob> {
+  const response = await fetch(buildUrl(path), {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!response.ok) {
+    const errorBody = (await response.json().catch(() => null)) as ApiErrorBody | null;
+    throw new ApiError(
+      response.status,
+      errorBody?.error?.code ?? "unknown_error",
+      errorBody?.error?.message ?? response.statusText,
+    );
+  }
+  return response.blob();
+}

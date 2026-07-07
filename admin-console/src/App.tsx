@@ -5,6 +5,7 @@ import { AppShell } from "@/components/layout/app-shell";
 import { ProtectedRoute } from "@/components/protected-route";
 import { ResourcePage } from "@/components/resource/resource-page";
 import { AuthProvider } from "@/hooks/use-auth";
+import AssetsPage from "@/pages/assets";
 import DashboardPage from "@/pages/dashboard";
 import LoginPage from "@/pages/login";
 import RegisterPage from "@/pages/register";
@@ -31,6 +32,7 @@ function App() {
             <Route element={<ProtectedRoute />}>
               <Route element={<AppShell />}>
                 <Route path="/app" element={<DashboardPage />} />
+                <Route path="/app/assets" element={<AssetsPage />} />
                 <Route
                   path="/app/tenant-resolved-defaults"
                   element={<TenantResolvedDefaultsPage />}

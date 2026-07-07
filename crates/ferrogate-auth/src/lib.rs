@@ -1853,11 +1853,21 @@ fn resolve_default_workspace(
         .find(|workspace| workspace.tenant_id == tenant_id))
 }
 
-/// Create a durable, admin.read+admin.write-scoped virtual API key for the
-/// gateway's own Admin API, reusing the exact secret format/hashing the
-/// gateway's existing `/admin/v1/virtual-keys` endpoint already produces and
-/// verifies (issue #157) -- the console is just another virtual-key holder,
-/// not a special case in the gateway's auth path.
+/// Create a durable, admin.read+admin.write+assets.read+assets.write
+/// -scoped virtual API key for the gateway's own Admin API, reusing the
+/// exact secret format/hashing the gateway's existing
+/// `/admin/v1/virtual-keys` endpoint already produces and verifies
+/// (issue #157) -- the console is just another virtual-key holder, not a
+/// special case in the gateway's auth path.
+///
+/// The assets.* scopes (added for #178's admin-console asset management
+/// UI) don't cross a real privilege boundary beyond what admin.write
+/// already grants: any admin.write holder can already self-escalate to
+/// any scope by calling `POST /admin/v1/virtual-keys` to mint a new,
+/// arbitrarily-scoped key. Including them directly on the session key
+/// just removes that indirection for the one console-native feature that
+/// needs it, rather than expanding what a compromised session can
+/// ultimately reach.
 fn provision_gateway_api_key(
     console: &AdminConsoleState,
     workspace_id: &str,
@@ -1883,7 +1893,12 @@ fn provision_gateway_api_key(
         key_hash: material.key_hash,
         last4: material.last4,
         enabled: true,
-        scopes: vec!["admin.read".into(), "admin.write".into()],
+        scopes: vec![
+            "admin.read".into(),
+            "admin.write".into(),
+            "assets.read".into(),
+            "assets.write".into(),
+        ],
         allowed_models: Vec::new(),
         allowed_providers: Vec::new(),
         tenant,
