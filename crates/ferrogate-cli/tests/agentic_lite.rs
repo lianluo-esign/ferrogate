@@ -819,6 +819,121 @@ fn tool_approvals_bind_fingerprint_and_fail_closed() {
     assert_eq!(tool_calls, 1);
 }
 
+/// Issue #186: `/admin/v1/tool-approvals*` resolved a pending approval by
+/// bare id with no tenant check, letting a tenant-scoped `admin` key read
+/// or approve/deny/expire *another* tenant's pending tool-execution gate --
+/// the same cross-tenant IDOR class #185 fixed elsewhere, for a
+/// write-capable security-gate resource this time.
+#[test]
+fn tool_approvals_deny_cross_tenant_read_and_decision() {
+    let (mcp_addr, mcp_handle) = spawn_mcp_server(2);
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    std::fs::write(
+        &config,
+        approval_mcp_config_two_tenants(&gateway_addr, &mcp_addr),
+    )
+    .unwrap();
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    let gateway_for_call = gateway_addr.clone();
+    let execution = thread::spawn(move || {
+        response_json(http_request(
+            &gateway_for_call,
+            "POST",
+            "/v1/tools/execute",
+            &[
+                "Authorization: Bearer tool-secret-a",
+                "Content-Type: application/json",
+            ],
+            r#"{"name":"github.search","arguments":{"query":"ferrogate"}}"#,
+        ))
+    });
+
+    let pending = wait_for_pending_approval(&gateway_addr, &[]);
+    assert_eq!(pending["actor_api_key_id"], "tool-client-a");
+    let approval_id = pending["id"].as_str().unwrap().to_string();
+
+    // Tenant B cannot read tenant A's pending approval.
+    let stolen_read = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        &format!("/admin/v1/tool-approvals/{approval_id}"),
+        &["Authorization: Bearer admin-b-secret"],
+        "",
+    ));
+    assert_eq!(
+        stolen_read["error"]["code"], "tenant_scope_denied",
+        "tenant B must not be able to read tenant A's pending approval: {stolen_read}"
+    );
+
+    // Tenant B's own bulk list does not include tenant A's approval.
+    let tenant_b_list = response_json(http_request(
+        &gateway_addr,
+        "GET",
+        "/admin/v1/tool-approvals",
+        &["Authorization: Bearer admin-b-secret"],
+        "",
+    ));
+    let listed_ids: Vec<&str> = tenant_b_list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|approval| approval["id"].as_str())
+        .collect();
+    assert!(
+        !listed_ids.contains(&approval_id.as_str()),
+        "tenant A's approval must not appear in tenant B's list: {tenant_b_list}"
+    );
+
+    // Tenant B cannot approve tenant A's pending tool execution.
+    let stolen_approve = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!("/admin/v1/tool-approvals/{approval_id}/approve"),
+        &[
+            "Authorization: Bearer admin-b-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"fingerprint":"{}"}}"#,
+            pending["fingerprint"].as_str().unwrap()
+        ),
+    ));
+    assert_eq!(
+        stolen_approve["error"]["code"], "tenant_scope_denied",
+        "tenant B must not be able to approve tenant A's pending tool execution: {stolen_approve}"
+    );
+
+    // Tenant A can still approve its own pending tool execution.
+    let approved = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        &format!("/admin/v1/tool-approvals/{approval_id}/approve"),
+        &[
+            "Authorization: Bearer admin-a-secret",
+            "Content-Type: application/json",
+        ],
+        &format!(
+            r#"{{"fingerprint":"{}"}}"#,
+            pending["fingerprint"].as_str().unwrap()
+        ),
+    ));
+    assert_eq!(approved["status"], "approved");
+    let executed = execution.join().unwrap();
+    assert_eq!(
+        executed["content"]["content"][0]["text"],
+        "ferrogate-result"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    mcp_handle.join().unwrap();
+}
+
 #[test]
 fn p3_mcp_gateway_lists_injects_and_executes_http_tools_with_governance() {
     let (mcp_addr, mcp_handle) = spawn_mcp_server_with_tool(7, "search");
@@ -1525,6 +1640,62 @@ id = "tool-client"
 name = "Tool client"
 key = "tool-secret"
 scopes = ["tools.read", "tools.execute"]
+
+[[extensions]]
+id = "mcp.http"
+kind = "tool_provider"
+source = "builtin"
+enabled = true
+order = 10
+approval_policy = "always"
+
+[extensions.permissions]
+tools = ["github.search"]
+network = ["127.0.0.1"]
+filesystem = false
+shell = false
+
+[extensions.config]
+endpoint = "http://{mcp_addr}/mcp"
+timeout_ms = 3000
+"#
+    )
+}
+
+fn approval_mcp_config_two_tenants(gateway_addr: &str, mcp_addr: &str) -> String {
+    format!(
+        r#"
+listen = "{gateway_addr}"
+
+[reliability]
+tool_approval_timeout_secs = 5
+
+[[api_keys]]
+id = "admin"
+name = "Admin"
+key = "admin-secret"
+scopes = ["admin.read", "admin.write"]
+
+[[api_keys]]
+id = "admin-a"
+name = "Tenant A admin-console session key"
+key = "admin-a-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-iso-a"
+
+[[api_keys]]
+id = "admin-b"
+name = "Tenant B admin-console session key"
+key = "admin-b-secret"
+scopes = ["admin.read", "admin.write"]
+organization_id = "tenant-iso-b"
+
+[[api_keys]]
+id = "tool-client-a"
+name = "Tenant A tool client"
+key = "tool-secret-a"
+scopes = ["tools.read", "tools.execute"]
+organization_id = "tenant-iso-a"
 
 [[extensions]]
 id = "mcp.http"

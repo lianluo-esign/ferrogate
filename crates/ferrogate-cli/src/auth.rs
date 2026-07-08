@@ -210,6 +210,60 @@ pub(crate) fn enforce_tenant_filter(
     }
 }
 
+/// Resolves and checks tenant ownership of a self-hosted worker by bare
+/// `worker_id` (issue #186): every self-hosted-worker sub-handler (rotate,
+/// heartbeat, telemetry event, artifact, checkpoint, and the single-worker
+/// GET) looked the worker up only by id, with no tenant check -- letting a
+/// tenant-scoped caller read or mutate (including rotating the identity
+/// fingerprint, a takeover primitive) any other tenant's self-hosted
+/// worker. Fails closed: if the worker can't be resolved at all, a
+/// tenant-scoped caller is denied here rather than falling through to the
+/// handler's own not-found path.
+pub(crate) fn authorize_self_hosted_worker_scope(
+    state: &AppState,
+    auth: &AuthContext,
+    worker_id: &str,
+) -> Result<(), AuthError> {
+    let Some(caller_tenant_id) = auth.organization_id.as_deref() else {
+        return Ok(());
+    };
+    let resolved_tenant_id = state
+        .self_hosted_worker_record(worker_id)
+        .and_then(|record| record.tenant.organization_id);
+    if resolved_tenant_id.as_deref() == Some(caller_tenant_id) {
+        Ok(())
+    } else {
+        Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "tenant_scope_denied",
+            message: "API key is not authorized to access this tenant's resources".into(),
+        })
+    }
+}
+
+/// Denies a tenant-scoped key outright, regardless of which tenant it
+/// belongs to (issue #186). `/admin/v1/api-keys*` manages the STATIC
+/// config-file-level authentication list -- a caller can set `scopes` and
+/// `organization_id` to anything in the request body (`api_key_from_mutation`),
+/// so a tenant-scoped `admin.write` key could otherwise mint itself a brand
+/// new key with `organization_id: null` and `scopes: ["admin.write"]`: a
+/// full platform-operator credential that bypasses every tenant-scope
+/// check in the system, not merely a cross-tenant read/write on one
+/// resource. The admin-console frontend never calls this endpoint (its
+/// key-management UI goes through the tenant-safe `/admin/v1/virtual-keys`
+/// instead), so this is a dead capability for tenant-scoped keys, not a
+/// designed one.
+pub(crate) fn require_platform_operator(auth: &AuthContext) -> Result<(), AuthError> {
+    if auth.organization_id.is_some() {
+        return Err(AuthError {
+            status: StatusCode::FORBIDDEN,
+            code: "platform_operator_required",
+            message: "this endpoint is restricted to platform-operator API keys".into(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn authenticate(
     state: &AppState,
     headers: &HeaderMap,

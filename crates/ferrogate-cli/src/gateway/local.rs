@@ -4156,8 +4156,11 @@ impl FerroGateway {
             .await;
         }
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let page = state.managed_worker_sessions_page(state.admin_pagination(query));
+            Ok(auth) => {
+                let page = state.managed_worker_sessions_page(
+                    state.admin_pagination(query),
+                    auth.organization_id.as_deref(),
+                );
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -4902,22 +4905,41 @@ impl FerroGateway {
             (&Method::GET, Some(worker_id)) if !worker_id.contains('/') => {
                 let state = self.state.current();
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.self_hosted_worker_record(worker_id) {
-                        Some(worker) => {
-                            write_json_response(session, StatusCode::OK, &worker, &ctx.request_id)
-                                .await
-                        }
-                        None => {
-                            write_json_error(
+                    Ok(auth) => {
+                        if let Err(error) = crate::auth::authorize_self_hosted_worker_scope(
+                            &state, &auth, worker_id,
+                        ) {
+                            return write_json_error(
                                 session,
-                                StatusCode::NOT_FOUND,
-                                "self_hosted_worker_not_found",
-                                format!("self-hosted worker {worker_id} was not found"),
+                                error.status,
+                                error.code,
+                                error.message,
                                 &ctx.request_id,
                             )
-                            .await
+                            .await;
                         }
-                    },
+                        match state.self_hosted_worker_record(worker_id) {
+                            Some(worker) => {
+                                write_json_response(
+                                    session,
+                                    StatusCode::OK,
+                                    &worker,
+                                    &ctx.request_id,
+                                )
+                                .await
+                            }
+                            None => {
+                                write_json_error(
+                                    session,
+                                    StatusCode::NOT_FOUND,
+                                    "self_hosted_worker_not_found",
+                                    format!("self-hosted worker {worker_id} was not found"),
+                                    &ctx.request_id,
+                                )
+                                .await
+                            }
+                        }
+                    }
                     Err(error) => {
                         write_json_error(
                             session,
@@ -4997,6 +5019,25 @@ impl FerroGateway {
                         }
                     };
 
+                // Issue #186: a tenant-scoped caller must register the
+                // worker under its own tenant -- `payload.tenant` is
+                // otherwise entirely caller-controlled, letting any
+                // tenant-scoped admin.write key attribute a worker
+                // registration to an arbitrary other tenant.
+                let self_hosted_tenant_id = crate::state::self_hosted_tenant_id(&payload.tenant);
+                if let Err(error) =
+                    crate::auth::authorize_tenant_scope(&auth, &self_hosted_tenant_id)
+                {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
+
                 // Plan/permission gate for self-hosted worker registration
                 // (issue #168's originally-scoped enforcement point, never
                 // wired until #182): either the tenant's plan enables
@@ -5013,7 +5054,6 @@ impl FerroGateway {
                 // unchecked until now, and plenty of legitimate registration
                 // payloads carry a TenantContext with no matching formal
                 // tenant record.
-                let self_hosted_tenant_id = crate::state::self_hosted_tenant_id(&payload.tenant);
                 let tenant_account_exists = state
                     .get_tenant_account(&self_hosted_tenant_id)
                     .ok()
@@ -5285,6 +5325,18 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) =
+            crate::auth::authorize_self_hosted_worker_scope(&state, &auth, worker_id)
+        {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -5424,6 +5476,18 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) =
+            crate::auth::authorize_self_hosted_worker_scope(&state, &auth, worker_id)
+        {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -5562,7 +5626,19 @@ impl FerroGateway {
         let state = self.state.current();
         if method == Method::GET {
             return match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => {
+                Ok(auth) => {
+                    if let Err(error) =
+                        crate::auth::authorize_self_hosted_worker_scope(&state, &auth, worker_id)
+                    {
+                        return write_json_error(
+                            session,
+                            error.status,
+                            error.code,
+                            error.message,
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
                     let Some(stream) = state.self_hosted_worker_event_stream(
                         worker_id,
                         state.self_hosted_worker_event_stream_query(query),
@@ -5613,6 +5689,18 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) =
+            crate::auth::authorize_self_hosted_worker_scope(&state, &auth, worker_id)
+        {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -5758,6 +5846,18 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) =
+            crate::auth::authorize_self_hosted_worker_scope(&state, &auth, worker_id)
+        {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -5905,6 +6005,18 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) =
+            crate::auth::authorize_self_hosted_worker_scope(&state, &auth, worker_id)
+        {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -6052,8 +6164,11 @@ impl FerroGateway {
             .await;
         }
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let page = state.self_hosted_worker_records_page(state.admin_pagination(query));
+            Ok(auth) => {
+                let page = state.self_hosted_worker_records_page(
+                    state.admin_pagination(query),
+                    auth.organization_id.as_deref(),
+                );
                 let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
@@ -6547,8 +6662,18 @@ impl FerroGateway {
                 .await;
             }
             return match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                Ok(_) => {
-                    let approvals = state.tool_approvals();
+                Ok(auth) => {
+                    let approvals = crate::auth::filter_by_tenant_scope(
+                        &auth,
+                        state.tool_approvals(),
+                        |approval| {
+                            approval
+                                .tenant
+                                .organization_id
+                                .as_deref()
+                                .unwrap_or_default()
+                        },
+                    );
                     let total = approvals.len();
                     write_json_response(
                         session,
@@ -6598,8 +6723,25 @@ impl FerroGateway {
         match (method.clone(), action) {
             (Method::GET, None) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => match state.tool_approval(id) {
+                    Ok(auth) => match state.tool_approval(id) {
                         Some(approval) => {
+                            if let Err(error) = crate::auth::authorize_tenant_scope(
+                                &auth,
+                                approval
+                                    .tenant
+                                    .organization_id
+                                    .as_deref()
+                                    .unwrap_or_default(),
+                            ) {
+                                return write_json_error(
+                                    session,
+                                    error.status,
+                                    error.code,
+                                    error.message,
+                                    &ctx.request_id,
+                                )
+                                .await;
+                            }
                             write_json_response(session, StatusCode::OK, &approval, &ctx.request_id)
                                 .await
                         }
@@ -6640,6 +6782,37 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                match state.tool_approval(id) {
+                    Some(approval) => {
+                        if let Err(error) = crate::auth::authorize_tenant_scope(
+                            &auth,
+                            approval
+                                .tenant
+                                .organization_id
+                                .as_deref()
+                                .unwrap_or_default(),
+                        ) {
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
+                    }
+                    None => {
+                        return write_json_error(
+                            session,
+                            StatusCode::NOT_FOUND,
+                            "tool_approval_not_found",
+                            format!("tool approval {id} was not found"),
+                            &ctx.request_id,
+                        )
+                        .await;
+                    }
+                }
                 let body = match read_request_body(session, 16 * 1024).await? {
                     Ok(body) => body,
                     Err(limit) => {
@@ -6801,7 +6974,17 @@ impl FerroGateway {
         match (method, id) {
             (&Method::GET, None) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => {
+                    Ok(auth) => {
+                        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
                         let body = AdminList::new(
                             state.config.api_keys.iter().map(admin_api_key).collect(),
                         );
@@ -6821,7 +7004,17 @@ impl FerroGateway {
             }
             (&Method::GET, Some(id)) => {
                 match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-                    Ok(_) => {
+                    Ok(auth) => {
+                        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                            return write_json_error(
+                                session,
+                                error.status,
+                                error.code,
+                                error.message,
+                                &ctx.request_id,
+                            )
+                            .await;
+                        }
                         let Some(key) = find_api_key(&state, id) else {
                             return write_json_error(
                                 session,
@@ -6896,6 +7089,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -7064,6 +7267,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         match self.state.delete_api_key(id) {
             Ok(Some(outcome)) if outcome.committed => {
@@ -7494,8 +7707,12 @@ impl FerroGateway {
     ) -> PingoraResult<()> {
         let state = self.state.current();
         match authenticate(&state, headers, "admin.read", &ctx.request_id) {
-            Ok(_) => {
-                let body = AdminList::new(state.tenant_refs());
+            Ok(auth) => {
+                let refs =
+                    crate::auth::filter_by_tenant_scope(&auth, state.tenant_refs(), |tenant_ref| {
+                        tenant_ref.organization_id.as_deref().unwrap_or_default()
+                    });
+                let body = AdminList::new(refs);
                 write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
             }
             Err(error) => {

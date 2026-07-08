@@ -6686,9 +6686,13 @@ impl AppState {
         }
     }
 
+    /// `tenant_scope`: narrows the page to a single tenant's managed
+    /// worker sessions (issue #186); `None` (platform operator) is
+    /// unfiltered.
     pub(crate) fn managed_worker_sessions_page(
         &self,
         pagination: AdminPagination,
+        tenant_scope: Option<&str>,
     ) -> AdminPage<crate::responses::AdminManagedWorkerSession> {
         let lifecycle_events = self.repositories.managed_worker_lifecycle_events();
         let mut sessions = self
@@ -6729,6 +6733,9 @@ impl AppState {
                 }
             })
             .collect::<Vec<_>>();
+        if let Some(tenant_id) = tenant_scope {
+            sessions.retain(|session| session.tenant.organization_id.as_deref() == Some(tenant_id));
+        }
         sessions.sort_by(|left, right| {
             right
                 .requested_at_unix
@@ -6749,11 +6756,17 @@ impl AppState {
         }
     }
 
+    /// `tenant_scope`: narrows the page to a single tenant's self-hosted
+    /// workers (issue #186); `None` (platform operator) is unfiltered.
     pub(crate) fn self_hosted_worker_records_page(
         &self,
         pagination: AdminPagination,
+        tenant_scope: Option<&str>,
     ) -> AdminPage<crate::responses::AdminSelfHostedWorkerRecord> {
         let mut records = self.self_hosted_worker_records();
+        if let Some(tenant_id) = tenant_scope {
+            records.retain(|record| record.tenant.organization_id.as_deref() == Some(tenant_id));
+        }
         records.sort_by(|left, right| {
             right
                 .last_seen_at_unix
@@ -11669,6 +11682,55 @@ mod tests {
     }
 
     #[test]
+    fn managed_worker_sessions_page_filters_by_tenant_scope() {
+        // Issue #186: the managed-worker-sessions admin list leaked every
+        // tenant's sessions to a tenant-scoped `admin.read` key. Proves the
+        // new `tenant_scope` param on `managed_worker_sessions_page`
+        // narrows correctly, using the same real production code path
+        // (`record_managed_worker_lifecycle`) that a real managed-worker
+        // dispatch would use.
+        let state = AppState::new(Config::default());
+        let record =
+            |session_id: &str, tenant_id: &str| ferrogate_runtime::ManagedWorkerLifecycleRecord {
+                session_id: session_id.into(),
+                run_id: format!("run-{session_id}"),
+                tenant_id: tenant_id.into(),
+                workspace_id: "workspace-1".into(),
+                worker_template_id: "template-codex".into(),
+                agent_worker_id: format!("agent-worker-{session_id}"),
+                isolation_backend_kind: ferrogate_runtime::IsolationBackendKind::FirecrackerMicroVm,
+                isolation_backend_version: "external_bundle".into(),
+                isolation_instance_id: Some(format!("microvm-{session_id}")),
+                capability_envelope_id: "capability-1".into(),
+                status: ferrogate_runtime::ManagedWorkerSessionStatus::Running,
+                action: ferrogate_runtime::ManagedWorkerLifecycleAction::ExecOrAttach,
+                outcome: "started".into(),
+                failure_reason: None,
+            };
+        state.record_managed_worker_lifecycle(&record("session-a", "tenant-iso-a"));
+        state.record_managed_worker_lifecycle(&record("session-b", "tenant-iso-b"));
+
+        let tenant_a_page = state.managed_worker_sessions_page(
+            AdminPagination {
+                offset: 0,
+                limit: 50,
+            },
+            Some("tenant-iso-a"),
+        );
+        assert_eq!(tenant_a_page.total, 1);
+        assert_eq!(tenant_a_page.data[0].id, "session-a");
+
+        let unfiltered_page = state.managed_worker_sessions_page(
+            AdminPagination {
+                offset: 0,
+                limit: 50,
+            },
+            None,
+        );
+        assert_eq!(unfiltered_page.total, 2);
+    }
+
+    #[test]
     fn self_hosted_worker_records_page_reads_storage_evidence() {
         let state = AppState::new(Config::default());
         let tenant = ferrogate_core::TenantContext {
@@ -11773,10 +11835,13 @@ mod tests {
             })
             .unwrap();
 
-        let page = state.self_hosted_worker_records_page(AdminPagination {
-            offset: 0,
-            limit: 50,
-        });
+        let page = state.self_hosted_worker_records_page(
+            AdminPagination {
+                offset: 0,
+                limit: 50,
+            },
+            None,
+        );
 
         assert_eq!(page.total, 1);
         assert_eq!(page.data[0].id, "worker-1");
