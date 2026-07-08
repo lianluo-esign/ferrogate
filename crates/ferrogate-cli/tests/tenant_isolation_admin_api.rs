@@ -755,3 +755,127 @@ fn tenant_roster_is_filtered_to_the_callers_own_tenant() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+/// Issue #187: gateway configs, plugins, and sellable plans are
+/// structurally global config -- no tenant-ownership field at all -- so a
+/// tenant-scoped `admin.write` key could previously create/edit/delete
+/// them just as freely as a platform-operator key, mutating config that
+/// affects every other tenant. `require_platform_operator` now denies
+/// tenant-scoped callers on every mutation path; reads stay unrestricted.
+#[test]
+fn tenant_scoped_admin_key_cannot_mutate_global_platform_config() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ferrogate.toml");
+    write_config(&config_path, &gateway_addr);
+
+    let mut gateway = start_gateway(&config_path);
+    wait_for_gateway(&gateway_addr);
+
+    // Gateway configs: create denied for a tenant-scoped key.
+    let gateway_config_body = serde_json::json!({
+        "id": "shared-profile",
+        "name": "Shared profile",
+        "revision": 1,
+        "cache_enabled": false,
+    })
+    .to_string();
+    let denied_gateway_config = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/gateway-configs",
+        &TENANT_A,
+        &gateway_config_body,
+    );
+    assert!(
+        status_line(&denied_gateway_config).contains("403"),
+        "tenant-scoped key must not create a gateway config: {denied_gateway_config}"
+    );
+
+    // Plugins: create denied for a tenant-scoped key.
+    let plugin_body = serde_json::json!({
+        "id": "tool.echo",
+        "kind": "tool_provider",
+        "enabled": true,
+        "source": "builtin",
+        "order": 10,
+        "permissions": {
+            "tools": ["tool.echo"],
+            "network": [],
+            "filesystem": false,
+            "shell": false,
+            "secrets": false,
+            "admin_mutation": false
+        }
+    })
+    .to_string();
+    let denied_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &TENANT_A,
+        &plugin_body,
+    );
+    assert!(
+        status_line(&denied_plugin).contains("403"),
+        "tenant-scoped key must not create a plugin: {denied_plugin}"
+    );
+
+    // Sellable plans: create denied for a tenant-scoped key.
+    let plan_body = serde_json::json!({
+        "name": "Enterprise",
+        "slug": "enterprise-pwn",
+    })
+    .to_string();
+    let denied_plan = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &TENANT_A,
+        &plan_body,
+    );
+    assert!(
+        status_line(&denied_plan).contains("403"),
+        "tenant-scoped key must not create a sellable plan: {denied_plan}"
+    );
+
+    // Reads remain unrestricted for tenant-scoped keys.
+    let plugin_list = http_request(&gateway_addr, "GET", "/admin/v1/plugins", &TENANT_A, "");
+    assert!(
+        plugin_list.contains("HTTP/1.1 200"),
+        "tenant-scoped key must still be able to read the plugin catalog: {plugin_list}"
+    );
+
+    // The platform operator retains full mutation access to all three.
+    let operator_gateway_config = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/gateway-configs",
+        &ADMIN,
+        &gateway_config_body,
+    );
+    assert!(
+        operator_gateway_config.contains("HTTP/1.1 201")
+            || operator_gateway_config.contains("HTTP/1.1 200"),
+        "the platform operator must retain full access to gateway configs: {operator_gateway_config}"
+    );
+    let operator_plugin = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plugins",
+        &ADMIN,
+        &plugin_body,
+    );
+    assert!(
+        operator_plugin.contains("HTTP/1.1 201") || operator_plugin.contains("HTTP/1.1 200"),
+        "the platform operator must retain full access to plugins: {operator_plugin}"
+    );
+    let operator_plan = http_request(&gateway_addr, "POST", "/admin/v1/plans", &ADMIN, &plan_body);
+    assert!(
+        operator_plan.contains("HTTP/1.1 201") || operator_plan.contains("HTTP/1.1 200"),
+        "the platform operator must retain full access to sellable plans: {operator_plan}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

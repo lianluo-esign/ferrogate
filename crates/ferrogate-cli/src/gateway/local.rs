@@ -465,6 +465,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -646,6 +656,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         match self.state.delete_mcp_server(name) {
             Ok(Some(outcome)) if outcome.committed => {
@@ -837,6 +857,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -1005,6 +1035,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         match self.state.delete_gateway_config(id) {
             Ok(Some(outcome)) if outcome.committed => {
@@ -1200,6 +1240,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
             Err(limit) => {
@@ -1359,6 +1409,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         match self.state.delete_agent_workflow(id, None) {
             Ok(Some(outcome)) if outcome.committed => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -1547,6 +1607,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
             Err(limit) => {
@@ -1706,6 +1776,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         match self.state.delete_skill_package(id) {
             Ok(Some(outcome)) if outcome.committed => {
                 state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -1956,6 +2036,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -2125,6 +2215,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         match self.state.archive_prompt_template(id) {
             Ok(Some(outcome)) if outcome.committed => {
@@ -6369,6 +6469,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -6542,6 +6652,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         match self.state.delete_plugin_registration(id) {
             Ok(Some(outcome)) if outcome.committed => {
@@ -7457,6 +7577,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -7625,6 +7755,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         match self.state.delete_policy(name) {
             Ok(Some(outcome)) if outcome.committed => {
@@ -7930,6 +8070,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         let body = match read_request_body(session, 64 * 1024).await? {
             Ok(body) => body,
@@ -8083,6 +8233,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
 
         match self.state.delete_agent_upstream(id) {
             Ok(Some(outcome)) => {

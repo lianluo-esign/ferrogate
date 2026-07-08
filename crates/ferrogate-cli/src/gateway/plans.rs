@@ -182,6 +182,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let payload = match read_json_body::<AdminPlanMutation>(session, &ctx.request_id).await? {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
@@ -271,6 +281,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let payload = match read_json_body::<AdminPlanMutation>(session, &ctx.request_id).await? {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
