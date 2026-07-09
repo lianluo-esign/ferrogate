@@ -128,8 +128,39 @@ registry access to fetch the image manifest.
   — they require the `[self-hosted, archlinux]` runner and a real image
   push, which only happens on a real `ci-image.yml` or `package.yml` run.
 
-**Still needed to fully close issue #189's acceptance criteria:** a real
-`ci-image.yml` or `package.yml` run producing a signed, attested,
-SBOM-accompanied image, followed by running the two verification commands
-above against that image's actual digest and recording the result here or
-in the issue.
+## Real end-to-end verification (2026-07-09, closes issue #189)
+
+`ci.yml` was dispatched once against `main` at commit `18f81b4` specifically
+to exercise this pipeline for real (`gh workflow run ci.yml --ref main`, run
+[29004136692](https://github.com/lianluo-esign/ferrogate/actions/runs/29004136692)).
+This publishes only `sha-<commit>` tags via `ci-image.yml` — it does not
+touch `package.yml`'s `:stable`/`:latest` release tags. The first attempt's
+`rust-e2e-harness` job failed on an unrelated transient Docker Hub registry
+500 pulling `postgres:16-alpine`; `gh run rerun --failed` re-ran only that
+job and it passed on retry, confirming the failure was infra flake, not a
+regression from the MySQL removal or CI trigger changes landed in this same
+session.
+
+Resulting image: `ghcr.io/lianluo-esign/ferrogate@sha256:7329e4872d48b68b975437515538b36a149564e33d468baf1a7ef32f449750b7`
+(tags `sha-18f81b4fba9fe06761bc09f035f806cb907a5d4d`, `sha-18f81b4fba9f`).
+
+Both verification commands above were run against this real digest, not a
+hypothetical one:
+
+- `cosign verify --certificate-identity-regexp '^https://github.com/lianluo-esign/ferrogate/\.github/workflows/.*$' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/lianluo-esign/ferrogate@sha256:7329e48...` —
+  **passed**. Printed two verified claims: a `sigstore.dev/cosign/sign/v1`
+  signature and a `slsa.dev/provenance/v1` attestation, both binding
+  `docker-manifest-digest` to the exact digest above, both checked against
+  the transparency log offline and validated against the Sigstore root CA.
+- `gh attestation verify oci://ghcr.io/lianluo-esign/ferrogate@sha256:7329e48... --repo lianluo-esign/ferrogate` —
+  **passed** (exit 0). `--format json` returned one attestation record whose
+  embedded Fulcio certificate SAN identifies the signer as
+  `https://github.com/lianluo-esign/ferrogate/.github/workflows/ci-image.yml@refs/heads/main`
+  triggered by `workflow_dispatch` at commit `18f81b4fba9fe06761bc09f035f806cb907a5d4d`
+  — an independently auditable, cryptographic link from the published image
+  back to the exact workflow file and commit that built it.
+
+This closes issue #189's remaining acceptance item: a real image was
+published with SBOM + signature + attestation, and both verification
+commands were run end-to-end against its actual digest with the results
+recorded here.
