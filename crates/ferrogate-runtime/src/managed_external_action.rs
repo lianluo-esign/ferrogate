@@ -1855,3 +1855,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "managed_external_action_red_team_test.rs"]
+mod managed_external_action_red_team_test;

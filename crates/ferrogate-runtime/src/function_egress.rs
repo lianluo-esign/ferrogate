@@ -161,3 +161,7 @@ pub struct FunctionInvocationOutcome {
 #[cfg(test)]
 #[path = "function_egress_test.rs"]
 mod function_egress_test;
+
+#[cfg(test)]
+#[path = "function_egress_red_team_test.rs"]
+mod function_egress_red_team_test;
