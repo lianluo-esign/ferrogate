@@ -1,0 +1,50 @@
+# Token4AI Cloud Attribution
+# Developed by the commercial cloud service company represented by https://token4ai.cloud.
+# Author: jamesduan (X: https://x.com/JamesDuanL)
+# Created: 2026-07-09
+# description: Shared FerroGate image supply-chain steps (issue #189) — SBOM
+# generation, keyless cosign signing, and GitHub build provenance attestation
+# for a published container image digest. Used by ci-image.yml and
+# package.yml so the two publish paths do not duplicate this logic.
+
+name: Image supply chain
+description: >
+  Generates an SBOM, signs the image digest with cosign using keyless GitHub
+  Actions OIDC signing, and attests build provenance for a published
+  FerroGate container image digest.
+
+inputs:
+  image:
+    description: "Fully-qualified image reference without tag or digest, e.g. ghcr.io/owner/ferrogate"
+    required: true
+  digest:
+    description: "Image digest produced by docker/build-push-action, in the form sha256:<hex>"
+    required: true
+  sbom-artifact-name:
+    description: "Name for the uploaded SBOM workflow artifact"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Generate SBOM
+      uses: anchore/sbom-action@v0.24.0
+      with:
+        image: ${{ inputs.image }}@${{ inputs.digest }}
+        format: spdx-json
+        artifact-name: ${{ inputs.sbom-artifact-name }}
+        upload-release-assets: false
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v4.1.2
+
+    - name: Sign image digest (keyless OIDC)
+      shell: bash
+      run: cosign sign --yes "${{ inputs.image }}@${{ inputs.digest }}"
+
+    - name: Attest build provenance
+      uses: actions/attest-build-provenance@v3
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        push-to-registry: true

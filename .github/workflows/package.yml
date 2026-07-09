@@ -3,6 +3,8 @@
 # Author: jamesduan (X: https://x.com/JamesDuanL)
 # Created: 2026-06-11
 # description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
+# Publishes an SBOM, a keyless cosign signature, and a build provenance
+# attestation for every released image alongside it (issue #189).
 
 name: Publish FerroGate package
 
@@ -19,8 +21,10 @@ on:
         default: "v2026.06.22"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: package-${{ github.ref }}
@@ -72,6 +76,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and publish image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -83,3 +88,10 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.image.outputs.version }}
+
+      - name: Generate SBOM, sign image, and attest provenance
+        uses: ./.github/actions/image-supply-chain
+        with:
+          image: ${{ steps.image.outputs.name }}
+          digest: ${{ steps.build.outputs.digest }}
+          sbom-artifact-name: sbom-release-${{ steps.image.outputs.version }}.spdx.json

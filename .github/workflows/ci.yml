@@ -84,6 +84,8 @@ jobs:
     needs: rust-ci
     uses: ./.github/workflows/ci-image.yml
     permissions:
-      contents: read
+      contents: write
       packages: write
+      id-token: write
+      attestations: write
     secrets: inherit
