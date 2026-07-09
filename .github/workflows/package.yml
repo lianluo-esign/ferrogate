@@ -8,11 +8,18 @@
 
 name: Publish FerroGate package
 
-# Package publishing is temporarily manual-only while GitHub runner usage is
-# paused for the development loop. Build and test locally first with
-# scripts/local-test-modules.sh, then dispatch this workflow explicitly only
-# when a release image should be published.
+# Package publishing is a release-gate workflow, not a per-commit CI step: it
+# triggers when a release tag (vYYYY.MM.DD, e.g. v2026.07.09) is pushed --
+# the version input below is left empty and the tag name (GITHUB_REF_NAME) is
+# used instead, per the fallback in "Prepare image metadata" -- or via manual
+# workflow_dispatch as an escape hatch to re-publish/re-verify a release
+# without re-tagging. Build and test locally first with
+# scripts/local-test-modules.sh; this workflow only publishes the image, it
+# does not itself run tests or depend on ci.yml (see ci.yml for that).
 on:
+  push:
+    tags:
+      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
   workflow_dispatch:
     inputs:
       version:
