@@ -19,7 +19,7 @@ env:
 jobs:
   gateway-runtime:
     name: rust-gateway-runtime / ${{ matrix.slice }}
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:

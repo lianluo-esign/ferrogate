@@ -32,7 +32,7 @@ env:
 jobs:
   supabase-storage-tests:
     name: rust-supabase-storage-tests / ${{ matrix.slice }}
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:

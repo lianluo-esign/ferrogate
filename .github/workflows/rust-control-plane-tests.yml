@@ -19,7 +19,7 @@ env:
 jobs:
   control-plane-tests:
     name: rust-control-plane-tests / ${{ matrix.slice }}
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:

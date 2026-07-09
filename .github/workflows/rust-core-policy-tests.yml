@@ -19,7 +19,7 @@ env:
 jobs:
   core-policy-tests:
     name: rust-core-policy-tests / ${{ matrix.slice }}
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:

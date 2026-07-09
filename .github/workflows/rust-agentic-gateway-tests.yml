@@ -19,7 +19,7 @@ env:
 jobs:
   agentic-gateway-tests:
     name: rust-agentic-gateway-tests / ${{ matrix.slice }}
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:

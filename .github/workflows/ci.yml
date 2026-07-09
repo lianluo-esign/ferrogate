@@ -6,9 +6,9 @@
 
 name: CI
 
-# CI is temporarily paused because the self-hosted runner queue is too slow for
-# the current development loop. Run scripts/local-test-modules.sh locally
-# instead, then restore push/pull_request triggers when GitHub CI is usable.
+# CI runs on GitHub-hosted runners (moved off self-hosted archlinux runners,
+# which were unreliable/offline — see issue #189). Still workflow_dispatch-only
+# pending a decision on restoring push/pull_request triggers.
 on:
   workflow_dispatch:
 
@@ -64,7 +64,7 @@ jobs:
 
   rust-ci:
     name: rust-ci
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     needs:
       - quality
       - core-policy-tests

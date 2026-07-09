@@ -19,7 +19,7 @@ env:
 jobs:
   quality:
     name: rust-quality
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5

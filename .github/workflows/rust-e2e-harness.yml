@@ -19,7 +19,7 @@ env:
 jobs:
   e2e-harness:
     name: rust-e2e-harness
-    runs-on: [self-hosted, archlinux]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
