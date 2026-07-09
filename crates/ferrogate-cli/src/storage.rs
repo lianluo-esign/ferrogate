@@ -8,8 +8,7 @@ use std::env;
 
 use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_storage::{
-    MySqlStorageConfig, MySqlTlsMode, PostgresStorageConfig, PostgresTlsMode,
-    RuntimeStorageRepositories, StorageMigrationCounts,
+    PostgresStorageConfig, PostgresTlsMode, RuntimeStorageRepositories, StorageMigrationCounts,
 };
 
 use crate::cli::{StorageCommands, StorageMigrateToSupabaseArgs};
@@ -63,32 +62,8 @@ fn migrate_to_supabase(args: StorageMigrateToSupabaseArgs) -> AnyResult<()> {
                 .map_err(|error| anyhow::anyhow!("{error}"))
                 .context("failed to open source postgres storage for migration")?
         }
-        "mysql" => {
-            let source_dsn = resolve_secret_value(
-                "source MySQL DSN",
-                args.source_mysql_dsn.as_deref(),
-                args.source_mysql_dsn_env.as_deref(),
-            )?;
-            RuntimeStorageRepositories::mysql_for_migration(
-                MySqlStorageConfig {
-                    dsn: source_dsn,
-                    pool_size: 2,
-                    tls_mode: parse_mysql_tls_mode(&args.mysql_tls_mode)?,
-                    tls_ca_cert_path: args
-                        .mysql_tls_ca_cert_path
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|path| !path.is_empty())
-                        .map(ToOwned::to_owned),
-                    connect_timeout_secs: 5,
-                },
-                false,
-            )
-            .map_err(|error| anyhow::anyhow!("{error}"))
-            .context("failed to open source MySQL storage for migration")?
-        }
         other => bail!(
-            "unsupported --source-provider {other}; current migration tooling supports postgres and mysql"
+            "unsupported --source-provider {other}; current migration tooling supports postgres"
         ),
     };
     let snapshot = source
@@ -150,18 +125,6 @@ fn parse_postgres_tls_mode(value: &str) -> AnyResult<PostgresTlsMode> {
         "verify_full" | "verify-full" => Ok(PostgresTlsMode::VerifyFull),
         other => bail!(
             "--postgres-tls-mode must be disable, prefer, require, verify_ca, or verify_full, got {other}"
-        ),
-    }
-}
-
-fn parse_mysql_tls_mode(value: &str) -> AnyResult<MySqlTlsMode> {
-    match value.trim() {
-        "disable" => Ok(MySqlTlsMode::Disable),
-        "require" => Ok(MySqlTlsMode::Require),
-        "verify_ca" | "verify-ca" => Ok(MySqlTlsMode::VerifyCa),
-        "verify_full" | "verify-full" => Ok(MySqlTlsMode::VerifyFull),
-        other => bail!(
-            "--mysql-tls-mode must be disable, require, verify_ca, or verify_full, got {other}"
         ),
     }
 }

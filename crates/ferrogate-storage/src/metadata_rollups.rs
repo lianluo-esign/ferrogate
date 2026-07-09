@@ -68,12 +68,6 @@ fn usage_metadata_rollup_from_row(row: &PostgresRow) -> StoredUsageMetadataRollu
     }
 }
 
-fn metadata_rollups_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "usage metadata rollups are Supabase/Postgres-only; set storage.provider = supabase".into(),
-    )
-}
-
 /// Fans a settled request's usage/cost delta out into one
 /// `usage_metadata_rollups` increment per metadata key/value pair on the
 /// event (issue #171). Called from within `append_billing_event`'s
@@ -232,7 +226,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_usage_metadata_rollups(metadata_key)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(metadata_rollups_supabase_only_error()),
         }
     }
 }

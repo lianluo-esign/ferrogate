@@ -9,8 +9,8 @@ use crate::{
     cli::{LocalArgs, SupabaseLiveRestartArgs, SupabaseLiveToken4aiProviderArgs},
     constants::{ADMIN_AUTH, CLIENT_AUTH, JSON_CONTENT},
     docker::{
-        docker_args, MYSQL_CONTAINER, MYSQL_IMAGE, POSTGRES_CONTAINER, POSTGRES_IMAGE,
-        POSTGRES_MIGRATION_SOURCE_CONTAINER, POSTGRES_MIGRATION_TARGET_CONTAINER,
+        docker_args, POSTGRES_CONTAINER, POSTGRES_IMAGE, POSTGRES_MIGRATION_SOURCE_CONTAINER,
+        POSTGRES_MIGRATION_TARGET_CONTAINER,
     },
     fixtures::toml_basic_string,
     http::{free_addr, free_port, http_request_addr},
@@ -599,69 +599,6 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
     Ok(())
 }
 
-pub(crate) fn run_mysql_restart(args: &LocalArgs) -> Result<()> {
-    let host_port = free_port()?;
-    let _cleanup = MySqlCleanup;
-    start_mysql_container(host_port)?;
-    let dsn = format!("mysql://root:mysql@127.0.0.1:{host_port}/ferrogate?prefer_socket=false");
-    run_control_plane_mysql_restart(
-        &args.ferrogate_bin,
-        &dsn,
-        MySqlRestartTls {
-            mode: "disable",
-            ca_cert_path: None,
-        },
-        "ferrogate-mysql-test",
-        true,
-    )?;
-    println!("mysql-restart scenario passed");
-    Ok(())
-}
-
-pub(crate) fn run_mysql_tls_restart(args: &LocalArgs) -> Result<()> {
-    let host_port = free_port()?;
-    let ca_dir = tempfile::tempdir()?;
-    let ca_cert_path = ca_dir.path().join("mysql-ca.pem");
-    let _cleanup = MySqlCleanup;
-    start_mysql_container(host_port)?;
-    docker_args([
-        "cp".to_string(),
-        format!("{MYSQL_CONTAINER}:/var/lib/mysql/ca.pem"),
-        ca_cert_path.display().to_string(),
-    ])?;
-    let dsn = format!("mysql://root:mysql@127.0.0.1:{host_port}/ferrogate?prefer_socket=false");
-    run_control_plane_mysql_restart(
-        &args.ferrogate_bin,
-        &dsn,
-        MySqlRestartTls {
-            mode: "verify_ca",
-            ca_cert_path: Some(ca_cert_path.as_path()),
-        },
-        "ferrogate-mysql-tls-test",
-        true,
-    )?;
-    println!("mysql-tls-restart scenario passed");
-    Ok(())
-}
-
-fn start_mysql_container(host_port: u16) -> Result<()> {
-    stop_mysql_container();
-    docker_args([
-        "run".to_string(),
-        "-d".to_string(),
-        "--name".to_string(),
-        MYSQL_CONTAINER.to_string(),
-        "-e".to_string(),
-        "MYSQL_ROOT_PASSWORD=mysql".to_string(),
-        "-e".to_string(),
-        "MYSQL_DATABASE=ferrogate".to_string(),
-        "-p".to_string(),
-        format!("127.0.0.1:{host_port}:3306"),
-        MYSQL_IMAGE.to_string(),
-    ])?;
-    wait_for_mysql_server()
-}
-
 struct PostgresTlsFiles {
     ca_cert_path: PathBuf,
 }
@@ -728,24 +665,6 @@ fn run_control_plane_supabase_restart(
         ferrogate_bin,
         ControlPlaneRestartStorage::Supabase {
             dsn: supabase_dsn,
-            tls,
-        },
-        resource_prefix,
-        verify_deleted_after_restart,
-    )
-}
-
-fn run_control_plane_mysql_restart(
-    ferrogate_bin: &Path,
-    mysql_dsn: &str,
-    tls: MySqlRestartTls<'_>,
-    resource_prefix: &str,
-    verify_deleted_after_restart: bool,
-) -> Result<()> {
-    run_control_plane_restart(
-        ferrogate_bin,
-        ControlPlaneRestartStorage::Mysql {
-            dsn: mysql_dsn,
             tls,
         },
         resource_prefix,
@@ -1319,47 +1238,6 @@ fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-fn wait_for_mysql_server() -> Result<()> {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(60) {
-        if Command::new("docker")
-            .args([
-                "exec",
-                MYSQL_CONTAINER,
-                "mysqladmin",
-                "ping",
-                "--protocol=tcp",
-                "-h127.0.0.1",
-                "-P3306",
-                "-uroot",
-                "-pmysql",
-                "--silent",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    let logs = Command::new("docker")
-        .args(["logs", MYSQL_CONTAINER, "--tail", "160"])
-        .output()
-        .ok()
-        .map(|output| {
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )
-        })
-        .unwrap_or_default();
-    bail!("timed out waiting for local MySQL server; logs: {logs}");
-}
-
 fn stop_postgres_container() {
     stop_postgres_container_named(POSTGRES_CONTAINER);
 }
@@ -1367,14 +1245,6 @@ fn stop_postgres_container() {
 fn stop_postgres_container_named(container_name: &str) {
     let _ = Command::new("docker")
         .args(["rm", "-f", container_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-fn stop_mysql_container() {
-    let _ = Command::new("docker")
-        .args(["rm", "-f", MYSQL_CONTAINER])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1403,23 +1273,6 @@ impl Drop for PostgresMigrationCleanup {
     }
 }
 
-struct MySqlCleanup;
-
-impl Drop for MySqlCleanup {
-    fn drop(&mut self) {
-        if env::var("FERROGATE_TEST_KEEP_CONTAINERS").is_ok_and(|value| value == "1") {
-            return;
-        }
-        stop_mysql_container();
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct MySqlRestartTls<'a> {
-    pub(crate) mode: &'a str,
-    pub(crate) ca_cert_path: Option<&'a Path>,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct PostgresRestartTls<'a> {
     pub(crate) mode: &'a str,
@@ -1436,10 +1289,6 @@ pub(crate) enum ControlPlaneRestartStorage<'a> {
         dsn: &'a str,
         tls: PostgresRestartTls<'a>,
     },
-    Mysql {
-        dsn: &'a str,
-        tls: MySqlRestartTls<'a>,
-    },
 }
 
 impl ControlPlaneRestartStorage<'_> {
@@ -1455,7 +1304,6 @@ impl ControlPlaneRestartStorage<'_> {
         match self {
             ControlPlaneRestartStorage::Supabase { .. } => "supabase",
             ControlPlaneRestartStorage::Postgres { .. } => "postgres",
-            ControlPlaneRestartStorage::Mysql { .. } => "mysql",
         }
     }
 
@@ -1466,9 +1314,6 @@ impl ControlPlaneRestartStorage<'_> {
             }
             ControlPlaneRestartStorage::Supabase { dsn, .. } => {
                 command.env("FERROGATE_SUPABASE_DSN", dsn);
-            }
-            ControlPlaneRestartStorage::Mysql { dsn, .. } => {
-                command.env("FERROGATE_MYSQL_DSN", dsn);
             }
         }
     }
@@ -1492,7 +1337,6 @@ impl ControlPlaneRestartStorage<'_> {
   provider_order:
     - supabase
     - postgres
-    - mysql
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
   postgres_pool_size: 2
   postgres_tls_mode: {tls_mode}{ca_cert_path}
@@ -1524,7 +1368,6 @@ impl ControlPlaneRestartStorage<'_> {
   provider_order:
     - supabase
     - postgres
-    - mysql
   supabase_dsn_env: FERROGATE_SUPABASE_DSN
   postgres_pool_size: 2
   postgres_tls_mode: {tls_mode}{ca_cert_path}
@@ -1533,34 +1376,6 @@ impl ControlPlaneRestartStorage<'_> {
   postgres_schema: ferrogate_control
   postgres_search_path:
     - public
-  migration_mode: {migration_mode}"#,
-                    tls_mode = tls.mode,
-                    ca_cert_path = ca_cert_path,
-                    migration_mode = migration_mode.as_str()
-                )
-            }
-            ControlPlaneRestartStorage::Mysql { tls, .. } => {
-                let ca_cert_path = tls
-                    .ca_cert_path
-                    .map(|path| {
-                        format!(
-                            "\n  mysql_tls_ca_cert_path: {}",
-                            toml_basic_string(&path.to_string_lossy())
-                        )
-                    })
-                    .unwrap_or_default();
-                format!(
-                    r#"storage:
-  provider: mysql
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-    - mysql
-  mysql_dsn_env: FERROGATE_MYSQL_DSN
-  mysql_pool_size: 2
-  mysql_tls_mode: {tls_mode}{ca_cert_path}
-  mysql_connect_timeout_secs: 5
   migration_mode: {migration_mode}"#,
                     tls_mode = tls.mode,
                     ca_cert_path = ca_cert_path,
@@ -1954,7 +1769,6 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["health"], "ok");
             assert_eq!(body["storage"]["provider_order"][0], "supabase");
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
-            assert_eq!(body["storage"]["provider_order"][2], "mysql");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
                 assert_eq!(body["storage"]["schema"]["version"], 16);

@@ -50,7 +50,6 @@ pub(crate) fn run_admin_api(args: &LocalArgs) -> Result<()> {
         assert_eq!(body["storage"]["contract_version"], 1);
         assert_eq!(body["storage"]["provider_order"][0], "supabase");
         assert_eq!(body["storage"]["provider_order"][1], "postgres");
-        assert_eq!(body["storage"]["provider_order"][2], "mysql");
         assert_eq!(body["analytics"]["provider"], "vector");
         assert_eq!(body["analytics"]["enabled"], false);
         assert_eq!(body["analytics"]["active"], false);

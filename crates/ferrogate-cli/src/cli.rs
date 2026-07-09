@@ -105,12 +105,6 @@ pub(crate) struct StorageMigrateToSupabaseArgs {
     /// Environment variable containing the source PostgreSQL DSN.
     #[arg(long, env = "FERROGATE_MIGRATION_SOURCE_POSTGRES_DSN_ENV")]
     pub(crate) source_postgres_dsn_env: Option<String>,
-    /// Source MySQL DSN. Prefer --source-mysql-dsn-env for shell history safety.
-    #[arg(long, conflicts_with = "source_mysql_dsn_env")]
-    pub(crate) source_mysql_dsn: Option<String>,
-    /// Environment variable containing the source MySQL DSN.
-    #[arg(long, env = "FERROGATE_MIGRATION_SOURCE_MYSQL_DSN_ENV")]
-    pub(crate) source_mysql_dsn_env: Option<String>,
     /// Target Supabase DSN. Prefer --target-supabase-dsn-env for shell history safety.
     #[arg(long, conflicts_with = "target_supabase_dsn_env")]
     pub(crate) target_supabase_dsn: Option<String>,
@@ -126,12 +120,6 @@ pub(crate) struct StorageMigrateToSupabaseArgs {
     /// Optional CA certificate path for PostgreSQL/Supabase TLS validation.
     #[arg(long)]
     pub(crate) postgres_tls_ca_cert_path: Option<String>,
-    /// MySQL TLS mode for MySQL source connections.
-    #[arg(long, default_value = "disable")]
-    pub(crate) mysql_tls_mode: String,
-    /// Optional CA certificate path for MySQL source TLS validation.
-    #[arg(long)]
-    pub(crate) mysql_tls_ca_cert_path: Option<String>,
     /// Run migration validation and counts without writing the target.
     #[arg(long, conflicts_with = "execute")]
     pub(crate) dry_run: bool,

@@ -65,8 +65,8 @@ use ferrogate_runtime::{
     SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{
-    budget_alert_notification_id, ControlPlaneDocuments, MySqlStorageConfig, PostgresStorageConfig,
-    QuotaScopeKind, RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
+    budget_alert_notification_id, ControlPlaneDocuments, PostgresStorageConfig, QuotaScopeKind,
+    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
     RuntimeStorageRepositories, StorageBackendEvidence, StorageError, StoredAgentRun,
     StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
     StoredBillingReportOutboxEntry, StoredBudgetAlertNotification,
@@ -1185,25 +1185,6 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
         )
         .map_err(|error| anyhow::anyhow!("{error}"));
     }
-    if storage.provider == ferrogate_storage::StorageProviderKind::Mysql {
-        let dsn = storage_mysql_dsn(storage)?;
-        return RuntimeStorageRepositories::mysql(
-            MySqlStorageConfig {
-                dsn,
-                pool_size: storage.mysql_pool_size,
-                tls_mode: storage.mysql_tls_mode,
-                tls_ca_cert_path: storage
-                    .mysql_tls_ca_cert_path
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|path| !path.is_empty())
-                    .map(ToOwned::to_owned),
-                connect_timeout_secs: storage.mysql_connect_timeout_secs,
-            },
-            storage_options(control_plane),
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"));
-    }
     let backend = RuntimeStorageBackend::new(
         storage.provider,
         storage.required,
@@ -1293,32 +1274,6 @@ fn storage_supabase_dsn(storage: &StorageConfig) -> anyhow::Result<String> {
     if dsn.trim().is_empty() {
         anyhow::bail!(
             "field storage.supabase_dsn_env: environment variable {env_name} must not be empty"
-        );
-    }
-    Ok(dsn)
-}
-
-fn storage_mysql_dsn(storage: &StorageConfig) -> anyhow::Result<String> {
-    if let Some(dsn) = storage
-        .mysql_dsn
-        .as_deref()
-        .map(str::trim)
-        .filter(|dsn| !dsn.is_empty())
-    {
-        return Ok(dsn.to_string());
-    }
-    let env_name = storage
-        .mysql_dsn_env
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("field storage.mysql_dsn_env is required"))?;
-    let dsn = env::var(env_name).map_err(|_| {
-        anyhow::anyhow!("field storage.mysql_dsn_env: environment variable {env_name} is not set")
-    })?;
-    if dsn.trim().is_empty() {
-        anyhow::bail!(
-            "field storage.mysql_dsn_env: environment variable {env_name} must not be empty"
         );
     }
     Ok(dsn)

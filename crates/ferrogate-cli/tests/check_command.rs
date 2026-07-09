@@ -316,7 +316,7 @@ fn storage_migration_rejects_unsupported_source_provider() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unsupported --source-provider turso_libsql"));
-    assert!(stderr.contains("supports postgres and mysql"));
+    assert!(stderr.contains("supports postgres"));
     assert!(!stderr.contains("postgresql://source:secret"));
     assert!(!stderr.contains("postgresql://target:secret"));
 }

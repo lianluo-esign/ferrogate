@@ -39,9 +39,9 @@
   gateway config profile、供应商健康、plugin/extension、tool、MCP server、配置验证、
   reload、readiness 和 drain。
 - **Durable control-plane storage**：以 Supabase-compatible PostgreSQL 作为生产
-  控制面目标，同时保留 memory、PostgreSQL、PostgreSQL TLS、MySQL 和 MySQL TLS
-  兼容 provider。遗留 Turso/libSQL 配置只作为迁移输入，不再作为新的生产
-  provider 选择。
+  控制面目标，同时保留 memory、PostgreSQL、PostgreSQL TLS 兼容 provider。遗留
+  Turso/libSQL 配置只作为迁移输入，不再作为新的生产 provider 选择；MySQL 已
+  彻底退出，不再保留任何迁移工具。
 - **Analytics delivery boundary**：支持 Vector-to-ClickHouse pipeline mode 或
   direct ClickHouse warehouse mode。
 - **集群运维**：多节点部署的节点身份、共享文件控制面状态、Redis 请求和 Token
@@ -81,15 +81,15 @@
 - Admin API、API key 和 policy CRUD、静态 Dashboard、配置验证、reload、status、
   readiness 和 drain。
 - 以 Supabase-compatible PostgreSQL TLS 为默认生产目标的控制面重启行为，同时保留
-  PostgreSQL、PostgreSQL TLS、MySQL 和 MySQL TLS 作为兼容和本地测试 provider。
-  遗留 Turso/libSQL 数据仍是迁移来源。
+  PostgreSQL、PostgreSQL TLS 作为兼容和本地测试 provider。遗留 Turso/libSQL
+  数据仍是迁移来源；MySQL 已彻底退出。
 - 手动 TLS、ACME HTTP-01、ACME DNS-01、续期调度和监听器级 graceful upgrade handoff。
 - 集群身份、共享文件状态、Redis 计数器、readiness 和 drain runbook。
 
 仍有意留作下一阶段生产工作的范围：
 
-- 已实现的 Supabase 控制面路径之上的生产硬化；generic PostgreSQL 和 MySQL 在各自
-  运维边界单独硬化前保留为兼容 provider，Turso/libSQL 已从生产 provider surface
+- 已实现的 Supabase 控制面路径之上的生产硬化；generic PostgreSQL 在其运维边界
+  单独硬化前保留为兼容 provider，Turso/libSQL 和 MySQL 已从生产 provider surface
   退出。
 - 当前已实现资源之外的完整 hosted Admin API control plane。
 - Semantic/vector cache matching。当前已实现的缓存是 exact-match。

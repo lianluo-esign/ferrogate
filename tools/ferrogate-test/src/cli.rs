@@ -50,10 +50,6 @@ pub(crate) enum Commands {
     PostgresRestart(LocalArgs),
     /// Run local Docker-backed PostgreSQL TLS restart durability coverage.
     PostgresTlsRestart(LocalArgs),
-    /// Run local Docker-backed MySQL restart durability coverage.
-    MysqlRestart(LocalArgs),
-    /// Run local Docker-backed MySQL TLS restart durability coverage.
-    MysqlTlsRestart(LocalArgs),
     /// CI entrypoint: run deterministic local Admin API, auth API, and gateway API E2E coverage.
     Ci(CiArgs),
 }
@@ -199,8 +195,6 @@ pub(crate) struct Dispatch {
     pub(crate) supabase_migration: fn(&LocalArgs) -> Result<()>,
     pub(crate) postgres_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) postgres_tls_restart: fn(&LocalArgs) -> Result<()>,
-    pub(crate) mysql_restart: fn(&LocalArgs) -> Result<()>,
-    pub(crate) mysql_tls_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) docker: fn(DockerScenario, &str) -> Result<()>,
     pub(crate) run_all_admin_auth_gateway: fn(&LocalArgs, &AuthArgs, bool, &str) -> Result<()>,
     pub(crate) ci: fn(&LocalArgs, &AuthArgs) -> Result<()>,
@@ -212,7 +206,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart, mysql-restart, mysql-tls-restart"
+                "local: admin-api, auth-api, gateway-api, ci, supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -238,8 +232,6 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::SupabaseMigration(args) => (dispatch.supabase_migration)(&args),
         Commands::PostgresRestart(args) => (dispatch.postgres_restart)(&args),
         Commands::PostgresTlsRestart(args) => (dispatch.postgres_tls_restart)(&args),
-        Commands::MysqlRestart(args) => (dispatch.mysql_restart)(&args),
-        Commands::MysqlTlsRestart(args) => (dispatch.mysql_tls_restart)(&args),
         Commands::Ci(args) => (dispatch.ci)(&args.local, &args.auth),
     }
 }

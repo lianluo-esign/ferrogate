@@ -63,13 +63,6 @@ fn budget_alert_notification_from_row(
     })
 }
 
-fn budget_alerts_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "budget alert notifications are Supabase/Postgres-only; set storage.provider = supabase"
-            .into(),
-    )
-}
-
 impl PostgresControlPlaneStore {
     pub(super) fn record_budget_alert_notification(
         &self,
@@ -181,7 +174,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.record_budget_alert_notification(&notification)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(budget_alerts_supabase_only_error()),
         }
     }
 
@@ -194,7 +186,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.budget_alert_already_notified(id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(budget_alerts_supabase_only_error()),
         }
     }
 
@@ -218,7 +209,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_budget_alert_notifications(scope_type, scope_id, period_month)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(budget_alerts_supabase_only_error()),
         }
     }
 }

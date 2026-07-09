@@ -47,15 +47,15 @@ The default commercial provider order is fixed in config validation:
 
 ```toml
 [storage]
-provider_order = ["supabase", "postgres", "mysql"]
+provider_order = ["supabase", "postgres"]
 ```
 
 `supabase` is the default commercial cloud provider. It uses the PostgreSQL wire
 protocol and checked-in PostgreSQL schema while preserving Supabase-specific
-config and Admin/status evidence. PostgreSQL and MySQL remain compatibility
-paths behind the same repository contract instead of gateway-core special cases.
-`turso_libsql` is no longer accepted as a production durable provider; migrate
-legacy configs to `storage.provider: supabase`.
+config and Admin/status evidence. PostgreSQL remains a compatibility path
+behind the same repository contract instead of a gateway-core special case.
+`turso_libsql` and `mysql` are no longer accepted as production durable
+providers; migrate legacy configs to `storage.provider: supabase`.
 
 ## Supabase
 
@@ -69,7 +69,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
   postgres_pool_size: 4
   postgres_tls_mode: verify_full
@@ -274,7 +273,6 @@ storage:
     - supabase
     - turso_libsql
     - postgres
-    - mysql
   libsql_url: "libsql://your-database.aws-ap-northeast-1.turso.io"
   libsql_auth_token_env: "FERROGATE_LIBSQL_AUTH_TOKEN"
   migration_mode: auto
@@ -289,7 +287,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
   postgres_tls_mode: verify_full
   migration_mode: auto
@@ -316,7 +313,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   postgres_dsn_env: "FERROGATE_POSTGRES_DSN"
   postgres_pool_size: 4
   postgres_tls_mode: verify_full
@@ -359,50 +355,15 @@ Runtime behavior:
 The schema file is
 [`sql/001_init_postgres.sql`](../sql/001_init_postgres.sql).
 
-## MySQL
+## MySQL (Retired)
 
-Use a MySQL URL through an environment variable so passwords do not appear in
-checked-in config:
-
-```yaml
-storage:
-  provider: mysql
-  required: true
-  provider_order:
-    - supabase
-    - postgres
-    - mysql
-  mysql_dsn_env: "FERROGATE_MYSQL_DSN"
-  mysql_pool_size: 4
-  mysql_tls_mode: verify_ca
-  mysql_tls_ca_cert_path: "/etc/ferrogate/mysql-ca.pem"
-  mysql_connect_timeout_secs: 5
-  migration_mode: auto
-```
-
-For local development:
-
-```bash
-export FERROGATE_MYSQL_DSN='mysql://root:mysql@127.0.0.1:3306/ferrogate?prefer_socket=false'
-```
-
-Runtime behavior:
-
-- `storage.required: true` fails closed if MySQL cannot be initialized.
-- `migration_mode: auto` runs the checked-in MySQL schema at startup.
-- Admin/status evidence reports `provider: mysql` without returning the DSN.
-- Control-plane resources use the same document-store contract as libSQL and
-  PostgreSQL.
-- `mysql_pool_size` configures the maximum MySQL client pool size for Admin API
-  control-plane mutations and restart restore.
-- `mysql_tls_mode` accepts `disable`, `require`, `verify_ca`, and
-  `verify_full`. `require` encrypts the connection without certificate
-  verification, `verify_ca` verifies the certificate chain, and `verify_full`
-  verifies both the chain and hostname. Use `mysql_tls_ca_cert_path` when your
-  managed MySQL provider or private CA requires an explicit root CA.
-- `mysql_connect_timeout_secs` is applied to MySQL TCP connection attempts.
-
-The schema file is [`sql/001_init_mysql.sql`](../sql/001_init_mysql.sql).
+`storage.provider: mysql` has been fully retired ([#192](https://github.com/lianluo-esign/ferrogate/issues/192)),
+following the same removal pattern as `turso_libsql` ([#94](https://github.com/lianluo-esign/ferrogate/issues/94)).
+New configs that select it fail validation with a migration message pointing at
+`storage.provider: supabase`. Unlike `turso_libsql`, no MySQL migration source
+tooling remains -- operators still running MySQL should export their data with
+their own managed backup/export tooling and load it into a PostgreSQL-wire
+staging database before running the Supabase migration path below.
 
 ## Legacy Local File-Backed libSQL
 
@@ -416,7 +377,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   libsql_url: "file:///tmp/ferrogate-control-plane.db"
   migration_mode: auto
 ```
@@ -435,7 +395,7 @@ cargo build -p ferrogate-cli -p ferrogate-test --locked
 
 The legacy local libSQL restart command has been removed from the public test
 harness. Keep old `file://` databases only as migration input and validate new
-durable deployments with the Supabase/PostgreSQL/MySQL restart scenarios.
+durable deployments with the Supabase/PostgreSQL restart scenarios.
 
 Run the Supabase-compatible restart test against a local TLS-enabled PostgreSQL
 container:
@@ -490,18 +450,6 @@ Run the Docker-backed PostgreSQL restart test:
 ./target/debug/ferrogate-test postgres-restart
 ```
 
-Run the Docker-backed MySQL restart test:
-
-```bash
-./target/debug/ferrogate-test mysql-restart
-```
-
-Run the Docker-backed MySQL TLS restart test:
-
-```bash
-./target/debug/ferrogate-test mysql-tls-restart
-```
-
 These restart scenarios start real FerroGate gateway processes against the same
 durable backend and verify through the Admin API that these resources survive
 restart:
@@ -516,7 +464,7 @@ It then deletes or archives those resources, restarts again, and verifies the
 post-cleanup state.
 
 `ferrogate-test ci` includes the Supabase-compatible restart, PostgreSQL
-restart, PostgreSQL TLS restart, MySQL restart, and MySQL TLS restart tests:
+restart, and PostgreSQL TLS restart tests:
 
 ```bash
 ./target/debug/ferrogate-test ci
@@ -528,11 +476,11 @@ then migrate that state into Supabase through the dedicated migration workflow.
 
 ## Migration To Supabase
 
-The first migration-tooling slice supports PostgreSQL-wire and MySQL legacy
-storage to Supabase-compatible PostgreSQL. This covers generic PostgreSQL
-staging databases, MySQL compatibility deployments, and Supabase-compatible
-exports. It does not reintroduce the retired libSQL runtime client; for old
-Turso/libSQL deployments, export with the provider's managed tooling first, then
+The first migration-tooling slice supports PostgreSQL-wire legacy storage to
+Supabase-compatible PostgreSQL. This covers generic PostgreSQL staging
+databases and Supabase-compatible exports. It does not reintroduce the retired
+libSQL runtime client or the retired MySQL client; for old Turso/libSQL or
+MySQL deployments, export with the provider's managed tooling first, then
 stage the exported control-plane records in a PostgreSQL-compatible FerroGate
 schema before migrating into Supabase.
 
@@ -567,9 +515,6 @@ prompt templates, plugin registrations, MCP servers, agent upstreams, tool
 approvals, request logs, audit events, billing events, usage aggregates, agent
 runs, and agent run events. Secrets are read from environment variables when
 `*-dsn-env` flags are used and are not included in the report.
-
-For a MySQL source, use `--source-provider mysql` with
-`--source-mysql-dsn-env FERROGATE_MYSQL_DSN`. The target remains Supabase.
 
 Conflict behavior is intentionally idempotent:
 
@@ -607,8 +552,10 @@ exported state through the PostgreSQL-compatible migration path above.
 For PostgreSQL, use your managed PostgreSQL backup/PITR workflow for the
 database behind `storage.postgres_dsn_env`.
 
-For MySQL, use your managed MySQL backup/PITR workflow for the database behind
-`storage.mysql_dsn_env`.
+For legacy MySQL deployments, `storage.mysql_dsn_env` and the rest of the MySQL
+config surface no longer exist; use your provider's own managed MySQL
+backup/export tooling before migrating the exported state through the
+PostgreSQL-compatible migration path above.
 
 For local `file://` databases, snapshot the database file only when the gateway
 is stopped or when your filesystem/database tooling can provide a consistent
@@ -617,8 +564,9 @@ policy data.
 
 ## Failure Semantics
 
-- `storage.provider: turso_libsql` fails config validation with a migration
-  message; use `storage.provider: supabase` and `storage.supabase_dsn_env`.
+- `storage.provider: turso_libsql` or `storage.provider: mysql` fails config
+  validation with a migration message; use `storage.provider: supabase` and
+  `storage.supabase_dsn_env`.
 - Missing `storage.supabase_dsn_env` fails config validation when
   `provider: supabase`.
 - Supabase rejects plaintext or opportunistic TLS modes; use
@@ -629,12 +577,6 @@ policy data.
   search-path identifiers fail config validation.
 - Invalid `storage.postgres_tls_ca_cert_path` values fail startup instead of
   silently falling back to the system trust store.
-- Missing `storage.mysql_dsn` and `storage.mysql_dsn_env` fails config
-  validation when `provider: mysql`.
-- Invalid `storage.mysql_tls_ca_cert_path` values fail startup instead of
-  silently falling back to the system trust store.
-- Invalid `storage.mysql_pool_size` and `storage.mysql_connect_timeout_secs`
-  fail config validation.
 - With `storage.required: true`, initialization errors prevent startup instead
   of falling back to memory.
 - Admin mutations that fail to persist are rejected or rolled back before the

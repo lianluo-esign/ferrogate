@@ -273,7 +273,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   libsql_url: "libsql://example.turso.io"
   libsql_auth_token: "test-token"
   migration_mode: auto
@@ -412,7 +411,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   postgres_dsn_env: FERROGATE_POSTGRES_DSN
   postgres_pool_size: 3
   postgres_tls_mode: prefer
@@ -468,7 +466,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   supabase_dsn_env: FERROGATE_SUPABASE_DSN
   postgres_pool_size: 3
   postgres_tls_mode: require
@@ -506,7 +503,7 @@ storage:
 }
 
 #[test]
-fn parses_yaml_storage_mysql_operational_config_file() {
+fn rejects_yaml_storage_mysql_config_file_with_migration_message() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.yaml");
     std::fs::write(
@@ -519,36 +516,14 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
-  mysql_dsn_env: FERROGATE_MYSQL_DSN
-  mysql_pool_size: 3
-  mysql_tls_mode: verify_ca
-  mysql_tls_ca_cert_path: "/tmp/ferrogate-mysql-ca.pem"
-  mysql_connect_timeout_secs: 7
   migration_mode: auto
 "#,
     )
     .unwrap();
 
-    let config = Config::load(&path).unwrap();
-    assert_eq!(
-        config.storage.provider,
-        ferrogate_storage::StorageProviderKind::Mysql
-    );
-    assert_eq!(
-        config.storage.mysql_dsn_env.as_deref(),
-        Some("FERROGATE_MYSQL_DSN")
-    );
-    assert_eq!(config.storage.mysql_pool_size, 3);
-    assert_eq!(
-        config.storage.mysql_tls_mode,
-        ferrogate_storage::MySqlTlsMode::VerifyCa
-    );
-    assert_eq!(
-        config.storage.mysql_tls_ca_cert_path.as_deref(),
-        Some("/tmp/ferrogate-mysql-ca.pem")
-    );
-    assert_eq!(config.storage.mysql_connect_timeout_secs, 7);
+    let error = format!("{:?}", Config::load(&path).unwrap_err());
+    assert!(error.contains("mysql has been removed"));
+    assert!(error.contains("supabase"));
 }
 
 #[test]
@@ -567,7 +542,6 @@ storage:
   provider_order:
     - supabase
     - postgres
-    - mysql
   libsql_url: "file://{}"
   migration_mode: auto
 "#,

@@ -19,10 +19,6 @@ use std::{
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
 use ferrogate_core::{TenantContext, WorkspaceScope};
-use mysql::prelude::Queryable;
-use mysql::{
-    params, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, PooledConn, SslOpts, TxOpts,
-};
 use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
 use postgres::config::SslMode as PostgresSslMode;
 use postgres::row::Row as PostgresRow;
@@ -44,11 +40,8 @@ pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
 mod wallet;
 pub use wallet::{payment_method_id, StoredPaymentMethod, StoredWallet};
 
-pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] = &[
-    StorageProviderKind::Supabase,
-    StorageProviderKind::Postgres,
-    StorageProviderKind::Mysql,
-];
+pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] =
+    &[StorageProviderKind::Supabase, StorageProviderKind::Postgres];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,7 +75,6 @@ impl StorageProviderKind {
             StorageProviderKind::Memory
                 | StorageProviderKind::Supabase
                 | StorageProviderKind::Postgres
-                | StorageProviderKind::Mysql
         )
     }
 }
@@ -135,15 +127,6 @@ pub struct PostgresStorageConfig {
     pub statement_timeout_millis: u64,
     pub schema: Option<String>,
     pub search_path: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MySqlStorageConfig {
-    pub dsn: String,
-    pub pool_size: usize,
-    pub tls_mode: MySqlTlsMode,
-    pub tls_ca_cert_path: Option<String>,
-    pub connect_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,27 +253,6 @@ pub struct RuntimeStorageOptions {
     pub audit_event_retention_records: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MySqlTlsMode {
-    #[default]
-    Disable,
-    Require,
-    VerifyCa,
-    VerifyFull,
-}
-
-impl MySqlTlsMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MySqlTlsMode::Disable => "disable",
-            MySqlTlsMode::Require => "require",
-            MySqlTlsMode::VerifyCa => "verify_ca",
-            MySqlTlsMode::VerifyFull => "verify_full",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageBackendEvidence {
     pub provider: StorageProviderKind,
@@ -404,7 +366,6 @@ pub enum StorageError {
         required: bool,
     },
     Postgres(String),
-    Mysql(String),
     Runtime(String),
     Serialization(String),
 }
@@ -420,7 +381,6 @@ impl std::fmt::Display for StorageError {
                 )
             }
             StorageError::Postgres(error) => write!(formatter, "postgres storage error: {error}"),
-            StorageError::Mysql(error) => write!(formatter, "mysql storage error: {error}"),
             StorageError::Runtime(error) => write!(formatter, "storage runtime error: {error}"),
             StorageError::Serialization(error) => {
                 write!(formatter, "storage serialization error: {error}")
@@ -783,10 +743,6 @@ pub struct RuntimeControlPlaneState {
 struct PostgresControlPlaneStore {
     pool: Arc<PostgresClientPool>,
     schema: StorageSchemaEvidence,
-}
-
-struct MySqlControlPlaneStore {
-    pool: Pool,
 }
 
 struct PostgresClientPool {
@@ -3445,433 +3401,6 @@ impl PostgresClientPool {
     }
 }
 
-impl std::fmt::Debug for MySqlControlPlaneStore {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("MySqlControlPlaneStore")
-            .field("pool", &"<redacted>")
-            .finish()
-    }
-}
-
-impl MySqlControlPlaneStore {
-    fn connect(
-        config: MySqlStorageConfig,
-        bootstrap: ControlPlaneDocuments,
-        initialize_schema: bool,
-    ) -> Result<Self, StorageError> {
-        let opts = mysql_opts(&config)?;
-        let pool = Pool::new(opts).map_err(mysql_error)?;
-        let store = Self { pool };
-        store.with_conn(|conn| {
-            conn.query_drop("SELECT 1")?;
-            Ok(())
-        })?;
-        if initialize_schema {
-            store.initialize_schema()?;
-        }
-        store.seed_missing_resources("api_key", bootstrap.api_keys)?;
-        store.seed_missing_resources("tenant", bootstrap.tenants)?;
-        store.seed_missing_resources("policy", bootstrap.policies)?;
-        store.seed_missing_resources("gateway_config", bootstrap.gateway_configs)?;
-        store.seed_missing_resources("agent_workflow", bootstrap.agent_workflows)?;
-        store.seed_missing_resources("skill_package", bootstrap.skill_packages)?;
-        store.seed_missing_resources("prompt_template", bootstrap.prompt_templates)?;
-        store.seed_missing_resources("plugin_registration", bootstrap.plugin_registrations)?;
-        store.seed_missing_resources("mcp_server", bootstrap.mcp_servers)?;
-        store.seed_missing_resources("agent_upstream", bootstrap.agent_upstreams)?;
-        Ok(store)
-    }
-
-    fn initialize_schema(&self) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
-            for statement in include_str!("../../../sql/001_init_mysql.sql")
-                .split(';')
-                .map(str::trim)
-                .filter(|statement| !statement.is_empty())
-            {
-                conn.query_drop(statement)?;
-            }
-            Ok(())
-        })
-    }
-
-    fn seed_missing_resources(
-        &self,
-        kind: &'static str,
-        records: Vec<(String, String)>,
-    ) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
-            for (id, document_json) in records {
-                conn.exec_drop(
-                    "INSERT IGNORE INTO control_plane_resources \
-                     (resource_kind, resource_id, document_json) \
-                     VALUES (:kind, :id, :document_json)",
-                    params! {
-                        "kind" => kind,
-                        "id" => id,
-                        "document_json" => document_json,
-                    },
-                )?;
-            }
-            Ok(())
-        })
-    }
-
-    fn snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
-        Ok(ControlPlaneSnapshot {
-            api_keys: self.list_documents("api_key")?,
-            tenants: self.list_documents("tenant")?,
-            policies: self.list_documents("policy")?,
-            gateway_configs: self.list_documents("gateway_config")?,
-            agent_workflows: self.list_documents("agent_workflow")?,
-            skill_packages: self.list_documents("skill_package")?,
-            prompt_templates: self.list_documents("prompt_template")?,
-            plugin_registrations: self.list_documents("plugin_registration")?,
-            mcp_servers: self.list_documents("mcp_server")?,
-            agent_upstreams: self.list_documents("agent_upstream")?,
-        })
-    }
-
-    fn documents(&self) -> Result<ControlPlaneDocuments, StorageError> {
-        Ok(ControlPlaneDocuments {
-            api_keys: self.list_resource_documents("api_key")?,
-            tenants: self.list_resource_documents("tenant")?,
-            policies: self.list_resource_documents("policy")?,
-            gateway_configs: self.list_resource_documents("gateway_config")?,
-            agent_workflows: self.list_resource_documents("agent_workflow")?,
-            skill_packages: self.list_resource_documents("skill_package")?,
-            prompt_templates: self.list_resource_documents("prompt_template")?,
-            plugin_registrations: self.list_resource_documents("plugin_registration")?,
-            mcp_servers: self.list_resource_documents("mcp_server")?,
-            agent_upstreams: self.list_resource_documents("agent_upstream")?,
-        })
-    }
-
-    fn list_resource_documents(
-        &self,
-        kind: &'static str,
-    ) -> Result<Vec<(String, String)>, StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_map(
-                "SELECT resource_id, CAST(document_json AS CHAR) FROM control_plane_resources \
-                 WHERE resource_kind = :kind ORDER BY resource_id ASC",
-                params! {
-                    "kind" => kind,
-                },
-                |(id, document_json): (String, String)| (id, document_json),
-            )
-        })
-    }
-
-    fn list_documents(&self, kind: &'static str) -> Result<Vec<String>, StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_map(
-                "SELECT CAST(document_json AS CHAR) FROM control_plane_resources \
-                 WHERE resource_kind = :kind ORDER BY resource_id ASC",
-                params! {
-                    "kind" => kind,
-                },
-                |document_json: String| document_json,
-            )
-        })
-    }
-
-    fn get_document(&self, kind: &'static str, id: String) -> Result<Option<String>, StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_first(
-                "SELECT CAST(document_json AS CHAR) FROM control_plane_resources \
-                 WHERE resource_kind = :kind AND resource_id = :id",
-                params! {
-                    "kind" => kind,
-                    "id" => id,
-                },
-            )
-        })
-    }
-
-    fn upsert(
-        &self,
-        kind: &'static str,
-        id: String,
-        document_json: String,
-    ) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_drop(
-                "INSERT INTO control_plane_resources \
-                 (resource_kind, resource_id, document_json, revision, updated_at_unix) \
-                 VALUES (:kind, :id, :document_json, 1, UNIX_TIMESTAMP()) \
-                 ON DUPLICATE KEY UPDATE \
-                 document_json = VALUES(document_json), \
-                 revision = revision + 1, \
-                 updated_at_unix = UNIX_TIMESTAMP()",
-                params! {
-                    "kind" => kind,
-                    "id" => id,
-                    "document_json" => document_json,
-                },
-            )?;
-            Ok(())
-        })
-    }
-
-    fn replace_kind(
-        &self,
-        kind: &'static str,
-        records: Vec<(String, String)>,
-    ) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
-            let mut transaction = conn.start_transaction(TxOpts::default())?;
-            transaction.exec_drop(
-                "DELETE FROM control_plane_resources WHERE resource_kind = :kind",
-                params! {
-                    "kind" => kind,
-                },
-            )?;
-            for (id, document_json) in records {
-                transaction.exec_drop(
-                    "INSERT INTO control_plane_resources \
-                     (resource_kind, resource_id, document_json) \
-                     VALUES (:kind, :id, :document_json)",
-                    params! {
-                        "kind" => kind,
-                        "id" => id,
-                        "document_json" => document_json,
-                    },
-                )?;
-            }
-            transaction.commit()?;
-            Ok(())
-        })
-    }
-
-    fn delete(&self, kind: &'static str, id: String) -> Result<bool, StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_drop(
-                "DELETE FROM control_plane_resources \
-                 WHERE resource_kind = :kind AND resource_id = :id",
-                params! {
-                    "kind" => kind,
-                    "id" => id,
-                },
-            )?;
-            Ok(conn.affected_rows() > 0)
-        })
-    }
-
-    fn upsert_tenant_account(&self, account: &StoredTenantAccount) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_drop(
-                "INSERT INTO tenants \
-                 (id, name, slug, status, plan_id, created_at_unix, updated_at_unix) \
-                 VALUES (:id, :name, :slug, :status, :plan_id, :created_at_unix, :updated_at_unix) \
-                 ON DUPLICATE KEY UPDATE \
-                 name = VALUES(name), slug = VALUES(slug), status = VALUES(status), \
-                 plan_id = VALUES(plan_id), updated_at_unix = VALUES(updated_at_unix)",
-                params! {
-                    "id" => &account.id,
-                    "name" => &account.name,
-                    "slug" => &account.slug,
-                    "status" => &account.status,
-                    "plan_id" => &account.plan_id,
-                    "created_at_unix" => account.created_at_unix,
-                    "updated_at_unix" => account.updated_at_unix,
-                },
-            )
-        })
-    }
-
-    fn get_tenant_account(&self, id: &str) -> Result<Option<StoredTenantAccount>, StorageError> {
-        self.with_conn(|conn| {
-            let row: Option<(String, String, String, String, String, i64, i64)> = conn.exec_first(
-                "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
-                 FROM tenants WHERE id = :id",
-                params! { "id" => id },
-            )?;
-            Ok(row.map(tenant_account_from_tuple))
-        })
-    }
-
-    fn list_tenant_accounts(&self) -> Result<Vec<StoredTenantAccount>, StorageError> {
-        self.with_conn(|conn| {
-            let rows: Vec<(String, String, String, String, String, i64, i64)> = conn.exec(
-                "SELECT id, name, slug, status, plan_id, created_at_unix, updated_at_unix \
-                 FROM tenants ORDER BY id ASC",
-                (),
-            )?;
-            Ok(rows.into_iter().map(tenant_account_from_tuple).collect())
-        })
-    }
-
-    fn upsert_project(&self, project: &StoredProject) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_drop(
-                "INSERT INTO projects \
-                 (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) \
-                 VALUES (:id, :tenant_id, :name, :slug, :status, :created_at_unix, \
-                 :updated_at_unix) \
-                 ON DUPLICATE KEY UPDATE \
-                 tenant_id = VALUES(tenant_id), name = VALUES(name), slug = VALUES(slug), \
-                 status = VALUES(status), updated_at_unix = VALUES(updated_at_unix)",
-                params! {
-                    "id" => &project.id,
-                    "tenant_id" => &project.tenant_id,
-                    "name" => &project.name,
-                    "slug" => &project.slug,
-                    "status" => &project.status,
-                    "created_at_unix" => project.created_at_unix,
-                    "updated_at_unix" => project.updated_at_unix,
-                },
-            )
-        })
-    }
-
-    fn get_project(&self, id: &str) -> Result<Option<StoredProject>, StorageError> {
-        self.with_conn(|conn| {
-            let row: Option<(String, String, String, String, String, i64, i64)> = conn.exec_first(
-                "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
-                 FROM projects WHERE id = :id",
-                params! { "id" => id },
-            )?;
-            Ok(row.map(project_from_tuple))
-        })
-    }
-
-    fn list_projects(&self) -> Result<Vec<StoredProject>, StorageError> {
-        self.with_conn(|conn| {
-            let rows: Vec<(String, String, String, String, String, i64, i64)> = conn.exec(
-                "SELECT id, tenant_id, name, slug, status, created_at_unix, updated_at_unix \
-                 FROM projects ORDER BY id ASC",
-                (),
-            )?;
-            Ok(rows.into_iter().map(project_from_tuple).collect())
-        })
-    }
-
-    fn upsert_workspace(&self, workspace: &StoredWorkspace) -> Result<(), StorageError> {
-        self.with_conn(|conn| {
-            conn.exec_drop(
-                "INSERT INTO workspaces \
-                 (id, project_id, tenant_id, name, slug, environment, status, \
-                  created_at_unix, updated_at_unix) \
-                 VALUES (:id, :project_id, :tenant_id, :name, :slug, :environment, :status, \
-                 :created_at_unix, :updated_at_unix) \
-                 ON DUPLICATE KEY UPDATE \
-                 project_id = VALUES(project_id), tenant_id = VALUES(tenant_id), \
-                 name = VALUES(name), slug = VALUES(slug), environment = VALUES(environment), \
-                 status = VALUES(status), updated_at_unix = VALUES(updated_at_unix)",
-                params! {
-                    "id" => &workspace.id,
-                    "project_id" => &workspace.project_id,
-                    "tenant_id" => &workspace.tenant_id,
-                    "name" => &workspace.name,
-                    "slug" => &workspace.slug,
-                    "environment" => &workspace.environment,
-                    "status" => &workspace.status,
-                    "created_at_unix" => workspace.created_at_unix,
-                    "updated_at_unix" => workspace.updated_at_unix,
-                },
-            )
-        })
-    }
-
-    fn get_workspace(&self, id: &str) -> Result<Option<StoredWorkspace>, StorageError> {
-        self.with_conn(|conn| {
-            let row: Option<WorkspaceRow> = conn.exec_first(
-                "SELECT id, project_id, tenant_id, name, slug, environment, status, \
-                 created_at_unix, updated_at_unix FROM workspaces WHERE id = :id",
-                params! { "id" => id },
-            )?;
-            Ok(row.map(workspace_from_tuple))
-        })
-    }
-
-    fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>, StorageError> {
-        self.with_conn(|conn| {
-            let rows: Vec<WorkspaceRow> = conn.exec(
-                "SELECT id, project_id, tenant_id, name, slug, environment, status, \
-                 created_at_unix, updated_at_unix FROM workspaces ORDER BY id ASC",
-                (),
-            )?;
-            Ok(rows.into_iter().map(workspace_from_tuple).collect())
-        })
-    }
-
-    fn resolve_workspace_scope(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Option<WorkspaceScope>, StorageError> {
-        self.with_conn(|conn| {
-            let row: Option<(String, String, String)> = conn.exec_first(
-                "SELECT tenant_id, project_id, id FROM workspaces WHERE id = :id",
-                params! { "id" => workspace_id },
-            )?;
-            Ok(row
-                .map(|(tenant_id, project_id, id)| WorkspaceScope::new(tenant_id, project_id, id)))
-        })
-    }
-
-    fn with_conn<T: Send>(
-        &self,
-        action: impl FnOnce(&mut PooledConn) -> Result<T, mysql::Error> + Send,
-    ) -> Result<T, StorageError> {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let mut conn = self.pool.get_conn().map_err(mysql_error)?;
-                    action(&mut conn).map_err(mysql_error)
-                })
-                .join()
-                .map_err(|_| StorageError::Mysql("mysql storage thread panicked".into()))?
-        })
-    }
-}
-
-fn mysql_opts(config: &MySqlStorageConfig) -> Result<Opts, StorageError> {
-    let opts =
-        Opts::from_url(&config.dsn).map_err(|error| StorageError::Mysql(error.to_string()))?;
-    let constraints = PoolConstraints::new(0, config.pool_size).ok_or_else(|| {
-        StorageError::Mysql(format!(
-            "invalid storage.mysql_pool_size {}",
-            config.pool_size
-        ))
-    })?;
-    let pool_opts = PoolOpts::default().with_constraints(constraints);
-    let mut builder = OptsBuilder::from_opts(opts)
-        .pool_opts(Some(pool_opts))
-        .tcp_connect_timeout(Some(Duration::from_secs(config.connect_timeout_secs)));
-
-    if !matches!(config.tls_mode, MySqlTlsMode::Disable) {
-        builder = builder.ssl_opts(Some(mysql_ssl_opts(config)?));
-    }
-
-    Ok(builder.into())
-}
-
-fn mysql_ssl_opts(config: &MySqlStorageConfig) -> Result<SslOpts, StorageError> {
-    let mut ssl_opts = SslOpts::default();
-    if let Some(path) = config.tls_ca_cert_path.as_deref() {
-        if !std::path::Path::new(path).exists() {
-            return Err(StorageError::Mysql(format!(
-                "failed to read storage.mysql_tls_ca_cert_path {path}: file does not exist"
-            )));
-        }
-        ssl_opts = ssl_opts.with_root_cert_path(Some(std::path::Path::new(path).to_path_buf()));
-    }
-    match config.tls_mode {
-        MySqlTlsMode::Disable | MySqlTlsMode::VerifyFull => {}
-        MySqlTlsMode::Require => {
-            ssl_opts = ssl_opts
-                .with_danger_accept_invalid_certs(true)
-                .with_danger_skip_domain_validation(true);
-        }
-        MySqlTlsMode::VerifyCa => {
-            ssl_opts = ssl_opts.with_danger_skip_domain_validation(true);
-        }
-    }
-    Ok(ssl_opts)
-}
-
 fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {
     let mut pg_config = postgres::Config::from_str(&config.dsn).map_err(postgres_error)?;
     pg_config.connect_timeout(Duration::from_secs(config.connect_timeout_secs));
@@ -4221,20 +3750,6 @@ fn deserialize_storage_document<T: for<'de> Deserialize<'de>>(
     serde_json::from_str(value).map_err(|error| StorageError::Serialization(error.to_string()))
 }
 
-fn api_key_records_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "virtual API key records are Supabase/Postgres-only; set storage.provider = supabase"
-            .into(),
-    )
-}
-
-fn admin_console_users_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "admin console user records are Supabase/Postgres-only; set storage.provider = supabase"
-            .into(),
-    )
-}
-
 fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
     StoredTenantAccount {
         id: row.get::<_, String>(0),
@@ -4386,12 +3901,6 @@ fn plan_from_row(row: &PostgresRow) -> Result<StoredPlan, StorageError> {
     })
 }
 
-fn plans_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "plans are Supabase/Postgres-only; set storage.provider = supabase".into(),
-    )
-}
-
 fn asset_from_row(row: &PostgresRow) -> StoredAsset {
     StoredAsset {
         id: row.get::<_, String>(0),
@@ -4408,25 +3917,6 @@ fn asset_from_row(row: &PostgresRow) -> StoredAsset {
         updated_at_unix: row.get::<_, i64>(11),
         storage_uri: row.get::<_, Option<String>>(12),
     }
-}
-
-fn assets_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "stored assets are Supabase/Postgres-only; set storage.provider = supabase".into(),
-    )
-}
-
-fn quota_policies_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "quota policy records are Supabase/Postgres-only; set storage.provider = supabase".into(),
-    )
-}
-
-fn usage_monthly_rollups_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "usage monthly rollup records are Supabase/Postgres-only; set storage.provider = supabase"
-            .into(),
-    )
 }
 
 fn ledger_entry_from_row(
@@ -4462,7 +3952,7 @@ pub struct BillingEventAppendOutcome {
     /// the event was already recorded (idempotent no-op on `request_id`).
     pub recorded: bool,
     /// Set only on backends where the metering write and outbox enqueue are
-    /// NOT committed atomically (Memory/Mysql) and the enqueue step
+    /// NOT committed atomically (Memory) and the enqueue step
     /// specifically failed after a successful metering write — non-fatal,
     /// mirroring how a standalone `enqueue_billing_report` failure was always
     /// treated as a warning rather than an aborting error. Always `None` on
@@ -4482,12 +3972,6 @@ fn billing_report_outbox_from_row(
         next_attempt_unix: row.get::<_, i64>(3),
         dead_lettered_at_unix: row.get::<_, Option<i64>>(4),
     })
-}
-
-fn billing_report_outbox_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "billing report outbox requires Supabase/Postgres or in-memory storage".into(),
-    )
 }
 
 /// A durable [`ferrogate_billing::LedgerSink`] backed by Supabase/Postgres.
@@ -4547,72 +4031,6 @@ impl ferrogate_billing::LedgerSink for StorageLedgerSink {
         self.repositories
             .billing_ledger_entry(id)
             .map_err(ledger_storage_error)
-    }
-}
-
-fn tenant_account_from_tuple(
-    row: (String, String, String, String, String, i64, i64),
-) -> StoredTenantAccount {
-    let (id, name, slug, status, plan_id, created_at_unix, updated_at_unix) = row;
-    StoredTenantAccount {
-        id,
-        name,
-        slug,
-        status,
-        plan_id,
-        created_at_unix,
-        updated_at_unix,
-    }
-}
-
-fn project_from_tuple(row: (String, String, String, String, String, i64, i64)) -> StoredProject {
-    let (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix) = row;
-    StoredProject {
-        id,
-        tenant_id,
-        name,
-        slug,
-        status,
-        created_at_unix,
-        updated_at_unix,
-    }
-}
-
-/// MySQL row shape for the `workspaces` table, in SELECT column order.
-type WorkspaceRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    i64,
-);
-
-fn workspace_from_tuple(row: WorkspaceRow) -> StoredWorkspace {
-    let (
-        id,
-        project_id,
-        tenant_id,
-        name,
-        slug,
-        environment,
-        status,
-        created_at_unix,
-        updated_at_unix,
-    ) = row;
-    StoredWorkspace {
-        id,
-        project_id,
-        tenant_id,
-        name,
-        slug,
-        environment,
-        status,
-        created_at_unix,
-        updated_at_unix,
     }
 }
 
@@ -5239,7 +4657,6 @@ fn billing_usage_source_from_str(value: &str) -> ferrogate_billing::BillingUsage
 enum RuntimeControlPlaneBackend {
     Memory(Box<Mutex<RuntimeControlPlaneState>>),
     Postgres(Arc<PostgresControlPlaneStore>),
-    Mysql(Arc<MySqlControlPlaneStore>),
 }
 
 impl RuntimeControlPlaneState {
@@ -6862,50 +6279,6 @@ impl RuntimeStorageRepositories {
         )
     }
 
-    pub fn mysql_for_migration(
-        config: MySqlStorageConfig,
-        initialize_schema: bool,
-    ) -> Result<Self, StorageError> {
-        let backend = RuntimeStorageBackend::new_with_migration_mode(
-            StorageProviderKind::Mysql,
-            true,
-            DEFAULT_DURABLE_PROVIDER_ORDER.to_vec(),
-            if initialize_schema {
-                "auto".into()
-            } else {
-                "validate_only".into()
-            },
-        )?;
-        let control_plane = MySqlControlPlaneStore::connect(
-            config,
-            ControlPlaneDocuments::default(),
-            initialize_schema,
-        )?;
-        let repositories = RuntimeStorageRepositorySets::new(0, 0);
-        Ok(Self {
-            backend,
-            control_plane: RuntimeControlPlaneBackend::Mysql(Arc::new(control_plane)),
-            request_logs: repositories.request_logs,
-            audit_events: repositories.audit_events,
-            usage_aggregates: repositories.usage_aggregates,
-            agent_runs: repositories.agent_runs,
-            agent_run_events: repositories.agent_run_events,
-            managed_worker_templates: repositories.managed_worker_templates,
-            agent_worker_instances: repositories.agent_worker_instances,
-            managed_worker_sessions: repositories.managed_worker_sessions,
-            managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
-            managed_worker_isolation_selections: repositories.managed_worker_isolation_selections,
-            managed_worker_isolation_policies: repositories.managed_worker_isolation_policies,
-            managed_worker_isolation_evidence: repositories.managed_worker_isolation_evidence,
-            self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
-            self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
-            self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
-            self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
-            self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
-            self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
-        })
-    }
-
     fn postgres_wire_for_migration(
         provider: StorageProviderKind,
         config: PostgresStorageConfig,
@@ -6931,56 +6304,6 @@ impl RuntimeStorageRepositories {
         Ok(Self {
             backend,
             control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
-            request_logs: repositories.request_logs,
-            audit_events: repositories.audit_events,
-            usage_aggregates: repositories.usage_aggregates,
-            agent_runs: repositories.agent_runs,
-            agent_run_events: repositories.agent_run_events,
-            managed_worker_templates: repositories.managed_worker_templates,
-            agent_worker_instances: repositories.agent_worker_instances,
-            managed_worker_sessions: repositories.managed_worker_sessions,
-            managed_worker_lifecycle_events: repositories.managed_worker_lifecycle_events,
-            managed_worker_isolation_selections: repositories.managed_worker_isolation_selections,
-            managed_worker_isolation_policies: repositories.managed_worker_isolation_policies,
-            managed_worker_isolation_evidence: repositories.managed_worker_isolation_evidence,
-            self_hosted_worker_registrations: repositories.self_hosted_worker_registrations,
-            self_hosted_worker_heartbeats: repositories.self_hosted_worker_heartbeats,
-            self_hosted_worker_telemetry_events: repositories.self_hosted_worker_telemetry_events,
-            self_hosted_worker_artifacts: repositories.self_hosted_worker_artifacts,
-            self_hosted_worker_checkpoints: repositories.self_hosted_worker_checkpoints,
-            self_hosted_run_dispatches: repositories.self_hosted_run_dispatches,
-        })
-    }
-
-    pub fn mysql(
-        config: MySqlStorageConfig,
-        options: RuntimeStorageOptions,
-    ) -> Result<Self, StorageError> {
-        let backend = RuntimeStorageBackend::new_with_migration_mode(
-            StorageProviderKind::Mysql,
-            options.required,
-            options.provider_order,
-            options.migration_mode,
-        )?;
-        let request_log_retention_records = options.request_log_retention_records;
-        let audit_event_retention_records = options.audit_event_retention_records;
-        let bootstrap = options.control_plane;
-        let initialize_schema = options.initialize_schema;
-        let control_plane = std::thread::scope(|scope| {
-            scope
-                .spawn(move || {
-                    MySqlControlPlaneStore::connect(config, bootstrap, initialize_schema)
-                })
-                .join()
-                .map_err(|_| StorageError::Mysql("mysql storage connect thread panicked".into()))?
-        })?;
-        let repositories = RuntimeStorageRepositorySets::new(
-            request_log_retention_records,
-            audit_event_retention_records,
-        );
-        Ok(Self {
-            backend,
-            control_plane: RuntimeControlPlaneBackend::Mysql(Arc::new(control_plane)),
             request_logs: repositories.request_logs,
             audit_events: repositories.audit_events,
             usage_aggregates: repositories.usage_aggregates,
@@ -7028,7 +6351,6 @@ impl RuntimeStorageRepositories {
                     agent_upstreams: Vec::new(),
                 })),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.snapshot(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.snapshot(),
         }
     }
 
@@ -7057,20 +6379,6 @@ impl RuntimeStorageRepositories {
                 control_plane.replace_kind("agent_upstream", documents.agent_upstreams)?;
                 Ok(())
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.replace_kind("api_key", documents.api_keys)?;
-                control_plane.replace_kind("tenant", documents.tenants)?;
-                control_plane.replace_kind("policy", documents.policies)?;
-                control_plane.replace_kind("gateway_config", documents.gateway_configs)?;
-                control_plane.replace_kind("agent_workflow", documents.agent_workflows)?;
-                control_plane.replace_kind("skill_package", documents.skill_packages)?;
-                control_plane.replace_kind("prompt_template", documents.prompt_templates)?;
-                control_plane
-                    .replace_kind("plugin_registration", documents.plugin_registrations)?;
-                control_plane.replace_kind("mcp_server", documents.mcp_servers)?;
-                control_plane.replace_kind("agent_upstream", documents.agent_upstreams)?;
-                Ok(())
-            }
         }
     }
 
@@ -7081,7 +6389,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.documents())
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.documents()?,
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.documents()?,
         };
         Ok(StorageMigrationSnapshot {
             control_plane,
@@ -7195,9 +6502,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("api_key", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("api_key", id.into(), document_json)
-            }
         }
     }
 
@@ -7208,9 +6512,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_api_key(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("api_key", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("api_key", id.to_string())
             }
         }
@@ -7229,7 +6530,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_api_key_record(&api_key)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
@@ -7242,7 +6542,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_api_key_record(id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
@@ -7255,7 +6554,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_api_key_records()
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
@@ -7271,7 +6569,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.find_api_key_records_by_prefix(key_prefix)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(api_key_records_supabase_only_error()),
         }
     }
 
@@ -7288,7 +6585,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_admin_user(&user)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7301,7 +6597,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_admin_user_by_id(id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7317,7 +6612,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_admin_user_by_email(email)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7335,7 +6629,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_admin_user_membership(&membership)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7351,7 +6644,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_admin_user_memberships_by_user(user_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7369,7 +6661,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_admin_user_memberships_by_tenant(tenant_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7390,7 +6681,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_admin_user_membership(user_id, tenant_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7408,7 +6698,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_admin_user_refresh_token(&token)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7424,7 +6713,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_admin_user_refresh_token_by_hash(token_hash)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7446,7 +6734,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.revoke_all_admin_user_refresh_tokens(user_id, revoked_at_unix)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(admin_console_users_supabase_only_error()),
         }
     }
 
@@ -7459,9 +6746,6 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.upsert_tenant_account(&account)
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.upsert_tenant_account(&account)
             }
         }
@@ -7479,9 +6763,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_tenant_account(id)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.get_tenant_account(id)
-            }
         }
     }
 
@@ -7492,9 +6773,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_tenant_accounts())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_tenant_accounts()
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.list_tenant_accounts()
             }
         }
@@ -7511,9 +6789,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_project(&project)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert_project(&project)
-            }
         }
     }
 
@@ -7524,7 +6799,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_project(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_project(id),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.get_project(id),
         }
     }
 
@@ -7535,7 +6809,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_projects())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_projects(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.list_projects(),
         }
     }
 
@@ -7550,9 +6823,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_workspace(&workspace)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert_workspace(&workspace)
-            }
         }
     }
 
@@ -7563,7 +6833,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_workspace(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_workspace(id),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.get_workspace(id),
         }
     }
 
@@ -7574,7 +6843,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_workspaces())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_workspaces(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.list_workspaces(),
         }
     }
 
@@ -7590,9 +6858,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.resolve_workspace_scope(workspace_id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.resolve_workspace_scope(workspace_id)
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.resolve_workspace_scope(workspace_id)
             }
         }
@@ -7611,7 +6876,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_quota_policy(&policy)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
         }
     }
 
@@ -7628,7 +6892,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_quota_policy(scope_type, scope_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
         }
     }
 
@@ -7641,7 +6904,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_quota_policies()
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
         }
     }
 
@@ -7658,7 +6920,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_quota_policy(scope_type, scope_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(quota_policies_supabase_only_error()),
         }
     }
 
@@ -7674,7 +6935,6 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert_plan(&plan),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(plans_supabase_only_error()),
         }
     }
 
@@ -7685,7 +6945,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_plan(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_plan(id),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(plans_supabase_only_error()),
         }
     }
 
@@ -7696,7 +6955,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_plans())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_plans(),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(plans_supabase_only_error()),
         }
     }
 
@@ -7714,7 +6972,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_asset(&asset)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
         }
     }
 
@@ -7725,7 +6982,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_asset(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_asset(id),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
         }
     }
 
@@ -7742,7 +6998,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_assets(tenant_id, asset_type)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
         }
     }
 
@@ -7753,7 +7008,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_asset(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.delete_asset(id),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(assets_supabase_only_error()),
         }
     }
 
@@ -7775,9 +7029,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_usage_monthly_rollup(scope_type, scope_id, period_month)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(usage_monthly_rollups_supabase_only_error())
-            }
         }
     }
 
@@ -7792,9 +7043,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_usage_monthly_rollups()
             }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(usage_monthly_rollups_supabase_only_error())
-            }
         }
     }
 
@@ -7808,9 +7056,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.append_billing_ledger_entry(entry)
             }
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_ledger_supabase_only_error())
-            }
+            RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
         }
     }
 
@@ -7829,9 +7075,7 @@ impl RuntimeStorageRepositories {
                     saturating_i64(offset as u64),
                     saturating_i64(limit as u64),
                 ),
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_ledger_supabase_only_error())
-            }
+            RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
         }
     }
 
@@ -7844,9 +7088,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_billing_ledger_entry(id)
             }
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_ledger_supabase_only_error())
-            }
+            RuntimeControlPlaneBackend::Memory(_) => Err(billing_ledger_supabase_only_error()),
         }
     }
 
@@ -7869,9 +7111,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.enqueue_billing_report(id, event, next_attempt_unix)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_report_outbox_supabase_only_error())
-            }
         }
     }
 
@@ -7888,9 +7127,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_due_billing_reports(now_unix, saturating_i64(limit as u64))
-            }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_report_outbox_supabase_only_error())
             }
         }
     }
@@ -7910,9 +7146,6 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.reschedule_billing_report(id, next_attempt_unix)
-            }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_report_outbox_supabase_only_error())
             }
         }
     }
@@ -7936,9 +7169,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.dead_letter_billing_report(id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_report_outbox_supabase_only_error())
-            }
         }
     }
 
@@ -7955,9 +7185,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_dead_lettered_billing_reports(saturating_i64(limit as u64))
             }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_report_outbox_supabase_only_error())
-            }
         }
     }
 
@@ -7972,9 +7199,6 @@ impl RuntimeStorageRepositories {
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_billing_report(id)
-            }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                Err(billing_report_outbox_supabase_only_error())
             }
         }
     }
@@ -7994,9 +7218,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("policy", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("policy", id.into(), document_json)
-            }
         }
     }
 
@@ -8007,9 +7228,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_policy(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("policy", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("policy", id.to_string())
             }
         }
@@ -8030,9 +7248,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("gateway_config", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("gateway_config", id.into(), document_json)
-            }
         }
     }
 
@@ -8043,9 +7258,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_gateway_config(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("gateway_config", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("gateway_config", id.to_string())
             }
         }
@@ -8066,9 +7278,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("agent_workflow", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("agent_workflow", id.into(), document_json)
-            }
         }
     }
 
@@ -8079,9 +7288,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_agent_workflow(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("agent_workflow", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("agent_workflow", id.to_string())
             }
         }
@@ -8102,9 +7308,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("skill_package", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("skill_package", id.into(), document_json)
-            }
         }
     }
 
@@ -8115,9 +7318,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_skill_package(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("skill_package", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("skill_package", id.to_string())
             }
         }
@@ -8138,9 +7338,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("prompt_template", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("prompt_template", id.into(), document_json)
-            }
         }
     }
 
@@ -8159,9 +7356,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("plugin_registration", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("plugin_registration", id.into(), document_json)
-            }
         }
     }
 
@@ -8172,9 +7366,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_plugin_registration(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("plugin_registration", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("plugin_registration", id.to_string())
             }
         }
@@ -8195,9 +7386,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("mcp_server", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("mcp_server", id.into(), document_json)
-            }
         }
     }
 
@@ -8208,9 +7396,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_mcp_server(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("mcp_server", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("mcp_server", id.to_string())
             }
         }
@@ -8231,9 +7416,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("agent_upstream", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("agent_upstream", id.into(), document_json)
-            }
         }
     }
 
@@ -8244,9 +7426,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_agent_upstream(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.delete("agent_upstream", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.delete("agent_upstream", id.to_string())
             }
         }
@@ -8267,9 +7446,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert("tool_approval", id.into(), document_json)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("tool_approval", id.into(), document_json)
-            }
         }
     }
 
@@ -8280,9 +7456,6 @@ impl RuntimeStorageRepositories {
                 .ok()
                 .and_then(|control_plane| control_plane.tool_approval(id))),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.get_document("tool_approval", id.to_string())
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.get_document("tool_approval", id.to_string())
             }
         }
@@ -8297,9 +7470,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_documents("tool_approval")
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.list_documents("tool_approval")
-            }
         }
     }
 
@@ -8312,9 +7482,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.tool_approval_documents())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
-                control_plane.list_resource_documents("tool_approval")
-            }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
                 control_plane.list_resource_documents("tool_approval")
             }
         }
@@ -8374,17 +7541,13 @@ impl RuntimeStorageRepositories {
                 }
                 Ok(true)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => {
-                self.upsert_in_memory_usage_aggregate(&event);
-                Ok(true)
-            }
         }
     }
 
     /// Append a billing event and durably enqueue it for delivery to the
     /// billing service in as few round-trips as the backend allows (issue
     /// #150). On Postgres both writes commit in a single transaction. On
-    /// Memory/Mysql (no real round-trip to save) this simply calls
+    /// Memory (no real round-trip to save) this simply calls
     /// [`append_billing_event`](Self::append_billing_event) followed by
     /// [`enqueue_billing_report`](Self::enqueue_billing_report), preserving
     /// their prior non-fatal enqueue-failure semantics via
@@ -8407,7 +7570,7 @@ impl RuntimeStorageRepositories {
                     enqueue_error: None,
                 })
             }
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
+            RuntimeControlPlaneBackend::Memory(_) => {
                 let recorded = self.append_billing_event(event.clone())?;
                 let enqueue_error = if recorded {
                     self.enqueue_billing_report(outbox_id, &event, outbox_next_attempt_unix)
@@ -8457,9 +7620,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.billing_events().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
-                Vec::new()
-            }
+            RuntimeControlPlaneBackend::Memory(_) => Vec::new(),
         }
     }
 
@@ -8468,9 +7629,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .billing_events_page(offset, limit)
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => {
-                StoragePage::empty(offset, limit)
-            }
+            RuntimeControlPlaneBackend::Memory(_) => StoragePage::empty(offset, limit),
         }
     }
 
@@ -8479,7 +7638,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.request_logs().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) => self
                 .request_logs
                 .lock()
                 .map(|logs| logs.list())
@@ -8492,7 +7651,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .request_logs_page(offset, limit)
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) => self
                 .request_logs
                 .lock()
                 .map(|logs| StoragePage {
@@ -8534,7 +7693,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.audit_events().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) => self
                 .audit_events
                 .lock()
                 .map(|events| events.list())
@@ -8547,7 +7706,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .audit_events_page(offset, limit)
                 .unwrap_or_else(|_| StoragePage::empty(offset, limit)),
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) => self
                 .audit_events
                 .lock()
                 .map(|events| StoragePage {
@@ -8605,7 +7764,7 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.usage_aggregates().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Memory(_) | RuntimeControlPlaneBackend::Mysql(_) => self
+            RuntimeControlPlaneBackend::Memory(_) => self
                 .usage_aggregates
                 .lock()
                 .map(|aggregates| aggregates.list())
@@ -8624,9 +7783,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_agent_run(&run)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => {
-                control_plane.upsert("agent_run", run.id.clone(), serialize_storage_record(&run)?)
-            }
         }
     }
 
@@ -8638,11 +7794,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.agent_run(id).unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .get_document("agent_run", id.to_string())
-                .ok()
-                .flatten()
-                .and_then(|document| serde_json::from_str(&document).ok()),
         }
     }
 
@@ -8656,10 +7807,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.agent_runs().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("agent_run")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
         }
     }
 
@@ -8674,11 +7821,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.append_agent_run_event(&event)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "agent_run_event",
-                event.id.clone(),
-                serialize_storage_record(&event)?,
-            ),
         }
     }
 
@@ -8692,10 +7834,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.agent_run_events().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("agent_run_event")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
         }
     }
 
@@ -8713,11 +7851,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_managed_worker_template(&template)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "managed_worker_template",
-                template.id.clone(),
-                serialize_storage_record(&template)?,
-            ),
         }
     }
 
@@ -8731,10 +7864,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.managed_worker_templates().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("managed_worker_template")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
         }
     }
 
@@ -8752,11 +7881,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_agent_worker_instance(&instance)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "agent_worker_instance",
-                instance.id.clone(),
-                serialize_storage_record(&instance)?,
-            ),
         }
     }
 
@@ -8770,10 +7894,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.agent_worker_instances().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("agent_worker_instance")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
         }
     }
 
@@ -8791,11 +7911,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_managed_worker_session(&session)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "managed_worker_session",
-                session.id.clone(),
-                serialize_storage_record(&session)?,
-            ),
         }
     }
 
@@ -8809,10 +7924,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.managed_worker_sessions().unwrap_or_default()
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("managed_worker_session")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
         }
     }
 
@@ -8830,11 +7941,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.append_managed_worker_lifecycle_event(&event)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "managed_worker_lifecycle_event",
-                event.id.clone(),
-                serialize_storage_record(&event)?,
-            ),
         }
     }
 
@@ -8847,10 +7953,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_lifecycle_events()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("managed_worker_lifecycle_event")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -8869,11 +7971,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_managed_worker_isolation_selection(&selection)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "managed_worker_isolation_selection",
-                selection.session_id.clone(),
-                serialize_storage_record(&selection)?,
-            ),
         }
     }
 
@@ -8888,10 +7985,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_isolation_selections()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("managed_worker_isolation_selection")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -8910,11 +8003,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_managed_worker_isolation_policy(&policy)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "managed_worker_isolation_policy",
-                policy.session_id.clone(),
-                serialize_storage_record(&policy)?,
-            ),
         }
     }
 
@@ -8927,10 +8015,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_isolation_policies()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("managed_worker_isolation_policy")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -8949,11 +8033,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_managed_worker_isolation_evidence(&evidence)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "managed_worker_isolation_evidence",
-                evidence.id.clone(),
-                serialize_storage_record(&evidence)?,
-            ),
         }
     }
 
@@ -8966,10 +8045,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .managed_worker_isolation_evidence()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("managed_worker_isolation_evidence")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -8988,11 +8063,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_self_hosted_worker_registration(&registration)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "self_hosted_worker_registration",
-                registration.id.clone(),
-                serialize_storage_record(&registration)?,
-            ),
         }
     }
 
@@ -9005,10 +8075,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_registrations()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("self_hosted_worker_registration")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -9027,11 +8093,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.append_self_hosted_worker_heartbeat(&heartbeat)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "self_hosted_worker_heartbeat",
-                heartbeat.id.clone(),
-                serialize_storage_record(&heartbeat)?,
-            ),
         }
     }
 
@@ -9044,10 +8105,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_heartbeats()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("self_hosted_worker_heartbeat")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -9066,11 +8123,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.append_self_hosted_worker_telemetry_event(&event)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "self_hosted_worker_telemetry_event",
-                event.id.clone(),
-                serialize_storage_record(&event)?,
-            ),
         }
     }
 
@@ -9083,10 +8135,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_telemetry_events()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("self_hosted_worker_telemetry_event")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -9105,11 +8153,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_self_hosted_worker_artifact(&artifact)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "self_hosted_worker_artifact",
-                artifact.id.clone(),
-                serialize_storage_record(&artifact)?,
-            ),
         }
     }
 
@@ -9122,10 +8165,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_artifacts()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("self_hosted_worker_artifact")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -9144,11 +8183,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_self_hosted_worker_checkpoint(&checkpoint)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "self_hosted_worker_checkpoint",
-                checkpoint.id.clone(),
-                serialize_storage_record(&checkpoint)?,
-            ),
         }
     }
 
@@ -9161,10 +8195,6 @@ impl RuntimeStorageRepositories {
                 .unwrap_or_default(),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_worker_checkpoints()
-                .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("self_hosted_worker_checkpoint")
-                .map(deserialize_storage_records)
                 .unwrap_or_default(),
         }
     }
@@ -9183,11 +8213,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_self_hosted_run_dispatch(&dispatch)
             }
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane.upsert(
-                "self_hosted_run_dispatch",
-                dispatch.dispatch_id.clone(),
-                serialize_storage_record(&dispatch)?,
-            ),
         }
     }
 
@@ -9201,25 +8226,8 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
                 .self_hosted_run_dispatches()
                 .unwrap_or_default(),
-            RuntimeControlPlaneBackend::Mysql(control_plane) => control_plane
-                .list_documents("self_hosted_run_dispatch")
-                .map(deserialize_storage_records)
-                .unwrap_or_default(),
         }
     }
-}
-
-fn serialize_storage_record<T: Serialize>(record: &T) -> Result<String, StorageError> {
-    serde_json::to_string(record).map_err(|error| {
-        StorageError::Serialization(format!("failed to serialize storage record: {error}"))
-    })
-}
-
-fn deserialize_storage_records<T: for<'de> Deserialize<'de>>(documents: Vec<String>) -> Vec<T> {
-    documents
-        .into_iter()
-        .filter_map(|document| serde_json::from_str(&document).ok())
-        .collect()
 }
 
 fn postgres_error(error: postgres::Error) -> StorageError {
@@ -9279,10 +8287,6 @@ fn redact_url_passwords(input: &str) -> String {
     }
     output.push_str(rest);
     output
-}
-
-fn mysql_error(error: mysql::Error) -> StorageError {
-    StorageError::Mysql(error.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10121,16 +9125,13 @@ mod tests {
         assert_eq!(evidence.contract_version, 1);
         assert_eq!(
             evidence.provider_order,
-            vec![
-                StorageProviderKind::Supabase,
-                StorageProviderKind::Postgres,
-                StorageProviderKind::Mysql,
-            ]
+            vec![StorageProviderKind::Supabase, StorageProviderKind::Postgres,]
         );
 
         assert!(
             RuntimeStorageBackend::new(StorageProviderKind::TursoLibsql, true, Vec::new()).is_err()
         );
+        assert!(RuntimeStorageBackend::new(StorageProviderKind::Mysql, true, Vec::new()).is_err());
 
         let supabase_backend =
             RuntimeStorageBackend::new(StorageProviderKind::Supabase, true, Vec::new()).unwrap();
@@ -10141,11 +9142,6 @@ mod tests {
             RuntimeStorageBackend::new(StorageProviderKind::Postgres, true, Vec::new()).unwrap();
         assert!(postgres_backend.evidence().durable);
         assert!(postgres_backend.evidence().implemented);
-
-        let mysql_backend =
-            RuntimeStorageBackend::new(StorageProviderKind::Mysql, true, Vec::new()).unwrap();
-        assert!(mysql_backend.evidence().durable);
-        assert!(mysql_backend.evidence().implemented);
     }
 
     #[test]

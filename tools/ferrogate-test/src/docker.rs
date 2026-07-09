@@ -37,8 +37,6 @@ pub(crate) const POSTGRES_MIGRATION_SOURCE_CONTAINER: &str =
 pub(crate) const POSTGRES_MIGRATION_TARGET_CONTAINER: &str =
     "ferrogate-e2e-postgres-migration-target";
 pub(crate) const POSTGRES_IMAGE: &str = "postgres:16-alpine";
-pub(crate) const MYSQL_CONTAINER: &str = "ferrogate-e2e-mysql";
-pub(crate) const MYSQL_IMAGE: &str = "mysql:8.4";
 const GATEWAY_A_CONTAINER: &str = "ferrogate-e2e-gateway-a";
 const GATEWAY_B_CONTAINER: &str = "ferrogate-e2e-gateway-b";
 const GATEWAY_A_PORT: u16 = 18080;
@@ -1551,7 +1549,6 @@ fn cleanup_containers() {
             POSTGRES_CONTAINER,
             POSTGRES_MIGRATION_SOURCE_CONTAINER,
             POSTGRES_MIGRATION_TARGET_CONTAINER,
-            MYSQL_CONTAINER,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

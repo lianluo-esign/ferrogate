@@ -244,7 +244,7 @@ runs, rather than separate binaries per service:
 - `ferrogate billing serve` — the token-usage pricing and ledger REST API,
   in-memory by default or durable via `--supabase-dsn`.
 - `ferrogate storage migrate-to-supabase` — one-shot migration of legacy
-  Postgres/MySQL control-plane state into Supabase.
+  Postgres control-plane state into Supabase.
 
 Point the gateway at a running billing service with a `[billing_service]`
 config section (`enabled`, `endpoint`, `timeout_millis`, optional
@@ -307,7 +307,7 @@ crates/
   ferrogate-runtime         Reload, lifecycle, bounded harness, managed worker
                              isolation
   ferrogate-storage         Repository traits and control-plane storage
-                             boundary (in-memory, Postgres, MySQL, Supabase)
+                             boundary (in-memory, Postgres, Supabase)
 tools/
   ferrogate-test            End-to-end test harness driving admin/auth/gateway/
                              billing/storage scenarios locally and via Docker

@@ -91,8 +91,8 @@ These areas are implemented in the current open-source gateway:
   template CRUD/render, tool approvals, request-log exports, and dashboard
   visibility.
 - Durable storage provider abstraction plus Supabase-first control-plane
-  storage wiring for configured control-plane resources, with PostgreSQL and
-  MySQL compatibility paths and Turso/libSQL retired from the production
+  storage wiring for configured control-plane resources, with PostgreSQL as a
+  compatibility path and Turso/libSQL and MySQL retired from the production
   provider surface.
 - Managed agent runtime primitives in `ferrogate-runtime`: the default contract
   is an external `agent-worker` process that owns Firecracker microVM lifecycle,
@@ -118,7 +118,7 @@ These areas are implemented in the current open-source gateway:
 
 | Theme | Goal | Tracking |
 | --- | --- | --- |
-| Database providers | Keep Supabase as the durable control-plane target while hardening or retiring compatibility providers behind the same storage contract. MySQL production hardening remains tracked separately. | [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#94](https://github.com/lianluo-esign/ferrogate/issues/94) |
+| Database providers | Keep Supabase as the durable control-plane target while hardening or retiring compatibility providers behind the same storage contract. MySQL has been retired as a production provider. | [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#94](https://github.com/lianluo-esign/ferrogate/issues/94), [#192](https://github.com/lianluo-esign/ferrogate/issues/192) |
 | External service boundaries | Keep tenant RBAC and billing integrations behind explicit service/provider boundaries instead of moving that complexity into the gateway hot path. | [#54](https://github.com/lianluo-esign/ferrogate/issues/54) |
 | Agent graph governance | Add workflow graph policy and execution budgets so multi-step agent runs can be governed at graph/run level, not only per request. | [#50](https://github.com/lianluo-esign/ferrogate/issues/50) |
 | Agent protocol ingress | Add A2A and broader agent protocol ingress governance while reusing auth, policy, approvals, billing, and observability surfaces. Current slice covers registered agent upstream control-plane storage plus discovery metadata. | [#48](https://github.com/lianluo-esign/ferrogate/issues/48) |
@@ -156,11 +156,13 @@ Use analytics delivery for high-write observability data:
 - dashboard chart statistics.
 
 The current direction is Supabase-first for commercial durable control-plane
-tables and operator evidence. Turso/libSQL is retired from the production
-provider surface and remains only as legacy migration input; generic PostgreSQL
-and MySQL are compatibility paths until their separate hardening or removal
-issues close. Analytics can flow through Vector to ClickHouse or directly to
-ClickHouse when operators want fewer moving parts.
+tables and operator evidence. Turso/libSQL ([#94](https://github.com/lianluo-esign/ferrogate/issues/94))
+is retired from the production provider surface and remains only as legacy
+migration input; MySQL ([#192](https://github.com/lianluo-esign/ferrogate/issues/192))
+is retired outright, with no remaining migration tooling. Generic PostgreSQL is
+a compatibility path until its separate hardening or removal issue closes.
+Analytics can flow through Vector to ClickHouse or directly to ClickHouse when
+operators want fewer moving parts.
 
 ## Non-Goals
 

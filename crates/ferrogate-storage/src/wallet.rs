@@ -102,13 +102,6 @@ fn payment_method_from_row(row: &PostgresRow) -> StoredPaymentMethod {
     }
 }
 
-fn wallet_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "wallets/payment methods are Supabase/Postgres-only; set storage.provider = supabase"
-            .into(),
-    )
-}
-
 impl PostgresControlPlaneStore {
     pub(super) fn upsert_wallet(&self, wallet: &StoredWallet) -> Result<(), StorageError> {
         self.with_client(|client| {
@@ -341,7 +334,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_wallet(&wallet)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -354,7 +346,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_wallet(tenant_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -365,7 +356,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_wallets())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_wallets(),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -389,7 +379,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.adjust_wallet_balance(tenant_id, delta_credits, now_unix)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -409,7 +398,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.set_wallet_dunning(tenant_id, dunning, now_unix)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -427,7 +415,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_payment_method(&payment_method)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -443,7 +430,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_payment_methods(tenant_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -459,7 +445,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.get_payment_method(id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 
@@ -472,7 +457,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_payment_method(id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(wallet_supabase_only_error()),
         }
     }
 }

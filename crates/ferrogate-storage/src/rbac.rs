@@ -115,12 +115,6 @@ fn tenant_role_binding_from_row(row: &PostgresRow) -> StoredTenantRoleBinding {
     }
 }
 
-fn rbac_supabase_only_error() -> StorageError {
-    StorageError::Runtime(
-        "permissions/roles are Supabase/Postgres-only; set storage.provider = supabase".into(),
-    )
-}
-
 impl PostgresControlPlaneStore {
     pub(super) fn upsert_permission(
         &self,
@@ -349,7 +343,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.upsert_permission(&permission)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -360,7 +353,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_permission(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_permission(id),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -371,7 +363,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_permissions())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_permissions(),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -384,7 +375,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.delete_permission(id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -399,7 +389,6 @@ impl RuntimeStorageRepositories {
                 Ok(())
             }
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.upsert_role(&role),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -410,7 +399,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.get_role(id))
                 .unwrap_or(None)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.get_role(id),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -421,7 +409,6 @@ impl RuntimeStorageRepositories {
                 .map(|control_plane| control_plane.list_roles())
                 .unwrap_or_default()),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.list_roles(),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -432,7 +419,6 @@ impl RuntimeStorageRepositories {
                 .map(|mut control_plane| control_plane.delete_role(id))
                 .unwrap_or(false)),
             RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane.delete_role(id),
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -451,7 +437,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.bind_tenant_role(&binding)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -467,7 +452,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.list_tenant_role_bindings(tenant_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 
@@ -480,7 +464,6 @@ impl RuntimeStorageRepositories {
             RuntimeControlPlaneBackend::Postgres(control_plane) => {
                 control_plane.unbind_tenant_role(tenant_id, role_id)
             }
-            RuntimeControlPlaneBackend::Mysql(_) => Err(rbac_supabase_only_error()),
         }
     }
 }

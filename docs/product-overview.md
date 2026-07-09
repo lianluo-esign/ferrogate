@@ -49,9 +49,10 @@ work belongs in [`roadmap.md`](roadmap.md).
   profiles, provider health, plugins/extensions, tools, MCP servers, config
   validation, reload, readiness, and drain.
 - **Durable control-plane storage** with Supabase-compatible PostgreSQL as the
-  production target, plus memory, PostgreSQL, PostgreSQL TLS, MySQL, and MySQL
-  TLS compatibility providers. Legacy Turso/libSQL configs are migration
-  inputs, not new production provider choices.
+  production target, plus memory, PostgreSQL, and PostgreSQL TLS compatibility
+  providers. Legacy Turso/libSQL configs are migration inputs, not new
+  production provider choices; MySQL is retired outright with no remaining
+  migration tooling.
 - **Analytics delivery boundary** through either Vector-to-ClickHouse pipeline
   mode or direct ClickHouse warehouse mode.
 - **Cluster operations** for multi-node deployments with node identity, shared
@@ -97,9 +98,9 @@ Validated end to end:
 - Admin API, API key and policy CRUD, static dashboard, config validation,
   reload, status, readiness, and drain.
 - Durable control-plane restart behavior for Supabase-compatible PostgreSQL TLS
-  as the default production target, with PostgreSQL, PostgreSQL TLS, MySQL, and
-  MySQL TLS retained as compatibility and local test providers. Legacy
-  Turso/libSQL data remains a migration source.
+  as the default production target, with PostgreSQL and PostgreSQL TLS
+  retained as compatibility and local test providers. Legacy Turso/libSQL data
+  remains a migration source; MySQL is retired outright.
 - Manual TLS, ACME HTTP-01, ACME DNS-01, renewal scheduling, and listener-level
   graceful upgrade handoff.
 - Cluster identity, shared file state, Redis counters, readiness, and drain
@@ -108,8 +109,8 @@ Validated end to end:
 Still intentionally scoped as next-stage production work:
 
 - Production hardening beyond the implemented Supabase control-plane path;
-  generic PostgreSQL and MySQL remain compatibility providers until their
-  operator boundaries are separately hardened, while Turso/libSQL is retired
+  generic PostgreSQL remains a compatibility provider until its operator
+  boundary is separately hardened, while Turso/libSQL and MySQL are retired
   from the production provider surface.
 - Full hosted Admin API control plane beyond the current implemented resources.
 - Semantic/vector cache matching. The implemented cache is exact-match only.

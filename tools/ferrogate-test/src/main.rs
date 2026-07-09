@@ -23,9 +23,9 @@ use scenarios::{
     run_gateway_billing_chain, run_gateway_external_auth_api, run_gateway_third_party_auth_api,
 };
 use storage::{
-    run_mysql_restart, run_mysql_tls_restart, run_postgres_restart, run_postgres_tls_restart,
-    run_supabase_live_restart, run_supabase_live_smoke, run_supabase_live_token4ai_provider,
-    run_supabase_migration, run_supabase_restart,
+    run_postgres_restart, run_postgres_tls_restart, run_supabase_live_restart,
+    run_supabase_live_smoke, run_supabase_live_token4ai_provider, run_supabase_migration,
+    run_supabase_restart,
 };
 
 fn main() -> Result<()> {
@@ -42,8 +42,6 @@ fn main() -> Result<()> {
         supabase_migration: run_supabase_migration,
         postgres_restart: run_postgres_restart,
         postgres_tls_restart: run_postgres_tls_restart,
-        mysql_restart: run_mysql_restart,
-        mysql_tls_restart: run_mysql_tls_restart,
         docker: run_docker_scenario,
         run_all_admin_auth_gateway: |local, auth, include_docker, image| {
             run_admin_api(local)?;

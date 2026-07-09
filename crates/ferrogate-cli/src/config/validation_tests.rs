@@ -2515,7 +2515,6 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         vec![
             ferrogate_storage::StorageProviderKind::Supabase,
             ferrogate_storage::StorageProviderKind::Postgres,
-            ferrogate_storage::StorageProviderKind::Mysql,
         ]
     );
 
@@ -2531,6 +2530,18 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
     };
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("turso_libsql has been removed"));
+    assert!(error.contains("migrate"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Mysql,
+            required: true,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("mysql has been removed"));
     assert!(error.contains("migrate"));
 
     let config = Config {
@@ -2593,84 +2604,6 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
         ..Config::default()
     };
     config.validate().unwrap();
-
-    let config = Config {
-        storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::Mysql,
-            required: true,
-            mysql_dsn: Some(
-                "mysql://root:mysql@127.0.0.1:3306/ferrogate?prefer_socket=false".into(),
-            ),
-            mysql_pool_size: 2,
-            mysql_tls_mode: ferrogate_storage::MySqlTlsMode::VerifyCa,
-            mysql_tls_ca_cert_path: Some("/tmp/ferrogate-mysql-ca.pem".into()),
-            mysql_connect_timeout_secs: 5,
-            ..StorageConfig::default()
-        },
-        ..Config::default()
-    };
-    config.validate().unwrap();
-
-    let config = Config {
-        storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::Mysql,
-            required: true,
-            mysql_dsn_env: Some("FERROGATE_MYSQL_DSN".into()),
-            ..StorageConfig::default()
-        },
-        ..Config::default()
-    };
-    config.validate().unwrap();
-
-    let config = Config {
-        storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::Mysql,
-            required: true,
-            ..StorageConfig::default()
-        },
-        ..Config::default()
-    };
-    let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field storage.mysql_dsn_env"));
-
-    let config = Config {
-        storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::Mysql,
-            required: true,
-            mysql_dsn_env: Some("FERROGATE_MYSQL_DSN".into()),
-            mysql_pool_size: 0,
-            ..StorageConfig::default()
-        },
-        ..Config::default()
-    };
-    let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field storage.mysql_pool_size"));
-
-    let config = Config {
-        storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::Mysql,
-            required: true,
-            mysql_dsn_env: Some("FERROGATE_MYSQL_DSN".into()),
-            mysql_tls_ca_cert_path: Some(" ".into()),
-            ..StorageConfig::default()
-        },
-        ..Config::default()
-    };
-    let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field storage.mysql_tls_ca_cert_path"));
-
-    let config = Config {
-        storage: StorageConfig {
-            provider: ferrogate_storage::StorageProviderKind::Mysql,
-            required: true,
-            mysql_dsn_env: Some("FERROGATE_MYSQL_DSN".into()),
-            mysql_connect_timeout_secs: 0,
-            ..StorageConfig::default()
-        },
-        ..Config::default()
-    };
-    let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("field storage.mysql_connect_timeout_secs"));
 
     let config = Config {
         storage: StorageConfig {

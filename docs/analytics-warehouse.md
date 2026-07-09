@@ -147,7 +147,7 @@ analytics target.
 
 ## Local Verification Commands
 
-Run deterministic local API coverage plus Supabase/PostgreSQL/MySQL durability
+Run deterministic local API coverage plus Supabase/PostgreSQL durability
 tests:
 
 ```bash
