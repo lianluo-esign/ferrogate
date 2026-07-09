@@ -1957,11 +1957,8 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][2], "mysql");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 8);
-                assert_eq!(
-                    body["storage"]["schema"]["name"],
-                    "008_managed_worker_isolation_evidence"
-                );
+                assert_eq!(body["storage"]["schema"]["version"], 16);
+                assert_eq!(body["storage"]["schema"]["name"], "016_admin_console_users");
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]
                     .as_str()

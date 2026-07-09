@@ -31,6 +31,7 @@ jobs:
 
       - name: Install supply-chain security tools
         run: |
+          sudo apt-get update && sudo apt-get install -y ripgrep
           cargo install cargo-deny --locked
           cargo install cargo-audit --locked
 
