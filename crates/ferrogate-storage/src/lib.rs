@@ -1462,6 +1462,7 @@ impl PostgresControlPlaneStore {
         let alert_threshold_pcts_json = serialize_storage_document(&policy.alert_threshold_pcts)?;
         let rpm_limit = policy.rpm_limit.map(saturating_i64);
         let tpm_limit = policy.tpm_limit.map(saturating_i64);
+        let asset_storage_quota_bytes = policy.asset_storage_quota_bytes.map(saturating_i64);
         let created_at_unix = policy.created_at_unix;
         let updated_at_unix = policy.updated_at_unix;
         self.with_client(|client| {
@@ -1469,14 +1470,15 @@ impl PostgresControlPlaneStore {
                 "INSERT INTO quota_policies \
                  (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit, \
                   monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
-                  alert_threshold_pcts_json) \
-                 VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10, $11::text::jsonb) \
+                  alert_threshold_pcts_json, asset_storage_quota_bytes) \
+                 VALUES ($1, $2, $3, $4::text::jsonb, $5, $6, $7, $8, $9, $10, $11::text::jsonb, $12) \
                  ON CONFLICT (scope_type, scope_id) DO UPDATE SET \
                  model_allowlist_json = EXCLUDED.model_allowlist_json, \
                  rpm_limit = EXCLUDED.rpm_limit, tpm_limit = EXCLUDED.tpm_limit, \
                  monthly_budget_usd = EXCLUDED.monthly_budget_usd, \
                  enabled = EXCLUDED.enabled, updated_at_unix = EXCLUDED.updated_at_unix, \
-                 alert_threshold_pcts_json = EXCLUDED.alert_threshold_pcts_json",
+                 alert_threshold_pcts_json = EXCLUDED.alert_threshold_pcts_json, \
+                 asset_storage_quota_bytes = EXCLUDED.asset_storage_quota_bytes",
                 &[
                     &policy.id,
                     &policy.scope_type.as_str(),
@@ -1489,6 +1491,7 @@ impl PostgresControlPlaneStore {
                     &created_at_unix,
                     &updated_at_unix,
                     &alert_threshold_pcts_json,
+                    &asset_storage_quota_bytes,
                 ],
             )?;
             Ok(())
@@ -1504,7 +1507,7 @@ impl PostgresControlPlaneStore {
             client.query_opt(
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
-                 alert_threshold_pcts_json::text \
+                 alert_threshold_pcts_json::text, asset_storage_quota_bytes \
                  FROM quota_policies WHERE scope_type = $1 AND scope_id = $2",
                 &[&scope_type.as_str(), &scope_id],
             )
@@ -1517,7 +1520,7 @@ impl PostgresControlPlaneStore {
             client.query(
                 "SELECT id, scope_type, scope_id, model_allowlist_json::text, rpm_limit, \
                  tpm_limit, monthly_budget_usd, enabled, created_at_unix, updated_at_unix, \
-                 alert_threshold_pcts_json::text \
+                 alert_threshold_pcts_json::text, asset_storage_quota_bytes \
                  FROM quota_policies ORDER BY id ASC",
                 &[],
             )
@@ -4358,6 +4361,7 @@ fn quota_policy_from_row(row: &PostgresRow) -> Result<StoredQuotaPolicy, Storage
         created_at_unix: row.get::<_, i64>(8),
         updated_at_unix: row.get::<_, i64>(9),
         alert_threshold_pcts,
+        asset_storage_quota_bytes: row.get::<_, Option<i64>>(11).map(nonnegative_u64),
     })
 }
 
@@ -6303,6 +6307,14 @@ pub struct StoredQuotaPolicy {
     pub tpm_limit: Option<u64>,
     #[serde(default)]
     pub monthly_budget_usd: Option<f64>,
+    /// Per-tenant/project/workspace/key override of `StoredPlan.
+    /// default_asset_storage_quota_bytes` (issue #188) -- lets a specific
+    /// scope get a different cumulative `/v1/assets/*` storage allowance
+    /// than its plan's shared default, mirroring how `rpm_limit`/
+    /// `tpm_limit` already override the plan. `None` means "no override,
+    /// fall back to the plan default".
+    #[serde(default)]
+    pub asset_storage_quota_bytes: Option<u64>,
     /// Percent-of-`monthly_budget_usd` tiers (e.g. `[75, 90, 95]`) that fire
     /// a one-time webhook notification each, strictly before the 100% hard
     /// deny in `AppState::monthly_budget_exceeded` (issue #170). Empty
@@ -10553,6 +10565,7 @@ mod tests {
                 rpm_limit: Some(1_000),
                 tpm_limit: Some(500_000),
                 monthly_budget_usd: Some(250.0),
+                asset_storage_quota_bytes: Some(104_857_600),
                 alert_threshold_pcts: vec![],
                 enabled: true,
                 created_at_unix: 1,
@@ -10568,6 +10581,7 @@ mod tests {
                 rpm_limit: Some(60),
                 tpm_limit: None,
                 monthly_budget_usd: None,
+                asset_storage_quota_bytes: None,
                 alert_threshold_pcts: vec![],
                 enabled: true,
                 created_at_unix: 1,
@@ -10581,6 +10595,7 @@ mod tests {
             .expect("tenant policy is stored");
         assert_eq!(tenant_policy.rpm_limit, Some(1_000));
         assert_eq!(tenant_policy.monthly_budget_usd, Some(250.0));
+        assert_eq!(tenant_policy.asset_storage_quota_bytes, Some(104_857_600));
         assert_eq!(
             tenant_policy.model_allowlist,
             vec!["fast-chat", "smart-chat"]
@@ -10613,6 +10628,7 @@ mod tests {
                 rpm_limit: Some(100),
                 tpm_limit: None,
                 monthly_budget_usd: None,
+                asset_storage_quota_bytes: Some(10_485_760),
                 alert_threshold_pcts: vec![],
                 enabled: true,
                 created_at_unix: 1,
@@ -10629,6 +10645,7 @@ mod tests {
                 rpm_limit: Some(50),
                 tpm_limit: Some(10_000),
                 monthly_budget_usd: Some(10.0),
+                asset_storage_quota_bytes: Some(52_428_800),
                 alert_threshold_pcts: vec![],
                 enabled: false,
                 created_at_unix: 1,
@@ -10643,6 +10660,7 @@ mod tests {
         assert_eq!(policy.rpm_limit, Some(50));
         assert_eq!(policy.tpm_limit, Some(10_000));
         assert_eq!(policy.monthly_budget_usd, Some(10.0));
+        assert_eq!(policy.asset_storage_quota_bytes, Some(52_428_800));
         assert!(!policy.enabled);
         assert_eq!(repositories.list_quota_policies().unwrap().len(), 1);
     }

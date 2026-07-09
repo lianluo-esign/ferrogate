@@ -179,3 +179,190 @@ fn asset_push_is_denied_once_the_tenants_storage_quota_is_exceeded() {
     gateway.kill().unwrap();
     gateway.wait().unwrap();
 }
+
+fn set_tenant_asset_quota_override(gateway_addr: &str, tenant_id: &str, bytes: u64) {
+    let response = response_json(http_request(
+        gateway_addr,
+        "PUT",
+        &format!("/admin/v1/quota-policies/tenant/{tenant_id}"),
+        &admin_headers(),
+        &format!(r#"{{"asset_storage_quota_bytes":{bytes},"enabled":true}}"#),
+    ));
+    assert_eq!(
+        response["policy"]["asset_storage_quota_bytes"], bytes,
+        "quota policy upsert must echo back the override: {response}"
+    );
+}
+
+// Issue #188: a tenant-scoped StoredQuotaPolicy.asset_storage_quota_bytes
+// override must be enforced instead of the tenant's plan default, in both
+// directions -- tighter than the plan (should reject sooner) and looser
+// than the plan (should allow more than the plan alone would).
+#[test]
+fn asset_push_quota_tenant_override_is_tighter_than_the_plan_default() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_config(&config, &gateway_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &admin_headers(),
+        r#"{"id":"tenant-quota-e2e","name":"Tenant Quota E2E","slug":"tenant-quota-e2e"}"#,
+    ));
+
+    // Plan default is generous (1000 bytes) -- would allow both pushes on
+    // its own.
+    let plan = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &admin_headers(),
+        r#"{"id":"generous-quota","name":"Generous Quota","slug":"generous-quota","asset_hosting_enabled":true,"default_asset_storage_quota_bytes":1000}"#,
+    ));
+    assert_eq!(plan["plan"]["default_asset_storage_quota_bytes"], 1000);
+
+    response_json(http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-quota-e2e",
+        &admin_headers(),
+        r#"{"plan_id":"generous-quota"}"#,
+    ));
+
+    // A tighter tenant-scoped override (50 bytes) must win over the plan's
+    // 1000-byte default.
+    set_tenant_asset_quota_override(&gateway_addr, "tenant-quota-e2e", 50);
+
+    let first_push = push_asset(&gateway_addr, "one", &"a".repeat(30));
+    assert!(
+        status_line(&first_push).contains("200 OK"),
+        "first push (30/50 override bytes) must succeed: {first_push}"
+    );
+
+    let second_push = push_asset(&gateway_addr, "two", &"b".repeat(30));
+    assert!(
+        status_line(&second_push).contains("403"),
+        "second push (60 bytes) exceeds the 50-byte override even though \
+         the 1000-byte plan default alone would allow it: {second_push}"
+    );
+    assert!(second_push.contains("asset_storage_quota_exceeded"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+#[test]
+fn asset_push_quota_tenant_override_is_looser_than_the_plan_default() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_config(&config, &gateway_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &admin_headers(),
+        r#"{"id":"tenant-quota-e2e","name":"Tenant Quota E2E","slug":"tenant-quota-e2e"}"#,
+    ));
+
+    // Plan default is tiny (50 bytes) -- would reject the second push on
+    // its own.
+    let plan = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &admin_headers(),
+        r#"{"id":"tiny-quota","name":"Tiny Quota","slug":"tiny-quota","asset_hosting_enabled":true,"default_asset_storage_quota_bytes":50}"#,
+    ));
+    assert_eq!(plan["plan"]["default_asset_storage_quota_bytes"], 50);
+
+    response_json(http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-quota-e2e",
+        &admin_headers(),
+        r#"{"plan_id":"tiny-quota"}"#,
+    ));
+
+    // A looser tenant-scoped override (1000 bytes) must win over the
+    // plan's 50-byte default.
+    set_tenant_asset_quota_override(&gateway_addr, "tenant-quota-e2e", 1000);
+
+    let first_push = push_asset(&gateway_addr, "one", &"a".repeat(30));
+    assert!(
+        status_line(&first_push).contains("200 OK"),
+        "first push (30/1000 override bytes) must succeed: {first_push}"
+    );
+
+    let second_push = push_asset(&gateway_addr, "two", &"b".repeat(30));
+    assert!(
+        status_line(&second_push).contains("200 OK"),
+        "second push (60 bytes) exceeds the 50-byte plan default but must \
+         succeed under the 1000-byte tenant override: {second_push}"
+    );
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}
+
+// A tenant with no StoredQuotaPolicy override at all must still fall back
+// to the plan default exactly as before -- no regression from issue #188.
+#[test]
+fn asset_push_quota_falls_back_to_plan_default_with_no_tenant_override() {
+    let gateway_addr = free_addr();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferrogate.toml");
+    write_config(&config, &gateway_addr);
+
+    let mut gateway = start_gateway(&config);
+    wait_for_gateway(&gateway_addr);
+
+    response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-accounts",
+        &admin_headers(),
+        r#"{"id":"tenant-quota-e2e","name":"Tenant Quota E2E","slug":"tenant-quota-e2e"}"#,
+    ));
+
+    let plan = response_json(http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/plans",
+        &admin_headers(),
+        r#"{"id":"tiny-quota","name":"Tiny Quota","slug":"tiny-quota","asset_hosting_enabled":true,"default_asset_storage_quota_bytes":50}"#,
+    ));
+    assert_eq!(plan["plan"]["default_asset_storage_quota_bytes"], 50);
+
+    response_json(http_request(
+        &gateway_addr,
+        "PATCH",
+        "/admin/v1/tenant-accounts/tenant-quota-e2e",
+        &admin_headers(),
+        r#"{"plan_id":"tiny-quota"}"#,
+    ));
+
+    let first_push = push_asset(&gateway_addr, "one", &"a".repeat(30));
+    assert!(status_line(&first_push).contains("200 OK"));
+
+    let second_push = push_asset(&gateway_addr, "two", &"b".repeat(30));
+    assert!(
+        status_line(&second_push).contains("403"),
+        "with no tenant override, the 50-byte plan default must still \
+         govern: {second_push}"
+    );
+    assert!(second_push.contains("asset_storage_quota_exceeded"));
+
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+}

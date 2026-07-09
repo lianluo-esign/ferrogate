@@ -510,6 +510,11 @@ impl FerroGateway {
                         .as_ref()
                         .and_then(|existing| existing.monthly_budget_usd)
                 }),
+                asset_storage_quota_bytes: payload.asset_storage_quota_bytes.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.asset_storage_quota_bytes)
+                }),
                 alert_threshold_pcts: payload.alert_threshold_pcts.unwrap_or_else(|| {
                     existing
                         .as_ref()
@@ -531,6 +536,7 @@ impl FerroGateway {
                 rpm_limit: payload.rpm_limit,
                 tpm_limit: payload.tpm_limit,
                 monthly_budget_usd: payload.monthly_budget_usd,
+                asset_storage_quota_bytes: payload.asset_storage_quota_bytes,
                 alert_threshold_pcts: payload.alert_threshold_pcts.unwrap_or_default(),
                 enabled: payload.enabled.unwrap_or(true),
                 created_at_unix,
@@ -614,6 +620,7 @@ fn admin_quota_policy(policy: &StoredQuotaPolicy) -> AdminQuotaPolicy {
         rpm_limit: policy.rpm_limit,
         tpm_limit: policy.tpm_limit,
         monthly_budget_usd: policy.monthly_budget_usd,
+        asset_storage_quota_bytes: policy.asset_storage_quota_bytes,
         alert_threshold_pcts: policy.alert_threshold_pcts.clone(),
         enabled: policy.enabled,
         created_at_unix: policy.created_at_unix,

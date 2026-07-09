@@ -8,6 +8,7 @@ export interface AdminQuotaPolicy extends Record<string, unknown> {
   rpm_limit: number | null;
   tpm_limit: number | null;
   monthly_budget_usd: number | null;
+  asset_storage_quota_bytes: number | null;
   enabled: boolean;
   created_at_unix: number;
   updated_at_unix: number;
@@ -26,6 +27,7 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
     { key: "rpm_limit", header: "RPM limit" },
     { key: "tpm_limit", header: "TPM limit" },
     { key: "monthly_budget_usd", header: "Monthly budget (USD)" },
+    { key: "asset_storage_quota_bytes", header: "Asset storage quota (bytes)" },
     { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
   ],
   fields: [
@@ -47,6 +49,11 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
     { name: "rpm_limit", label: "Requests per minute", type: "number" },
     { name: "tpm_limit", label: "Tokens per minute", type: "number" },
     { name: "monthly_budget_usd", label: "Monthly budget (USD)", type: "number" },
+    {
+      name: "asset_storage_quota_bytes",
+      label: "Asset storage quota override (bytes)",
+      type: "number",
+    },
     { name: "enabled", label: "Enabled", type: "boolean" },
   ],
 };

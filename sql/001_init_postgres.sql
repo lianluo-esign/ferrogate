@@ -768,6 +768,13 @@ CREATE INDEX IF NOT EXISTS idx_quota_policies_scope
 ALTER TABLE quota_policies
     ADD COLUMN IF NOT EXISTS alert_threshold_pcts_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+-- Per-scope override of plans.default_asset_storage_quota_bytes (issue
+-- #188) -- lets one tenant/project/workspace/key get a different
+-- cumulative /v1/assets/* storage allowance than its plan's shared
+-- default. NULL means "no override, fall back to the plan default".
+ALTER TABLE quota_policies
+    ADD COLUMN IF NOT EXISTS asset_storage_quota_bytes BIGINT;
+
 -- budget_alert_notifications: idempotency ledger for issue #170 -- exactly
 -- one row per (scope, period, tier) means a threshold fires its webhook
 -- once per billing period, not on every subsequent request after crossing
@@ -1207,5 +1214,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (24, '024_stored_assets_storage_uri')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (25, '025_quota_policies_asset_storage_quota_bytes')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;
