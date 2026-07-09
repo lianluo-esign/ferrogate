@@ -9,16 +9,24 @@
 ---
 title: Agentic Gateway Architecture & Roadmap
 description: How FerroGate evolves from a proxy-only LLM gateway into a modular, plugin-based agentic gateway (MCP host, tool calling, agent runtime, skills), modeled on Bifrost's plugin architecture and benchmarked against Portkey.
-status: proposal
-last_reviewed: 2026-06-01
+status: partially-shipped
+last_reviewed: 2026-07-09
 ---
 
 # Agentic Gateway Architecture & Roadmap
 
-> **Status: proposal / design.** This document is research-backed (primary
-> sources cited inline and in the appendix) and describes a target architecture
-> and phased roadmap. It does not yet reflect shipped code. The current shipped
-> capabilities are described in [README](../README.md) and [roadmap](./roadmap.md).
+> **Status: partially shipped, doc drifted from implementation.** This
+> document was written 2026-06-01 as a proposal. As of 2026-07-09 several of
+> the "proposal" items below have actually shipped (async pooled dispatch via
+> `reqwest`, the canonical tool-calling model, `ferrogate-mcp`, and a
+> substantial `ferrogate-runtime` agent-sandbox security boundary — see the
+> correction note in [`docs/design/ai-gateway-market-research-2026-07.md`](design/ai-gateway-market-research-2026-07.md#3-ferrogate-当前实现基线核实纠正内部文档失真)
+> for the full list of stale claims and their actual code-verified state).
+> Sections below are left as originally written for historical context on the
+> *design rationale*, but should not be read as an accurate description of
+> current gateway internals. The current shipped capabilities are described in
+> [README](../README.md) and [roadmap](./roadmap.md) — those two files are the
+> source of truth; this proposal doc is not.
 
 ## 1. Purpose & scope
 
@@ -240,17 +248,19 @@ Pingora `ProxyHttp::request_filter` (`proxy.rs`) → `handle_request_filter`
 (`handlers.rs`) → auth (`auth.rs`) → route match (`state.rs`) → model resolve +
 policy → `dispatch_provider_request` (`dispatch.rs`) → response/stream.
 
-**Critical constraint:** `dispatch.rs` uses **synchronous blocking I/O** (raw
-`std::net::TcpStream` + rustls, `Connection: close`, blocking reads) called
-directly inside the async handler, with **no connection pooling**. A single
-request tolerates this; an **agent loop making N sequential model calls would
-N×-multiply the blocking-in-async cost and connection churn**, starving Pingora
-worker threads. **An async, pooled dispatch path is a prerequisite for the agent
-loop** (§5.8) — this is the single most important enabling refactor.
+**Stale as of 2026-07-09 — corrected:** this section originally claimed
+`dispatch.rs` used synchronous blocking I/O with no connection pooling as the
+prerequisite blocker for an agent loop. That is no longer true: `dispatch.rs`
+now dispatches through a pooled `reqwest::Client` (async, connection-reused).
+The §5.8 async-dispatch refactor described below has shipped; do not treat it
+as outstanding work.
 
-Also note: `providers/canonical.rs` (`CanonicalContent ∈ {Text, TextBlocks}`)
-**does not model tools** today — tool *definitions* pass through transparently in
-the raw body, but the gateway never parses or executes `tool_calls`.
+Also stale: `providers/canonical.rs` now models tools directly —
+`CanonicalToolDefinition` / `CanonicalToolCall` exist alongside
+`ferrogate_core::{ToolDef, ToolCall, ToolResult}`, and provider adapters (e.g.
+`ferrogate-providers/src/anthropic.rs`) implement `inject_tools` /
+`extract_tool_calls`. Tool definitions are parsed and round-tripped, not just
+passed through transparently.
 
 ### 5.1 Crate map
 
