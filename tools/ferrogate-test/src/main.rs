@@ -67,9 +67,7 @@ fn main() -> Result<()> {
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;
             run_postgres_restart(local)?;
-            run_postgres_tls_restart(local)?;
-            run_mysql_restart(local)?;
-            run_mysql_tls_restart(local)
+            run_postgres_tls_restart(local)
         },
     })
 }
