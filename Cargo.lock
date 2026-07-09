@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agent-worker"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -981,14 +981,14 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferrogate-admin"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ferrogate-auth"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-billing"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "ferrogate-core",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-cli"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-config"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-core"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-mcp"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "ferrogate-core",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-observability"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "serde_json",
  "tracing",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-policy"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "ferrogate-core",
  "ferrogate-storage",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-providers"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "ferrogate-core",
  "hmac 0.12.1",
@@ -1127,14 +1127,14 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-routing"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "ferrogate-core",
 ]
 
 [[package]]
 name = "ferrogate-runtime"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "base64",
  "blake2",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-secrets"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "http",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-storage"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "ferrogate-billing",
  "ferrogate-core",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "ferrogate-test"
-version = "2026.6.22"
+version = "2026.7.9"
 dependencies = [
  "anyhow",
  "clap",
