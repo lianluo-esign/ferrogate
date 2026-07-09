@@ -14,7 +14,7 @@ permalink: /roadmap/
 
 # FerroGate Roadmap
 
-Last reviewed: 2026-06-21.
+Last reviewed: 2026-07-09.
 
 This roadmap describes where FerroGate is going and how current GitHub issues
 map to that direction. It is a planning document, not a release promise. The
@@ -75,6 +75,11 @@ These areas are implemented in the current open-source gateway:
 - MCP host/client support, native `/v1/mcp` JSON-RPC ingress, tool execution,
   dispatch isolation, timeout handling, approval gates, immutable approval
   fingerprints, Codex compatibility, and Claude Code compatibility.
+- Agent-sandbox capability boundary (`isolation.rs` + `capability_boundary.rs`
+  + `function_egress.rs`): ten `CapabilityAction` classes, fail-closed
+  denial proven against a CVE-2025-53967-shaped escalation attempt with a
+  red-team regression test and an inspectable audit trail. See
+  [`docs/security/agent-sandbox-model.md`](security/agent-sandbox-model.md).
 - Agentic Lite plugin surface with built-in plugin registrations, request
   hooks, tool providers, event sinks, admin plugin/tool views, tool sessions,
   and audit events.
@@ -107,6 +112,7 @@ These areas are implemented in the current open-source gateway:
 | Managed runtime | Complete the `agent-worker` Firecracker microVM transport and local microVM E2E harness for Codex CLI, Claude Code, Hermes, and native adapters without moving VM lifecycle into the gateway hot path. | [#82](https://github.com/lianluo-esign/ferrogate/issues/82), [#85](https://github.com/lianluo-esign/ferrogate/issues/85) |
 | Durable control plane | Close the full durable control-plane boundary for API keys, policies, gateway configs, prompt templates, plugin registrations, MCP servers, tool approvals, and agent run records. | [#12](https://github.com/lianluo-esign/ferrogate/issues/12), [#66](https://github.com/lianluo-esign/ferrogate/issues/66), [#67](https://github.com/lianluo-esign/ferrogate/issues/67), [#68](https://github.com/lianluo-esign/ferrogate/issues/68), [#69](https://github.com/lianluo-esign/ferrogate/issues/69) |
 | Prompt workflows | Complete versioned prompt template management and render APIs as first-class agent workflow inputs. | [#44](https://github.com/lianluo-esign/ferrogate/issues/44) |
+| Release supply-chain verification | Verify the shipped SBOM/cosign-signing/attestation pipeline end to end against a real CI-built image once self-hosted runners are back online; record the verification in the issue. | [#189](https://github.com/lianluo-esign/ferrogate/issues/189) |
 
 ## Next
 
@@ -118,6 +124,7 @@ These areas are implemented in the current open-source gateway:
 | Agent protocol ingress | Add A2A and broader agent protocol ingress governance while reusing auth, policy, approvals, billing, and observability surfaces. Current slice covers registered agent upstream control-plane storage plus discovery metadata. | [#48](https://github.com/lianluo-esign/ferrogate/issues/48) |
 | Canonical AI request model | Extend the internal AI request model for tools and multimodal inputs without leaking provider-specific request shapes into gateway core. | [#9](https://github.com/lianluo-esign/ferrogate/issues/9) |
 | Responses streaming | Normalize Responses API streaming events so client compatibility is predictable across providers. | [#10](https://github.com/lianluo-esign/ferrogate/issues/10) |
+| Wallet reservation primitive | Add a reserve/hold mechanic to the prepaid-credit wallet (`adjust_wallet_balance` is currently check-then-proceed with no hold) — required before any exact-amount, irreversible spend decision (e.g. agent-initiated x402 payments) can be gated safely under concurrency. Surfaced by the x402/AP2 spike, not yet filed as its own issue. | Backlog, see [#191](https://github.com/lianluo-esign/ferrogate/issues/191) |
 
 ## Later
 

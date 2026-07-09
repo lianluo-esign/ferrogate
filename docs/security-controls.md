@@ -124,6 +124,39 @@ licenses bans sources`, and `cargo audit`. CI runs this gate in strict mode
 fails the build rather than silently skipping —
 see [`.github/workflows/rust-quality.yml`](../.github/workflows/rust-quality.yml).
 
+Published container images (`.github/workflows/ci-image.yml` per-commit,
+`.github/workflows/package.yml` releases) are additionally covered by a
+shared `.github/actions/image-supply-chain` step: an SPDX SBOM
+(`anchore/sbom-action`), a keyless `cosign` signature over the image digest
+using GitHub Actions OIDC identity (no stored private key), and a GitHub
+build-provenance attestation (`actions/attest-build-provenance`) (issue
+#189). **Status: implemented and pushed, not yet verified end-to-end** — the
+self-hosted CI runners were offline at implementation time, so no real
+signed/attested image has been produced and verified yet; see
+[`docs/security/supply-chain.md`](security/supply-chain.md) for the
+real `cosign verify` / `gh attestation verify` commands an operator will run
+once a CI-built image exists, and issue #189 for the outstanding
+verification step.
+
+## Agent Sandbox / Capability Boundary
+
+Managed agent/tool execution is bounded by a three-layer model in
+`crates/ferrogate-runtime/src/`: `isolation.rs` (execution boundary — a
+multi-backend abstraction over Firecracker microVM, Kata Containers, gVisor,
+and rootless Docker), `capability_boundary.rs` (authorization boundary — ten
+`CapabilityAction` classes, evaluated independently of which isolation
+backend is in use), and `function_egress.rs` (fail-closed, per-tenant
+allowlist governance for gateway-brokered Supabase edge-function
+invocation). A red-team regression test proves this boundary denies a
+CVE-2025-53967-shaped escalation attempt (an MCP/agent tool call trying to
+reach a shell, filesystem, or network target outside its granted capability
+class) fail-closed, with an inspectable audit trail (issue #190). See
+[`docs/security/agent-sandbox-model.md`](security/agent-sandbox-model.md)
+for the full architecture writeup and its explicit "proven vs.
+architecturally present but untested" boundary — notably, authorization is
+class-level only today (e.g. granting `Filesystem` does not itself restrict
+to one path or to read-only access).
+
 ## Compliance Certifications
 
 FerroGate does not currently hold SOC 2, HIPAA, ISO 27001, or GDPR-specific
