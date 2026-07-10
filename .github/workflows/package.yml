@@ -8,24 +8,14 @@
 
 name: Publish FerroGate package
 
-# Package publishing is a release-gate workflow, not a per-commit CI step: it
-# triggers when a release tag (vYYYY.MM.DD, e.g. v2026.07.09) is pushed --
-# the version input below is left empty and the tag name (GITHUB_REF_NAME) is
-# used instead, per the fallback in "Prepare image metadata" -- or via manual
-# workflow_dispatch as an escape hatch to re-publish/re-verify a release
-# without re-tagging. Build and test locally first with
-# scripts/local-test-modules.sh; this workflow only publishes the image, it
-# does not itself run tests or depend on ci.yml (see ci.yml for that).
+# Package publishing is a release-gate workflow, not a per-commit CI step. It
+# triggers only when a GitHub Release is published; tag pushes and manual
+# dispatch do not publish packages. Build and test locally first with
+# `ferrogate-test`; this workflow only publishes the release image and does
+# not itself run tests or depend on ci.yml (see ci.yml for that).
 on:
-  push:
-    tags:
-      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Date-based container version tag, for example v2026.06.22"
-        required: true
-        default: "v2026.06.22"
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -44,6 +34,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Prepare image metadata
         id: image
@@ -51,10 +43,7 @@ jobs:
         run: |
           owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/ferrogate"
-          version="${{ github.event.inputs.version }}"
-          if [[ -z "$version" ]]; then
-            version="${GITHUB_REF_NAME}"
-          fi
+          version="${{ github.event.release.tag_name }}"
           if [[ ! "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
             echo "::error::version must match vYYYY.MM.DD, got '${version}'"
             exit 1

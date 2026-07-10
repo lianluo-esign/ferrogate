@@ -8,17 +8,14 @@ name: CI
 
 # CI runs on GitHub-hosted runners (moved off self-hosted archlinux runners,
 # which were unreliable/offline — see issue #189). This is a release-gate
-# workflow, not a per-commit CI check: it triggers only when a release tag
-# (vYYYY.MM.DD, e.g. v2026.07.09) is pushed, or via manual workflow_dispatch
-# for re-verifying an existing release (e.g. after a hotfix, without
-# re-tagging). Day-to-day development stays local: commit/push freely and
-# verify with `ferrogate-test` and scripts/local-test-modules.sh -- cloud
-# runner-minutes are reserved for actual release cuts.
+# workflow, not a per-commit CI check: it triggers only when a GitHub Release
+# is published. Tag pushes, pull requests, branch pushes, and manual dispatch
+# do not spend cloud runner-minutes. Day-to-day development stays local:
+# compile FerroGate and run `ferrogate-test` directly in the development
+# container.
 on:
-  push:
-    tags:
-      - 'v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
