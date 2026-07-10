@@ -11728,6 +11728,46 @@
         },
         "additionalProperties": false
       },
+      "GuardrailJsonConstraints": {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": ["object", "boolean", "null"],
+            "description": "JSON Schema compiled when the policy revision is activated."
+          },
+          "required_keys": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "description": "RFC 6901 JSON pointer."},
+            "default": []
+          },
+          "forbidden_keys": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "description": "RFC 6901 JSON pointer."},
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "GuardrailRequestConstraints": {
+        "type": "object",
+        "properties": {
+          "allowed_endpoints": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "enum": ["chat_completions", "responses"]},
+            "default": []
+          },
+          "allowed_models": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}, "default": []},
+          "forbidden_models": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}, "default": []},
+          "allowed_providers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}, "default": []},
+          "forbidden_providers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}, "default": []},
+          "metadata": {"oneOf": [{"$ref": "#/components/schemas/GuardrailJsonConstraints"}, {"type": "null"}]},
+          "tool_parameters": {"oneOf": [{"$ref": "#/components/schemas/GuardrailJsonConstraints"}, {"type": "null"}]}
+        },
+        "additionalProperties": false
+      },
       "GuardrailLocalDetector": {
         "type": "object",
         "required": ["kind"],
@@ -11735,12 +11775,28 @@
           "kind": {"type": "string", "const": "local"},
           "keywords": {"type": "array", "minItems": 1, "items": {"type": "string"}, "default": []},
           "regex": {"type": "array", "minItems": 1, "items": {"type": "string"}, "default": []},
-          "max_input_bytes": {"type": ["integer", "null"], "minimum": 1}
+          "max_input_bytes": {"type": ["integer", "null"], "minimum": 1},
+          "json": {"oneOf": [{"$ref": "#/components/schemas/GuardrailJsonConstraints"}, {"type": "null"}]},
+          "request": {"oneOf": [{"$ref": "#/components/schemas/GuardrailRequestConstraints"}, {"type": "null"}]},
+          "secret_patterns": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "enum": ["open_ai_api_key", "github_token", "aws_access_key_id"]},
+            "default": [],
+            "description": "Versioned high-confidence pattern set; requires fingerprint_secret_ref."
+          },
+          "fingerprint_secret_ref": {
+            "type": ["string", "null"],
+            "description": "Secret reference resolved at activation for HMAC-SHA256 finding fingerprints."
+          }
         },
         "anyOf": [
           {"required": ["keywords"]},
           {"required": ["regex"]},
-          {"required": ["max_input_bytes"]}
+          {"required": ["max_input_bytes"]},
+          {"required": ["json"]},
+          {"required": ["request"]},
+          {"required": ["secret_patterns", "fingerprint_secret_ref"]}
         ],
         "additionalProperties": false
       },

@@ -338,12 +338,12 @@ impl AppState {
                     policy_revision: policy.revision.revision,
                     check_id: None,
                     effect: GuardrailEffect::Deny,
-                    matched_text: String::new(),
                     segment_id: None,
                     byte_start: None,
                     byte_end: None,
-                    redaction_regex: None,
                     content_patches: Vec::new(),
+                    patch_envelope: None,
+                    patch_sources: Vec::new(),
                     code: "guardrail_streaming_unsupported".to_string(),
                     message: format!(
                         "guardrail policy '{}' does not allow streaming",
@@ -472,7 +472,15 @@ impl AppState {
             })
             .await;
             let candidate = (!effective_shadow)
-                .then(|| guardrail_enforcement(policy, &evaluations, aggregate, actions))
+                .then(|| {
+                    guardrail_enforcement(
+                        policy,
+                        &evaluations,
+                        aggregate,
+                        actions,
+                        context.envelope,
+                    )
+                })
                 .flatten();
             if let Some(candidate) = candidate.clone() {
                 merge_guardrail_enforcement(&mut enforcement, candidate);
@@ -686,12 +694,12 @@ impl AppState {
                 policy_revision: policy.revision.revision,
                 check_id: None,
                 effect: GuardrailEffect::Deny,
-                matched_text: String::new(),
                 segment_id: None,
                 byte_start: None,
                 byte_end: None,
-                redaction_regex: None,
                 content_patches: Vec::new(),
+                patch_envelope: None,
+                patch_sources: Vec::new(),
                 code: action
                     .code
                     .clone()
@@ -1123,11 +1131,9 @@ fn merge_finding_category_counts(
 struct GuardrailCheckEvaluation {
     check_id: String,
     outcome: CheckOutcome,
-    matched_text: String,
     segment_id: Option<String>,
     byte_start: Option<usize>,
     byte_end: Option<usize>,
-    redaction_regex: Option<Regex>,
     content_patches: Vec<ContentPatch>,
     detector_error: Option<DetectorError>,
     used_fallback: bool,
@@ -1161,58 +1167,52 @@ async fn evaluate_guardrail_check(
         return GuardrailCheckEvaluation::disabled(&check.id);
     }
     let started = Instant::now();
-    let mut evaluation = match &check.detector {
-        GuardrailDetectorRuntime::Local(detector) => {
-            local_guardrail_evaluation(&check.id, detector, &check.sources, context.envelope)
-        }
-        GuardrailDetectorRuntime::External(detector) => {
-            let detector_text = context.envelope.flattened_text();
-            let input = DetectorInput {
-                stage,
-                tenant: DetectorTenant {
-                    organization_id: context.tenant.organization_id.as_deref(),
-                    team_id: context.tenant.team_id.as_deref(),
-                    project_id: context.tenant.project_id.as_deref(),
-                    user_id: context.tenant.user_id.as_deref(),
-                    api_key_id: context.tenant.api_key_id.as_deref(),
-                },
-                model: context.model,
-                provider: context.provider,
-                text: &detector_text,
-                segments: &context.envelope.segments,
-            };
-            match detector.evaluate(&input, deadline).await {
-                Ok(result) => external_guardrail_evaluation(&check.id, result, context.envelope),
-                Err(error) => {
-                    if let Some(fallback) = &check.fallback_detector {
-                        let mut evaluation = local_guardrail_evaluation(
-                            &check.id,
-                            fallback,
-                            &check.sources,
-                            context.envelope,
-                        );
-                        evaluation.detector_error = Some(error);
-                        evaluation.used_fallback = true;
-                        evaluation
-                    } else {
-                        GuardrailCheckEvaluation {
-                            check_id: check.id.clone(),
-                            outcome: CheckOutcome::Error,
-                            matched_text: String::new(),
-                            segment_id: None,
-                            byte_start: None,
-                            byte_end: None,
-                            redaction_regex: None,
-                            content_patches: Vec::new(),
-                            detector_error: Some(error),
-                            used_fallback: false,
-                            detector_version: "unavailable".to_string(),
-                            latency_ms: 0,
-                            finding_category_counts: BTreeMap::new(),
-                            finding_count: 0,
+    let detector_text = context.envelope.flattened_text();
+    let input = DetectorInput {
+        protocol: context.envelope.protocol,
+        stage,
+        tenant: DetectorTenant {
+            organization_id: context.tenant.organization_id.as_deref(),
+            team_id: context.tenant.team_id.as_deref(),
+            project_id: context.tenant.project_id.as_deref(),
+            user_id: context.tenant.user_id.as_deref(),
+            api_key_id: context.tenant.api_key_id.as_deref(),
+        },
+        model: context.model,
+        provider: context.provider,
+        text: &detector_text,
+        segments: &context.envelope.segments,
+    };
+    let mut evaluation = match check.detector.evaluate(&input, deadline).await {
+        Ok(result) => match validate_content_patch_permissions(
+            context.envelope,
+            &check.sources,
+            &result.patches,
+        ) {
+            Ok(()) => external_guardrail_evaluation(&check.id, result, context.envelope),
+            Err(error) => GuardrailCheckEvaluation::error(&check.id, error),
+        },
+        Err(error) => {
+            if let Some(fallback) = &check.fallback_detector {
+                match fallback.evaluate(&input, deadline).await {
+                    Ok(result) => match validate_content_patch_permissions(
+                        context.envelope,
+                        &check.sources,
+                        &result.patches,
+                    ) {
+                        Ok(()) => {
+                            let mut evaluation =
+                                external_guardrail_evaluation(&check.id, result, context.envelope);
+                            evaluation.detector_error = Some(error);
+                            evaluation.used_fallback = true;
+                            evaluation
                         }
-                    }
+                        Err(error) => GuardrailCheckEvaluation::error(&check.id, error),
+                    },
+                    Err(_) => GuardrailCheckEvaluation::error(&check.id, error),
                 }
+            } else {
+                GuardrailCheckEvaluation::error(&check.id, error)
             }
         }
     };
@@ -1225,15 +1225,30 @@ impl GuardrailCheckEvaluation {
         Self {
             check_id: check_id.to_string(),
             outcome: CheckOutcome::Disabled,
-            matched_text: String::new(),
             segment_id: None,
             byte_start: None,
             byte_end: None,
-            redaction_regex: None,
             content_patches: Vec::new(),
             detector_error: None,
             used_fallback: false,
             detector_version: "disabled".to_string(),
+            latency_ms: 0,
+            finding_category_counts: BTreeMap::new(),
+            finding_count: 0,
+        }
+    }
+
+    fn error(check_id: &str, error: DetectorError) -> Self {
+        Self {
+            check_id: check_id.to_string(),
+            outcome: CheckOutcome::Error,
+            segment_id: None,
+            byte_start: None,
+            byte_end: None,
+            content_patches: Vec::new(),
+            detector_error: Some(error),
+            used_fallback: false,
+            detector_version: "unavailable".to_string(),
             latency_ms: 0,
             finding_category_counts: BTreeMap::new(),
             finding_count: 0,
@@ -1265,11 +1280,9 @@ fn external_guardrail_evaluation(
             DetectorVerdict::Pass => CheckOutcome::Pass,
             DetectorVerdict::Fail => CheckOutcome::Fail,
         },
-        matched_text: result.first_matched_text().unwrap_or_default().to_string(),
         segment_id,
         byte_start: finding.and_then(|finding| finding.byte_start),
         byte_end: finding.and_then(|finding| finding.byte_end),
-        redaction_regex: None,
         content_patches: result.patches,
         detector_error: None,
         used_fallback: false,
@@ -1280,120 +1293,24 @@ fn external_guardrail_evaluation(
     }
 }
 
-fn local_guardrail_evaluation(
-    check_id: &str,
-    detector: &LocalGuardrailDetectorRuntime,
-    sources: &[ferrogate_guardrails::ContentSource],
-    envelope: &ferrogate_guardrails::GuardrailEnvelope,
-) -> GuardrailCheckEvaluation {
-    let matched = if let Some(max_input_bytes) = detector.max_input_bytes {
-        let selected_bytes = envelope
-            .segments
-            .iter()
-            .filter(|segment| sources.contains(&segment.source))
-            .map(|segment| segment.text.len())
-            .sum::<usize>();
-        if selected_bytes > max_input_bytes {
-            Some(("length".to_string(), None, None, None, None))
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-    .or_else(|| {
-        envelope
-            .segments
-            .iter()
-            .filter(|segment| sources.contains(&segment.source))
-            .find_map(|segment| {
-                detector.keywords.iter().find_map(|keyword| {
-                    segment.text.find(keyword.as_str()).map(|start| {
-                        (
-                            keyword.clone(),
-                            None,
-                            Some(segment.segment_id.clone()),
-                            Some(start),
-                            Some(start + keyword.len()),
-                        )
-                    })
-                })
-            })
-    })
-    .or_else(|| {
-        envelope
-            .segments
-            .iter()
-            .filter(|segment| sources.contains(&segment.source))
-            .find_map(|segment| {
-                detector.regex.iter().find_map(|regex| {
-                    regex.find(&segment.text).map(|matched| {
-                        (
-                            matched.as_str().to_string(),
-                            Some(regex.clone()),
-                            Some(segment.segment_id.clone()),
-                            Some(matched.start()),
-                            Some(matched.end()),
-                        )
-                    })
-                })
-            })
-    });
-    let category = matched.as_ref().map(|matched| {
-        if matched.1.is_some() {
-            "regex"
-        } else if matched.2.is_some() {
-            "keyword"
-        } else {
-            "input_size"
-        }
-    });
-    let finding_category_counts = category
-        .map(|category| BTreeMap::from([(category.to_string(), 1)]))
-        .unwrap_or_default();
-    GuardrailCheckEvaluation {
-        check_id: check_id.to_string(),
-        outcome: if matched.is_some() {
-            CheckOutcome::Fail
-        } else {
-            CheckOutcome::Pass
-        },
-        matched_text: matched
-            .as_ref()
-            .map(|matched| matched.0.clone())
-            .unwrap_or_default(),
-        segment_id: matched.as_ref().and_then(|matched| matched.2.clone()),
-        byte_start: matched.as_ref().and_then(|matched| matched.3),
-        byte_end: matched.as_ref().and_then(|matched| matched.4),
-        redaction_regex: matched.and_then(|matched| matched.1),
-        content_patches: Vec::new(),
-        detector_error: None,
-        used_fallback: false,
-        detector_version: "ferrogate-local-v1".to_string(),
-        latency_ms: 0,
-        finding_category_counts,
-        finding_count: u64::from(category.is_some()),
-    }
-}
-
 fn sanitized_guardrail_evidence_token(value: &str, fallback: &str) -> String {
     let value = value.trim();
     if value.is_empty()
         || value.len() > 64
         || !value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
     {
         return fallback.to_string();
     }
     value.to_string()
 }
-
 fn guardrail_enforcement(
     policy: &GuardrailPolicyRuntime,
     evaluations: &[GuardrailCheckEvaluation],
     aggregate: AggregateOutcome,
     actions: &[PolicyAction],
+    envelope: &GuardrailEnvelope,
 ) -> Option<GuardrailMatch> {
     let evidence = match aggregate {
         AggregateOutcome::Fail => evaluations
@@ -1417,15 +1334,21 @@ fn guardrail_enforcement(
             policy_revision: policy.revision.revision,
             check_id: evidence.map(|evaluation| evaluation.check_id.clone()),
             effect,
-            matched_text: evidence
-                .map(|evaluation| evaluation.matched_text.clone())
-                .unwrap_or_default(),
             segment_id: evidence.and_then(|evaluation| evaluation.segment_id.clone()),
             byte_start: evidence.and_then(|evaluation| evaluation.byte_start),
             byte_end: evidence.and_then(|evaluation| evaluation.byte_end),
-            redaction_regex: evidence.and_then(|evaluation| evaluation.redaction_regex.clone()),
             content_patches: evidence
                 .map(|evaluation| evaluation.content_patches.clone())
+                .unwrap_or_default(),
+            patch_envelope: Some(envelope.clone()),
+            patch_sources: evidence
+                .and_then(|evaluation| {
+                    policy
+                        .checks
+                        .iter()
+                        .find(|check| check.id == evaluation.check_id)
+                })
+                .map(|check| check.sources.clone())
                 .unwrap_or_default(),
             code: action
                 .code
@@ -1436,10 +1359,7 @@ fn guardrail_enforcement(
                 .clone()
                 .unwrap_or_else(|| "request blocked by guardrail policy".to_string()),
         };
-        if candidate.effect == GuardrailEffect::Redact
-            && candidate.content_patches.is_empty()
-            && candidate.matched_text.is_empty()
-        {
+        if candidate.effect == GuardrailEffect::Redact && candidate.content_patches.is_empty() {
             candidate.effect = GuardrailEffect::Deny;
             candidate.code = "guardrail_invalid_redaction".to_string();
             candidate.message = format!(
@@ -1474,12 +1394,12 @@ fn guardrail_evidence_unavailable_match(policy: &GuardrailPolicyRuntime) -> Guar
         policy_revision: policy.revision.revision,
         check_id: None,
         effect: GuardrailEffect::Deny,
-        matched_text: String::new(),
         segment_id: None,
         byte_start: None,
         byte_end: None,
-        redaction_regex: None,
         content_patches: Vec::new(),
+        patch_envelope: None,
+        patch_sources: Vec::new(),
         code: "guardrail_evidence_unavailable".to_string(),
         message: "guardrail evidence capacity is unavailable; request denied".to_string(),
     }
@@ -1513,13 +1433,27 @@ mod tests {
             crate::config::GuardrailStage::Request => DetectorStage::Request,
             crate::config::GuardrailStage::Response => DetectorStage::Response,
         };
-        let envelope = ferrogate_guardrails::GuardrailEnvelope::from_text(
-            ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
-            detector_stage,
-            ferrogate_guardrails::ContentSource::User,
-            "test.body",
-            body,
-        );
+        let envelope = match stage {
+            crate::config::GuardrailStage::Request => {
+                ferrogate_guardrails::GuardrailEnvelope::from_text(
+                    ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+                    detector_stage,
+                    ferrogate_guardrails::ContentSource::User,
+                    "messages[0].content",
+                    body,
+                )
+            }
+            crate::config::GuardrailStage::Response => {
+                let response = serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": body}}]
+                });
+                ferrogate_guardrails::normalize_response(
+                    ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+                    &serde_json::to_vec(&response).expect("response fixture"),
+                    false,
+                )
+            }
+        };
         tokio::runtime::Runtime::new()
             .expect("test runtime")
             .block_on(state.match_guardrail(
@@ -1659,12 +1593,12 @@ mod tests {
         assert_eq!(evaluations[0].verdict, "fail");
         assert_eq!(evaluations[0].action, "block");
         assert_eq!(evaluations[0].enforcement_status, "enforced");
-        assert_eq!(evaluations[0].finding_category_counts["keyword"], 1);
+        assert_eq!(evaluations[0].finding_category_counts["contains"], 1);
         assert!(evaluations[0].input_fingerprint.starts_with("hmac-sha256:"));
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].verdict, "fail");
         assert_eq!(checks[0].detector_id, "ferrogate.local");
-        assert_eq!(checks[0].detector_version, "ferrogate-local-v1");
+        assert_eq!(checks[0].detector_version, "deterministic/1");
         let encoded = serde_json::to_string(&(evaluations, checks)).unwrap();
         assert!(!encoded.contains("raw-secret-must-not-persist"));
         assert!(!encoded.contains("matched_text"));
@@ -1749,6 +1683,46 @@ mod tests {
             .unwrap();
         assert_eq!(views[0].status, PolicyRevisionStatus::Active);
         assert_eq!(views[1].status, PolicyRevisionStatus::Archived);
+    }
+
+    #[test]
+    fn structured_policy_activation_compiles_json_schema_into_live_runtime() {
+        let shared = SharedAppState::with_source_path(Config::default(), None);
+        let mut revision = durable_guardrail_revision(
+            "structured-policy",
+            1,
+            "unused-legacy-keyword",
+            PolicyScopeSelector::default(),
+        );
+        revision.checks[0].sources = vec![ferrogate_guardrails::ContentSource::Metadata];
+        revision.checks[0].detector = serde_json::from_value(serde_json::json!({
+            "kind": "local",
+            "json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["safe"],
+                    "properties": {"safe": {"type": "boolean"}}
+                },
+                "required_keys": ["/safe"],
+                "forbidden_keys": ["/credential"]
+            }
+        }))
+        .unwrap();
+        shared
+            .create_guardrail_policy_revision(revision)
+            .expect("create structured revision");
+        shared
+            .activate_guardrail_policy_revision("structured-policy", 1, "test-admin", 10, false)
+            .expect("compile and activate structured revision");
+        assert_eq!(
+            shared
+                .current()
+                .guardrail_policy_binding("structured-policy")
+                .unwrap()
+                .unwrap()
+                .active_revision,
+            Some(1)
+        );
     }
 
     #[test]
@@ -2047,16 +2021,41 @@ mod tests {
                 ferrogate_guardrails::ContentSource::Metadata,
             ),
         ] {
-            let evaluation = local_guardrail_evaluation(
-                "normalized",
-                &LocalGuardrailDetectorRuntime {
-                    keywords: vec![keyword.to_string()],
-                    regex: Vec::new(),
-                    max_input_bytes: None,
-                },
-                &[expected_source],
-                &envelope,
-            );
+            let detector = DeterministicDetector::new(DeterministicDetectorConfig {
+                id: "normalized".to_string(),
+                supported_sources: vec![expected_source],
+                keywords: vec![keyword.to_string()],
+                regex: Vec::new(),
+                max_input_bytes: None,
+                json: None,
+                request: None,
+                secret_patterns: Vec::new(),
+                fingerprint_key: None,
+            })
+            .unwrap();
+            let text = envelope.flattened_text();
+            let result = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(detector.evaluate(
+                    &DetectorInput {
+                        protocol: envelope.protocol,
+                        stage: envelope.stage,
+                        tenant: DetectorTenant {
+                            organization_id: None,
+                            team_id: None,
+                            project_id: None,
+                            user_id: None,
+                            api_key_id: None,
+                        },
+                        model: None,
+                        provider: None,
+                        text: &text,
+                        segments: &envelope.segments,
+                    },
+                    Instant::now() + Duration::from_secs(1),
+                ))
+                .unwrap();
+            let evaluation = external_guardrail_evaluation("normalized", result, &envelope);
             assert_eq!(evaluation.outcome, CheckOutcome::Fail, "{keyword}");
             let segment = envelope
                 .segments
@@ -2073,16 +2072,41 @@ mod tests {
             );
         }
 
-        let excluded = local_guardrail_evaluation(
-            "normalized",
-            &LocalGuardrailDetectorRuntime {
-                keywords: vec!["developer-secret".to_string()],
-                regex: Vec::new(),
-                max_input_bytes: None,
-            },
-            &[ferrogate_guardrails::ContentSource::User],
-            &envelope,
-        );
+        let excluded_detector = DeterministicDetector::new(DeterministicDetectorConfig {
+            id: "normalized".to_string(),
+            supported_sources: vec![ferrogate_guardrails::ContentSource::User],
+            keywords: vec!["developer-secret".to_string()],
+            regex: Vec::new(),
+            max_input_bytes: None,
+            json: None,
+            request: None,
+            secret_patterns: Vec::new(),
+            fingerprint_key: None,
+        })
+        .unwrap();
+        let text = envelope.flattened_text();
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(excluded_detector.evaluate(
+                &DetectorInput {
+                    protocol: envelope.protocol,
+                    stage: envelope.stage,
+                    tenant: DetectorTenant {
+                        organization_id: None,
+                        team_id: None,
+                        project_id: None,
+                        user_id: None,
+                        api_key_id: None,
+                    },
+                    model: None,
+                    provider: None,
+                    text: &text,
+                    segments: &envelope.segments,
+                },
+                Instant::now() + Duration::from_secs(1),
+            ))
+            .unwrap();
+        let excluded = external_guardrail_evaluation("normalized", result, &envelope);
         assert_eq!(excluded.outcome, CheckOutcome::Pass);
     }
 
@@ -2165,7 +2189,6 @@ mod tests {
         assert_eq!(matched.rule_id, "block-secret");
         assert_eq!(matched.rule_name, "Block secret");
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
-        assert_eq!(matched.matched_text, "secret");
         assert_eq!(matched.code, "guardrail_blocked");
         assert_eq!(matched.message, "blocked by guardrail");
     }
@@ -2388,7 +2411,7 @@ mod tests {
     /// that reads a single `Content-Length`-bounded request, records its
     /// JSON body, and replies with `response_body`.
     fn spawn_guardrail_provider_mock(
-        response_body: &'static str,
+        response_body: impl Into<String>,
     ) -> (String, Arc<Mutex<Option<serde_json::Value>>>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -2397,6 +2420,7 @@ mod tests {
         let endpoint = format!("http://{}/check", listener.local_addr().unwrap());
         let captured = Arc::new(Mutex::new(None));
         let server_captured = Arc::clone(&captured);
+        let response_body = response_body.into();
 
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2496,10 +2520,9 @@ mod tests {
 
         assert_eq!(matched.rule_id, "pii-detector");
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
-        assert_eq!(matched.matched_text, "john@example.com");
         assert_eq!(
             matched.redact_text("my email is john@example.com"),
-            "my email is [REDACTED]"
+            "[REDACTED]"
         );
 
         let request = captured.lock().unwrap().take().expect("request captured");
@@ -2667,14 +2690,34 @@ mod tests {
         )
         .expect("local fallback detector should match");
         assert_eq!(matched.code, "guardrail_pii_detected");
-        assert_eq!(matched.matched_text, "secret");
         assert_eq!(state.audit_events()[0].outcome, "fallback");
     }
 
     #[test]
     fn custom_http_provider_applies_typed_redaction_patches() {
+        let content = "email john@example.com";
+        let fingerprint = ferrogate_guardrails::content_fingerprint(content);
         let (endpoint, _) = spawn_guardrail_provider_mock(
-            r#"{"verdict":"fail","findings":[{"category":"pii","severity":"high","byte_start":6,"byte_end":22}],"patches":[{"byte_start":6,"byte_end":22,"replacement":"[EMAIL]"}],"detector_version":"test-1"}"#,
+            serde_json::json!({
+                "verdict": "fail",
+                "findings": [{
+                    "category": "pii",
+                    "severity": "high",
+                    "segment_id": "chat:0",
+                    "byte_start": 6,
+                    "byte_end": 22
+                }],
+                "patches": [{
+                    "segment_id": "chat:0",
+                    "expected_fingerprint": fingerprint,
+                    "protocol_location": "choices[0].message.content",
+                    "byte_start": 6,
+                    "byte_end": 22,
+                    "replacement": "[EMAIL]"
+                }],
+                "detector_version": "test-1"
+            })
+            .to_string(),
         );
         let mut rule = custom_http_guardrail_rule(endpoint);
         rule.stage = crate::config::GuardrailStage::Response;
@@ -2692,13 +2735,21 @@ mod tests {
             &ferrogate_core::TenantContext::default(),
             Some("fast-chat"),
             Some("openai"),
-            "email john@example.com",
+            content,
         )
         .expect("typed patch detector should match");
+        let response = serde_json::json!({
+            "model": "must-not-change",
+            "choices": [{"message": {"role": "assistant", "content": content}}]
+        })
+        .to_string();
+        let redacted: serde_json::Value =
+            serde_json::from_str(&matched.redact_text(&response)).unwrap();
         assert_eq!(
-            matched.redact_text("email john@example.com"),
+            redacted["choices"][0]["message"]["content"],
             "email [EMAIL]"
         );
+        assert_eq!(redacted["model"], "must-not-change");
     }
 
     #[test]
@@ -2772,11 +2823,21 @@ mod tests {
         .expect("regex guardrail should match");
 
         assert_eq!(matched.rule_id, "redact-token");
-        assert_eq!(matched.matched_text, "token-123");
+        let response = serde_json::json!({
+            "model": "must-not-change",
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "provider returned token-123 and token-456"
+            }}]
+        })
+        .to_string();
+        let redacted: serde_json::Value =
+            serde_json::from_str(&matched.redact_text(&response)).unwrap();
         assert_eq!(
-            matched.redact_text("provider returned token-123 and token-456"),
+            redacted["choices"][0]["message"]["content"],
             "provider returned [REDACTED] and [REDACTED]"
         );
+        assert_eq!(redacted["model"], "must-not-change");
     }
 
     #[test]
@@ -2819,7 +2880,6 @@ mod tests {
         .expect("length guardrail should match");
 
         assert_eq!(matched.rule_id, "max-input");
-        assert_eq!(matched.matched_text, "length");
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
     }
 

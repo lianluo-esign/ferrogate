@@ -131,6 +131,7 @@ fn detector_config(endpoint: String) -> CustomHttpDetectorConfig {
 
 fn input<'a>(text: &'a str) -> DetectorInput<'a> {
     DetectorInput {
+        protocol: GuardrailProtocol::ChatCompletions,
         stage: DetectorStage::Request,
         tenant: DetectorTenant {
             organization_id: Some("org-demo"),
@@ -263,47 +264,61 @@ fn rejects_findings_for_unknown_or_invalid_segment_coordinates() {
 
 #[test]
 fn applies_only_valid_non_overlapping_utf8_patches() {
-    let text = "secret: José";
+    let envelope = normalize_response(
+        GuardrailProtocol::ChatCompletions,
+        serde_json::to_vec(&serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "secret: José"}}]
+        }))
+        .unwrap()
+        .as_slice(),
+        false,
+    );
+    let response = serde_json::json!({
+        "choices": [{"message": {"role": "assistant", "content": "secret: José"}}]
+    });
+    let segment = &envelope.segments[0];
+    let patch = |byte_start, byte_end, replacement: &str| ContentPatch {
+        segment_id: segment.segment_id.clone(),
+        expected_fingerprint: segment.fingerprint.clone(),
+        protocol_location: segment.protocol_location.clone(),
+        byte_start,
+        byte_end,
+        replacement: replacement.to_string(),
+    };
     let patches = vec![
-        ContentPatch {
-            byte_start: 0,
-            byte_end: 6,
-            replacement: "[REDACTED]".to_string(),
-        },
-        ContentPatch {
-            byte_start: 8,
-            byte_end: text.len(),
-            replacement: "[NAME]".to_string(),
-        },
+        patch(0, 6, "[REDACTED]"),
+        patch(8, "secret: José".len(), "[NAME]"),
     ];
     assert_eq!(
-        apply_content_patches(text, &patches).unwrap(),
+        apply_content_patches_to_document(
+            &response,
+            &envelope,
+            &[ContentSource::Assistant],
+            &patches,
+        )
+        .unwrap()["choices"][0]["message"]["content"],
         "[REDACTED]: [NAME]"
     );
 
-    let invalid = vec![ContentPatch {
-        byte_start: 12,
-        byte_end: 13,
-        replacement: "x".to_string(),
-    }];
+    let invalid = vec![patch(12, 13, "x")];
     assert_eq!(
-        apply_content_patches(text, &invalid).unwrap_err().kind,
-        DetectorErrorKind::InvalidResponse
+        validate_content_patches_for_segments(&envelope.segments, &invalid)
+            .unwrap_err()
+            .kind,
+        DetectorErrorKind::InvalidPatch
     );
 
-    let overlapping = vec![
-        ContentPatch {
-            byte_start: 0,
-            byte_end: 6,
-            replacement: "x".to_string(),
-        },
-        ContentPatch {
-            byte_start: 5,
-            byte_end: 7,
-            replacement: "y".to_string(),
-        },
-    ];
-    assert!(validate_content_patches(text, &overlapping).is_err());
+    let overlapping = vec![patch(0, 6, "x"), patch(5, 7, "y")];
+    assert!(validate_content_patches_for_segments(&envelope.segments, &overlapping).is_err());
+
+    let mut stale = patch(0, 6, "x");
+    stale.expected_fingerprint = "sha256:stale".to_string();
+    assert_eq!(
+        validate_content_patches_for_segments(&envelope.segments, &[stale])
+            .unwrap_err()
+            .kind,
+        DetectorErrorKind::StalePatch
+    );
 }
 
 #[test]

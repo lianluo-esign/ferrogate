@@ -9,9 +9,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-use crate::DetectorStage;
+use crate::{ContentPatch, DetectorError, DetectorErrorKind, DetectorStage};
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardrailProtocol {
     ChatCompletions,
@@ -86,6 +86,10 @@ impl ContentSegment {
             text,
         }
     }
+}
+
+pub fn content_fingerprint(text: &str) -> String {
+    fingerprint(text)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -364,7 +368,12 @@ fn extract_content(
                 match part_type {
                     "text" | "input_text" | "output_text" => {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            builder.push(source, part_location, SegmentContentType::Text, text);
+                            builder.push(
+                                source,
+                                format!("{part_location}.text"),
+                                SegmentContentType::Text,
+                                text,
+                            );
                         }
                     }
                     "input_file" | "file" => {
@@ -373,14 +382,19 @@ fn extract_content(
                             .and_then(Value::as_str)
                             .unwrap_or_default();
                         if media_type.starts_with("text/") {
-                            if let Some(text) = part
+                            if let Some((field, text)) = part
                                 .get("text")
-                                .or_else(|| part.get("file_data"))
                                 .and_then(Value::as_str)
+                                .map(|text| ("text", text))
+                                .or_else(|| {
+                                    part.get("file_data")
+                                        .and_then(Value::as_str)
+                                        .map(|text| ("file_data", text))
+                                })
                             {
                                 builder.push(
                                     ContentSource::TextAttachment,
-                                    part_location,
+                                    format!("{part_location}.{field}"),
                                     SegmentContentType::TextAttachment,
                                     text,
                                 );
@@ -597,6 +611,202 @@ fn fingerprint(text: &str) -> String {
         encoded.push_str(&format!("{byte:02x}"));
     }
     format!("sha256:{encoded}")
+}
+
+/// Validate patches against the detector-visible segment identity. This is
+/// deliberately independent of the request document so custom detector
+/// responses can be rejected before the gateway attempts a transformation.
+pub fn validate_content_patches_for_segments(
+    segments: &[ContentSegment],
+    patches: &[ContentPatch],
+) -> Result<(), DetectorError> {
+    let mut ordered = patches.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|patch| (patch.segment_id.as_str(), patch.byte_start, patch.byte_end));
+    let mut previous: Option<(&str, usize)> = None;
+    for patch in ordered {
+        let segment = segments
+            .iter()
+            .find(|segment| segment.segment_id == patch.segment_id)
+            .ok_or_else(|| patch_error("guardrail patch references an unknown segment"))?;
+        if patch.protocol_location != segment.protocol_location {
+            return Err(patch_error(
+                "guardrail patch protocol path does not match its segment",
+            ));
+        }
+        if patch.expected_fingerprint != segment.fingerprint {
+            return Err(DetectorError::new(
+                DetectorErrorKind::StalePatch,
+                "guardrail patch fingerprint is stale",
+            ));
+        }
+        if patch.byte_start > patch.byte_end
+            || patch.byte_end > segment.text.len()
+            || !segment.text.is_char_boundary(patch.byte_start)
+            || !segment.text.is_char_boundary(patch.byte_end)
+            || previous.is_some_and(|(id, end)| id == patch.segment_id && patch.byte_start < end)
+        {
+            return Err(patch_error(
+                "guardrail patch has an invalid, non-UTF-8, or overlapping range",
+            ));
+        }
+        previous = Some((&patch.segment_id, patch.byte_end));
+    }
+    Ok(())
+}
+
+/// Apply patches only to exact text-bearing protocol paths selected by the
+/// detector. JSON-valued segments, metadata, tool declarations/arguments, and
+/// unknown sources are immutable because byte replacement inside serialized
+/// JSON can alter credentials, tool allowlists, or routing fields.
+pub fn apply_content_patches_to_document(
+    document: &Value,
+    envelope: &GuardrailEnvelope,
+    declared_sources: &[ContentSource],
+    patches: &[ContentPatch],
+) -> Result<Value, DetectorError> {
+    validate_content_patches_for_segments(&envelope.segments, patches)?;
+    validate_content_patch_permissions(envelope, declared_sources, patches)?;
+    let mut output = document.clone();
+    let mut grouped = BTreeMap::<String, Vec<&ContentPatch>>::new();
+    for patch in patches {
+        let segment = envelope
+            .segments
+            .iter()
+            .find(|segment| segment.segment_id == patch.segment_id)
+            .expect("patch segment was validated");
+        grouped
+            .entry(segment.protocol_location.clone())
+            .or_default()
+            .push(patch);
+    }
+    for (path, mut path_patches) in grouped {
+        let target = value_at_protocol_path_mut(&mut output, &path).ok_or_else(|| {
+            DetectorError::new(
+                DetectorErrorKind::StalePatch,
+                "guardrail patch protocol path no longer exists",
+            )
+        })?;
+        let text = target.as_str().ok_or_else(|| {
+            DetectorError::new(
+                DetectorErrorKind::ProtectedPath,
+                "guardrail patch target is not an exact text field",
+            )
+        })?;
+        if path_patches
+            .first()
+            .is_some_and(|patch| content_fingerprint(text) != patch.expected_fingerprint)
+        {
+            return Err(DetectorError::new(
+                DetectorErrorKind::StalePatch,
+                "guardrail patch target changed after detector evaluation",
+            ));
+        }
+        let mut replaced = text.to_string();
+        path_patches.sort_by_key(|patch| (patch.byte_start, patch.byte_end));
+        for patch in path_patches.into_iter().rev() {
+            replaced.replace_range(patch.byte_start..patch.byte_end, &patch.replacement);
+        }
+        *target = Value::String(replaced);
+    }
+    Ok(output)
+}
+
+pub fn validate_content_patch_permissions(
+    envelope: &GuardrailEnvelope,
+    declared_sources: &[ContentSource],
+    patches: &[ContentPatch],
+) -> Result<(), DetectorError> {
+    validate_content_patches_for_segments(&envelope.segments, patches)?;
+    for patch in patches {
+        let segment = envelope
+            .segments
+            .iter()
+            .find(|segment| segment.segment_id == patch.segment_id)
+            .expect("patch segment was validated");
+        if !declared_sources.contains(&segment.source)
+            || !matches!(
+                segment.source,
+                ContentSource::System
+                    | ContentSource::Developer
+                    | ContentSource::User
+                    | ContentSource::Assistant
+                    | ContentSource::ToolResult
+                    | ContentSource::TextAttachment
+            )
+            || !matches!(
+                segment.content_type,
+                SegmentContentType::Text | SegmentContentType::TextAttachment
+            )
+        {
+            return Err(DetectorError::new(
+                DetectorErrorKind::ProtectedPath,
+                "guardrail patch targets a protected content path",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn patch_error(message: &'static str) -> DetectorError {
+    DetectorError::new(DetectorErrorKind::InvalidPatch, message)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathToken {
+    Field(String),
+    Index(usize),
+}
+
+fn value_at_protocol_path_mut<'a>(document: &'a mut Value, path: &str) -> Option<&'a mut Value> {
+    let tokens = parse_protocol_path(path)?;
+    let mut current = document;
+    for token in tokens {
+        current = match token {
+            PathToken::Field(field) => current.as_object_mut()?.get_mut(&field)?,
+            PathToken::Index(index) => current.as_array_mut()?.get_mut(index)?,
+        };
+    }
+    Some(current)
+}
+
+fn parse_protocol_path(path: &str) -> Option<Vec<PathToken>> {
+    if path.is_empty() || path.starts_with('.') || path.contains("..") {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    let mut tokens = Vec::new();
+    while index < bytes.len() {
+        let start = index;
+        while index < bytes.len() && bytes[index] != b'.' && bytes[index] != b'[' {
+            index += 1;
+        }
+        if index > start {
+            tokens.push(PathToken::Field(path[start..index].to_string()));
+        }
+        while index < bytes.len() && bytes[index] == b'[' {
+            index += 1;
+            let number_start = index;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+            if number_start == index || bytes.get(index) != Some(&b']') {
+                return None;
+            }
+            tokens.push(PathToken::Index(path[number_start..index].parse().ok()?));
+            index += 1;
+        }
+        if index < bytes.len() {
+            if bytes[index] != b'.' {
+                return None;
+            }
+            index += 1;
+            if index == bytes.len() {
+                return None;
+            }
+        }
+    }
+    (!tokens.is_empty()).then_some(tokens)
 }
 
 #[cfg(test)]

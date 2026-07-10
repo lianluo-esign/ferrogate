@@ -35,6 +35,8 @@ mod policy;
 pub use policy::*;
 mod envelope;
 pub use envelope::*;
+mod deterministic;
+pub use deterministic::*;
 
 const CONTRACT_VERSION: u32 = 1;
 pub const MAX_DETECTOR_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,6 +59,7 @@ pub struct DetectorTenant<'a> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectorInput<'a> {
+    pub protocol: GuardrailProtocol,
     pub stage: DetectorStage,
     pub tenant: DetectorTenant<'a>,
     pub model: Option<&'a str>,
@@ -111,6 +114,10 @@ pub struct Finding {
     pub byte_end: Option<usize>,
     #[serde(default)]
     pub segment_id: Option<String>,
+    /// Keyed, non-reversible identity of the matched value. The cleartext is
+    /// never required for enforcement or durable evidence.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
     /// Kept only in the in-memory decision path for backward-compatible
     /// redaction. Callers must never persist this field as evidence.
     #[serde(default)]
@@ -121,6 +128,9 @@ pub struct Finding {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ContentPatch {
+    pub segment_id: String,
+    pub expected_fingerprint: String,
+    pub protocol_location: String,
     pub byte_start: usize,
     pub byte_end: usize,
     pub replacement: String,
@@ -155,6 +165,9 @@ pub enum DetectorErrorKind {
     PayloadTooLarge,
     CircuitOpen,
     InvalidConfiguration,
+    InvalidPatch,
+    StalePatch,
+    ProtectedPath,
     Internal,
 }
 
@@ -169,6 +182,9 @@ impl DetectorErrorKind {
             Self::PayloadTooLarge => "payload_too_large",
             Self::CircuitOpen => "circuit_open",
             Self::InvalidConfiguration => "invalid_configuration",
+            Self::InvalidPatch => "invalid_patch",
+            Self::StalePatch => "stale_patch",
+            Self::ProtectedPath => "protected_path",
             Self::Internal => "internal",
         }
     }
@@ -253,6 +269,10 @@ impl DetectorSecret {
 
     fn expose(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
     }
 }
 
@@ -552,6 +572,7 @@ impl GuardrailDetector for CustomHttpDetector {
 
         let request = DetectorRequest {
             contract_version: CONTRACT_VERSION,
+            protocol: input.protocol,
             stage: input.stage,
             tenant: input.tenant.clone(),
             model: input.model,
@@ -650,6 +671,7 @@ impl GuardrailDetector for CustomHttpDetector {
 #[derive(Debug, Serialize)]
 struct DetectorRequest<'a> {
     contract_version: u32,
+    protocol: GuardrailProtocol,
     stage: DetectorStage,
     tenant: DetectorTenant<'a>,
     model: Option<&'a str>,
@@ -717,6 +739,7 @@ fn parse_detector_response(bytes: &[u8]) -> Result<DetectorResult, DetectorError
                 byte_start: None,
                 byte_end: None,
                 segment_id: None,
+                fingerprint: None,
                 matched_text: Some(matched_text),
                 attributes: Map::new(),
             },
@@ -732,33 +755,12 @@ fn parse_detector_response(bytes: &[u8]) -> Result<DetectorResult, DetectorError
     })
 }
 
-pub fn validate_content_patches(text: &str, patches: &[ContentPatch]) -> Result<(), DetectorError> {
-    let mut ordered = patches.to_vec();
-    ordered.sort_by_key(|patch| (patch.byte_start, patch.byte_end));
-    let mut previous_end = 0;
-    for patch in &ordered {
-        if patch.byte_start > patch.byte_end
-            || patch.byte_end > text.len()
-            || !text.is_char_boundary(patch.byte_start)
-            || !text.is_char_boundary(patch.byte_end)
-            || patch.byte_start < previous_end
-        {
-            return Err(DetectorError::new(
-                DetectorErrorKind::InvalidResponse,
-                "guardrail detector returned an invalid or overlapping content patch",
-            ));
-        }
-        previous_end = patch.byte_end;
-    }
-    Ok(())
-}
-
 fn validate_detector_result(
     text: &str,
     segments: &[ContentSegment],
     result: &DetectorResult,
 ) -> Result<(), DetectorError> {
-    validate_content_patches(text, &result.patches)?;
+    validate_content_patches_for_segments(segments, &result.patches)?;
     for finding in &result.findings {
         let coordinate_text = match finding.segment_id.as_deref() {
             Some(segment_id) => segments
@@ -789,20 +791,6 @@ fn validate_detector_result(
         }
     }
     Ok(())
-}
-
-pub fn apply_content_patches(
-    text: &str,
-    patches: &[ContentPatch],
-) -> Result<String, DetectorError> {
-    validate_content_patches(text, patches)?;
-    let mut output = text.to_string();
-    let mut ordered = patches.to_vec();
-    ordered.sort_by_key(|patch| (patch.byte_start, patch.byte_end));
-    for patch in ordered.iter().rev() {
-        output.replace_range(patch.byte_start..patch.byte_end, &patch.replacement);
-    }
-    Ok(output)
 }
 
 fn validate_config(config: &CustomHttpDetectorConfig) -> Result<(), DetectorError> {
@@ -989,5 +977,7 @@ fn is_disallowed_v6(ip: Ipv6Addr) -> bool {
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
+#[cfg(test)]
+mod deterministic_test;
 #[cfg(test)]
 mod lib_test;

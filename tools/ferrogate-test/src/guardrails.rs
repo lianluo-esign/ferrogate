@@ -32,11 +32,13 @@ use std::{
 
 const CLIENT_AUTH: &str = "Authorization: Bearer guardrail-client-secret";
 const DYNAMIC_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-dynamic-client-secret";
+const STRUCTURED_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-structured-client-secret";
+const REDACT_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-redact-client-secret";
+const PATCH_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-patch-client-secret";
 const BUFFER_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-buffer-client-secret";
 const SHADOW_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-shadow-client-secret";
 const REJECT_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-reject-client-secret";
 const UNGUARDED_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-unguarded-client-secret";
-const REDACT_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-redact-client-secret";
 const ADMIN_AUTH: &str = "Authorization: Bearer guardrail-admin-secret";
 const JSON_CONTENT: &str = "Content-Type: application/json";
 const DETECTOR_SECRET: &str = "guardrail-detector-e2e-secret";
@@ -406,6 +408,12 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     assert_provider_success(&v2_allowed, "revision 2 should be inactive after rollback")?;
 
     evidence.wait_for_policy_lifecycle()?;
+    let mut patch_detector = ProtectedPatchDetector::start()?;
+    verify_deterministic_checks_and_patches(&gateway_addr, &patch_detector.addr, &mut evidence)?;
+    let patch_requests = patch_detector.join()?;
+    if patch_requests.len() != 1 || patch_requests[0].contains("guardrail-patch-client-secret") {
+        bail!("protected patch detector request count or projection was invalid");
+    }
     let unbind = admin_json_request(
         &gateway_addr,
         "DELETE",
@@ -446,6 +454,9 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
         || request_count("stream-shadow-responses") != 1
         || request_count("stream-unguarded-chat") != 1
         || request_count("stream-unguarded-responses") != 1
+        || request_count("structured-input-block") != 0
+        || request_count("trigger-output-redact") != 1
+        || request_count("protected-patch-attempt") != 0
     {
         bail!(
             "provider dispatch evidence did not prove Guardrail normalization/streaming isolation: {provider_requests:?}"
@@ -489,6 +500,28 @@ fn send_chat_with_auth(addr: &str, content: &str, auth: &str) -> Result<HttpResp
     let body = serde_json::json!({
         "model": "fast-chat",
         "messages": [{"role": "user", "content": content}],
+        "stream": false
+    })
+    .to_string();
+    http_request_addr(
+        addr,
+        "POST",
+        "/v1/chat/completions",
+        &[auth, JSON_CONTENT],
+        &body,
+    )
+}
+
+fn send_chat_with_metadata(
+    addr: &str,
+    content: &str,
+    auth: &str,
+    metadata: Value,
+) -> Result<HttpResponse> {
+    let body = serde_json::json!({
+        "model": "fast-chat",
+        "messages": [{"role": "user", "content": content}],
+        "metadata": metadata,
         "stream": false
     })
     .to_string();
@@ -636,6 +669,197 @@ fn dynamic_policy_body_for_tenant(
         policy["policy_id"] = Value::String(policy_id.to_string());
     }
     policy.to_string()
+}
+
+fn verify_deterministic_checks_and_patches(
+    addr: &str,
+    patch_detector_addr: &str,
+    evidence: &mut SupabaseEvidence,
+) -> Result<()> {
+    create_and_activate_dynamic_policy(
+        addr,
+        "structured-input-policy",
+        serde_json::json!({
+            "policy_id": "structured-input-policy",
+            "name": "Structured input policy",
+            "enforced": true,
+            "scope": {
+                "organization_ids": [DYNAMIC_TENANT_ID],
+                "api_key_ids": ["guardrail-structured-client"],
+                "models": ["fast-chat"],
+                "providers": ["openai"]
+            },
+            "checks": [{
+                "id": "metadata-structure",
+                "stage": "request",
+                "sources": ["metadata"],
+                "detector": {
+                    "kind": "local",
+                    "json": {
+                        "schema": {"type": "object"},
+                        "forbidden_keys": ["/credential"]
+                    }
+                }
+            }],
+            "aggregation": {"type": "all"},
+            "execution": "sequential",
+            "mode": "enforce",
+            "streaming": "buffer_and_enforce",
+            "on_pass": [{"kind": "allow"}],
+            "on_fail": [{
+                "kind": "block",
+                "code": "deterministic_input_block",
+                "message": "structured input rejected"
+            }],
+            "on_error": [{
+                "kind": "block",
+                "code": "deterministic_input_error",
+                "message": "structured input could not be evaluated"
+            }],
+            "deadline_ms": 1000
+        }),
+    )?;
+    let blocked = send_chat_with_metadata(
+        addr,
+        "structured-input-block",
+        STRUCTURED_CLIENT_AUTH,
+        serde_json::json!({"credential": "must-not-reach-provider"}),
+    )?;
+    assert_json_error(&blocked, 403, "deterministic_input_block")?;
+
+    create_and_activate_dynamic_policy(
+        addr,
+        "typed-output-redact-policy",
+        serde_json::json!({
+            "policy_id": "typed-output-redact-policy",
+            "name": "Typed output redaction",
+            "enforced": true,
+            "scope": {
+                "organization_ids": [DYNAMIC_TENANT_ID],
+                "api_key_ids": ["guardrail-redact-client"],
+                "models": ["fast-chat"],
+                "providers": ["openai"]
+            },
+            "checks": [{
+                "id": "assistant-secret",
+                "stage": "response",
+                "sources": ["assistant"],
+                "detector": {"kind": "local", "keywords": ["output-secret"]}
+            }],
+            "aggregation": {"type": "all"},
+            "execution": "sequential",
+            "mode": "enforce",
+            "streaming": "buffer_and_enforce",
+            "on_pass": [{"kind": "allow"}],
+            "on_fail": [{
+                "kind": "redact",
+                "code": "typed_output_redacted",
+                "message": "assistant content redacted"
+            }],
+            "on_error": [{
+                "kind": "block",
+                "code": "typed_output_error",
+                "message": "assistant content could not be transformed"
+            }],
+            "deadline_ms": 1000
+        }),
+    )?;
+    let redacted = send_chat_with_auth(addr, "trigger-output-redact", REDACT_CLIENT_AUTH)?;
+    if redacted.status != 200 {
+        bail!("typed output redaction failed: {}", redacted.raw);
+    }
+    let redacted_body: Value = serde_json::from_str(&redacted.body)?;
+    if redacted_body["choices"][0]["message"]["content"] != "[REDACTED]"
+        || redacted_body["model"] != "provider-model-must-remain"
+        || redacted_body["usage"]["total_tokens"] != 2
+        || redacted_body["id"] != "chatcmpl_guardrail_e2e"
+    {
+        bail!("typed output patch modified a protected response field: {redacted_body}");
+    }
+
+    create_and_activate_dynamic_policy(
+        addr,
+        "protected-patch-policy",
+        serde_json::json!({
+            "policy_id": "protected-patch-policy",
+            "name": "Protected patch rejection",
+            "enforced": true,
+            "scope": {
+                "organization_ids": [DYNAMIC_TENANT_ID],
+                "api_key_ids": ["guardrail-patch-client"],
+                "models": ["fast-chat"],
+                "providers": ["openai"]
+            },
+            "checks": [{
+                "id": "metadata-patch",
+                "stage": "request",
+                "sources": ["metadata"],
+                "detector": {
+                    "kind": "custom_http",
+                    "endpoint": format!("http://{patch_detector_addr}/check"),
+                    "allow_private_network": true,
+                    "timeout_ms": 1000,
+                    "max_concurrency": 1,
+                    "max_retries": 0
+                }
+            }],
+            "aggregation": {"type": "all"},
+            "execution": "sequential",
+            "mode": "enforce",
+            "streaming": "buffer_and_enforce",
+            "on_pass": [{"kind": "allow"}],
+            "on_fail": [{
+                "kind": "redact",
+                "code": "protected_patch_must_not_apply",
+                "message": "protected patch must not apply"
+            }],
+            "on_error": [{
+                "kind": "block",
+                "code": "protected_patch_rejected",
+                "message": "detector patch targeted protected content"
+            }],
+            "deadline_ms": 1000
+        }),
+    )?;
+    let rejected = send_chat_with_metadata(
+        addr,
+        "protected-patch-attempt",
+        PATCH_CLIENT_AUTH,
+        serde_json::json!({"credential": "protected-value"}),
+    )?;
+    assert_json_error(&rejected, 403, "protected_patch_rejected")?;
+    let request_id = response_header(&rejected, "x-request-id")
+        .context("protected patch rejection omitted x-request-id")?;
+    evidence.wait_for_protected_patch_rejection(&request_id)?;
+    Ok(())
+}
+
+fn create_and_activate_dynamic_policy(addr: &str, policy_id: &str, policy: Value) -> Result<()> {
+    let created = dynamic_json_request(
+        addr,
+        "POST",
+        "/admin/v1/guardrail-policies",
+        &policy.to_string(),
+    )?;
+    if created.status != 201 {
+        bail!(
+            "generated RBAC role could not create {policy_id}: {}",
+            created.raw
+        );
+    }
+    let activated = dynamic_json_request(
+        addr,
+        "POST",
+        &format!("/admin/v1/guardrail-policies/{policy_id}/activate"),
+        r#"{"revision":1}"#,
+    )?;
+    if activated.status != 200 {
+        bail!(
+            "generated RBAC role could not activate {policy_id}: {}",
+            activated.raw
+        );
+    }
+    Ok(())
 }
 
 fn install_streaming_policies(addr: &str) -> Result<()> {
@@ -1120,7 +1344,7 @@ fn verify_guardrail_evidence_api(
         || blocked_rows[0]["action"] != "block"
         || blocked_rows[0]["enforcement_status"] != "enforced"
         || blocked_rows[0]["checks"][0]["verdict"] != "fail"
-        || blocked_rows[0]["checks"][0]["finding_category_counts"]["keyword"] != 1
+        || blocked_rows[0]["checks"][0]["finding_category_counts"]["contains"] != 1
         || !blocked_rows[0]["input_fingerprint"]
             .as_str()
             .is_some_and(|value| value.starts_with("hmac-sha256:"))
@@ -1159,7 +1383,7 @@ fn verify_guardrail_evidence_api(
     let category = dynamic_json_request(
         addr,
         "GET",
-        "/admin/v1/guardrail-evaluations?category=keyword&verdict=fail&action=block",
+        "/admin/v1/guardrail-evaluations?category=contains&verdict=fail&action=block",
         "",
     )?;
     if category.status != 200
@@ -1372,6 +1596,25 @@ api_keys:
     name: "Guardrail E2E admin"
     key: "guardrail-admin-secret"
     scopes: ["admin.read", "admin.write"]
+  - id: "guardrail-structured-client"
+    name: "Structured Guardrail E2E client"
+    key: "guardrail-structured-client-secret"
+    scopes: ["models.read", "chat.completions"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_dynamic_guardrail_e2e"
+  - id: "guardrail-redact-client"
+    name: "Typed redaction Guardrail E2E client"
+    key: "guardrail-redact-client-secret"
+    scopes: ["models.read", "chat.completions"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_dynamic_guardrail_e2e"
+    project_id: "project_dynamic_guardrail_e2e"
+  - id: "guardrail-patch-client"
+    name: "Protected patch Guardrail E2E client"
+    key: "guardrail-patch-client-secret"
+    scopes: ["models.read", "chat.completions"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_dynamic_guardrail_e2e"
   - id: "guardrail-buffer-client"
     name: "Guardrail buffered streaming client"
     key: "guardrail-buffer-client-secret"
@@ -1396,13 +1639,6 @@ api_keys:
     scopes: ["models.read", "chat.completions", "responses.create"]
     allowed_models: ["fast-chat"]
     organization_id: "org_guardrail_unguarded_e2e"
-  - id: "guardrail-redact-client"
-    name: "Guardrail redaction evidence client"
-    key: "guardrail-redact-client-secret"
-    scopes: ["models.read", "chat.completions"]
-    allowed_models: ["fast-chat"]
-    organization_id: "org_dynamic_guardrail_e2e"
-    project_id: "project_dynamic_guardrail_e2e"
 guardrails:
   - id: "e2e-pii-detector"
     name: "E2E PII detector"
@@ -1634,12 +1870,15 @@ fn write_guardrail_provider_response(
     } else {
         let content = if request.contains("redaction-probe") {
             "prefix provider-redact-secret suffix"
+        } else if request.contains("trigger-output-redact") {
+            "output-secret"
         } else {
             "ok"
         };
         serde_json::json!({
             "id": "chatcmpl_guardrail_e2e",
             "object": "chat.completion",
+            "model": "provider-model-must-remain",
             "choices": [{"message": {"role": "assistant", "content": content}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         })
@@ -1756,6 +1995,100 @@ impl MockDetector {
 }
 
 impl Drop for MockDetector {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct ProtectedPatchDetector {
+    addr: String,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<Vec<String>>>,
+}
+
+impl ProtectedPatchDetector {
+    fn start() -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let addr = listener.local_addr()?.to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            while requests.is_empty() && !server_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let Ok(request) = read_http_request(&mut stream) else {
+                            continue;
+                        };
+                        let response = request
+                            .split_once("\r\n\r\n")
+                            .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+                            .and_then(|body| body["segments"].as_array().cloned())
+                            .and_then(|segments| segments.into_iter().next())
+                            .map(|segment| {
+                                let text = segment["text"].as_str().unwrap_or_default();
+                                serde_json::json!({
+                                    "verdict": "fail",
+                                    "findings": [{
+                                        "category": "adversarial.protected_patch",
+                                        "severity": "critical",
+                                        "confidence": 1.0,
+                                        "segment_id": segment["segment_id"],
+                                        "byte_start": 0,
+                                        "byte_end": text.len()
+                                    }],
+                                    "patches": [{
+                                        "segment_id": segment["segment_id"],
+                                        "expected_fingerprint": segment["fingerprint"],
+                                        "protocol_location": segment["protocol_location"],
+                                        "byte_start": 0,
+                                        "byte_end": text.len(),
+                                        "replacement": "{}"
+                                    }],
+                                    "detector_version": "protected-patch-e2e/1"
+                                })
+                                .to_string()
+                            })
+                            .unwrap_or_else(|| {
+                                r#"{"verdict":"pass","findings":[],"patches":[],"detector_version":"protected-patch-e2e/1"}"#.to_string()
+                            });
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            response.len(),
+                            response
+                        );
+                        requests.push(request);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+            requests
+        });
+        Ok(Self {
+            addr,
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn join(&mut self) -> Result<Vec<String>> {
+        self.handle
+            .take()
+            .context("protected patch detector join handle missing")?
+            .join()
+            .map_err(|_| anyhow::anyhow!("protected patch detector thread panicked"))
+    }
+}
+
+impl Drop for ProtectedPatchDetector {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -1994,6 +2327,39 @@ impl SupabaseEvidence {
             }
         }
         Ok(())
+    }
+
+    fn wait_for_protected_patch_rejection(&mut self, request_id: &str) -> Result<()> {
+        let audit_query = format!(
+            "SELECT target, outcome, audit_json::text FROM \"{}\".audit_events WHERE request_id = $1 AND action = 'guardrail.detector_error'",
+            self.schema
+        );
+        let request_query = format!(
+            "SELECT status_code, error_code FROM \"{}\".request_logs WHERE request_id = $1",
+            self.schema
+        );
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(15) {
+            if let Some(audit_row) = self.client.query_opt(&audit_query, &[&request_id])? {
+                let target: Option<String> = audit_row.get(0);
+                let outcome: String = audit_row.get(1);
+                let audit_json: String = audit_row.get(2);
+                let request_row = self.client.query_opt(&request_query, &[&request_id])?;
+                if target.as_deref() == Some("protected-patch-policy@1/metadata-patch")
+                    && outcome == "blocked"
+                    && audit_json.contains("protected_path")
+                    && request_row.as_ref().is_some_and(|row| {
+                        row.get::<_, Option<i32>>(0) == Some(403)
+                            && row.get::<_, Option<String>>(1).as_deref()
+                                == Some("protected_patch_rejected")
+                    })
+                {
+                    return Ok(());
+                }
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        bail!("timed out reading protected patch rejection evidence from Supabase")
     }
 
     fn verify_guardrail_rbac_binding(&mut self, role_id: &str, expected_bound: bool) -> Result<()> {

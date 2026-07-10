@@ -56,6 +56,10 @@ clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = "0.3"
 hmac = "0.12"
 http = "1"
+# JSON Schema is a standard with references, combinators, numeric semantics,
+# and draft compatibility. Reimplementing a partial validator would silently
+# accept policies that operators expect a conforming validator to reject.
+jsonschema = { version = "0.47", default-features = false }
 instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }
 jsonwebtoken = "9"
 matchit = "0.8"

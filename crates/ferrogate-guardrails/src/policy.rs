@@ -6,7 +6,8 @@
 
 use crate::{
     all_content_sources, validate_custom_http_endpoint, ContentSource, DetectorError,
-    DetectorErrorKind, DetectorStage, MAX_DETECTOR_TIMEOUT,
+    DetectorErrorKind, DetectorStage, JsonConstraints, RequestConstraints, SecretPattern,
+    MAX_DETECTOR_TIMEOUT,
 };
 use regex::Regex;
 use reqwest::Url;
@@ -173,6 +174,16 @@ pub enum DetectorDefinition {
         regex: Vec<String>,
         #[serde(default)]
         max_input_bytes: Option<usize>,
+        #[serde(default)]
+        json: Option<JsonConstraints>,
+        #[serde(default)]
+        request: Option<Box<RequestConstraints>>,
+        #[serde(default)]
+        secret_patterns: Vec<SecretPattern>,
+        /// Resolves once during activation/reload. Required when secret
+        /// patterns are enabled so evidence is keyed and non-reversible.
+        #[serde(default)]
+        fingerprint_secret_ref: Option<String>,
     },
     CustomHttp {
         endpoint: String,
@@ -207,6 +218,10 @@ impl DetectorDefinition {
             keywords,
             regex,
             max_input_bytes,
+            json: None,
+            request: None,
+            secret_patterns: Vec::new(),
+            fingerprint_secret_ref: None,
         }
     }
 
@@ -216,10 +231,20 @@ impl DetectorDefinition {
                 keywords,
                 regex,
                 max_input_bytes,
+                json,
+                request,
+                secret_patterns,
+                fingerprint_secret_ref,
             } => {
-                if keywords.is_empty() && regex.is_empty() && max_input_bytes.is_none() {
+                if keywords.is_empty()
+                    && regex.is_empty()
+                    && max_input_bytes.is_none()
+                    && json.as_ref().is_none_or(JsonConstraints::is_empty)
+                    && request.as_deref().is_none_or(RequestConstraints::is_empty)
+                    && secret_patterns.is_empty()
+                {
                     return Err(invalid_policy(
-                        "local guardrail detector requires a keyword, regex, or max_input_bytes",
+                        "local guardrail detector requires at least one deterministic constraint",
                     ));
                 }
                 if keywords.iter().any(|keyword| keyword.is_empty()) {
@@ -235,6 +260,29 @@ impl DetectorDefinition {
                 if *max_input_bytes == Some(0) {
                     return Err(invalid_policy(
                         "local guardrail detector max_input_bytes must be greater than zero",
+                    ));
+                }
+                if let Some(json) = json {
+                    json.validate("json")?;
+                }
+                if let Some(request) = request.as_deref() {
+                    request.validate()?;
+                }
+                if secret_patterns.iter().collect::<HashSet<_>>().len() != secret_patterns.len() {
+                    return Err(invalid_policy(
+                        "local guardrail secret_patterns must be unique",
+                    ));
+                }
+                if !secret_patterns.is_empty()
+                    && fingerprint_secret_ref.as_deref().is_none_or(str::is_empty)
+                {
+                    return Err(invalid_policy(
+                        "local secret detection requires fingerprint_secret_ref",
+                    ));
+                }
+                if fingerprint_secret_ref.as_deref().is_some_and(str::is_empty) {
+                    return Err(invalid_policy(
+                        "local fingerprint_secret_ref cannot be empty",
                     ));
                 }
             }

@@ -681,7 +681,18 @@ fn dry_run_check(check: &ferrogate_guardrails::CheckBinding, text: &str) -> Guar
             keywords,
             regex,
             max_input_bytes,
+            json,
+            request,
+            secret_patterns,
+            ..
         } => {
+            if json.is_some() || request.is_some() || !secret_patterns.is_empty() {
+                return GuardrailDryRunCheck {
+                    id: check.id.clone(),
+                    detector: detector_kind(&check.detector),
+                    result: "not_executed",
+                };
+            }
             let matched = max_input_bytes.is_some_and(|maximum| text.len() > maximum)
                 || keywords.iter().any(|keyword| text.contains(keyword))
                 || regex.iter().any(|pattern| {

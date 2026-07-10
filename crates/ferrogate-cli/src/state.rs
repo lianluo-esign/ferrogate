@@ -43,12 +43,14 @@ use ferrogate_billing::{
 };
 use ferrogate_core::{RequestContext, WorkspaceScope};
 use ferrogate_guardrails::{
-    apply_content_patches, ActionKind as GuardrailActionKind, AggregateOutcome, CheckBinding,
-    CheckOutcome, ContentPatch, CustomHttpDetector, CustomHttpDetectorConfig, DetectorDefinition,
-    DetectorError, DetectorInput, DetectorResult, DetectorSecret, DetectorStage, DetectorTenant,
-    DetectorVerdict, GuardrailDetector, GuardrailEnvelope, PolicyAction, PolicyAggregation,
-    PolicyExecution, PolicyMode, PolicyRevision, PolicyRevisionStatus, PolicyRevisionView,
-    PolicyScopeSelector, PolicySelectionContext, PolicyStreamingMode,
+    apply_content_patches_to_document, validate_content_patch_permissions,
+    ActionKind as GuardrailActionKind, AggregateOutcome, CheckBinding, CheckOutcome, ContentPatch,
+    ContentSource, CustomHttpDetector, CustomHttpDetectorConfig, DetectorDefinition, DetectorError,
+    DetectorInput, DetectorResult, DetectorSecret, DetectorStage, DetectorTenant, DetectorVerdict,
+    DeterministicDetector, DeterministicDetectorConfig, GuardrailDetector, GuardrailEnvelope,
+    PolicyAction, PolicyAggregation, PolicyExecution, PolicyMode, PolicyRevision,
+    PolicyRevisionStatus, PolicyRevisionView, PolicyScopeSelector, PolicySelectionContext,
+    PolicyStreamingMode,
 };
 use ferrogate_mcp::{
     McpExecutionError, McpManager, McpServerStatus, McpToolExecutionRequest, McpToolExecutionResult,
@@ -92,7 +94,6 @@ use ferrogate_storage::{
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 #[cfg(test)]
 use redis::Commands;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
@@ -1622,21 +1623,8 @@ struct GuardrailCheckRuntime {
     sources: Vec<ferrogate_guardrails::ContentSource>,
     detector_id: String,
     detector_config_digest: String,
-    detector: GuardrailDetectorRuntime,
-    fallback_detector: Option<LocalGuardrailDetectorRuntime>,
-}
-
-#[derive(Debug, Clone)]
-enum GuardrailDetectorRuntime {
-    Local(LocalGuardrailDetectorRuntime),
-    External(Arc<dyn GuardrailDetector>),
-}
-
-#[derive(Debug, Clone)]
-struct LocalGuardrailDetectorRuntime {
-    keywords: Vec<String>,
-    regex: Vec<Regex>,
-    max_input_bytes: Option<usize>,
+    detector: Arc<dyn GuardrailDetector>,
+    fallback_detector: Option<Arc<dyn GuardrailDetector>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1646,12 +1634,12 @@ pub(crate) struct GuardrailMatch {
     pub(crate) policy_revision: u32,
     pub(crate) check_id: Option<String>,
     pub(crate) effect: GuardrailEffect,
-    pub(crate) matched_text: String,
     pub(crate) segment_id: Option<String>,
     pub(crate) byte_start: Option<usize>,
     pub(crate) byte_end: Option<usize>,
-    redaction_regex: Option<Regex>,
     content_patches: Vec<ContentPatch>,
+    patch_envelope: Option<GuardrailEnvelope>,
+    patch_sources: Vec<ContentSource>,
     pub(crate) code: String,
     pub(crate) message: String,
 }
@@ -1674,16 +1662,20 @@ impl GuardrailMatch {
 
     pub(crate) fn redact_text(&self, text: &str) -> String {
         if !self.content_patches.is_empty() {
-            // Detector patches were validated against this exact text before
-            // the decision was returned. Redact the whole value if an
-            // invariant is nevertheless violated; returning the original
-            // content would turn a detector bug into a data leak.
-            apply_content_patches(text, &self.content_patches)
-                .unwrap_or_else(|_| "[REDACTED]".to_string())
-        } else if let Some(regex) = &self.redaction_regex {
-            regex.replace_all(text, "[REDACTED]").into_owned()
+            let result = serde_json::from_str(text).ok().and_then(|document| {
+                apply_content_patches_to_document(
+                    &document,
+                    self.patch_envelope.as_ref()?,
+                    &self.patch_sources,
+                    &self.content_patches,
+                )
+                .ok()
+            });
+            result
+                .and_then(|document| serde_json::to_string(&document).ok())
+                .unwrap_or_else(|| "[REDACTED]".to_string())
         } else {
-            text.replace(&self.matched_text, "[REDACTED]")
+            "[REDACTED]".to_string()
         }
     }
 
@@ -4969,7 +4961,15 @@ fn build_guardrail_policy_runtime(
                 fallback_detector: check
                     .fallback_detector
                     .as_ref()
-                    .map(build_local_guardrail_detector)
+                    .map(|detector| {
+                        build_guardrail_detector(
+                            &revision.immutable_id(),
+                            &check.id,
+                            &check.sources,
+                            detector,
+                            secret_registry,
+                        )
+                    })
                     .transpose()?,
             })
         })
@@ -4988,39 +4988,59 @@ fn guardrail_detector_evidence_metadata(
     let digest = Sha256::digest(serialized);
     Ok((detector_id, format!("sha256:{digest:x}")))
 }
-
-fn build_local_guardrail_detector(
-    definition: &DetectorDefinition,
-) -> anyhow::Result<LocalGuardrailDetectorRuntime> {
-    let DetectorDefinition::Local {
-        keywords,
-        regex,
-        max_input_bytes,
-    } = definition
-    else {
-        anyhow::bail!("guardrail fallback detector must be local");
-    };
-    Ok(LocalGuardrailDetectorRuntime {
-        keywords: keywords.clone(),
-        regex: regex
-            .iter()
-            .map(|pattern| Regex::new(pattern))
-            .collect::<Result<Vec<_>, _>>()?,
-        max_input_bytes: *max_input_bytes,
-    })
-}
-
 fn build_guardrail_detector(
     policy_id: &str,
     check_id: &str,
     sources: &[ferrogate_guardrails::ContentSource],
     definition: &DetectorDefinition,
     secret_registry: &ferrogate_secrets::SecretResolverRegistry,
-) -> anyhow::Result<GuardrailDetectorRuntime> {
-    if matches!(definition, DetectorDefinition::Local { .. }) {
-        return Ok(GuardrailDetectorRuntime::Local(
-            build_local_guardrail_detector(definition)?,
-        ));
+) -> anyhow::Result<Arc<dyn GuardrailDetector>> {
+    if let DetectorDefinition::Local {
+        keywords,
+        regex,
+        max_input_bytes,
+        json,
+        request,
+        secret_patterns,
+        fingerprint_secret_ref,
+    } = definition
+    {
+        let fingerprint_key = fingerprint_secret_ref
+            .as_deref()
+            .map(|secret_ref| {
+                secret_registry
+                    .resolve(secret_ref)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to resolve fingerprint secret for guardrail {policy_id}/{check_id}: {error}"
+                        )
+                    })?
+                    .map(DetectorSecret::new)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "fingerprint secret for guardrail {policy_id}/{check_id} resolved no value"
+                        )
+                    })
+            })
+            .transpose()?;
+        let detector = DeterministicDetector::new(DeterministicDetectorConfig {
+            id: format!("{policy_id}/{check_id}"),
+            supported_sources: sources.to_vec(),
+            keywords: keywords.clone(),
+            regex: regex.clone(),
+            max_input_bytes: *max_input_bytes,
+            json: json.clone(),
+            request: request.as_deref().cloned(),
+            secret_patterns: secret_patterns.clone(),
+            fingerprint_key,
+        })
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "failed to initialize guardrail {policy_id}/{check_id}: {}",
+                error.safe_message()
+            )
+        })?;
+        return Ok(Arc::new(detector));
     }
     let DetectorDefinition::CustomHttp {
         endpoint,
@@ -5072,7 +5092,7 @@ fn build_guardrail_detector(
             error.safe_message()
         )
     })?;
-    Ok(GuardrailDetectorRuntime::External(Arc::new(detector)))
+    Ok(Arc::new(detector))
 }
 
 /// Resolves every configured `Provider.secret_ref` once (issue #163),
