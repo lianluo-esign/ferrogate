@@ -33,6 +33,8 @@ use tokio::sync::Semaphore;
 
 mod policy;
 pub use policy::*;
+mod envelope;
+pub use envelope::*;
 
 const CONTRACT_VERSION: u32 = 1;
 pub const MAX_DETECTOR_TIMEOUT: Duration = Duration::from_secs(30);
@@ -60,6 +62,7 @@ pub struct DetectorInput<'a> {
     pub model: Option<&'a str>,
     pub provider: Option<&'a str>,
     pub text: &'a str,
+    pub segments: &'a [ContentSegment],
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -69,6 +72,7 @@ pub struct DetectorDescriptor {
     pub supports_request: bool,
     pub supports_response: bool,
     pub supports_transform: bool,
+    pub supported_sources: Vec<ContentSource>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -105,6 +109,8 @@ pub struct Finding {
     pub byte_start: Option<usize>,
     #[serde(default)]
     pub byte_end: Option<usize>,
+    #[serde(default)]
+    pub segment_id: Option<String>,
     /// Kept only in the in-memory decision path for backward-compatible
     /// redaction. Callers must never persist this field as evidence.
     #[serde(default)]
@@ -268,6 +274,7 @@ pub struct CustomHttpDetectorConfig {
     pub max_payload_bytes: usize,
     pub max_response_bytes: usize,
     pub allow_private_network: bool,
+    pub supported_sources: Vec<ContentSource>,
     pub bearer_token: Option<DetectorSecret>,
 }
 
@@ -288,6 +295,7 @@ impl fmt::Debug for CustomHttpDetectorConfig {
             .field("max_payload_bytes", &self.max_payload_bytes)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("allow_private_network", &self.allow_private_network)
+            .field("supported_sources", &self.supported_sources)
             .field("bearer_token", &self.bearer_token)
             .finish()
     }
@@ -469,6 +477,7 @@ impl GuardrailDetector for CustomHttpDetector {
             supports_request: true,
             supports_response: true,
             supports_transform: true,
+            supported_sources: self.config.supported_sources.clone(),
         }
     }
 
@@ -512,7 +521,27 @@ impl GuardrailDetector for CustomHttpDetector {
             self.failure_total.fetch_add(1, Ordering::Relaxed);
             return Err(error);
         }
-        if input.text.len() > self.config.max_payload_bytes {
+        let projected_segments = input
+            .segments
+            .iter()
+            .filter(|segment| self.config.supported_sources.contains(&segment.source))
+            .cloned()
+            .collect::<Vec<_>>();
+        let projected_text = if input.segments.is_empty()
+            && self
+                .config
+                .supported_sources
+                .contains(&ContentSource::Unknown)
+        {
+            input.text.to_string()
+        } else {
+            projected_segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        if projected_text.len() > self.config.max_payload_bytes {
             let error = DetectorError::new(
                 DetectorErrorKind::PayloadTooLarge,
                 "guardrail detector request exceeds configured limit",
@@ -527,7 +556,8 @@ impl GuardrailDetector for CustomHttpDetector {
             tenant: input.tenant.clone(),
             model: input.model,
             provider: input.provider,
-            text: input.text,
+            text: &projected_text,
+            segments: &projected_segments,
         };
         let request_body = match serde_json::to_vec(&request) {
             Ok(body) => body,
@@ -588,7 +618,9 @@ impl GuardrailDetector for CustomHttpDetector {
             match tokio::time::timeout(attempt_timeout, self.send_once(request_body.clone())).await
             {
                 Ok(Ok(result)) => {
-                    if let Err(error) = validate_detector_result(input.text, &result) {
+                    if let Err(error) =
+                        validate_detector_result(&projected_text, &projected_segments, &result)
+                    {
                         break Err(error);
                     }
                     break Ok(result);
@@ -623,6 +655,7 @@ struct DetectorRequest<'a> {
     model: Option<&'a str>,
     provider: Option<&'a str>,
     text: &'a str,
+    segments: &'a [ContentSegment],
 }
 
 #[derive(Debug, Default)]
@@ -683,6 +716,7 @@ fn parse_detector_response(bytes: &[u8]) -> Result<DetectorResult, DetectorError
                 confidence: None,
                 byte_start: None,
                 byte_end: None,
+                segment_id: None,
                 matched_text: Some(matched_text),
                 attributes: Map::new(),
             },
@@ -719,16 +753,33 @@ pub fn validate_content_patches(text: &str, patches: &[ContentPatch]) -> Result<
     Ok(())
 }
 
-fn validate_detector_result(text: &str, result: &DetectorResult) -> Result<(), DetectorError> {
+fn validate_detector_result(
+    text: &str,
+    segments: &[ContentSegment],
+    result: &DetectorResult,
+) -> Result<(), DetectorError> {
     validate_content_patches(text, &result.patches)?;
     for finding in &result.findings {
+        let coordinate_text = match finding.segment_id.as_deref() {
+            Some(segment_id) => segments
+                .iter()
+                .find(|segment| segment.segment_id == segment_id)
+                .map(|segment| segment.text.as_str())
+                .ok_or_else(|| {
+                    DetectorError::new(
+                        DetectorErrorKind::InvalidResponse,
+                        "guardrail detector returned a finding for an unknown segment",
+                    )
+                })?,
+            None => text,
+        };
         match (finding.byte_start, finding.byte_end) {
             (None, None) => {}
             (Some(start), Some(end))
                 if start <= end
-                    && end <= text.len()
-                    && text.is_char_boundary(start)
-                    && text.is_char_boundary(end) => {}
+                    && end <= coordinate_text.len()
+                    && coordinate_text.is_char_boundary(start)
+                    && coordinate_text.is_char_boundary(end) => {}
             _ => {
                 return Err(DetectorError::new(
                     DetectorErrorKind::InvalidResponse,
@@ -765,10 +816,16 @@ fn validate_config(config: &CustomHttpDetectorConfig) -> Result<(), DetectorErro
         || config.max_payload_bytes == 0
         || config.max_response_bytes == 0
         || config.max_retries > 1
+        || config.supported_sources.is_empty()
+        || config
+            .supported_sources
+            .iter()
+            .enumerate()
+            .any(|(index, source)| config.supported_sources[index + 1..].contains(source))
     {
         return Err(DetectorError::new(
             DetectorErrorKind::InvalidConfiguration,
-            "guardrail detector limits are invalid, timeout exceeds 30 seconds, or retries exceed one",
+            "guardrail detector limits or source declarations are invalid, timeout exceeds 30 seconds, or retries exceed one",
         ));
     }
     Ok(())

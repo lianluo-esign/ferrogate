@@ -8,7 +8,9 @@ use http::{HeaderMap, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Deserialize;
 use std::{
-    io::{Error as IoError, Read},
+    fmt,
+    io::{Cursor, Error as IoError, Read},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::{info, warn};
@@ -29,7 +31,11 @@ use crate::{
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
-use ferrogate_guardrails::PolicySelectionContext;
+use ferrogate_guardrails::{
+    normalize_request as normalize_guardrail_request,
+    normalize_response as normalize_guardrail_response, GuardrailEnvelope, GuardrailProtocol,
+    PolicySelectionContext,
+};
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::{
     ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest, SecretValue,
@@ -38,9 +44,7 @@ use ferrogate_storage::StoredRequestLog;
 
 use super::{
     body::read_request_body,
-    dispatch::{
-        dispatch_provider_request, dispatch_provider_streaming_request, ProviderBodyReader,
-    },
+    dispatch::{dispatch_provider_request, dispatch_provider_streaming_request},
     responses_stream::{ResponsesStreamNormalizer, ResponsesStreamProviderKind},
     FerroGateway, ProxyContext,
 };
@@ -85,6 +89,13 @@ impl AiEndpoint {
         match self {
             Self::ChatCompletions => "invalid chat completion request",
             Self::Responses => "invalid responses request",
+        }
+    }
+
+    fn guardrail_protocol(self) -> GuardrailProtocol {
+        match self {
+            Self::ChatCompletions => GuardrailProtocol::ChatCompletions,
+            Self::Responses => GuardrailProtocol::Responses,
         }
     }
 }
@@ -216,7 +227,7 @@ impl FerroGateway {
             body_json,
             estimated_usage,
             mut routes,
-            body_text,
+            guardrail_envelope,
         } = request_plan;
         let request_started_at_unix = now_unix_seconds();
         // Monotonic timer for P1-4 latency_ms; `request_started_at_unix` above
@@ -402,7 +413,7 @@ impl FerroGateway {
                         model: Some(&request.model),
                         provider: Some(&provider.name),
                         streaming: request.stream,
-                        body_text: &body_text,
+                        envelope: &guardrail_envelope,
                     },
                 )
                 .await
@@ -432,8 +443,11 @@ impl FerroGateway {
                     target: guardrail.evidence_target(),
                     outcome: "blocked".into(),
                     message: format!(
-                        "guardrail {} blocked request for model {} provider {}",
-                        guardrail.rule_name, request.model, provider.name
+                        "guardrail {} blocked request for model {} provider {} at {}",
+                        guardrail.rule_name,
+                        request.model,
+                        provider.name,
+                        guardrail.evidence_location()
                     ),
                 });
                 write_json_error(
@@ -759,16 +773,58 @@ impl FerroGateway {
                                 let body = match read_provider_streaming_body(
                                     response.initial_body,
                                     response.body,
+                                    provider_response_body_max_bytes,
+                                    dispatch_timeout,
                                 )
                                 .await
                                 {
                                     Ok(body) => body,
                                     Err(error) => {
+                                        let (status, code) = error.status_and_code();
+                                        let empty_envelope = normalize_guardrail_response(
+                                            endpoint.guardrail_protocol(),
+                                            &[],
+                                            true,
+                                        );
+                                        let policy_failure = state
+                                            .guardrail_streaming_buffer_failure(
+                                                GuardrailEvaluationContext {
+                                                    request_id: &ctx.request_id,
+                                                    trace_id: ctx.trace_id.as_deref(),
+                                                    agent_run_id: Some(&agent_run_id),
+                                                    workflow_id: workflow_id.as_deref(),
+                                                    workflow_version,
+                                                    workflow_node_id: workflow_node_id.as_deref(),
+                                                    actor_api_key_id: auth.api_key_id.as_deref(),
+                                                    tenant: &policy_request.tenant,
+                                                    service_account_id: auth.service_account_id(),
+                                                    gateway_config_id: gateway_config
+                                                        .as_ref()
+                                                        .map(|profile| profile.id.as_str()),
+                                                    model: Some(&request.model),
+                                                    provider: Some(&provider.name),
+                                                    streaming: true,
+                                                    envelope: &empty_envelope,
+                                                },
+                                                code,
+                                            )
+                                            .await;
+                                        let (status, code, message) = match policy_failure {
+                                            Some(guardrail) => {
+                                                state.record_guardrail_match(&guardrail);
+                                                (
+                                                    StatusCode::FORBIDDEN,
+                                                    guardrail.code,
+                                                    guardrail.message,
+                                                )
+                                            }
+                                            None => (status, code.to_string(), error.to_string()),
+                                        };
                                         write_json_error(
                                             session,
-                                            StatusCode::BAD_GATEWAY,
-                                            "provider_dispatch_error",
-                                            format!("provider dispatch failed: {error}"),
+                                            status,
+                                            &code,
+                                            message,
                                             &ctx.request_id,
                                         )
                                         .await?;
@@ -847,37 +903,38 @@ impl FerroGateway {
                             }
 
                             state.record_provider_success(&provider.name);
-                            if let Err(error) = state.record_estimated_billing_event(
-                                BillingEventDraft {
-                                    request: &policy_request,
-                                    logical_model: &request.model,
-                                    provider: &provider.name,
-                                    provider_model: &model_route.provider_model,
-                                    status_code: response.status.as_u16(),
-                                    latency_ms: Some(
-                                        request_started_at.elapsed().as_millis() as u64
-                                    ),
-                                    metadata: request.metadata.as_ref(),
-                                },
-                                &estimated_usage,
-                            ) {
-                                warn!(
-                                    request_id = %ctx.request_id,
-                                    logical_model = %request.model,
-                                    provider = %provider.name,
-                                    provider_model = %model_route.provider_model,
-                                    error_code = %error.code,
-                                    "estimated streaming billing event write failed"
-                                );
-                            }
                             if let Some(reservation) = token_reservation.take() {
                                 reservation.settle();
                             }
                             let record_bodies =
                                 auth.can_record_bodies(state.config.telemetry.log_bodies);
-                            if state.has_guardrail_candidate(
-                                GuardrailStage::Response,
-                                PolicySelectionContext {
+                            let record_stream_usage = || {
+                                if let Err(error) = state.record_estimated_billing_event(
+                                    BillingEventDraft {
+                                        request: &policy_request,
+                                        logical_model: &request.model,
+                                        provider: &provider.name,
+                                        provider_model: &model_route.provider_model,
+                                        status_code: response.status.as_u16(),
+                                        latency_ms: Some(
+                                            request_started_at.elapsed().as_millis() as u64
+                                        ),
+                                        metadata: request.metadata.as_ref(),
+                                    },
+                                    &estimated_usage,
+                                ) {
+                                    warn!(
+                                        request_id = %ctx.request_id,
+                                        logical_model = %request.model,
+                                        provider = %provider.name,
+                                        provider_model = %model_route.provider_model,
+                                        error_code = %error.code,
+                                        "estimated streaming billing event write failed"
+                                    );
+                                }
+                            };
+                            let streaming_guardrail_plan =
+                                state.streaming_guardrail_plan(PolicySelectionContext {
                                     organization_id: policy_request
                                         .tenant
                                         .organization_id
@@ -891,33 +948,119 @@ impl FerroGateway {
                                         .map(|profile| profile.id.as_str()),
                                     model: Some(&request.model),
                                     provider: Some(&provider.name),
-                                },
-                                true,
-                            ) {
+                                });
+                            if streaming_guardrail_plan
+                                == crate::state::StreamingGuardrailPlan::BufferAndEnforce
+                            {
+                                record_stream_usage();
+                                let response_status = response.status;
+                                let response_content_type = response.content_type;
+                                let (buffer_initial, buffer_reader, client_content_type): (
+                                    Vec<u8>,
+                                    Box<dyn Read + Send>,
+                                    String,
+                                ) = if endpoint == AiEndpoint::Responses {
+                                    let provider_kind =
+                                        responses_stream_provider_kind(&provider.kind);
+                                    let raw =
+                                        Cursor::new(response.initial_body).chain(response.body);
+                                    (
+                                        Vec::new(),
+                                        Box::new(ResponsesStreamNormalizer::new(
+                                            raw,
+                                            provider_kind,
+                                            ctx.request_id.clone(),
+                                            response_content_type.clone(),
+                                        )),
+                                        "text/event-stream".to_string(),
+                                    )
+                                } else {
+                                    (
+                                        response.initial_body,
+                                        Box::new(response.body),
+                                        response_content_type,
+                                    )
+                                };
                                 let mut final_body = match read_provider_streaming_body(
-                                    response.initial_body,
-                                    response.body,
+                                    buffer_initial,
+                                    buffer_reader,
+                                    provider_response_body_max_bytes,
+                                    dispatch_timeout,
                                 )
                                 .await
                                 {
                                     Ok(body) => body,
                                     Err(error) => {
+                                        let (status, code) = error.status_and_code();
+                                        let empty_envelope = normalize_guardrail_response(
+                                            endpoint.guardrail_protocol(),
+                                            &[],
+                                            true,
+                                        );
+                                        let policy_failure = state
+                                            .guardrail_streaming_buffer_failure(
+                                                GuardrailEvaluationContext {
+                                                    request_id: &ctx.request_id,
+                                                    trace_id: ctx.trace_id.as_deref(),
+                                                    agent_run_id: Some(&agent_run_id),
+                                                    workflow_id: workflow_id.as_deref(),
+                                                    workflow_version,
+                                                    workflow_node_id: workflow_node_id.as_deref(),
+                                                    actor_api_key_id: auth.api_key_id.as_deref(),
+                                                    tenant: &policy_request.tenant,
+                                                    service_account_id: auth.service_account_id(),
+                                                    gateway_config_id: gateway_config
+                                                        .as_ref()
+                                                        .map(|profile| profile.id.as_str()),
+                                                    model: Some(&request.model),
+                                                    provider: Some(&provider.name),
+                                                    streaming: true,
+                                                    envelope: &empty_envelope,
+                                                },
+                                                code,
+                                            )
+                                            .await;
+                                        let (status, code, message) = match policy_failure {
+                                            Some(guardrail) => {
+                                                state.record_guardrail_match(&guardrail);
+                                                (
+                                                    StatusCode::FORBIDDEN,
+                                                    guardrail.code,
+                                                    guardrail.message,
+                                                )
+                                            }
+                                            None => (status, code.to_string(), error.to_string()),
+                                        };
+                                        self.record_ai_error_log(
+                                            endpoint,
+                                            ctx,
+                                            AiErrorLog {
+                                                tenant: policy_request.tenant.clone(),
+                                                logical_model: Some(&request.model),
+                                                provider: Some(&provider.name),
+                                                status,
+                                                error_code: &code,
+                                            },
+                                        );
                                         write_json_error(
                                             session,
-                                            StatusCode::BAD_GATEWAY,
-                                            "provider_dispatch_error",
-                                            format!("provider dispatch failed: {error}"),
+                                            status,
+                                            &code,
+                                            message,
                                             &ctx.request_id,
                                         )
                                         .await?;
                                         return Ok(());
                                     }
                                 };
-                                let mut final_status = response.status;
-                                let mut final_content_type = response.content_type;
+                                let mut final_status = response_status;
+                                let mut final_content_type = client_content_type;
                                 let mut final_error_code = None;
-                                let guardrail_body =
-                                    String::from_utf8_lossy(&final_body).into_owned();
+                                let guardrail_envelope = normalize_guardrail_response(
+                                    endpoint.guardrail_protocol(),
+                                    &final_body,
+                                    true,
+                                );
                                 if let Some(guardrail) = state
                                     .match_guardrail(
                                         GuardrailStage::Response,
@@ -937,7 +1080,7 @@ impl FerroGateway {
                                             model: Some(&request.model),
                                             provider: Some(&provider.name),
                                             streaming: true,
-                                            body_text: &guardrail_body,
+                                            envelope: &guardrail_envelope,
                                         },
                                     )
                                     .await
@@ -953,17 +1096,20 @@ impl FerroGateway {
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
                                                     agent_run_id: Some(agent_run_id.clone()),
-            workflow_id: workflow_id.clone(),
-            workflow_version,
-            workflow_node_id: workflow_node_id.clone(),
+                                                    workflow_id: workflow_id.clone(),
+                                                    workflow_version,
+                                                    workflow_node_id: workflow_node_id.clone(),
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.deny".into(),
                                                     target: guardrail.evidence_target(),
                                                     outcome: "blocked".into(),
                                                     message: format!(
-                                                        "guardrail {} blocked streaming response for model {} provider {}",
-                                                        guardrail.rule_name, request.model, provider.name
+                                                        "guardrail {} blocked streaming response for model {} provider {} at {}",
+                                                        guardrail.rule_name,
+                                                        request.model,
+                                                        provider.name,
+                                                        guardrail.evidence_location()
                                                     ),
                                                 },
                                             );
@@ -986,17 +1132,20 @@ impl FerroGateway {
                                                     request_id: ctx.request_id.clone(),
                                                     trace_id: ctx.trace_id.clone(),
                                                     agent_run_id: Some(agent_run_id.clone()),
-            workflow_id: workflow_id.clone(),
-            workflow_version,
-            workflow_node_id: workflow_node_id.clone(),
+                                                    workflow_id: workflow_id.clone(),
+                                                    workflow_version,
+                                                    workflow_node_id: workflow_node_id.clone(),
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.redact".into(),
                                                     target: guardrail.evidence_target(),
                                                     outcome: "redacted".into(),
                                                     message: format!(
-                                                        "guardrail {} redacted streaming response for model {} provider {}",
-                                                        guardrail.rule_name, request.model, provider.name
+                                                        "guardrail {} redacted streaming response for model {} provider {} at {}",
+                                                        guardrail.rule_name,
+                                                        request.model,
+                                                        provider.name,
+                                                        guardrail.evidence_location()
                                                     ),
                                                 },
                                             );
@@ -1048,37 +1197,136 @@ impl FerroGateway {
                                 )
                                 .await;
                             }
-                            state.record_request_log(StoredRequestLog {
-                                request_id: ctx.request_id.clone(),
-                                trace_id: ctx.trace_id.clone(),
-                                agent_run_id: Some(agent_run_id.clone()),
-                                workflow_id: workflow_id.clone(),
-                                workflow_version,
-                                workflow_node_id: workflow_node_id.clone(),
-                                cluster_id: None,
-                                node_id: None,
-                                tenant: policy_request.tenant.clone(),
-                                route: policy_request.route.clone(),
-                                provider: Some(provider.name.clone()),
-                                logical_model: Some(request.model.clone()),
-                                provider_model: Some(model_route.provider_model.clone()),
-                                gateway_config_id: gateway_config
-                                    .as_ref()
-                                    .map(|profile| profile.id.clone()),
-                                gateway_config_revision: gateway_config
-                                    .as_ref()
-                                    .map(|profile| profile.revision),
-                                status_code: response.status.as_u16(),
-                                error_code: None,
-                                prompt_recorded: record_bodies,
-                                response_recorded: false,
-                                prompt_body: record_bodies.then(|| body_json.to_string()),
-                                response_body: None,
-                                cache_status: None,
-                                started_at_unix: Some(request_started_at_unix),
-                                completed_at_unix: Some(now_unix_seconds()),
-                            });
-                            if endpoint == AiEndpoint::Responses {
+                            let record_pass_through_completion = || {
+                                record_stream_usage();
+                                state.record_request_log(StoredRequestLog {
+                                    request_id: ctx.request_id.clone(),
+                                    trace_id: ctx.trace_id.clone(),
+                                    agent_run_id: Some(agent_run_id.clone()),
+                                    workflow_id: workflow_id.clone(),
+                                    workflow_version,
+                                    workflow_node_id: workflow_node_id.clone(),
+                                    cluster_id: None,
+                                    node_id: None,
+                                    tenant: policy_request.tenant.clone(),
+                                    route: policy_request.route.clone(),
+                                    provider: Some(provider.name.clone()),
+                                    logical_model: Some(request.model.clone()),
+                                    provider_model: Some(model_route.provider_model.clone()),
+                                    gateway_config_id: gateway_config
+                                        .as_ref()
+                                        .map(|profile| profile.id.clone()),
+                                    gateway_config_revision: gateway_config
+                                        .as_ref()
+                                        .map(|profile| profile.revision),
+                                    status_code: response.status.as_u16(),
+                                    error_code: None,
+                                    prompt_recorded: record_bodies,
+                                    response_recorded: false,
+                                    prompt_body: record_bodies.then(|| body_json.to_string()),
+                                    response_body: None,
+                                    cache_status: None,
+                                    started_at_unix: Some(request_started_at_unix),
+                                    completed_at_unix: Some(now_unix_seconds()),
+                                });
+                            };
+                            if streaming_guardrail_plan
+                                == crate::state::StreamingGuardrailPlan::ShadowAfterComplete
+                            {
+                                let (stream_result, capture) = if endpoint == AiEndpoint::Responses
+                                {
+                                    let provider_kind =
+                                        responses_stream_provider_kind(&provider.kind);
+                                    let raw =
+                                        Cursor::new(response.initial_body).chain(response.body);
+                                    let normalized = ResponsesStreamNormalizer::new(
+                                        raw,
+                                        provider_kind,
+                                        ctx.request_id.clone(),
+                                        response.content_type.clone(),
+                                    );
+                                    let (capturing, capture) = CapturingReader::new(
+                                        normalized,
+                                        &[],
+                                        provider_response_body_max_bytes,
+                                    );
+                                    let result = write_streaming_response(
+                                        session,
+                                        response.status,
+                                        "text/event-stream",
+                                        Vec::new(),
+                                        capturing,
+                                        &ctx.request_id,
+                                    )
+                                    .await;
+                                    (result, capture)
+                                } else {
+                                    let (capturing, capture) = CapturingReader::new(
+                                        response.body,
+                                        &response.initial_body,
+                                        provider_response_body_max_bytes,
+                                    );
+                                    let result = write_streaming_response(
+                                        session,
+                                        response.status,
+                                        &response.content_type,
+                                        response.initial_body,
+                                        capturing,
+                                        &ctx.request_id,
+                                    )
+                                    .await;
+                                    (result, capture)
+                                };
+                                record_pass_through_completion();
+                                if stream_result.is_ok() {
+                                    let captured = capture
+                                        .lock()
+                                        .map(|capture| capture.clone())
+                                        .unwrap_or(StreamingCapture {
+                                            body: Vec::new(),
+                                            truncated: true,
+                                        });
+                                    let guardrail_envelope = normalize_guardrail_response(
+                                        endpoint.guardrail_protocol(),
+                                        &captured.body,
+                                        true,
+                                    );
+                                    let evaluation_context = GuardrailEvaluationContext {
+                                        request_id: &ctx.request_id,
+                                        trace_id: ctx.trace_id.as_deref(),
+                                        agent_run_id: Some(&agent_run_id),
+                                        workflow_id: workflow_id.as_deref(),
+                                        workflow_version,
+                                        workflow_node_id: workflow_node_id.as_deref(),
+                                        actor_api_key_id: auth.api_key_id.as_deref(),
+                                        tenant: &policy_request.tenant,
+                                        service_account_id: auth.service_account_id(),
+                                        gateway_config_id: gateway_config
+                                            .as_ref()
+                                            .map(|profile| profile.id.as_str()),
+                                        model: Some(&request.model),
+                                        provider: Some(&provider.name),
+                                        streaming: true,
+                                        envelope: &guardrail_envelope,
+                                    };
+                                    if captured.truncated {
+                                        state
+                                            .record_guardrail_stream_capture_overflow(
+                                                evaluation_context,
+                                            )
+                                            .await;
+                                    } else {
+                                        let _ = state
+                                            .match_guardrail(
+                                                GuardrailStage::Response,
+                                                evaluation_context,
+                                            )
+                                            .await;
+                                    }
+                                }
+                                return stream_result;
+                            }
+                            let stream_result = if endpoint == AiEndpoint::Responses {
                                 let provider_kind = responses_stream_provider_kind(&provider.kind);
                                 let normalized = ResponsesStreamNormalizer::new(
                                     response.body,
@@ -1086,7 +1334,7 @@ impl FerroGateway {
                                     ctx.request_id.clone(),
                                     response.content_type.clone(),
                                 );
-                                return write_streaming_response(
+                                write_streaming_response(
                                     session,
                                     response.status,
                                     "text/event-stream",
@@ -1094,17 +1342,20 @@ impl FerroGateway {
                                     normalized,
                                     &ctx.request_id,
                                 )
-                                .await;
-                            }
-                            return write_streaming_response(
-                                session,
-                                response.status,
-                                &response.content_type,
-                                response.initial_body,
-                                response.body,
-                                &ctx.request_id,
-                            )
-                            .await;
+                                .await
+                            } else {
+                                write_streaming_response(
+                                    session,
+                                    response.status,
+                                    &response.content_type,
+                                    response.initial_body,
+                                    response.body,
+                                    &ctx.request_id,
+                                )
+                                .await
+                            };
+                            record_pass_through_completion();
+                            return stream_result;
                         }
                         Err(error) => {
                             state.record_provider_failure(&provider.name);
@@ -1319,7 +1570,11 @@ impl FerroGateway {
                         let mut final_body = response.body;
                         let mut final_content_type = response.content_type;
                         let mut final_error_code = None;
-                        let guardrail_body = String::from_utf8_lossy(&final_body).into_owned();
+                        let guardrail_envelope = normalize_guardrail_response(
+                            endpoint.guardrail_protocol(),
+                            &final_body,
+                            false,
+                        );
                         if let Some(guardrail) = state
                             .match_guardrail(
                                 GuardrailStage::Response,
@@ -1339,7 +1594,7 @@ impl FerroGateway {
                                     model: Some(&request.model),
                                     provider: Some(&provider.name),
                                     streaming: false,
-                                    body_text: &guardrail_body,
+                                    envelope: &guardrail_envelope,
                                 },
                             )
                             .await
@@ -1364,8 +1619,11 @@ impl FerroGateway {
                                             target: guardrail.evidence_target(),
                                             outcome: "blocked".into(),
                                             message: format!(
-                                                "guardrail {} blocked response for model {} provider {}",
-                                                guardrail.rule_name, request.model, provider.name
+                                                "guardrail {} blocked response for model {} provider {} at {}",
+                                                guardrail.rule_name,
+                                                request.model,
+                                                provider.name,
+                                                guardrail.evidence_location()
                                             ),
                                         },
                                     );
@@ -1397,8 +1655,11 @@ impl FerroGateway {
                                             target: guardrail.evidence_target(),
                                             outcome: "redacted".into(),
                                             message: format!(
-                                                "guardrail {} redacted response for model {} provider {}",
-                                                guardrail.rule_name, request.model, provider.name
+                                                "guardrail {} redacted response for model {} provider {} at {}",
+                                                guardrail.rule_name,
+                                                request.model,
+                                                provider.name,
+                                                guardrail.evidence_location()
                                             ),
                                         },
                                     );
@@ -1648,7 +1909,7 @@ struct AiRequestPlan {
     body_json: serde_json::Value,
     estimated_usage: BillingTokenUsage,
     routes: Vec<ModelRoute>,
-    body_text: String,
+    guardrail_envelope: GuardrailEnvelope,
 }
 
 #[derive(Debug)]
@@ -1677,17 +1938,132 @@ fn reject_ai_request(rejection: AiRequestRejection) -> Box<AiRequestRejection> {
     Box::new(rejection)
 }
 
-async fn read_provider_streaming_body(
+#[derive(Debug)]
+enum StreamingBodyReadError {
+    Io(IoError),
+    TooLarge { max_bytes: usize },
+    Timeout { timeout: std::time::Duration },
+}
+
+impl StreamingBodyReadError {
+    fn status_and_code(&self) -> (StatusCode, &'static str) {
+        match self {
+            Self::Io(_) => (StatusCode::BAD_GATEWAY, "provider_dispatch_error"),
+            Self::TooLarge { .. } => (
+                StatusCode::BAD_GATEWAY,
+                "guardrail_stream_buffer_limit_exceeded",
+            ),
+            Self::Timeout { .. } => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "guardrail_stream_buffer_timeout",
+            ),
+        }
+    }
+}
+
+impl fmt::Display for StreamingBodyReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "provider stream read failed: {error}"),
+            Self::TooLarge { max_bytes } => write!(
+                formatter,
+                "guarded provider stream exceeds the {max_bytes}-byte buffer limit"
+            ),
+            Self::Timeout { timeout } => write!(
+                formatter,
+                "guarded provider stream did not complete within {} milliseconds",
+                timeout.as_millis()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StreamingBodyReadError {}
+
+#[derive(Debug, Clone, Default)]
+struct StreamingCapture {
+    body: Vec<u8>,
+    truncated: bool,
+}
+
+impl StreamingCapture {
+    fn append(&mut self, bytes: &[u8], max_bytes: usize) {
+        let remaining = max_bytes.saturating_sub(self.body.len());
+        let captured = bytes.len().min(remaining);
+        self.body.extend_from_slice(&bytes[..captured]);
+        if captured < bytes.len() {
+            self.truncated = true;
+        }
+    }
+}
+
+struct CapturingReader<R> {
+    reader: R,
+    capture: Arc<Mutex<StreamingCapture>>,
+    max_bytes: usize,
+}
+
+impl<R> CapturingReader<R> {
+    fn new(
+        reader: R,
+        initial_body: &[u8],
+        max_bytes: usize,
+    ) -> (Self, Arc<Mutex<StreamingCapture>>) {
+        let mut state = StreamingCapture::default();
+        state.append(initial_body, max_bytes);
+        let capture = Arc::new(Mutex::new(state));
+        (
+            Self {
+                reader,
+                capture: Arc::clone(&capture),
+                max_bytes,
+            },
+            capture,
+        )
+    }
+}
+
+impl<R: Read> Read for CapturingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.reader.read(buffer)?;
+        if read > 0 {
+            if let Ok(mut capture) = self.capture.lock() {
+                capture.append(&buffer[..read], self.max_bytes);
+            }
+        }
+        Ok(read)
+    }
+}
+
+async fn read_provider_streaming_body<R: Read + Send + 'static>(
     initial_body: Vec<u8>,
-    mut reader: ProviderBodyReader,
-) -> Result<Vec<u8>, IoError> {
-    tokio::task::spawn_blocking(move || {
+    mut reader: R,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, StreamingBodyReadError> {
+    if initial_body.len() > max_bytes {
+        return Err(StreamingBodyReadError::TooLarge { max_bytes });
+    }
+    let read_task = tokio::task::spawn_blocking(move || {
         let mut body = initial_body;
-        reader.read_to_end(&mut body)?;
-        Ok(body)
-    })
-    .await
-    .map_err(IoError::other)?
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(StreamingBodyReadError::Io)?;
+            if read == 0 {
+                return Ok(body);
+            }
+            if body.len().saturating_add(read) > max_bytes {
+                return Err(StreamingBodyReadError::TooLarge { max_bytes });
+            }
+            body.extend_from_slice(&buffer[..read]);
+        }
+    });
+    match tokio::time::timeout(timeout, read_task).await {
+        Ok(result) => result.map_err(|error| StreamingBodyReadError::Io(IoError::other(error)))?,
+        Err(_) => Err(StreamingBodyReadError::Timeout { timeout }),
+    }
 }
 
 struct AiProviderRequestInput<'a> {
@@ -1957,7 +2333,7 @@ fn build_ai_request_plan(
             ),
         }));
     }
-    let body_text = String::from_utf8_lossy(body).into_owned();
+    let guardrail_envelope = normalize_guardrail_request(endpoint.guardrail_protocol(), &body_json);
     Ok(AiRequestPlan {
         auth,
         agent_run_id,
@@ -1970,7 +2346,7 @@ fn build_ai_request_plan(
         body_json,
         estimated_usage,
         routes,
-        body_text,
+        guardrail_envelope,
     })
 }
 
@@ -2722,7 +3098,7 @@ mod tests {
         assert_eq!(plan.routes[0].provider, "openai");
         assert_eq!(plan.routes[0].provider_model, "gpt-test");
         assert!(plan.estimated_usage.total_tokens > 0);
-        assert!(plan.body_text.contains("\"fast-chat\""));
+        assert!(plan.guardrail_envelope.flattened_text().contains("hello"));
     }
 
     #[test]
@@ -2892,5 +3268,50 @@ mod tests {
         assert!(request.headers.iter().any(|header| {
             header.name == "tracestate" && header.value.expose_secret() == "token4ai=ingress"
         }));
+    }
+
+    #[tokio::test]
+    async fn guarded_stream_buffer_enforces_byte_and_time_limits() {
+        let too_large = read_provider_streaming_body(
+            Vec::new(),
+            Cursor::new(b"12345".to_vec()),
+            4,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect_err("oversized guarded stream must fail before response write");
+        assert!(matches!(
+            too_large,
+            StreamingBodyReadError::TooLarge { max_bytes: 4 }
+        ));
+
+        struct SlowReader;
+        impl Read for SlowReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                Ok(0)
+            }
+        }
+        let timed_out = read_provider_streaming_body(
+            Vec::new(),
+            SlowReader,
+            1024,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect_err("slow guarded stream must hit its deadline");
+        assert!(matches!(timed_out, StreamingBodyReadError::Timeout { .. }));
+    }
+
+    #[test]
+    fn shadow_capture_never_interrupts_pass_through_when_capture_is_full() {
+        let (mut reader, capture) =
+            CapturingReader::new(Cursor::new(b"full-stream".to_vec()), b"pre-", 6);
+        let mut forwarded = Vec::new();
+        reader.read_to_end(&mut forwarded).unwrap();
+        assert_eq!(forwarded, b"full-stream");
+        let capture = capture.lock().unwrap();
+        assert_eq!(capture.body, b"pre-fu");
+        assert!(capture.truncated);
     }
 }

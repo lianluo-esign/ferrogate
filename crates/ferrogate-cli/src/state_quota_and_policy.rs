@@ -325,6 +325,9 @@ impl AppState {
                         check_id: None,
                         effect: GuardrailEffect::Deny,
                         matched_text: String::new(),
+                        segment_id: None,
+                        byte_start: None,
+                        byte_end: None,
                         redaction_regex: None,
                         content_patches: Vec::new(),
                         code: "guardrail_streaming_unsupported".to_string(),
@@ -403,13 +406,16 @@ impl AppState {
                 || (context.streaming
                     && detector_stage == DetectorStage::Response
                     && policy.revision.streaming == PolicyStreamingMode::ShadowAfterComplete);
-            let outcome = match (effective_shadow, aggregate) {
-                (true, AggregateOutcome::Pass) => "shadow_pass",
-                (true, AggregateOutcome::Fail) => "shadow_fail",
-                (true, AggregateOutcome::Error) => "shadow_error",
-                (false, AggregateOutcome::Pass) => "pass",
-                (false, AggregateOutcome::Fail) => "fail",
-                (false, AggregateOutcome::Error) => "error",
+            let not_enforced =
+                context.streaming && detector_stage == DetectorStage::Response && effective_shadow;
+            let outcome = match (not_enforced, effective_shadow, aggregate) {
+                (true, _, _) => "not_enforced",
+                (false, true, AggregateOutcome::Pass) => "shadow_pass",
+                (false, true, AggregateOutcome::Fail) => "shadow_fail",
+                (false, true, AggregateOutcome::Error) => "shadow_error",
+                (false, false, AggregateOutcome::Pass) => "pass",
+                (false, false, AggregateOutcome::Fail) => "fail",
+                (false, false, AggregateOutcome::Error) => "error",
             };
             self.record_guardrail_audit_event(AdminAuditEventDraft {
                 request_id: context.request_id.to_string(),
@@ -423,11 +429,17 @@ impl AppState {
                 action: "guardrail.policy_evaluate".to_string(),
                 target: policy.revision.immutable_id(),
                 outcome: outcome.to_string(),
-                message: format!(
-                    "guardrail policy evaluated {} checks with {} action(s)",
-                    evaluations.len(),
-                    actions.len()
-                ),
+                message: if not_enforced {
+                    format!(
+                        "streaming output completed before shadow evaluation; aggregate {aggregate:?} was not enforced"
+                    )
+                } else {
+                    format!(
+                        "guardrail policy evaluated {} checks with {} action(s)",
+                        evaluations.len(),
+                        actions.len()
+                    )
+                },
             })
             .await;
             if effective_shadow {
@@ -450,30 +462,174 @@ impl AppState {
         enforcement
     }
 
-    pub(crate) fn has_guardrail_candidate(
+    pub(crate) fn streaming_guardrail_plan(
         &self,
-        stage: GuardrailStage,
         selection: PolicySelectionContext<'_>,
-        streaming: bool,
-    ) -> bool {
-        let detector_stage = match stage {
-            GuardrailStage::Request => DetectorStage::Request,
-            GuardrailStage::Response => DetectorStage::Response,
-        };
-        self.guardrail_policies.iter().any(|policy| {
-            policy.revision.scope.matches(selection)
-                && !(streaming && policy.revision.streaming == PolicyStreamingMode::RejectStreaming)
-                && policy
+    ) -> StreamingGuardrailPlan {
+        let mut plan = StreamingGuardrailPlan::None;
+        for policy in self
+            .guardrail_policies
+            .iter()
+            .filter(|policy| policy.revision.scope.matches(selection))
+            .filter(|policy| {
+                policy
                     .checks
                     .iter()
-                    .any(|check| check.enabled && check.stage == detector_stage)
-        })
+                    .any(|check| check.enabled && check.stage == DetectorStage::Response)
+            })
+        {
+            if policy.revision.streaming == PolicyStreamingMode::RejectStreaming {
+                continue;
+            }
+            if policy.revision.mode == PolicyMode::Enforce
+                && policy.revision.streaming == PolicyStreamingMode::BufferAndEnforce
+            {
+                return StreamingGuardrailPlan::BufferAndEnforce;
+            }
+            plan = StreamingGuardrailPlan::ShadowAfterComplete;
+        }
+        plan
     }
 
     pub(crate) fn record_guardrail_match(&self, guardrail: &GuardrailMatch) {
         if let Ok(mut metrics) = self.metrics.lock() {
             metrics.record_guardrail_match(guardrail.effect);
         }
+    }
+
+    pub(crate) async fn record_guardrail_stream_capture_overflow(
+        &self,
+        context: GuardrailEvaluationContext<'_>,
+    ) {
+        let selection = PolicySelectionContext {
+            organization_id: context.tenant.organization_id.as_deref(),
+            project_id: context.tenant.project_id.as_deref(),
+            workspace_id: context.tenant.workspace_id.as_deref(),
+            api_key_id: context.tenant.api_key_id.as_deref(),
+            service_account_id: context.service_account_id,
+            gateway_config_id: context.gateway_config_id,
+            model: context.model,
+            provider: context.provider,
+        };
+        let policies = self
+            .guardrail_policies
+            .iter()
+            .filter(|policy| policy.revision.scope.matches(selection))
+            .filter(|policy| {
+                policy.revision.mode == PolicyMode::Shadow
+                    || policy.revision.streaming == PolicyStreamingMode::ShadowAfterComplete
+            })
+            .filter(|policy| {
+                policy
+                    .checks
+                    .iter()
+                    .any(|check| check.enabled && check.stage == DetectorStage::Response)
+            })
+            .map(|policy| policy.revision.immutable_id())
+            .collect::<Vec<_>>();
+        for target in policies {
+            self.record_guardrail_audit_event(AdminAuditEventDraft {
+                request_id: context.request_id.to_string(),
+                trace_id: context.trace_id.map(str::to_string),
+                agent_run_id: context.agent_run_id.map(str::to_string),
+                workflow_id: context.workflow_id.map(str::to_string),
+                workflow_version: context.workflow_version,
+                workflow_node_id: context.workflow_node_id.map(str::to_string),
+                actor_api_key_id: context.actor_api_key_id.map(str::to_string),
+                tenant: context.tenant.clone(),
+                action: "guardrail.policy_evaluate".to_string(),
+                target,
+                outcome: "not_enforced".to_string(),
+                message:
+                    "streaming shadow capture exceeded its byte limit; evaluation was not enforced"
+                        .to_string(),
+            })
+            .await;
+        }
+    }
+
+    pub(crate) async fn guardrail_streaming_buffer_failure(
+        &self,
+        context: GuardrailEvaluationContext<'_>,
+        error_code: &str,
+    ) -> Option<GuardrailMatch> {
+        let selection = PolicySelectionContext {
+            organization_id: context.tenant.organization_id.as_deref(),
+            project_id: context.tenant.project_id.as_deref(),
+            workspace_id: context.tenant.workspace_id.as_deref(),
+            api_key_id: context.tenant.api_key_id.as_deref(),
+            service_account_id: context.service_account_id,
+            gateway_config_id: context.gateway_config_id,
+            model: context.model,
+            provider: context.provider,
+        };
+        let policies = self
+            .guardrail_policies
+            .iter()
+            .filter(|policy| policy.revision.scope.matches(selection))
+            .filter(|policy| {
+                policy.revision.mode == PolicyMode::Enforce
+                    && policy.revision.streaming == PolicyStreamingMode::BufferAndEnforce
+            })
+            .filter(|policy| {
+                policy
+                    .checks
+                    .iter()
+                    .any(|check| check.enabled && check.stage == DetectorStage::Response)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut enforcement = None;
+        for policy in policies {
+            let selected_action = policy.revision.on_error.iter().find(|action| {
+                matches!(
+                    action.kind,
+                    GuardrailActionKind::Block | GuardrailActionKind::Redact
+                )
+            });
+            self.record_guardrail_audit_event(AdminAuditEventDraft {
+                request_id: context.request_id.to_string(),
+                trace_id: context.trace_id.map(str::to_string),
+                agent_run_id: context.agent_run_id.map(str::to_string),
+                workflow_id: context.workflow_id.map(str::to_string),
+                workflow_version: context.workflow_version,
+                workflow_node_id: context.workflow_node_id.map(str::to_string),
+                actor_api_key_id: context.actor_api_key_id.map(str::to_string),
+                tenant: context.tenant.clone(),
+                action: "guardrail.policy_evaluate".to_string(),
+                target: policy.revision.immutable_id(),
+                outcome: "error".to_string(),
+                message: format!(
+                    "guarded streaming output failed before first-byte release with {error_code}"
+                ),
+            })
+            .await;
+            if enforcement.is_none() {
+                if let Some(action) = selected_action {
+                    enforcement = Some(GuardrailMatch {
+                        rule_id: policy.revision.policy_id.clone(),
+                        rule_name: policy.revision.name.clone(),
+                        policy_revision: policy.revision.revision,
+                        check_id: None,
+                        effect: GuardrailEffect::Deny,
+                        matched_text: String::new(),
+                        segment_id: None,
+                        byte_start: None,
+                        byte_end: None,
+                        redaction_regex: None,
+                        content_patches: Vec::new(),
+                        code: action
+                            .code
+                            .clone()
+                            .unwrap_or_else(|| error_code.to_string()),
+                        message: action.message.clone().unwrap_or_else(|| {
+                            "guarded streaming output could not be evaluated safely".to_string()
+                        }),
+                    });
+                }
+            }
+        }
+        enforcement
     }
 
     async fn record_guardrail_detector_error(
@@ -536,6 +692,9 @@ struct GuardrailCheckEvaluation {
     check_id: String,
     outcome: CheckOutcome,
     matched_text: String,
+    segment_id: Option<String>,
+    byte_start: Option<usize>,
+    byte_end: Option<usize>,
     redaction_regex: Option<Regex>,
     content_patches: Vec<ContentPatch>,
     detector_error: Option<DetectorError>,
@@ -553,9 +712,10 @@ async fn evaluate_guardrail_check(
     }
     match &check.detector {
         GuardrailDetectorRuntime::Local(detector) => {
-            local_guardrail_evaluation(&check.id, detector, context.body_text)
+            local_guardrail_evaluation(&check.id, detector, &check.sources, context.envelope)
         }
         GuardrailDetectorRuntime::External(detector) => {
+            let detector_text = context.envelope.flattened_text();
             let input = DetectorInput {
                 stage,
                 tenant: DetectorTenant {
@@ -567,14 +727,19 @@ async fn evaluate_guardrail_check(
                 },
                 model: context.model,
                 provider: context.provider,
-                text: context.body_text,
+                text: &detector_text,
+                segments: &context.envelope.segments,
             };
             match detector.evaluate(&input, deadline).await {
-                Ok(result) => external_guardrail_evaluation(&check.id, result),
+                Ok(result) => external_guardrail_evaluation(&check.id, result, context.envelope),
                 Err(error) => {
                     if let Some(fallback) = &check.fallback_detector {
-                        let mut evaluation =
-                            local_guardrail_evaluation(&check.id, fallback, context.body_text);
+                        let mut evaluation = local_guardrail_evaluation(
+                            &check.id,
+                            fallback,
+                            &check.sources,
+                            context.envelope,
+                        );
                         evaluation.detector_error = Some(error);
                         evaluation.used_fallback = true;
                         evaluation
@@ -583,6 +748,9 @@ async fn evaluate_guardrail_check(
                             check_id: check.id.clone(),
                             outcome: CheckOutcome::Error,
                             matched_text: String::new(),
+                            segment_id: None,
+                            byte_start: None,
+                            byte_end: None,
                             redaction_regex: None,
                             content_patches: Vec::new(),
                             detector_error: Some(error),
@@ -601,6 +769,9 @@ impl GuardrailCheckEvaluation {
             check_id: check_id.to_string(),
             outcome: CheckOutcome::Disabled,
             matched_text: String::new(),
+            segment_id: None,
+            byte_start: None,
+            byte_end: None,
             redaction_regex: None,
             content_patches: Vec::new(),
             detector_error: None,
@@ -612,7 +783,14 @@ impl GuardrailCheckEvaluation {
 fn external_guardrail_evaluation(
     check_id: &str,
     result: DetectorResult,
+    envelope: &ferrogate_guardrails::GuardrailEnvelope,
 ) -> GuardrailCheckEvaluation {
+    let finding = result.findings.first();
+    let segment_id = finding
+        .and_then(|finding| finding.segment_id.clone())
+        .or_else(|| {
+            (envelope.segments.len() == 1).then(|| envelope.segments[0].segment_id.clone())
+        });
     GuardrailCheckEvaluation {
         check_id: check_id.to_string(),
         outcome: match result.verdict {
@@ -620,6 +798,9 @@ fn external_guardrail_evaluation(
             DetectorVerdict::Fail => CheckOutcome::Fail,
         },
         matched_text: result.first_matched_text().unwrap_or_default().to_string(),
+        segment_id,
+        byte_start: finding.and_then(|finding| finding.byte_start),
+        byte_end: finding.and_then(|finding| finding.byte_end),
         redaction_regex: None,
         content_patches: result.patches,
         detector_error: None,
@@ -630,11 +811,18 @@ fn external_guardrail_evaluation(
 fn local_guardrail_evaluation(
     check_id: &str,
     detector: &LocalGuardrailDetectorRuntime,
-    body_text: &str,
+    sources: &[ferrogate_guardrails::ContentSource],
+    envelope: &ferrogate_guardrails::GuardrailEnvelope,
 ) -> GuardrailCheckEvaluation {
     let matched = if let Some(max_input_bytes) = detector.max_input_bytes {
-        if body_text.len() > max_input_bytes {
-            Some(("length".to_string(), None))
+        let selected_bytes = envelope
+            .segments
+            .iter()
+            .filter(|segment| sources.contains(&segment.source))
+            .map(|segment| segment.text.len())
+            .sum::<usize>();
+        if selected_bytes > max_input_bytes {
+            Some(("length".to_string(), None, None, None, None))
         } else {
             None
         }
@@ -642,18 +830,42 @@ fn local_guardrail_evaluation(
         None
     }
     .or_else(|| {
-        detector
-            .keywords
+        envelope
+            .segments
             .iter()
-            .find(|keyword| body_text.contains(keyword.as_str()))
-            .map(|keyword| (keyword.clone(), None))
+            .filter(|segment| sources.contains(&segment.source))
+            .find_map(|segment| {
+                detector.keywords.iter().find_map(|keyword| {
+                    segment.text.find(keyword.as_str()).map(|start| {
+                        (
+                            keyword.clone(),
+                            None,
+                            Some(segment.segment_id.clone()),
+                            Some(start),
+                            Some(start + keyword.len()),
+                        )
+                    })
+                })
+            })
     })
     .or_else(|| {
-        detector.regex.iter().find_map(|regex| {
-            regex
-                .find(body_text)
-                .map(|matched| (matched.as_str().to_string(), Some(regex.clone())))
-        })
+        envelope
+            .segments
+            .iter()
+            .filter(|segment| sources.contains(&segment.source))
+            .find_map(|segment| {
+                detector.regex.iter().find_map(|regex| {
+                    regex.find(&segment.text).map(|matched| {
+                        (
+                            matched.as_str().to_string(),
+                            Some(regex.clone()),
+                            Some(segment.segment_id.clone()),
+                            Some(matched.start()),
+                            Some(matched.end()),
+                        )
+                    })
+                })
+            })
     });
     GuardrailCheckEvaluation {
         check_id: check_id.to_string(),
@@ -666,6 +878,9 @@ fn local_guardrail_evaluation(
             .as_ref()
             .map(|matched| matched.0.clone())
             .unwrap_or_default(),
+        segment_id: matched.as_ref().and_then(|matched| matched.2.clone()),
+        byte_start: matched.as_ref().and_then(|matched| matched.3),
+        byte_end: matched.as_ref().and_then(|matched| matched.4),
         redaction_regex: matched.and_then(|matched| matched.1),
         content_patches: Vec::new(),
         detector_error: None,
@@ -704,6 +919,9 @@ fn guardrail_enforcement(
             matched_text: evidence
                 .map(|evaluation| evaluation.matched_text.clone())
                 .unwrap_or_default(),
+            segment_id: evidence.and_then(|evaluation| evaluation.segment_id.clone()),
+            byte_start: evidence.and_then(|evaluation| evaluation.byte_start),
+            byte_end: evidence.and_then(|evaluation| evaluation.byte_end),
             redaction_regex: evidence.and_then(|evaluation| evaluation.redaction_regex.clone()),
             content_patches: evidence
                 .map(|evaluation| evaluation.content_patches.clone())
@@ -759,6 +977,17 @@ mod tests {
         body: &'a str,
         streaming: bool,
     ) -> Option<GuardrailMatch> {
+        let detector_stage = match stage {
+            crate::config::GuardrailStage::Request => DetectorStage::Request,
+            crate::config::GuardrailStage::Response => DetectorStage::Response,
+        };
+        let envelope = ferrogate_guardrails::GuardrailEnvelope::from_text(
+            ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+            detector_stage,
+            ferrogate_guardrails::ContentSource::User,
+            "test.body",
+            body,
+        );
         tokio::runtime::Runtime::new()
             .expect("test runtime")
             .block_on(state.match_guardrail(
@@ -777,7 +1006,7 @@ mod tests {
                     model,
                     provider,
                     streaming,
-                    body_text: body,
+                    envelope: &envelope,
                 },
             ))
     }
@@ -836,6 +1065,7 @@ mod tests {
                 id: "keyword".to_string(),
                 enabled: true,
                 stage: DetectorStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
                 detector: DetectorDefinition::local(vec![keyword.to_string()], Vec::new(), None),
                 fallback_detector: None,
             }],
@@ -1001,6 +1231,7 @@ mod tests {
                 id: "non-match".to_string(),
                 enabled: true,
                 stage: DetectorStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
                 detector: DetectorDefinition::local(
                     vec!["not-present".to_string()],
                     Vec::new(),
@@ -1080,8 +1311,23 @@ mod tests {
         assert!(shadow_state.current().audit_events().iter().any(|event| {
             event.action == "guardrail.policy_evaluate"
                 && event.target == "streaming-shadow@1"
-                && event.outcome == "shadow_fail"
+                && event.outcome == "not_enforced"
         }));
+        assert_eq!(
+            shadow_state
+                .current()
+                .streaming_guardrail_plan(PolicySelectionContext {
+                    organization_id: None,
+                    project_id: None,
+                    workspace_id: None,
+                    api_key_id: None,
+                    service_account_id: None,
+                    gateway_config_id: None,
+                    model: None,
+                    provider: None,
+                }),
+            StreamingGuardrailPlan::ShadowAfterComplete
+        );
         assert!(match_guardrail_for_test(
             &shadow_state.current(),
             GuardrailStage::Response,
@@ -1091,6 +1337,159 @@ mod tests {
             "contains secret",
         )
         .is_some());
+    }
+
+    #[test]
+    fn streaming_buffer_limits_use_configured_error_action_and_sanitized_evidence() {
+        let shared = SharedAppState::with_source_path(Config::default(), None);
+        let mut policy = durable_guardrail_revision(
+            "buffer-errors",
+            1,
+            "secret",
+            PolicyScopeSelector::default(),
+        );
+        policy.checks[0].stage = DetectorStage::Response;
+        shared.create_guardrail_policy_revision(policy).unwrap();
+        shared
+            .activate_guardrail_policy_revision("buffer-errors", 1, "test-admin", 1, false)
+            .unwrap();
+
+        let state = shared.current();
+        let tenant = ferrogate_core::TenantContext::default();
+        let envelope = ferrogate_guardrails::GuardrailEnvelope::from_text(
+            ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+            DetectorStage::Response,
+            ferrogate_guardrails::ContentSource::Assistant,
+            "test.response",
+            "sensitive-stream-body",
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for error_code in [
+            "guardrail_stream_buffer_limit_exceeded",
+            "guardrail_stream_buffer_timeout",
+        ] {
+            let matched = runtime
+                .block_on(state.guardrail_streaming_buffer_failure(
+                    GuardrailEvaluationContext {
+                        request_id: error_code,
+                        trace_id: None,
+                        agent_run_id: None,
+                        workflow_id: None,
+                        workflow_version: None,
+                        workflow_node_id: None,
+                        actor_api_key_id: None,
+                        tenant: &tenant,
+                        service_account_id: None,
+                        gateway_config_id: None,
+                        model: Some("fast-chat"),
+                        provider: Some("openai"),
+                        streaming: true,
+                        envelope: &envelope,
+                    },
+                    error_code,
+                ))
+                .expect("buffer failure must follow the configured block action");
+            assert_eq!(matched.code, "durable_guardrail_unavailable");
+        }
+
+        let events = state
+            .audit_events()
+            .into_iter()
+            .filter(|event| event.target == "buffer-errors@1")
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| {
+            event.action == "guardrail.policy_evaluate"
+                && event.outcome == "error"
+                && !event.message.contains("sensitive-stream-body")
+        }));
+        assert!(events.iter().any(|event| {
+            event
+                .message
+                .contains("guardrail_stream_buffer_limit_exceeded")
+        }));
+        assert!(events
+            .iter()
+            .any(|event| { event.message.contains("guardrail_stream_buffer_timeout") }));
+    }
+
+    #[test]
+    fn normalized_segments_inspect_every_chat_role_and_report_utf8_byte_ranges() {
+        let envelope = ferrogate_guardrails::normalize_request(
+            ferrogate_guardrails::GuardrailProtocol::ChatCompletions,
+            &serde_json::json!({
+                "messages": [
+                    {"role": "system", "content": "前缀秘密"},
+                    {"role": "developer", "content": "developer-secret"},
+                    {"role": "user", "content": "user-secret"},
+                    {"role": "assistant", "tool_calls": [{"function": {"arguments": "{\"token\":\"argument-secret\"}"}}]},
+                    {"role": "tool", "content": "result-secret"}
+                ],
+                "tools": [{"type": "function", "function": {"name": "schema-secret"}}],
+                "metadata": {"case": "metadata-secret"}
+            }),
+        );
+        for (keyword, expected_source) in [
+            ("秘密", ferrogate_guardrails::ContentSource::System),
+            (
+                "developer-secret",
+                ferrogate_guardrails::ContentSource::Developer,
+            ),
+            ("user-secret", ferrogate_guardrails::ContentSource::User),
+            (
+                "argument-secret",
+                ferrogate_guardrails::ContentSource::ToolArguments,
+            ),
+            (
+                "result-secret",
+                ferrogate_guardrails::ContentSource::ToolResult,
+            ),
+            (
+                "schema-secret",
+                ferrogate_guardrails::ContentSource::ToolSchema,
+            ),
+            (
+                "metadata-secret",
+                ferrogate_guardrails::ContentSource::Metadata,
+            ),
+        ] {
+            let evaluation = local_guardrail_evaluation(
+                "normalized",
+                &LocalGuardrailDetectorRuntime {
+                    keywords: vec![keyword.to_string()],
+                    regex: Vec::new(),
+                    max_input_bytes: None,
+                },
+                &[expected_source],
+                &envelope,
+            );
+            assert_eq!(evaluation.outcome, CheckOutcome::Fail, "{keyword}");
+            let segment = envelope
+                .segments
+                .iter()
+                .find(|segment| Some(&segment.segment_id) == evaluation.segment_id.as_ref())
+                .expect("matched segment must exist");
+            assert_eq!(segment.source, expected_source, "{keyword}");
+            let start = segment.text.find(keyword).unwrap();
+            assert_eq!(evaluation.byte_start, Some(start), "{keyword}");
+            assert_eq!(
+                evaluation.byte_end,
+                Some(start + keyword.len()),
+                "{keyword}"
+            );
+        }
+
+        let excluded = local_guardrail_evaluation(
+            "normalized",
+            &LocalGuardrailDetectorRuntime {
+                keywords: vec!["developer-secret".to_string()],
+                regex: Vec::new(),
+                max_input_bytes: None,
+            },
+            &[ferrogate_guardrails::ContentSource::User],
+            &envelope,
+        );
+        assert_eq!(excluded.outcome, CheckOutcome::Pass);
     }
 
     #[test]
@@ -1132,6 +1531,7 @@ mod tests {
                 name: "Block secret".into(),
                 enabled: true,
                 stage: crate::config::GuardrailStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
                 organization_ids: vec!["org_demo".into()],
                 project_ids: vec!["project_demo".into()],
                 api_key_ids: vec!["key_demo".into()],
@@ -1215,6 +1615,7 @@ mod tests {
                 name: "Block secret".into(),
                 enabled: false,
                 stage: crate::config::GuardrailStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
                 organization_ids: vec![],
                 project_ids: vec![],
                 api_key_ids: vec![],
@@ -1285,6 +1686,7 @@ mod tests {
                 name: "Redact secret".into(),
                 enabled: true,
                 stage: crate::config::GuardrailStage::Response,
+                sources: ferrogate_guardrails::all_content_sources(),
                 organization_ids: vec![],
                 project_ids: vec![],
                 api_key_ids: vec![],
@@ -1384,6 +1786,7 @@ mod tests {
             name: "External PII detector".into(),
             enabled: true,
             stage: crate::config::GuardrailStage::Request,
+            sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
             api_key_ids: vec![],
@@ -1666,6 +2069,7 @@ mod tests {
                 name: "Redact token".into(),
                 enabled: true,
                 stage: crate::config::GuardrailStage::Response,
+                sources: ferrogate_guardrails::all_content_sources(),
                 organization_ids: vec![],
                 project_ids: vec![],
                 api_key_ids: vec![],
@@ -1712,6 +2116,7 @@ mod tests {
                 name: "Max input".into(),
                 enabled: true,
                 stage: crate::config::GuardrailStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
                 organization_ids: vec![],
                 project_ids: vec![],
                 api_key_ids: vec![],

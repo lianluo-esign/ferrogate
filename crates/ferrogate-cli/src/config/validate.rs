@@ -1862,6 +1862,10 @@ impl Config {
             if guardrail.name.trim().is_empty() {
                 bail!("field guardrails[{index}].name: cannot be empty");
             }
+            let unique_sources = guardrail.sources.iter().collect::<HashSet<_>>();
+            if guardrail.sources.is_empty() || unique_sources.len() != guardrail.sources.len() {
+                bail!("field guardrails[{index}].sources: must contain unique content sources");
+            }
             if guardrail.provider == super::GuardrailProviderKind::None
                 && guardrail.keywords.is_empty()
                 && guardrail.regex.is_empty()

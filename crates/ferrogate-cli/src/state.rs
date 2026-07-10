@@ -46,9 +46,9 @@ use ferrogate_guardrails::{
     apply_content_patches, ActionKind as GuardrailActionKind, AggregateOutcome, CheckBinding,
     CheckOutcome, ContentPatch, CustomHttpDetector, CustomHttpDetectorConfig, DetectorDefinition,
     DetectorError, DetectorInput, DetectorResult, DetectorSecret, DetectorStage, DetectorTenant,
-    DetectorVerdict, GuardrailDetector, PolicyAction, PolicyAggregation, PolicyExecution,
-    PolicyMode, PolicyRevision, PolicyRevisionStatus, PolicyRevisionView, PolicyScopeSelector,
-    PolicySelectionContext, PolicyStreamingMode,
+    DetectorVerdict, GuardrailDetector, GuardrailEnvelope, PolicyAction, PolicyAggregation,
+    PolicyExecution, PolicyMode, PolicyRevision, PolicyRevisionStatus, PolicyRevisionView,
+    PolicyScopeSelector, PolicySelectionContext, PolicyStreamingMode,
 };
 use ferrogate_mcp::{
     McpExecutionError, McpManager, McpServerStatus, McpToolExecutionRequest, McpToolExecutionResult,
@@ -1602,6 +1602,7 @@ struct GuardrailCheckRuntime {
     id: String,
     enabled: bool,
     stage: DetectorStage,
+    sources: Vec<ferrogate_guardrails::ContentSource>,
     detector: GuardrailDetectorRuntime,
     fallback_detector: Option<LocalGuardrailDetectorRuntime>,
 }
@@ -1627,10 +1628,20 @@ pub(crate) struct GuardrailMatch {
     pub(crate) check_id: Option<String>,
     pub(crate) effect: GuardrailEffect,
     pub(crate) matched_text: String,
+    pub(crate) segment_id: Option<String>,
+    pub(crate) byte_start: Option<usize>,
+    pub(crate) byte_end: Option<usize>,
     redaction_regex: Option<Regex>,
     content_patches: Vec<ContentPatch>,
     pub(crate) code: String,
     pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamingGuardrailPlan {
+    None,
+    ShadowAfterComplete,
+    BufferAndEnforce,
 }
 
 impl GuardrailMatch {
@@ -1656,6 +1667,16 @@ impl GuardrailMatch {
             text.replace(&self.matched_text, "[REDACTED]")
         }
     }
+
+    pub(crate) fn evidence_location(&self) -> String {
+        match (self.segment_id.as_deref(), self.byte_start, self.byte_end) {
+            (Some(segment_id), Some(start), Some(end)) => {
+                format!("segment {segment_id} bytes {start}..{end}")
+            }
+            (Some(segment_id), _, _) => format!("segment {segment_id}"),
+            _ => "unlocated content".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1673,7 +1694,7 @@ pub(crate) struct GuardrailEvaluationContext<'a> {
     pub(crate) model: Option<&'a str>,
     pub(crate) provider: Option<&'a str>,
     pub(crate) streaming: bool,
-    pub(crate) body_text: &'a str,
+    pub(crate) envelope: &'a GuardrailEnvelope,
 }
 
 impl RequestLogExportFilter {
@@ -4549,6 +4570,7 @@ fn compile_static_guardrail_policy(rule: &GuardrailRule) -> anyhow::Result<Polic
                 GuardrailStage::Request => DetectorStage::Request,
                 GuardrailStage::Response => DetectorStage::Response,
             },
+            sources: rule.sources.clone(),
             detector,
             fallback_detector,
         }],
@@ -4635,9 +4657,11 @@ fn build_guardrail_policy_runtime(
                 id: check.id.clone(),
                 enabled: check.enabled,
                 stage: check.stage,
+                sources: check.sources.clone(),
                 detector: build_guardrail_detector(
                     &revision.immutable_id(),
                     &check.id,
+                    &check.sources,
                     &check.detector,
                     secret_registry,
                 )?,
@@ -4676,6 +4700,7 @@ fn build_local_guardrail_detector(
 fn build_guardrail_detector(
     policy_id: &str,
     check_id: &str,
+    sources: &[ferrogate_guardrails::ContentSource],
     definition: &DetectorDefinition,
     secret_registry: &ferrogate_secrets::SecretResolverRegistry,
 ) -> anyhow::Result<GuardrailDetectorRuntime> {
@@ -4725,6 +4750,7 @@ fn build_guardrail_detector(
         max_payload_bytes: *max_payload_bytes,
         max_response_bytes: *max_response_bytes,
         allow_private_network: *allow_private_network,
+        supported_sources: sources.to_vec(),
         bearer_token,
     })
     .map_err(|error| {

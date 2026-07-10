@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub(crate) use ferrogate_core::ApprovalPolicy;
+use ferrogate_guardrails::{all_content_sources, ContentSource};
 pub(crate) use ferrogate_mcp::{
     McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
@@ -760,6 +761,8 @@ pub(crate) struct GuardrailRule {
     pub(crate) enabled: bool,
     #[serde(default = "default_guardrail_stage")]
     pub(crate) stage: GuardrailStage,
+    #[serde(default = "all_content_sources")]
+    pub(crate) sources: Vec<ContentSource>,
     #[serde(default)]
     pub(crate) organization_ids: Vec<String>,
     #[serde(default)]

@@ -15,15 +15,16 @@ use postgres::{config::SslMode, Client, Config as PostgresConfig};
 use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     env, fs,
-    io::Write,
-    net::TcpListener,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     path::Path,
     process::{Child, Command, Stdio},
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -31,11 +32,15 @@ use std::{
 
 const CLIENT_AUTH: &str = "Authorization: Bearer guardrail-client-secret";
 const DYNAMIC_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-dynamic-client-secret";
+const BUFFER_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-buffer-client-secret";
+const SHADOW_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-shadow-client-secret";
+const REJECT_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-reject-client-secret";
+const UNGUARDED_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-unguarded-client-secret";
 const ADMIN_AUTH: &str = "Authorization: Bearer guardrail-admin-secret";
 const JSON_CONTENT: &str = "Content-Type: application/json";
 const DETECTOR_SECRET: &str = "guardrail-detector-e2e-secret";
+const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 const DYNAMIC_TENANT_ID: &str = "org_dynamic_guardrail_e2e";
-const GUARDRAIL_MANAGER_ROLE_ID: &str = "role-guardrail-manager-e2e";
 const GUARDRAIL_ACTIONS: [(&str, &str); 6] = [
     ("guardrails.policy.read", "Read Guardrail policies"),
     (
@@ -73,12 +78,15 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
         .context("system clock is before UNIX epoch")?
         .as_millis();
     let schema = format!("ferrogate_guardrail_e2e_{suffix}");
+    let policy_role_id = format!("role-e2e-{suffix}");
+    let policy_role_slug = format!("e2e-runtime-role-{suffix}");
     let mut evidence = SupabaseEvidence::connect(args, schema.clone())?;
 
     let gateway_addr = free_addr()?;
     let provider_stop = Arc::new(AtomicBool::new(false));
-    let (provider_addr, provider_handle) = spawn_guardrail_provider(Arc::clone(&provider_stop))
-        .context("start local model provider")?;
+    let (provider_addr, provider_handle, provider_signals) =
+        spawn_guardrail_provider(Arc::clone(&provider_stop))
+            .context("start local model provider")?;
     let mut provider = ProviderGuard::new(provider_stop, provider_handle);
     let mut detector = MockDetector::start(2)?;
     let dir = tempfile::tempdir()?;
@@ -95,7 +103,11 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
         args.supabase_dsn.trim(),
     )?;
 
-    let detected = send_chat(&gateway_addr, "my email is pii@example.com")?;
+    let detected = send_chat_with_system(
+        &gateway_addr,
+        "system-private-content",
+        "my email is pii@example.com",
+    )?;
     assert_json_error(&detected, 403, "guardrail_pii_detected")?;
 
     let allowed = send_chat(&gateway_addr, "ordinary safe request")?;
@@ -131,8 +143,18 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
             || !request.contains("\"organization_id\":\"org_guardrail_e2e\"")
             || !request.contains("\"model\":\"fast-chat\"")
             || !request.contains("\"provider\":\"openai\"")
+            || !request.contains("\"segments\":[")
+            || !request.contains("\"segment_id\":")
+            || !request.contains("\"source\":\"user\"")
+            || !request.contains("\"fingerprint\":")
         {
-            bail!("Guardrail detector request omitted required execution context");
+            bail!("Guardrail detector request omitted execution context or content segments");
+        }
+        if request.contains("system-private-content")
+            || request.contains("guardrail-client-secret")
+            || request.contains("\"source\":\"system\"")
+        {
+            bail!("Guardrail detector request exceeded its declared content projection");
         }
     }
 
@@ -171,8 +193,8 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     )?;
     assert_json_error(&tenant_create, 403, "guardrail_rbac_denied")?;
 
-    configure_guardrail_manager_role(&gateway_addr)?;
-    evidence.verify_guardrail_rbac_binding(true)?;
+    configure_guardrail_policy_role(&gateway_addr, &policy_role_id, &policy_role_slug)?;
+    evidence.verify_guardrail_rbac_binding(&policy_role_id, true)?;
 
     let cross_tenant_create = dynamic_json_request(
         &gateway_addr,
@@ -186,6 +208,10 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
         ),
     )?;
     assert_json_error(&cross_tenant_create, 403, "guardrail_policy_scope_denied")?;
+
+    install_streaming_policies(&gateway_addr)?;
+    verify_normalized_and_streaming_paths(&gateway_addr, &provider_signals)?;
+    evidence.wait_for_streaming_semantics()?;
 
     let create_v1 = dynamic_json_request(
         &gateway_addr,
@@ -337,13 +363,16 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     let unbind = admin_json_request(
         &gateway_addr,
         "DELETE",
-        &format!("/admin/v1/tenant-roles/{DYNAMIC_TENANT_ID}/{GUARDRAIL_MANAGER_ROLE_ID}"),
+        &format!("/admin/v1/tenant-roles/{DYNAMIC_TENANT_ID}/{policy_role_id}"),
         "",
     )?;
     if unbind.status != 200 {
-        bail!("failed to revoke Guardrail manager role: {}", unbind.raw);
+        bail!(
+            "failed to revoke generated Guardrail policy role: {}",
+            unbind.raw
+        );
     }
-    evidence.verify_guardrail_rbac_binding(false)?;
+    evidence.verify_guardrail_rbac_binding(&policy_role_id, false)?;
     let denied_after_unbind = dynamic_json_request(
         &gateway_addr,
         "POST",
@@ -352,17 +381,27 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     )?;
     assert_json_error(&denied_after_unbind, 403, "guardrail_rbac_denied")?;
     let provider_requests = provider.join()?;
-    let chat_requests = provider_requests
-        .iter()
-        .filter(|request| request.contains("POST /v1/chat/completions "))
-        .collect::<Vec<_>>();
-    if chat_requests.len() != 3
-        || !chat_requests[0].contains("ordinary safe request")
-        || !chat_requests[1].contains("dynamic-secret-v1")
-        || !chat_requests[2].contains("dynamic-secret-v2")
+    let request_count = |needle: &str| {
+        provider_requests
+            .iter()
+            .filter(|request| request.contains(needle))
+            .count()
+    };
+    if request_count("ordinary safe request") != 1
+        || request_count("dynamic-secret-v1") != 1
+        || request_count("dynamic-secret-v2") != 1
+        || request_count("normalized-input-secret") != 0
+        || request_count("stream-reject-chat") != 0
+        || request_count("stream-buffer-chat") != 1
+        || request_count("stream-buffer-responses") != 1
+        || request_count("stream-buffer-overflow") != 1
+        || request_count("stream-shadow-chat") != 1
+        || request_count("stream-shadow-responses") != 1
+        || request_count("stream-unguarded-chat") != 1
+        || request_count("stream-unguarded-responses") != 1
     {
         bail!(
-            "provider dispatch count/content proved neither dry-run isolation nor revision switching: {provider_requests:?}"
+            "provider dispatch evidence did not prove Guardrail normalization/streaming isolation: {provider_requests:?}"
         );
     }
 
@@ -378,6 +417,25 @@ fn send_chat(addr: &str, content: &str) -> Result<HttpResponse> {
 
 fn send_dynamic_chat(addr: &str, content: &str) -> Result<HttpResponse> {
     send_chat_with_auth(addr, content, DYNAMIC_CLIENT_AUTH)
+}
+
+fn send_chat_with_system(addr: &str, system: &str, user: &str) -> Result<HttpResponse> {
+    let body = serde_json::json!({
+        "model": "fast-chat",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ],
+        "stream": false
+    })
+    .to_string();
+    http_request_addr(
+        addr,
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT],
+        &body,
+    )
 }
 
 fn send_chat_with_auth(addr: &str, content: &str, auth: &str) -> Result<HttpResponse> {
@@ -410,7 +468,7 @@ fn dynamic_json_request(addr: &str, method: &str, path: &str, body: &str) -> Res
     )
 }
 
-fn configure_guardrail_manager_role(addr: &str) -> Result<()> {
+fn configure_guardrail_policy_role(addr: &str, role_id: &str, role_slug: &str) -> Result<()> {
     let tenant = admin_json_request(
         addr,
         "POST",
@@ -452,9 +510,9 @@ fn configure_guardrail_manager_role(addr: &str) -> Result<()> {
         "POST",
         "/admin/v1/roles",
         &serde_json::json!({
-            "id": GUARDRAIL_MANAGER_ROLE_ID,
-            "name": "Guardrail Manager",
-            "slug": "guardrail_manager",
+            "id": role_id,
+            "name": format!("Generated E2E role {role_slug}"),
+            "slug": role_slug,
             "permission_keys": GUARDRAIL_ACTIONS
                 .iter()
                 .map(|(key, _)| *key)
@@ -463,17 +521,23 @@ fn configure_guardrail_manager_role(addr: &str) -> Result<()> {
         .to_string(),
     )?;
     if role.status != 200 {
-        bail!("failed to create Guardrail manager role: {}", role.raw);
+        bail!(
+            "failed to create generated Guardrail policy role: {}",
+            role.raw
+        );
     }
 
     let binding = admin_json_request(
         addr,
         "POST",
         &format!("/admin/v1/tenant-roles/{DYNAMIC_TENANT_ID}"),
-        &serde_json::json!({"role_id": GUARDRAIL_MANAGER_ROLE_ID}).to_string(),
+        &serde_json::json!({"role_id": role_id}).to_string(),
     )?;
     if binding.status != 200 {
-        bail!("failed to bind Guardrail manager role: {}", binding.raw);
+        bail!(
+            "failed to bind generated Guardrail policy role: {}",
+            binding.raw
+        );
     }
     Ok(())
 }
@@ -501,6 +565,7 @@ fn dynamic_policy_body_for_tenant(
             "id": "keyword",
             "enabled": true,
             "stage": "request",
+            "sources": ["user"],
             "detector": {"kind": "local", "keywords": [keyword]}
         }],
         "aggregation": {"type": "all"},
@@ -524,6 +589,374 @@ fn dynamic_policy_body_for_tenant(
         policy["policy_id"] = Value::String(policy_id.to_string());
     }
     policy.to_string()
+}
+
+fn install_streaming_policies(addr: &str) -> Result<()> {
+    create_and_activate_policy(
+        addr,
+        "stream-buffer-policy",
+        serde_json::json!({
+            "policy_id": "stream-buffer-policy",
+            "name": "Buffered streaming and normalized input",
+            "enforced": true,
+            "scope": {
+                "organization_ids": ["org_guardrail_buffer_e2e"],
+                "models": ["fast-chat"],
+                "providers": ["openai"]
+            },
+            "checks": [
+                {
+                    "id": "normalized-input",
+                    "stage": "request",
+                    "sources": ["system", "developer", "user", "tool_schema", "tool_arguments", "tool_result", "metadata", "text_attachment"],
+                    "detector": {"kind": "local", "keywords": ["normalized-input-secret"]}
+                },
+                {
+                    "id": "split-stream-output",
+                    "stage": "response",
+                    "sources": ["assistant", "tool_arguments", "tool_result"],
+                    "detector": {"kind": "local", "keywords": ["split-secret"]}
+                }
+            ],
+            "aggregation": {"type": "any"},
+            "execution": "parallel",
+            "mode": "enforce",
+            "streaming": "buffer_and_enforce",
+            "on_pass": [{"kind": "allow"}],
+            "on_fail": [{
+                "kind": "block",
+                "code": "guardrail_stream_buffered",
+                "message": "blocked by buffered Guardrail"
+            }],
+            "on_error": [{
+                "kind": "block",
+                "code": "guardrail_stream_buffer_unavailable",
+                "message": "buffered Guardrail unavailable"
+            }],
+            "deadline_ms": 1000
+        }),
+    )?;
+    create_and_activate_policy(
+        addr,
+        "stream-shadow-policy",
+        streaming_response_policy(
+            "stream-shadow-policy",
+            "org_guardrail_shadow_e2e",
+            "shadow_after_complete",
+        ),
+    )?;
+    create_and_activate_policy(
+        addr,
+        "stream-reject-policy",
+        streaming_response_policy(
+            "stream-reject-policy",
+            "org_guardrail_reject_e2e",
+            "reject_streaming",
+        ),
+    )?;
+    Ok(())
+}
+
+fn streaming_response_policy(policy_id: &str, tenant_id: &str, streaming: &str) -> Value {
+    serde_json::json!({
+        "policy_id": policy_id,
+        "name": policy_id,
+        "enforced": true,
+        "scope": {
+            "organization_ids": [tenant_id],
+            "models": ["fast-chat"],
+            "providers": ["openai"]
+        },
+        "checks": [{
+            "id": "split-stream-output",
+            "stage": "response",
+            "sources": ["assistant", "tool_arguments", "tool_result"],
+            "detector": {"kind": "local", "keywords": ["split-secret"]}
+        }],
+        "aggregation": {"type": "all"},
+        "execution": "parallel",
+        "mode": "enforce",
+        "streaming": streaming,
+        "on_pass": [{"kind": "allow"}],
+        "on_fail": [{
+            "kind": "block",
+            "code": "guardrail_shadow_must_not_escape",
+            "message": "shadow result must not become an enforced block"
+        }],
+        "on_error": [{"kind": "record"}],
+        "deadline_ms": 1000
+    })
+}
+
+fn create_and_activate_policy(addr: &str, policy_id: &str, policy: Value) -> Result<()> {
+    let created = admin_json_request(
+        addr,
+        "POST",
+        "/admin/v1/guardrail-policies",
+        &policy.to_string(),
+    )?;
+    if created.status != 201 {
+        bail!("failed to create {policy_id}: {}", created.raw);
+    }
+    let activated = admin_json_request(
+        addr,
+        "POST",
+        &format!("/admin/v1/guardrail-policies/{policy_id}/activate"),
+        r#"{"revision":1}"#,
+    )?;
+    if activated.status != 200 {
+        bail!("failed to activate {policy_id}: {}", activated.raw);
+    }
+    Ok(())
+}
+
+fn verify_normalized_and_streaming_paths(
+    addr: &str,
+    provider_signals: &ProviderSignals,
+) -> Result<()> {
+    let chat_input = http_request_addr(
+        addr,
+        "POST",
+        "/v1/chat/completions",
+        &[BUFFER_CLIENT_AUTH, JSON_CONTENT],
+        &serde_json::json!({
+            "model": "fast-chat",
+            "messages": [
+                {"role": "system", "content": "normalized-input-secret"},
+                {"role": "user", "content": "safe user content"}
+            ]
+        })
+        .to_string(),
+    )?;
+    assert_json_error(&chat_input, 403, "guardrail_stream_buffered")?;
+
+    let responses_input = http_request_addr(
+        addr,
+        "POST",
+        "/v1/responses",
+        &[BUFFER_CLIENT_AUTH, JSON_CONTENT],
+        &serde_json::json!({
+            "model": "fast-chat",
+            "instructions": "normalized-input-secret",
+            "input": "safe user content"
+        })
+        .to_string(),
+    )?;
+    assert_json_error(&responses_input, 403, "guardrail_stream_buffered")?;
+
+    let responses_output = http_request_addr(
+        addr,
+        "POST",
+        "/v1/responses",
+        &[BUFFER_CLIENT_AUTH, JSON_CONTENT],
+        &serde_json::json!({
+            "model": "fast-chat",
+            "input": "nonstream-response-secret",
+            "stream": false
+        })
+        .to_string(),
+    )?;
+    assert_json_error(&responses_output, 403, "guardrail_stream_buffered")?;
+
+    for (path, marker) in [
+        ("/v1/chat/completions", "stream-buffer-chat"),
+        ("/v1/responses", "stream-buffer-responses"),
+    ] {
+        let probe = probe_streaming_request(
+            addr,
+            path,
+            BUFFER_CLIENT_AUTH,
+            marker,
+            false,
+            provider_signals,
+        )?;
+        if probe.status != 403
+            || probe.raw.contains("split-sec")
+            || !probe.raw.contains("guardrail_stream_buffered")
+        {
+            bail!(
+                "buffered stream leaked content or returned wrong status: {}",
+                probe.raw
+            );
+        }
+    }
+
+    let overflow = http_request_addr(
+        addr,
+        "POST",
+        "/v1/chat/completions",
+        &[BUFFER_CLIENT_AUTH, JSON_CONTENT],
+        &streaming_request_body("/v1/chat/completions", "stream-buffer-overflow"),
+    )?;
+    assert_json_error(&overflow, 403, "guardrail_stream_buffer_unavailable")?;
+    if overflow.raw.contains("overflow-sensitive") {
+        bail!("buffer overflow response leaked provider content");
+    }
+
+    for (path, marker) in [
+        ("/v1/chat/completions", "stream-shadow-chat"),
+        ("/v1/responses", "stream-shadow-responses"),
+    ] {
+        let probe = probe_streaming_request(
+            addr,
+            path,
+            SHADOW_CLIENT_AUTH,
+            marker,
+            true,
+            provider_signals,
+        )?;
+        if probe.status != 200
+            || !probe.first_body.contains("split-sec")
+            || probe.first_body_elapsed >= Duration::from_millis(2500)
+        {
+            bail!("shadow stream was not a measured pass-through: {probe:?}");
+        }
+    }
+
+    let rejected = http_request_addr(
+        addr,
+        "POST",
+        "/v1/chat/completions",
+        &[REJECT_CLIENT_AUTH, JSON_CONTENT],
+        &streaming_request_body("/v1/chat/completions", "stream-reject-chat"),
+    )?;
+    assert_json_error(&rejected, 403, "guardrail_streaming_unsupported")?;
+
+    for (path, marker) in [
+        ("/v1/chat/completions", "stream-unguarded-chat"),
+        ("/v1/responses", "stream-unguarded-responses"),
+    ] {
+        let probe = probe_streaming_request(
+            addr,
+            path,
+            UNGUARDED_CLIENT_AUTH,
+            marker,
+            true,
+            provider_signals,
+        )?;
+        if probe.status != 200 || probe.first_body_elapsed >= Duration::from_millis(2500) {
+            bail!("unguarded stream regressed from pass-through: {probe:?}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct StreamingProbe {
+    status: u16,
+    first_body_elapsed: Duration,
+    first_body: String,
+    raw: String,
+}
+
+fn probe_streaming_request(
+    addr: &str,
+    path: &str,
+    auth: &str,
+    marker: &str,
+    expect_early_body: bool,
+    provider_signals: &ProviderSignals,
+) -> Result<StreamingProbe> {
+    let body = streaming_request_body(path, marker);
+    let mut stream = TcpStream::connect(addr)?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\n{auth}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()?;
+
+    let provider_first_chunk = provider_signals.wait(marker, Duration::from_secs(60))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    if expect_early_body {
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    raw.extend_from_slice(&buffer[..read]);
+                    if response_body(&raw).is_some_and(|body| !body.is_empty()) {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    bail!(
+                        "stream {marker} did not produce an early body chunk for {path}: {error}"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    } else {
+        match stream.read(&mut buffer) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Ok(read) => {
+                raw.extend_from_slice(&buffer[..read]);
+                bail!("buffered Guardrail emitted {read} bytes before evaluation completed");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let first_body_elapsed = provider_first_chunk.elapsed();
+    let first_body = response_body(&raw).unwrap_or_default().to_string();
+
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => raw.extend_from_slice(&buffer[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let raw = String::from_utf8(raw)?;
+    let status = raw
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .context("streaming response omitted HTTP status")?;
+    Ok(StreamingProbe {
+        status,
+        first_body_elapsed,
+        first_body,
+        raw,
+    })
+}
+
+fn streaming_request_body(path: &str, marker: &str) -> String {
+    if path == "/v1/responses" {
+        serde_json::json!({"model": "fast-chat", "input": marker, "stream": true}).to_string()
+    } else {
+        serde_json::json!({
+            "model": "fast-chat",
+            "messages": [{"role": "user", "content": marker}],
+            "stream": true
+        })
+        .to_string()
+    }
+}
+
+fn response_body(raw: &[u8]) -> Option<&str> {
+    let header_end = raw.windows(4).position(|window| window == b"\r\n\r\n")?;
+    std::str::from_utf8(&raw[header_end + 4..]).ok()
 }
 
 fn assert_policy_revision_response(
@@ -653,6 +1086,8 @@ cluster:
   node_zone: "local-a"
   state_backend: "local"
   counter_backend: "local"
+reliability:
+  provider_response_body_max_bytes: 2048
 storage:
   provider: "supabase"
   required: true
@@ -697,11 +1132,36 @@ api_keys:
     name: "Guardrail E2E admin"
     key: "guardrail-admin-secret"
     scopes: ["admin.read", "admin.write"]
+  - id: "guardrail-buffer-client"
+    name: "Guardrail buffered streaming client"
+    key: "guardrail-buffer-client-secret"
+    scopes: ["models.read", "chat.completions", "responses.create"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_guardrail_buffer_e2e"
+  - id: "guardrail-shadow-client"
+    name: "Guardrail shadow streaming client"
+    key: "guardrail-shadow-client-secret"
+    scopes: ["models.read", "chat.completions", "responses.create"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_guardrail_shadow_e2e"
+  - id: "guardrail-reject-client"
+    name: "Guardrail reject streaming client"
+    key: "guardrail-reject-client-secret"
+    scopes: ["models.read", "chat.completions", "responses.create"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_guardrail_reject_e2e"
+  - id: "guardrail-unguarded-client"
+    name: "Guardrail unguarded streaming client"
+    key: "guardrail-unguarded-client-secret"
+    scopes: ["models.read", "chat.completions", "responses.create"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_guardrail_unguarded_e2e"
 guardrails:
   - id: "e2e-pii-detector"
     name: "E2E PII detector"
     enabled: true
     stage: "request"
+    sources: ["user"]
     organization_ids: ["org_guardrail_e2e"]
     models: ["fast-chat"]
     providers: ["openai"]
@@ -764,7 +1224,7 @@ impl GatewayGuard {
     fn wait_for_readiness(&mut self, gateway_addr: &str) -> Result<()> {
         let started = Instant::now();
         let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(60) {
+        while started.elapsed() < GATEWAY_READINESS_TIMEOUT {
             if let Some(status) = self.child.try_wait()? {
                 bail!("FerroGate exited before Guardrail E2E readiness: {status}");
             }
@@ -791,10 +1251,47 @@ struct ProviderGuard {
     handle: Option<JoinHandle<Vec<String>>>,
 }
 
-fn spawn_guardrail_provider(stop: Arc<AtomicBool>) -> Result<(String, JoinHandle<Vec<String>>)> {
+#[derive(Clone, Default)]
+struct ProviderSignals {
+    emitted: Arc<(Mutex<HashMap<String, Instant>>, Condvar)>,
+}
+
+impl ProviderSignals {
+    fn mark(&self, marker: String) {
+        let (emitted, changed) = &*self.emitted;
+        emitted.lock().unwrap().insert(marker, Instant::now());
+        changed.notify_all();
+    }
+
+    fn wait(&self, marker: &str, timeout: Duration) -> Result<Instant> {
+        let (emitted, changed) = &*self.emitted;
+        let started = Instant::now();
+        let mut state = emitted.lock().unwrap();
+        loop {
+            if let Some(emitted_at) = state.remove(marker) {
+                return Ok(emitted_at);
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                bail!("provider did not emit the first stream chunk for marker {marker}");
+            }
+            let (next, result) = changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if result.timed_out() && !state.contains_key(marker) {
+                bail!("provider did not emit the first stream chunk for marker {marker}");
+            }
+        }
+    }
+}
+
+fn spawn_guardrail_provider(
+    stop: Arc<AtomicBool>,
+) -> Result<(String, JoinHandle<Vec<String>>, ProviderSignals)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?.to_string();
+    let signals = ProviderSignals::default();
+    let server_signals = signals.clone();
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
         while !stop.load(Ordering::Relaxed) {
@@ -803,13 +1300,8 @@ fn spawn_guardrail_provider(stop: Arc<AtomicBool>) -> Result<(String, JoinHandle
                     let Ok(request) = read_http_request(&mut stream) else {
                         continue;
                     };
-                    let body = r#"{"id":"chatcmpl_guardrail_e2e","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
+                    let _ =
+                        write_guardrail_provider_response(&mut stream, &request, &server_signals);
                     requests.push(request);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -820,7 +1312,87 @@ fn spawn_guardrail_provider(stop: Arc<AtomicBool>) -> Result<(String, JoinHandle
         }
         requests
     });
-    Ok((addr, handle))
+    Ok((addr, handle, signals))
+}
+
+fn write_guardrail_provider_response(
+    stream: &mut TcpStream,
+    request: &str,
+    signals: &ProviderSignals,
+) -> Result<()> {
+    let is_responses = request.contains("POST /v1/responses ");
+    let is_streaming = request.contains(r#""stream":true"#);
+    if is_streaming {
+        let overflow = request.contains("stream-buffer-overflow");
+        let first = if overflow {
+            format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}}}}]}}\n\n",
+                "overflow-sensitive".repeat(256)
+            )
+        } else {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"split-sec\"}}]}\n\n".to_string()
+        };
+        let second = "data: {\"choices\":[{\"delta\":{\"content\":\"ret\"}}]}\n\ndata: [DONE]\n\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{first}"
+        )?;
+        stream.flush()?;
+        if let Some(marker) = streaming_marker(request) {
+            signals.mark(marker);
+        }
+        if overflow {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(3));
+        stream.write_all(second.as_bytes())?;
+        stream.flush()?;
+        return Ok(());
+    }
+
+    let body = if is_responses {
+        let content = if request.contains("nonstream-response-secret") {
+            "split-secret"
+        } else {
+            "ok"
+        };
+        serde_json::json!({
+            "id": "resp_guardrail_e2e",
+            "object": "response",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": content}]
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        })
+        .to_string()
+    } else {
+        r#"{"id":"chatcmpl_guardrail_e2e","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#.to_string()
+    };
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )?;
+    Ok(())
+}
+
+fn streaming_marker(request: &str) -> Option<String> {
+    let body = request.split_once("\r\n\r\n")?.1;
+    let body: Value = serde_json::from_str(body).ok()?;
+    body.get("input")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            body.get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| messages.first())
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str)
+        })
+        .filter(|marker| marker.starts_with("stream-"))
+        .map(str::to_string)
 }
 
 impl ProviderGuard {
@@ -865,18 +1437,14 @@ impl MockDetector {
         let server_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
             let mut requests = Vec::new();
-            let started = Instant::now();
-            while requests.len() < expected_requests
-                && started.elapsed() < Duration::from_secs(60)
-                && !server_stop.load(Ordering::Relaxed)
-            {
+            while requests.len() < expected_requests && !server_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let Ok(request) = read_http_request(&mut stream) else {
                             continue;
                         };
                         let body = if request.contains("pii@example.com") {
-                            r#"{"verdict":"fail","findings":[{"category":"pii","severity":"high","matched_text":"pii@example.com"}],"patches":[],"detector_version":"e2e-1"}"#
+                            r#"{"verdict":"fail","findings":[{"category":"pii","severity":"high","segment_id":"chat:1","byte_start":12,"byte_end":27,"matched_text":"pii@example.com"}],"patches":[],"detector_version":"e2e-1"}"#
                         } else {
                             r#"{"verdict":"pass","findings":[],"patches":[],"detector_version":"e2e-1"}"#
                         };
@@ -1035,7 +1603,7 @@ impl SupabaseEvidence {
         bail!("timed out reading Guardrail evidence directly from Supabase: {last}")
     }
 
-    fn verify_guardrail_rbac_binding(&mut self, expected_bound: bool) -> Result<()> {
+    fn verify_guardrail_rbac_binding(&mut self, role_id: &str, expected_bound: bool) -> Result<()> {
         let permission_count: i64 = self
             .client
             .query_one(
@@ -1057,19 +1625,17 @@ impl SupabaseEvidence {
             .client
             .query_opt(
                 &format!(
-                    "SELECT slug, permission_keys_json::text FROM \"{}\".roles WHERE id = $1",
+                    "SELECT permission_keys_json::text FROM \"{}\".roles WHERE id = $1",
                     self.schema
                 ),
-                &[&GUARDRAIL_MANAGER_ROLE_ID],
+                &[&role_id],
             )?
-            .context("Supabase omitted the Guardrail manager role")?;
-        let slug: String = role_row.get(0);
-        let permission_keys_json: String = role_row.get(1);
+            .context("Supabase omitted the generated Guardrail policy role")?;
+        let permission_keys_json: String = role_row.get(0);
         let permission_keys: Vec<String> = serde_json::from_str(&permission_keys_json)?;
-        if slug != "guardrail_manager"
-            || !GUARDRAIL_ACTIONS
-                .iter()
-                .all(|(key, _)| permission_keys.iter().any(|actual| actual == key))
+        if !GUARDRAIL_ACTIONS
+            .iter()
+            .all(|(key, _)| permission_keys.iter().any(|actual| actual == key))
         {
             bail!("Supabase Guardrail role did not contain the expected action bundle");
         }
@@ -1081,13 +1647,121 @@ impl SupabaseEvidence {
                     "SELECT count(*) FROM \"{}\".tenant_role_bindings WHERE tenant_id = $1 AND role_id = $2",
                     self.schema
                 ),
-                &[&DYNAMIC_TENANT_ID, &GUARDRAIL_MANAGER_ROLE_ID],
+                &[&DYNAMIC_TENANT_ID, &role_id],
             )?
             .get(0);
         if (binding_count == 1) != expected_bound {
             bail!(
                 "Supabase Guardrail role binding state was wrong: expected_bound={expected_bound}, count={binding_count}"
             );
+        }
+        Ok(())
+    }
+
+    fn wait_for_streaming_semantics(&mut self) -> Result<()> {
+        let started = Instant::now();
+        let mut last = "Supabase streaming Guardrail evidence not visible yet".to_string();
+        while started.elapsed() < Duration::from_secs(15) {
+            match self.verify_streaming_semantics_once() {
+                Ok(()) => return Ok(()),
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        bail!("timed out verifying streaming Guardrail evidence in Supabase: {last}")
+    }
+
+    fn verify_streaming_semantics_once(&mut self) -> Result<()> {
+        let rows = self.client.query(
+            &format!(
+                "SELECT action, target, outcome, audit_json::text FROM \"{}\".audit_events WHERE target LIKE 'stream-%'",
+                self.schema
+            ),
+            &[],
+        )?;
+        let mut buffered_fail = false;
+        let mut buffered_error = false;
+        let mut shadow_not_enforced = false;
+        let mut rejected = false;
+        let mut normalized_location = false;
+        for row in rows {
+            let action: String = row.get(0);
+            let target: Option<String> = row.get(1);
+            let outcome: String = row.get(2);
+            let audit_json: String = row.get(3);
+            if audit_json.contains("split-secret")
+                || audit_json.contains("normalized-input-secret")
+                || audit_json.contains("overflow-sensitive")
+            {
+                bail!("streaming Guardrail audit leaked inspected content");
+            }
+            match (action.as_str(), target.as_deref(), outcome.as_str()) {
+                ("guardrail.policy_evaluate", Some("stream-buffer-policy@1"), "fail") => {
+                    buffered_fail = true;
+                }
+                ("guardrail.policy_evaluate", Some("stream-buffer-policy@1"), "error") => {
+                    buffered_error = true;
+                    let audit: Value = serde_json::from_str(&audit_json)?;
+                    if !audit["message"].as_str().is_some_and(|message| {
+                        message.contains("guardrail_stream_buffer_limit_exceeded")
+                            && !message.contains("overflow-sensitive")
+                    }) {
+                        bail!("buffer overflow audit evidence was not sanitized");
+                    }
+                }
+                ("guardrail.policy_evaluate", Some("stream-shadow-policy@1"), "not_enforced") => {
+                    shadow_not_enforced = true
+                }
+                ("guardrail.policy_evaluate", Some("stream-reject-policy@1"), "fail") => {
+                    rejected = true;
+                }
+                ("guardrail.deny", Some(target), "blocked")
+                    if target.starts_with("stream-shadow-policy@1") =>
+                {
+                    bail!("shadow streaming policy emitted a blocked audit outcome");
+                }
+                ("guardrail.deny", Some(target), "blocked")
+                    if target.starts_with("stream-buffer-policy@1") =>
+                {
+                    let audit: Value = serde_json::from_str(&audit_json)?;
+                    normalized_location |= audit["message"].as_str().is_some_and(|message| {
+                        message.contains("segment ") && message.contains(" bytes ")
+                    });
+                }
+                _ => {}
+            }
+        }
+        if !buffered_fail
+            || !buffered_error
+            || !shadow_not_enforced
+            || !rejected
+            || !normalized_location
+        {
+            bail!(
+                "streaming Guardrail evidence incomplete: buffered={buffered_fail}, buffer_error={buffered_error}, shadow={shadow_not_enforced}, rejected={rejected}, location={normalized_location}"
+            );
+        }
+
+        let request_codes = self.client.query(
+            &format!(
+                "SELECT error_code FROM \"{}\".request_logs WHERE error_code IN ('guardrail_stream_buffered', 'guardrail_stream_buffer_unavailable', 'guardrail_streaming_unsupported')",
+                self.schema
+            ),
+            &[],
+        )?;
+        let mut buffered_code = false;
+        let mut buffered_error_code = false;
+        let mut rejected_code = false;
+        for row in request_codes {
+            match row.get::<_, Option<String>>(0).as_deref() {
+                Some("guardrail_stream_buffered") => buffered_code = true,
+                Some("guardrail_stream_buffer_unavailable") => buffered_error_code = true,
+                Some("guardrail_streaming_unsupported") => rejected_code = true,
+                _ => {}
+            }
+        }
+        if !buffered_code || !buffered_error_code || !rejected_code {
+            bail!("request logs omitted stable streaming Guardrail error codes");
         }
         Ok(())
     }
@@ -1129,6 +1803,7 @@ impl SupabaseEvidence {
                 || revision != expected_revision
                 || policy["revision"] != expected_revision
                 || policy["policy_id"] != "dynamic-supabase-policy"
+                || policy["checks"][0]["sources"] != serde_json::json!(["user"])
             {
                 bail!("immutable Guardrail revision metadata diverged from policy_json");
             }

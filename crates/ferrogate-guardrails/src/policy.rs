@@ -5,8 +5,8 @@
 // description: Immutable Guardrail policy revision and deterministic composition domain.
 
 use crate::{
-    validate_custom_http_endpoint, DetectorError, DetectorErrorKind, DetectorStage,
-    MAX_DETECTOR_TIMEOUT,
+    all_content_sources, validate_custom_http_endpoint, ContentSource, DetectorError,
+    DetectorErrorKind, DetectorStage, MAX_DETECTOR_TIMEOUT,
 };
 use regex::Regex;
 use reqwest::Url;
@@ -284,6 +284,8 @@ pub struct CheckBinding {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub stage: DetectorStage,
+    #[serde(default = "all_content_sources")]
+    pub sources: Vec<ContentSource>,
     pub detector: DetectorDefinition,
     #[serde(default)]
     pub fallback_detector: Option<DetectorDefinition>,
@@ -420,6 +422,12 @@ impl PolicyRevision {
             if check.id.trim().is_empty() || !check_ids.insert(check.id.as_str()) {
                 return Err(invalid_policy(
                     "guardrail policy check ids must be non-empty and unique",
+                ));
+            }
+            let unique_sources = check.sources.iter().collect::<HashSet<_>>();
+            if check.sources.is_empty() || unique_sources.len() != check.sources.len() {
+                return Err(invalid_policy(
+                    "guardrail policy check sources must be non-empty and unique",
                 ));
             }
             check.detector.validate()?;
@@ -621,6 +629,7 @@ mod tests {
                 id: "check".to_string(),
                 enabled: true,
                 stage: DetectorStage::Request,
+                sources: all_content_sources(),
                 detector: DetectorDefinition::local(vec!["secret".to_string()], vec![], None),
                 fallback_detector: None,
             }],
@@ -755,6 +764,10 @@ mod tests {
 
     #[test]
     fn policy_validation_rejects_invalid_threshold_and_fallback() {
+        let mut invalid_sources = policy("invalid-sources", PolicyScopeSelector::default());
+        invalid_sources.checks[0].sources.clear();
+        assert!(invalid_sources.validate().is_err());
+
         let mut revision = policy("policy", PolicyScopeSelector::default());
         revision.aggregation = PolicyAggregation::Threshold { minimum: 2 };
         assert!(revision.validate().is_err());
@@ -782,6 +795,7 @@ mod tests {
             id: "disabled".to_string(),
             enabled: false,
             stage: DetectorStage::Request,
+            sources: all_content_sources(),
             detector: DetectorDefinition::local(vec!["x".to_string()], vec![], None),
             fallback_detector: None,
         });
@@ -789,6 +803,7 @@ mod tests {
             id: "response".to_string(),
             enabled: true,
             stage: DetectorStage::Response,
+            sources: all_content_sources(),
             detector: DetectorDefinition::local(vec!["x".to_string()], vec![], None),
             fallback_detector: None,
         });

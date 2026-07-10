@@ -1295,6 +1295,7 @@ fn validates_guardrail_keyword_scope_and_effect() {
             name: "Block secret".into(),
             enabled: true,
             stage: GuardrailStage::Request,
+            sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec!["org_demo".into()],
             project_ids: vec!["project_demo".into()],
             api_key_ids: vec!["key_dev".into()],
@@ -1328,6 +1329,7 @@ fn validates_response_guardrail_redact_effect() {
             name: "Redact secret".into(),
             enabled: true,
             stage: GuardrailStage::Response,
+            sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec!["org_demo".into()],
             project_ids: vec!["project_demo".into()],
             api_key_ids: vec!["key_dev".into()],
@@ -1362,6 +1364,7 @@ fn validates_guardrail_regex_and_max_input_bytes() {
                 name: "Block pattern".into(),
                 enabled: true,
                 stage: GuardrailStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
                 organization_ids: vec![],
                 project_ids: vec![],
                 api_key_ids: vec!["key_dev".into()],
@@ -1383,6 +1386,7 @@ fn validates_guardrail_regex_and_max_input_bytes() {
                 name: "Max input".into(),
                 enabled: true,
                 stage: GuardrailStage::Request,
+                sources: ferrogate_guardrails::all_content_sources(),
                 organization_ids: vec![],
                 project_ids: vec![],
                 api_key_ids: vec!["key_dev".into()],
@@ -1417,6 +1421,7 @@ fn rejects_invalid_guardrail_regex() {
             name: "Block pattern".into(),
             enabled: true,
             stage: GuardrailStage::Request,
+            sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
             api_key_ids: vec!["key_dev".into()],
@@ -1451,6 +1456,7 @@ fn rejects_response_guardrail_max_input_bytes() {
             name: "Response max input".into(),
             enabled: true,
             stage: GuardrailStage::Response,
+            sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
             api_key_ids: vec!["key_dev".into()],
@@ -1485,6 +1491,7 @@ fn rejects_request_guardrail_redact_effect() {
             name: "Redact secret".into(),
             enabled: true,
             stage: GuardrailStage::Request,
+            sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
             api_key_ids: vec!["key_dev".into()],
@@ -1518,6 +1525,7 @@ fn rejects_guardrail_with_unknown_model() {
             name: "Block secret".into(),
             enabled: true,
             stage: GuardrailStage::Request,
+            sources: ferrogate_guardrails::all_content_sources(),
             organization_ids: vec![],
             project_ids: vec![],
             api_key_ids: vec!["key_dev".into()],
@@ -1547,6 +1555,7 @@ fn custom_http_guardrail() -> GuardrailRule {
         name: "External PII detector".into(),
         enabled: true,
         stage: GuardrailStage::Request,
+        sources: ferrogate_guardrails::all_content_sources(),
         organization_ids: vec![],
         project_ids: vec![],
         api_key_ids: vec![],
@@ -1576,6 +1585,19 @@ fn accepts_guardrail_with_custom_http_provider_only() {
     };
 
     config.validate().unwrap();
+}
+
+#[test]
+fn rejects_guardrail_without_declared_content_sources() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.sources.clear();
+    let config = Config {
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("guardrails[0].sources"));
 }
 
 #[test]

@@ -124,6 +124,7 @@ fn detector_config(endpoint: String) -> CustomHttpDetectorConfig {
         max_payload_bytes: 16 * 1024,
         max_response_bytes: 16 * 1024,
         allow_private_network: true,
+        supported_sources: all_content_sources(),
         bearer_token: None,
     }
 }
@@ -141,6 +142,7 @@ fn input<'a>(text: &'a str) -> DetectorInput<'a> {
         model: Some("fast-chat"),
         provider: Some("openai"),
         text,
+        segments: &[],
     }
 }
 
@@ -153,6 +155,13 @@ fn runtime() -> tokio::runtime::Runtime {
 
 #[test]
 fn rejects_private_and_secret_bearing_endpoints_without_explicit_policy() {
+    let mut config = detector_config("https://example.com/check".to_string());
+    config.supported_sources.clear();
+    assert_eq!(
+        CustomHttpDetector::new(config).unwrap_err().kind,
+        DetectorErrorKind::InvalidConfiguration
+    );
+
     let mut config = detector_config("http://127.0.0.1:8080/check".to_string());
     config.allow_private_network = false;
     let error = CustomHttpDetector::new(config).unwrap_err();
@@ -179,12 +188,27 @@ fn sends_context_and_accepts_legacy_and_typed_contracts() {
             r#"{"match":true,"matched_text":"john@example.com","category":"pii"}"#,
         )
     });
-    let detector = CustomHttpDetector::new(detector_config(legacy_endpoint)).unwrap();
+    let mut config = detector_config(legacy_endpoint);
+    config.supported_sources = vec![ContentSource::User];
+    let detector = CustomHttpDetector::new(config).unwrap();
+    assert_eq!(
+        detector.descriptor().supported_sources,
+        vec![ContentSource::User]
+    );
+    let envelope = normalize_request(
+        GuardrailProtocol::ChatCompletions,
+        &serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "system-private-content"},
+                {"role": "user", "content": "email john@example.com"}
+            ]
+        }),
+    );
+    let flattened = envelope.flattened_text();
+    let mut detector_input = input(&flattened);
+    detector_input.segments = &envelope.segments;
     let result = runtime()
-        .block_on(detector.evaluate(
-            &input("email john@example.com"),
-            Instant::now() + Duration::from_secs(1),
-        ))
+        .block_on(detector.evaluate(&detector_input, Instant::now() + Duration::from_secs(1)))
         .unwrap();
     assert_eq!(result.verdict, DetectorVerdict::Fail);
     assert_eq!(result.findings[0].category, "pii");
@@ -193,6 +217,11 @@ fn sends_context_and_accepts_legacy_and_typed_contracts() {
     assert!(request.contains("\"contract_version\":1"));
     assert!(request.contains("\"organization_id\":\"org-demo\""));
     assert!(request.contains("\"model\":\"fast-chat\""));
+    assert!(request.contains("\"source\":\"user\""));
+    assert!(request.contains("\"protocol_location\":\"messages[1].content\""));
+    assert!(request.contains("\"fingerprint\":\"sha256:"));
+    assert!(!request.contains("system-private-content"));
+    assert!(!request.contains("\"source\":\"system\""));
 
     let (typed_endpoint, _) = spawn_server(1, |_, _| {
         TestResponse::json(
@@ -206,6 +235,30 @@ fn sends_context_and_accepts_legacy_and_typed_contracts() {
         .unwrap();
     assert_eq!(result.verdict, DetectorVerdict::Pass);
     assert_eq!(result.detector_version, "vendor-7");
+}
+
+#[test]
+fn rejects_findings_for_unknown_or_invalid_segment_coordinates() {
+    let (endpoint, _) = spawn_server(1, |_, _| {
+        TestResponse::json(
+            200,
+            r#"{"verdict":"fail","findings":[{"category":"pii","segment_id":"missing","byte_start":0,"byte_end":1}],"detector_version":"vendor-7"}"#,
+        )
+    });
+    let detector = CustomHttpDetector::new(detector_config(endpoint)).unwrap();
+    let envelope = GuardrailEnvelope::from_text(
+        GuardrailProtocol::ChatCompletions,
+        DetectorStage::Request,
+        ContentSource::User,
+        "messages[0].content",
+        "safe",
+    );
+    let mut detector_input = input("safe");
+    detector_input.segments = &envelope.segments;
+    let error = runtime()
+        .block_on(detector.evaluate(&detector_input, Instant::now() + Duration::from_secs(1)))
+        .unwrap_err();
+    assert_eq!(error.kind, DetectorErrorKind::InvalidResponse);
 }
 
 #[test]

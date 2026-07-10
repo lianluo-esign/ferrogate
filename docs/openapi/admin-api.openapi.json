@@ -11718,6 +11718,16 @@
           "id": {"type": "string", "minLength": 1},
           "enabled": {"type": "boolean", "default": true},
           "stage": {"type": "string", "enum": ["request", "response"]},
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": ["system", "developer", "user", "assistant", "tool_schema", "tool_arguments", "tool_result", "metadata", "text_attachment", "unknown"]
+            },
+            "description": "Content sources visible to this detector. Omitted values default to all supported sources for compatibility."
+          },
           "detector": {"$ref": "#/components/schemas/GuardrailDetectorDefinition"},
           "fallback_detector": {
             "oneOf": [
