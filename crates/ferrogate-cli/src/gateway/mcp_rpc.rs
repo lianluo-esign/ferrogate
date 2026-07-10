@@ -7,6 +7,7 @@
 use crate::approval::ApprovalStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fmt;
 
 use crate::{
     auth::AuthContext,
@@ -48,12 +49,27 @@ struct McpJsonRpcError {
     message: String,
 }
 
-pub(super) fn required_scope(method: &str) -> &'static str {
-    if method == "tools/call" {
-        "tools.execute"
-    } else {
-        "tools.read"
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct MissingScopeMapping {
+    method: String,
+}
+
+impl fmt::Display for MissingScopeMapping {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "runtime API contract has no MCP scope mapping for method {}",
+            self.method
+        )
     }
+}
+
+pub(super) fn required_scope(method: &str) -> Result<&'static str, MissingScopeMapping> {
+    super::api_contract::method_dependent_scope(&http::Method::POST, "/v1/mcp", method).ok_or_else(
+        || MissingScopeMapping {
+            method: method.to_string(),
+        },
+    )
 }
 
 pub(super) async fn handle_request(
@@ -494,5 +510,17 @@ fn mcp_error_code(code: &str) -> i64 {
         "tool_not_found" => -32602,
         "mcp_server_unavailable" => -32002,
         _ => -32000,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_method_scope_mapping_fails_closed() {
+        let error = required_scope("unmapped/method").expect_err("missing mapping must fail");
+        assert_eq!(error.method, "unmapped/method");
+        assert!(error.to_string().contains("no MCP scope mapping"));
     }
 }

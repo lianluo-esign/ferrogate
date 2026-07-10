@@ -32,6 +32,8 @@ pub(crate) enum Commands {
     AuthApi(AuthArgs),
     /// Run gateway API coverage against a real local FerroGate process.
     GatewayApi(LocalArgs),
+    /// Prove fixed runtime routes and methods are enforced by the OpenAPI contract.
+    ApiContract(LocalArgs),
     /// Run the gateway -> billing service usage-to-ledger chain (gpt-5.5).
     GatewayBillingChain(LocalArgs),
     /// Run function egress broker coverage against a real local FerroGate process.
@@ -188,6 +190,7 @@ pub(crate) struct Dispatch {
     pub(crate) admin: fn(&LocalArgs) -> Result<()>,
     pub(crate) auth: fn(&AuthArgs) -> Result<()>,
     pub(crate) gateway: fn(&LocalArgs) -> Result<()>,
+    pub(crate) api_contract: fn(&LocalArgs) -> Result<()>,
     pub(crate) gateway_billing_chain: fn(&LocalArgs) -> Result<()>,
     pub(crate) function_egress: fn(&LocalArgs) -> Result<()>,
     pub(crate) supabase_restart: fn(&LocalArgs) -> Result<()>,
@@ -209,7 +212,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, guardrail-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
+                "local: admin-api, auth-api, gateway-api, api-contract, ci, guardrail-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -224,6 +227,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::AdminApi(args) => (dispatch.admin)(&args),
         Commands::AuthApi(args) => (dispatch.auth)(&args),
         Commands::GatewayApi(args) => (dispatch.gateway)(&args),
+        Commands::ApiContract(args) => (dispatch.api_contract)(&args),
         Commands::GatewayBillingChain(args) => (dispatch.gateway_billing_chain)(&args),
         Commands::FunctionEgressApi(args) => (dispatch.function_egress)(&args),
         Commands::SupabaseRestart(args) => (dispatch.supabase_restart)(&args),

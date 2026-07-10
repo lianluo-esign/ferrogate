@@ -1,0 +1,15 @@
+{
+  "name": "ferrogate-openapi-client-smoke",
+  "private": true,
+  "scripts": {
+    "generate": "openapi-typescript ../../docs/openapi/admin-api.openapi.json -o generated.ts",
+    "check": "npm run generate && tsc --noEmit"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

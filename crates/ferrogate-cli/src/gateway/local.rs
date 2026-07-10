@@ -2793,7 +2793,20 @@ impl FerroGateway {
             return write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await;
         }
 
-        let required_scope = mcp_rpc::required_scope(&rpc.method);
+        let required_scope = match mcp_rpc::required_scope(&rpc.method) {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!(method = %rpc.method, error = %error, "MCP auth contract is incomplete");
+                return write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "api_contract_invalid",
+                    error.to_string(),
+                    &ctx.request_id,
+                )
+                .await;
+            }
+        };
         let state = self.state.current();
         let auth = match authenticate(&state, &headers, required_scope, &ctx.request_id) {
             Ok(auth) => auth,

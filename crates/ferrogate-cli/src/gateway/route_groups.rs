@@ -15,9 +15,6 @@
 // dispatch refactor -- every handler call below is identical to the
 // pre-refactor flat chain; no behavior change.
 
-use std::sync::LazyLock;
-
-use matchit::Router;
 use pingora::{proxy::Session, Result as PingoraResult};
 
 use super::{FerroGateway, ProxyContext};
@@ -34,6 +31,8 @@ pub(super) struct RequestParts {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RouteGroup {
+    Health,
+    Readiness,
     AdminOverview,
     Inference,
     Tool,
@@ -65,212 +64,46 @@ pub(super) enum RouteGroup {
     Wallets,
 }
 
-/// Built once (first access) and reused for the process lifetime: the
-/// fixed route set never changes at runtime, unlike the dynamic host/path
-/// route table (`state.match_runtime_route`), which is rebuilt on config
-/// reload and stays a separate, later fallback.
-static ROUTE_GROUP_ROUTER: LazyLock<Router<RouteGroup>> = LazyLock::new(build_route_group_router);
-
-pub(super) fn match_route_group(path: &str) -> Option<RouteGroup> {
-    ROUTE_GROUP_ROUTER
-        .at(path)
-        .ok()
-        .map(|matched| *matched.value)
+impl RouteGroup {
+    pub(super) fn from_contract_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "health" => Self::Health,
+            "readiness" => Self::Readiness,
+            "admin_overview" => Self::AdminOverview,
+            "inference" => Self::Inference,
+            "tool" => Self::Tool,
+            "agent_run" => Self::AgentRun,
+            "self_hosted_worker" => Self::SelfHostedWorker,
+            "skill" => Self::Skill,
+            "prompt" => Self::Prompt,
+            "admin_request_log" => Self::AdminRequestLog,
+            "admin_config_ops" => Self::AdminConfigOps,
+            "admin_provider" => Self::AdminProvider,
+            "admin_managed_worker" => Self::AdminManagedWorker,
+            "admin_agent_upstream" => Self::AdminAgentUpstream,
+            "admin_plugin" => Self::AdminPlugin,
+            "admin_tool" => Self::AdminTool,
+            "admin_mcp_server" => Self::AdminMcpServer,
+            "admin_model" => Self::AdminModel,
+            "admin_gateway_config" => Self::AdminGatewayConfig,
+            "admin_agent_workflow" => Self::AdminAgentWorkflow,
+            "admin_api_key" => Self::AdminApiKey,
+            "admin_policy" => Self::AdminPolicy,
+            "guardrail_policy" => Self::GuardrailPolicy,
+            "tenant_hierarchy" => Self::TenantHierarchy,
+            "admin_virtual_key" => Self::AdminVirtualKey,
+            "quota_policy" => Self::QuotaPolicy,
+            "asset" => Self::Asset,
+            "billing" => Self::Billing,
+            "rbac" => Self::Rbac,
+            "plans" => Self::Plans,
+            "wallets" => Self::Wallets,
+            _ => return None,
+        })
+    }
 }
 
-fn build_route_group_router() -> Router<RouteGroup> {
-    let mut router = Router::new();
-    let mut insert = |pattern: &'static str, group: RouteGroup| {
-        router.insert(pattern, group).unwrap_or_else(|error| {
-            panic!("invalid or conflicting route pattern {pattern}: {error}")
-        });
-    };
-
-    insert("/admin", RouteGroup::AdminOverview);
-    insert("/admin/", RouteGroup::AdminOverview);
-    insert("/admin/dashboard", RouteGroup::AdminOverview);
-    insert("/admin/status", RouteGroup::AdminOverview);
-    insert("/admin/v1/status", RouteGroup::AdminOverview);
-    insert("/admin/v1/observability", RouteGroup::AdminOverview);
-    insert("/metrics", RouteGroup::AdminOverview);
-
-    insert("/v1/models", RouteGroup::Inference);
-    insert("/v1/chat/completions", RouteGroup::Inference);
-    insert("/v1/responses", RouteGroup::Inference);
-
-    insert("/v1/tools", RouteGroup::Tool);
-    insert("/v1/tools/execute", RouteGroup::Tool);
-    insert("/v1/mcp/tool/execute", RouteGroup::Tool);
-    insert("/v1/functions/execute", RouteGroup::Tool);
-    insert("/v1/mcp", RouteGroup::Tool);
-
-    insert("/v1/agent-runs", RouteGroup::AgentRun);
-    insert("/.well-known/agent.json", RouteGroup::AgentRun);
-    insert("/v1/agents/{*rest}", RouteGroup::AgentRun);
-    insert("/admin/v1/agent-runs", RouteGroup::AgentRun);
-    insert("/admin/v1/agent-runs/{*rest}", RouteGroup::AgentRun);
-    insert("/admin/v1/self-hosted-runs/{*rest}", RouteGroup::AgentRun);
-
-    insert(
-        "/v1/self-hosted-workers/heartbeat",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/v1/self-hosted-workers/events",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/v1/self-hosted-workers/artifacts",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/v1/self-hosted-workers/checkpoints",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/v1/self-hosted-workers/runs/poll",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/v1/self-hosted-workers/runs/ack",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/admin/v1/self-hosted-workers",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/admin/v1/self-hosted-workers/{*rest}",
-        RouteGroup::SelfHostedWorker,
-    );
-    insert(
-        "/admin/v1/self-hosted-worker-records",
-        RouteGroup::SelfHostedWorker,
-    );
-
-    insert("/v1/skills", RouteGroup::Skill);
-    insert("/v1/skills/{*rest}", RouteGroup::Skill);
-    insert("/admin/v1/skill-packages", RouteGroup::Skill);
-    insert("/admin/v1/skill-packages/{*rest}", RouteGroup::Skill);
-
-    insert("/v1/prompts/{*rest}", RouteGroup::Prompt);
-    insert("/admin/v1/prompt-templates", RouteGroup::Prompt);
-    insert("/admin/v1/prompt-templates/{*rest}", RouteGroup::Prompt);
-
-    insert("/admin/v1/request-logs", RouteGroup::AdminRequestLog);
-    insert("/admin/v1/request-log-exports", RouteGroup::AdminRequestLog);
-    insert("/admin/v1/audit-events", RouteGroup::AdminRequestLog);
-    insert(
-        "/admin/v1/guardrail-evaluations",
-        RouteGroup::AdminRequestLog,
-    );
-    insert("/admin/v1/investigations", RouteGroup::AdminRequestLog);
-
-    insert("/admin/v1/config/validate", RouteGroup::AdminConfigOps);
-    insert("/admin/v1/config/reload", RouteGroup::AdminConfigOps);
-    insert("/admin/v1/drain", RouteGroup::AdminConfigOps);
-
-    insert("/admin/v1/providers", RouteGroup::AdminProvider);
-    insert("/admin/v1/provider-health", RouteGroup::AdminProvider);
-    insert("/admin/v1/provider-models", RouteGroup::AdminProvider);
-
-    insert("/admin/v1/managed-workers", RouteGroup::AdminManagedWorker);
-    insert(
-        "/admin/v1/managed-worker-sessions",
-        RouteGroup::AdminManagedWorker,
-    );
-    insert(
-        "/admin/v1/framework-adapters",
-        RouteGroup::AdminManagedWorker,
-    );
-
-    insert("/admin/v1/agent-upstreams", RouteGroup::AdminAgentUpstream);
-    insert(
-        "/admin/v1/agent-upstreams/{*rest}",
-        RouteGroup::AdminAgentUpstream,
-    );
-
-    insert("/admin/v1/extensions", RouteGroup::AdminPlugin);
-    insert("/admin/v1/plugins", RouteGroup::AdminPlugin);
-    insert("/admin/v1/plugins/{*rest}", RouteGroup::AdminPlugin);
-
-    insert("/admin/v1/tools", RouteGroup::AdminTool);
-    insert("/admin/v1/tool-approvals", RouteGroup::AdminTool);
-    insert("/admin/v1/tool-approvals/{*rest}", RouteGroup::AdminTool);
-    insert("/admin/v1/tool-sessions/{*rest}", RouteGroup::AdminTool);
-
-    insert("/admin/v1/mcp-servers", RouteGroup::AdminMcpServer);
-    insert("/admin/v1/mcp-servers/{*rest}", RouteGroup::AdminMcpServer);
-
-    insert("/admin/v1/models", RouteGroup::AdminModel);
-
-    insert("/admin/v1/gateway-configs", RouteGroup::AdminGatewayConfig);
-    insert(
-        "/admin/v1/gateway-configs/{*rest}",
-        RouteGroup::AdminGatewayConfig,
-    );
-
-    insert("/admin/v1/agent-workflows", RouteGroup::AdminAgentWorkflow);
-    insert(
-        "/admin/v1/agent-workflows/{*rest}",
-        RouteGroup::AdminAgentWorkflow,
-    );
-
-    insert("/admin/v1/api-keys", RouteGroup::AdminApiKey);
-    insert("/admin/v1/api-keys/{*rest}", RouteGroup::AdminApiKey);
-
-    insert("/admin/v1/policies", RouteGroup::AdminPolicy);
-    insert("/admin/v1/policies/{*rest}", RouteGroup::AdminPolicy);
-    insert("/admin/v1/guardrail-policies", RouteGroup::GuardrailPolicy);
-    insert(
-        "/admin/v1/guardrail-policies/{*rest}",
-        RouteGroup::GuardrailPolicy,
-    );
-
-    insert("/admin/v1/tenant-accounts", RouteGroup::TenantHierarchy);
-    insert(
-        "/admin/v1/tenant-accounts/{*rest}",
-        RouteGroup::TenantHierarchy,
-    );
-    insert("/admin/v1/projects", RouteGroup::TenantHierarchy);
-    insert("/admin/v1/workspaces", RouteGroup::TenantHierarchy);
-    insert("/admin/v1/tenants", RouteGroup::TenantHierarchy);
-
-    insert("/admin/v1/virtual-keys", RouteGroup::AdminVirtualKey);
-    insert(
-        "/admin/v1/virtual-keys/{*rest}",
-        RouteGroup::AdminVirtualKey,
-    );
-
-    insert("/admin/v1/quota-policies", RouteGroup::QuotaPolicy);
-    insert("/admin/v1/quota-policies/{*rest}", RouteGroup::QuotaPolicy);
-
-    insert("/v1/assets", RouteGroup::Asset);
-    insert("/v1/assets/{*rest}", RouteGroup::Asset);
-
-    insert("/admin/v1/permissions", RouteGroup::Rbac);
-    insert("/admin/v1/permissions/{*rest}", RouteGroup::Rbac);
-    insert("/admin/v1/roles", RouteGroup::Rbac);
-    insert("/admin/v1/roles/{*rest}", RouteGroup::Rbac);
-    insert("/admin/v1/tenant-roles/{*rest}", RouteGroup::Rbac);
-
-    insert("/admin/v1/plans", RouteGroup::Plans);
-    insert("/admin/v1/plans/{*rest}", RouteGroup::Plans);
-
-    insert("/admin/v1/wallets", RouteGroup::Wallets);
-    insert("/admin/v1/wallets/{*rest}", RouteGroup::Wallets);
-    insert("/admin/v1/payment-methods", RouteGroup::Wallets);
-    insert("/admin/v1/payment-methods/{*rest}", RouteGroup::Wallets);
-
-    insert("/admin/v1/metering-events", RouteGroup::Billing);
-    insert("/admin/v1/billing-events", RouteGroup::Billing);
-    insert("/admin/v1/metering-export-status", RouteGroup::Billing);
-    insert("/admin/v1/usage-aggregates", RouteGroup::Billing);
-    insert("/admin/v1/usage-reports", RouteGroup::Billing);
-    insert("/admin/v1/billing-outbox-dead-letters", RouteGroup::Billing);
-
-    router
-}
+pub(super) use super::api_contract::match_route_group;
 
 impl FerroGateway {
     /// Dispatches to the single route group `matchit` resolved for this
@@ -288,6 +121,7 @@ impl FerroGateway {
             return Ok(false);
         };
         match group {
+            RouteGroup::Health | RouteGroup::Readiness => Ok(false),
             RouteGroup::AdminOverview => self.try_admin_overview_routes(session, ctx, req).await,
             RouteGroup::Inference => self.try_inference_routes(session, ctx, req).await,
             RouteGroup::Tool => self.try_tool_routes(session, ctx, req).await,
@@ -1129,8 +963,8 @@ mod tests {
 
     #[test]
     fn dynamic_and_unknown_paths_fall_through() {
-        assert!(match_route_group("/healthz").is_none());
-        assert!(match_route_group("/readyz").is_none());
+        assert_eq!(match_route_group("/healthz"), Some(RouteGroup::Health));
+        assert_eq!(match_route_group("/readyz"), Some(RouteGroup::Readiness));
         assert!(match_route_group("/some/customer/upstream/path").is_none());
     }
 }

@@ -46,7 +46,22 @@ jobs:
           cargo test -p ferrogate-cli --all-features config::validation_tests
 
       - name: Validate OpenAPI schemas
-        run: python3 scripts/check-openapi.py
+        run: |
+          PYTHONPATH=scripts python3 -m unittest scripts/test_openapi_contract.py
+          python3 scripts/check-openapi.py
+
+      - name: Install Node.js for generated client smoke
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tools/openapi-client-smoke/package-lock.json
+
+      - name: Compile generated OpenAPI client
+        working-directory: tools/openapi-client-smoke
+        run: |
+          npm ci
+          npm run check
 
       - name: Validate Kubernetes examples
         run: scripts/check-kubernetes-examples.sh

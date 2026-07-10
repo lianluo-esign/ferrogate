@@ -164,6 +164,15 @@ kind = "anthropic"
 base_url = "http://{provider_addr}/v1"
 api_key_env = "FERROGATE_PROVIDER_SECRET"
 
+[[upstreams]]
+name = "operator-dynamic"
+url = "http://{provider_addr}"
+
+[[routes]]
+name = "operator-prompt-extension"
+upstream = "operator-dynamic"
+path_prefixes = ["/v1/prompts/foo/custom"]
+
 [[mcp_servers]]
 name = "http"
 transport = "streamable_http"

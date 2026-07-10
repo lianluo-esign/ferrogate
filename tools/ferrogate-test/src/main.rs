@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 
+mod api_contract;
 mod assertions;
 mod cli;
 mod constants;
@@ -18,6 +19,7 @@ mod mocks;
 mod scenarios;
 mod storage;
 
+use api_contract::run_api_contract;
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use guardrails::run_guardrail_supabase;
 use scenarios::{
@@ -35,6 +37,7 @@ fn main() -> Result<()> {
         admin: run_admin_api,
         auth: run_auth_api,
         gateway: run_gateway_api,
+        api_contract: run_api_contract,
         gateway_billing_chain: run_gateway_billing_chain,
         function_egress: run_function_egress_api,
         supabase_restart: run_supabase_restart,
@@ -58,6 +61,7 @@ fn main() -> Result<()> {
             Ok(())
         },
         ci: |local, auth| {
+            run_api_contract(local)?;
             run_admin_api(local)?;
             run_auth_api(auth)?;
             run_gateway_external_auth_api(local, auth)?;

@@ -5,6 +5,7 @@
 // description: Token4AI Cloud, FerroGate AI Gateway, Rust API Gateway, agent-native AI traffic infrastructure.
 
 mod agent_runs;
+mod api_contract;
 pub(crate) mod asset_bucket;
 mod asset_security;
 mod assets;

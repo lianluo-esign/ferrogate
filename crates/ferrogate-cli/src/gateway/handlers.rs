@@ -13,7 +13,7 @@ use crate::{
     state::NetworkAccessDecision,
 };
 
-use super::route_groups::RequestParts;
+use super::route_groups::{RequestParts, RouteGroup};
 use super::{FerroGateway, ProxyContext};
 
 impl FerroGateway {
@@ -82,7 +82,31 @@ impl FerroGateway {
             return Ok(true);
         }
 
-        if path == "/healthz" {
+        let fixed_group = super::api_contract::match_route_group(&path);
+        let fixed_operation = super::api_contract::operation(&req.method, &path);
+        if fixed_operation.is_none() && super::api_contract::path_is_documented(&path) {
+            write_json_error(
+                session,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                format!("{} is not documented for {path}", req.method),
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(true);
+        }
+        if let Some(operation) = fixed_operation {
+            tracing::trace!(
+                operation_id = %operation.operation_id,
+                visibility = %operation.visibility,
+                auth_kind = %operation.auth.kind,
+                auth_scope = operation.auth.scope.as_deref().unwrap_or("none"),
+                rbac_action = operation.rbac_action.as_deref().unwrap_or("none"),
+                "matched fixed API operation contract"
+            );
+        }
+
+        if fixed_group == Some(RouteGroup::Health) {
             self.handle_healthz(session, ctx).await?;
             return Ok(true);
         }
@@ -91,7 +115,7 @@ impl FerroGateway {
             tracing::warn!("failed to sync shared control plane: {error}");
         }
 
-        if path == "/readyz" {
+        if fixed_group == Some(RouteGroup::Readiness) {
             self.handle_readyz(session, ctx).await?;
             return Ok(true);
         }
