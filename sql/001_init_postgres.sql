@@ -406,6 +406,38 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_agent_run
 CREATE INDEX IF NOT EXISTS idx_request_logs_status
     ON request_logs(status_code, error_code);
 
+-- Immutable Guardrail policy content is separated from its mutable active
+-- binding. Activation and rollback update only the binding row, so a revision
+-- used for an earlier decision can always be reconstructed byte-for-byte.
+CREATE TABLE IF NOT EXISTS guardrail_policy_revisions (
+    policy_id TEXT NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    immutable_id TEXT NOT NULL UNIQUE,
+    created_at_unix BIGINT NOT NULL,
+    created_by TEXT NOT NULL,
+    policy_json JSONB NOT NULL,
+    PRIMARY KEY (policy_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_policy_revisions_created
+    ON guardrail_policy_revisions(policy_id, created_at_unix DESC);
+
+CREATE TABLE IF NOT EXISTS guardrail_policy_bindings (
+    policy_id TEXT PRIMARY KEY,
+    active_revision BIGINT,
+    archived_revisions_json JSONB NOT NULL DEFAULT '[]'::JSONB,
+    updated_at_unix BIGINT NOT NULL,
+    updated_by TEXT NOT NULL,
+    CONSTRAINT fk_guardrail_policy_active_revision
+        FOREIGN KEY (policy_id, active_revision)
+        REFERENCES guardrail_policy_revisions(policy_id, revision)
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_policy_bindings_active
+    ON guardrail_policy_bindings(active_revision)
+    WHERE active_revision IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
     request_id TEXT,
@@ -1219,5 +1251,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (25, '025_quota_policies_asset_storage_quota_bytes')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (26, '026_guardrail_policy_revisions')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

@@ -29,6 +29,7 @@ use crate::{
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
 use ferrogate_core::{RequestContext, TenantContext};
+use ferrogate_guardrails::PolicySelectionContext;
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::{
     ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest, SecretValue,
@@ -394,8 +395,13 @@ impl FerroGateway {
                         workflow_node_id: workflow_node_id.as_deref(),
                         actor_api_key_id: auth.api_key_id.as_deref(),
                         tenant: &policy_request.tenant,
+                        service_account_id: auth.service_account_id(),
+                        gateway_config_id: gateway_config
+                            .as_ref()
+                            .map(|profile| profile.id.as_str()),
                         model: Some(&request.model),
                         provider: Some(&provider.name),
+                        streaming: request.stream,
                         body_text: &body_text,
                     },
                 )
@@ -423,7 +429,7 @@ impl FerroGateway {
                     actor_api_key_id: auth.api_key_id.clone(),
                     tenant: auth.tenant_context(),
                     action: "guardrail.deny".into(),
-                    target: guardrail.rule_id.clone(),
+                    target: guardrail.evidence_target(),
                     outcome: "blocked".into(),
                     message: format!(
                         "guardrail {} blocked request for model {} provider {}",
@@ -871,9 +877,22 @@ impl FerroGateway {
                                 auth.can_record_bodies(state.config.telemetry.log_bodies);
                             if state.has_guardrail_candidate(
                                 GuardrailStage::Response,
-                                &policy_request.tenant,
-                                Some(&request.model),
-                                Some(&provider.name),
+                                PolicySelectionContext {
+                                    organization_id: policy_request
+                                        .tenant
+                                        .organization_id
+                                        .as_deref(),
+                                    project_id: policy_request.tenant.project_id.as_deref(),
+                                    workspace_id: policy_request.tenant.workspace_id.as_deref(),
+                                    api_key_id: policy_request.tenant.api_key_id.as_deref(),
+                                    service_account_id: auth.service_account_id(),
+                                    gateway_config_id: gateway_config
+                                        .as_ref()
+                                        .map(|profile| profile.id.as_str()),
+                                    model: Some(&request.model),
+                                    provider: Some(&provider.name),
+                                },
+                                true,
                             ) {
                                 let mut final_body = match read_provider_streaming_body(
                                     response.initial_body,
@@ -911,8 +930,13 @@ impl FerroGateway {
                                             workflow_node_id: workflow_node_id.as_deref(),
                                             actor_api_key_id: auth.api_key_id.as_deref(),
                                             tenant: &policy_request.tenant,
+                                            service_account_id: auth.service_account_id(),
+                                            gateway_config_id: gateway_config
+                                                .as_ref()
+                                                .map(|profile| profile.id.as_str()),
                                             model: Some(&request.model),
                                             provider: Some(&provider.name),
+                                            streaming: true,
                                             body_text: &guardrail_body,
                                         },
                                     )
@@ -935,7 +959,7 @@ impl FerroGateway {
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.deny".into(),
-                                                    target: guardrail.rule_id.clone(),
+                                                    target: guardrail.evidence_target(),
                                                     outcome: "blocked".into(),
                                                     message: format!(
                                                         "guardrail {} blocked streaming response for model {} provider {}",
@@ -968,7 +992,7 @@ impl FerroGateway {
                                                     actor_api_key_id: auth.api_key_id.clone(),
                                                     tenant: auth.tenant_context(),
                                                     action: "guardrail.redact".into(),
-                                                    target: guardrail.rule_id.clone(),
+                                                    target: guardrail.evidence_target(),
                                                     outcome: "redacted".into(),
                                                     message: format!(
                                                         "guardrail {} redacted streaming response for model {} provider {}",
@@ -1308,8 +1332,13 @@ impl FerroGateway {
                                     workflow_node_id: workflow_node_id.as_deref(),
                                     actor_api_key_id: auth.api_key_id.as_deref(),
                                     tenant: &policy_request.tenant,
+                                    service_account_id: auth.service_account_id(),
+                                    gateway_config_id: gateway_config
+                                        .as_ref()
+                                        .map(|profile| profile.id.as_str()),
                                     model: Some(&request.model),
                                     provider: Some(&provider.name),
+                                    streaming: false,
                                     body_text: &guardrail_body,
                                 },
                             )
@@ -1332,7 +1361,7 @@ impl FerroGateway {
                                             actor_api_key_id: auth.api_key_id.clone(),
                                             tenant: auth.tenant_context(),
                                             action: "guardrail.deny".into(),
-                                            target: guardrail.rule_id.clone(),
+                                            target: guardrail.evidence_target(),
                                             outcome: "blocked".into(),
                                             message: format!(
                                                 "guardrail {} blocked response for model {} provider {}",
@@ -1365,7 +1394,7 @@ impl FerroGateway {
                                             actor_api_key_id: auth.api_key_id.clone(),
                                             tenant: auth.tenant_context(),
                                             action: "guardrail.redact".into(),
-                                            target: guardrail.rule_id.clone(),
+                                            target: guardrail.evidence_target(),
                                             outcome: "redacted".into(),
                                             message: format!(
                                                 "guardrail {} redacted response for model {} provider {}",

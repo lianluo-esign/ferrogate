@@ -43,9 +43,12 @@ use ferrogate_billing::{
 };
 use ferrogate_core::{RequestContext, WorkspaceScope};
 use ferrogate_guardrails::{
-    apply_content_patches, ContentPatch, CustomHttpDetector, CustomHttpDetectorConfig,
-    DetectorErrorKind, DetectorInput, DetectorSecret, DetectorStage, DetectorTenant,
-    DetectorVerdict, GuardrailDetector,
+    apply_content_patches, ActionKind as GuardrailActionKind, AggregateOutcome, CheckBinding,
+    CheckOutcome, ContentPatch, CustomHttpDetector, CustomHttpDetectorConfig, DetectorDefinition,
+    DetectorError, DetectorInput, DetectorResult, DetectorSecret, DetectorStage, DetectorTenant,
+    DetectorVerdict, GuardrailDetector, PolicyAction, PolicyAggregation, PolicyExecution,
+    PolicyMode, PolicyRevision, PolicyRevisionStatus, PolicyRevisionView, PolicyScopeSelector,
+    PolicySelectionContext, PolicyStreamingMode,
 };
 use ferrogate_mcp::{
     McpExecutionError, McpManager, McpServerStatus, McpToolExecutionRequest, McpToolExecutionResult,
@@ -70,16 +73,17 @@ use ferrogate_runtime::{
     SelfHostedWorkerRegistration, SelfHostedWorkerRegistry,
 };
 use ferrogate_storage::{
-    budget_alert_notification_id, ControlPlaneDocuments, PostgresStorageConfig, QuotaScopeKind,
-    RuntimeControlPlaneState, RuntimeStorageBackend, RuntimeStorageOptions,
-    RuntimeStorageRepositories, StorageBackendEvidence, StorageError, StoredAgentRun,
-    StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
-    StoredBillingReportOutboxEntry, StoredBudgetAlertNotification,
-    StoredManagedWorkerIsolationEvidence, StoredManagedWorkerIsolationPolicy,
-    StoredManagedWorkerIsolationSelection, StoredManagedWorkerLifecycleEvent,
-    StoredManagedWorkerSession, StoredPaymentMethod, StoredPermission, StoredPlan, StoredProject,
-    StoredQuotaPolicy, StoredRequestLog, StoredRole, StoredSelfHostedRunDispatch,
-    StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
+    budget_alert_notification_id, guardrail_policy_revision_id, ControlPlaneDocuments,
+    GuardrailPolicyRepository, PostgresStorageConfig, QuotaScopeKind, RuntimeControlPlaneState,
+    RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
+    StorageBackendEvidence, StorageError, StoredAgentRun, StoredAgentRunEvent,
+    StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
+    StoredBillingReportOutboxEntry, StoredBudgetAlertNotification, StoredGuardrailPolicyBinding,
+    StoredGuardrailPolicyRevision, StoredManagedWorkerIsolationEvidence,
+    StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
+    StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredPaymentMethod,
+    StoredPermission, StoredPlan, StoredProject, StoredQuotaPolicy, StoredRequestLog, StoredRole,
+    StoredSelfHostedRunDispatch, StoredSelfHostedWorkerArtifact, StoredSelfHostedWorkerCheckpoint,
     StoredSelfHostedWorkerHeartbeat, StoredSelfHostedWorkerRegistration,
     StoredSelfHostedWorkerTelemetryEvent, StoredTenantAccount, StoredTenantRoleBinding,
     StoredUsageAggregate, StoredUsageMonthlyRollup, StoredWallet, StoredWorkspace,
@@ -277,6 +281,105 @@ impl SharedAppState {
 
     pub(crate) fn record_request_log(&self, log: StoredRequestLog) {
         self.current().record_request_log(log);
+    }
+
+    pub(crate) fn create_guardrail_policy_revision(
+        &self,
+        revision: PolicyRevision,
+    ) -> anyhow::Result<PolicyRevisionView> {
+        let active = self.current();
+        if active.guardrail_policies.iter().any(|policy| {
+            policy.revision.created_by == "static_config"
+                && policy.revision.policy_id == revision.policy_id
+        }) {
+            anyhow::bail!(
+                "guardrail policy id {} is owned by static configuration",
+                revision.policy_id
+            );
+        }
+        let secret_registry = ferrogate_secrets::SecretResolverRegistry::from_env();
+        build_guardrail_policy_runtime(revision.clone(), &secret_registry)?;
+        active
+            .repositories
+            .insert_guardrail_policy_revision(stored_guardrail_policy_revision(&revision)?)?;
+        Ok(PolicyRevisionView {
+            revision,
+            status: PolicyRevisionStatus::Draft,
+        })
+    }
+
+    pub(crate) fn activate_guardrail_policy_revision(
+        &self,
+        policy_id: &str,
+        revision: u32,
+        actor: &str,
+        updated_at_unix: u64,
+        rollback_only: bool,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let stored = active
+            .repositories
+            .get_guardrail_policy_revision(policy_id, revision)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("guardrail policy revision {policy_id}@{revision} was not found")
+            })?;
+        let policy = deserialize_guardrail_policy_revision(&stored)?;
+        let secret_registry = ferrogate_secrets::SecretResolverRegistry::from_env();
+        build_guardrail_policy_runtime(policy, &secret_registry)?;
+        let transition = active.repositories.activate_guardrail_policy_revision(
+            policy_id,
+            revision,
+            actor,
+            updated_at_unix,
+            rollback_only,
+        )?;
+        let result = self.reload_process_local((*active.config).clone());
+        if !result.committed {
+            active
+                .repositories
+                .restore_guardrail_policy_binding(policy_id, transition.previous)?;
+            anyhow::bail!(
+                "guardrail policy binding was restored after runtime reload failed: {}",
+                result
+                    .reason
+                    .as_deref()
+                    .unwrap_or("runtime rejected the policy revision")
+            );
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn archive_guardrail_policy_revision(
+        &self,
+        policy_id: &str,
+        revision: u32,
+        actor: &str,
+        updated_at_unix: u64,
+    ) -> anyhow::Result<RuntimeReloadResult> {
+        let active = self.current();
+        let previous = active
+            .repositories
+            .get_guardrail_policy_binding(policy_id)?;
+        active.repositories.archive_guardrail_policy_revision(
+            policy_id,
+            revision,
+            actor,
+            updated_at_unix,
+        )?;
+        let result = self.reload_process_local((*active.config).clone());
+        if !result.committed {
+            active
+                .repositories
+                .restore_guardrail_policy_binding(policy_id, previous)?;
+            anyhow::bail!(
+                "guardrail policy binding was restored after runtime reload failed: {}",
+                result
+                    .reason
+                    .as_deref()
+                    .unwrap_or("runtime rejected the archived revision")
+            );
+        }
+        Ok(result)
     }
 
     pub(crate) fn upsert_plugin_registration(
@@ -921,7 +1024,7 @@ pub(crate) struct AppState {
     approvals: ApprovalRegistry,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
-    guardrail_rules: Arc<Vec<GuardrailRuleRuntime>>,
+    guardrail_policies: Arc<Vec<GuardrailPolicyRuntime>>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
@@ -1489,31 +1592,39 @@ pub(crate) struct AdminAuditEventDraft {
 }
 
 #[derive(Debug, Clone)]
-struct GuardrailRuleRuntime {
+struct GuardrailPolicyRuntime {
+    revision: PolicyRevision,
+    checks: Vec<GuardrailCheckRuntime>,
+}
+
+#[derive(Debug, Clone)]
+struct GuardrailCheckRuntime {
     id: String,
-    name: String,
     enabled: bool,
-    stage: GuardrailStage,
-    effect: GuardrailEffect,
-    organization_ids: Vec<String>,
-    project_ids: Vec<String>,
-    api_key_ids: Vec<String>,
-    models: Vec<String>,
-    providers: Vec<String>,
+    stage: DetectorStage,
+    detector: GuardrailDetectorRuntime,
+    fallback_detector: Option<LocalGuardrailDetectorRuntime>,
+}
+
+#[derive(Debug, Clone)]
+enum GuardrailDetectorRuntime {
+    Local(LocalGuardrailDetectorRuntime),
+    External(Arc<dyn GuardrailDetector>),
+}
+
+#[derive(Debug, Clone)]
+struct LocalGuardrailDetectorRuntime {
     keywords: Vec<String>,
     regex: Vec<Regex>,
     max_input_bytes: Option<usize>,
-    detector: Option<Arc<dyn GuardrailDetector>>,
-    provider_timeout_ms: u64,
-    provider_on_error: GuardrailProviderErrorMode,
-    code: String,
-    message: String,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct GuardrailMatch {
     pub(crate) rule_id: String,
     pub(crate) rule_name: String,
+    pub(crate) policy_revision: u32,
+    pub(crate) check_id: Option<String>,
     pub(crate) effect: GuardrailEffect,
     pub(crate) matched_text: String,
     redaction_regex: Option<Regex>,
@@ -1523,6 +1634,14 @@ pub(crate) struct GuardrailMatch {
 }
 
 impl GuardrailMatch {
+    pub(crate) fn evidence_target(&self) -> String {
+        let revision = format!("{}@{}", self.rule_id, self.policy_revision);
+        self.check_id
+            .as_ref()
+            .map(|check_id| format!("{revision}/{check_id}"))
+            .unwrap_or(revision)
+    }
+
     pub(crate) fn redact_text(&self, text: &str) -> String {
         if !self.content_patches.is_empty() {
             // Detector patches were validated against this exact text before
@@ -1539,6 +1658,7 @@ impl GuardrailMatch {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct GuardrailEvaluationContext<'a> {
     pub(crate) request_id: &'a str,
     pub(crate) trace_id: Option<&'a str>,
@@ -1548,8 +1668,11 @@ pub(crate) struct GuardrailEvaluationContext<'a> {
     pub(crate) workflow_node_id: Option<&'a str>,
     pub(crate) actor_api_key_id: Option<&'a str>,
     pub(crate) tenant: &'a ferrogate_core::TenantContext,
+    pub(crate) service_account_id: Option<&'a str>,
+    pub(crate) gateway_config_id: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
     pub(crate) provider: Option<&'a str>,
+    pub(crate) streaming: bool,
     pub(crate) body_text: &'a str,
 }
 
@@ -3155,12 +3278,22 @@ impl AppState {
         Self::try_new(config).expect("failed to initialize app state")
     }
 
-    pub(crate) fn try_new(mut config: Config) -> anyhow::Result<Self> {
+    pub(crate) fn try_new(config: Config) -> anyhow::Result<Self> {
+        let repositories = Arc::new(runtime_storage_repositories(&config)?);
+        Self::try_new_with_repositories(config, repositories, true)
+    }
+
+    fn try_new_with_repositories(
+        mut config: Config,
+        repositories: Arc<RuntimeStorageRepositories>,
+        apply_durable_snapshot: bool,
+    ) -> anyhow::Result<Self> {
         let analytics = config.analytics.clone();
         config.materialize_skill_package_resources();
-        let repositories = Arc::new(runtime_storage_repositories(&config)?);
         let previous_skill_packages = config.skill_packages.clone();
-        apply_control_plane_snapshot_to_config_from_repositories(&repositories, &mut config)?;
+        if apply_durable_snapshot {
+            apply_control_plane_snapshot_to_config_from_repositories(&repositories, &mut config)?;
+        }
         config.materialize_skill_package_resources_with_previous(&previous_skill_packages);
         let providers = config
             .providers
@@ -3219,39 +3352,54 @@ impl AppState {
 
         let policy_engine = build_policy_engine(&config.policies);
         let guardrail_secret_registry = ferrogate_secrets::SecretResolverRegistry::from_env();
-        let guardrail_rules = config
+        let mut guardrail_policies = config
             .guardrails
             .iter()
-            .map(|rule| {
-                Ok(GuardrailRuleRuntime {
-                    id: rule.id.clone(),
-                    name: rule.name.clone(),
-                    enabled: rule.enabled,
-                    stage: rule.stage,
-                    effect: rule.effect,
-                    organization_ids: rule.organization_ids.clone(),
-                    project_ids: rule.project_ids.clone(),
-                    api_key_ids: rule.api_key_ids.clone(),
-                    models: rule.models.clone(),
-                    providers: rule.providers.clone(),
-                    keywords: rule.keywords.clone(),
-                    regex: rule
-                        .regex
-                        .iter()
-                        .map(|pattern| {
-                            Regex::new(pattern)
-                                .expect("config validation must reject invalid regex")
-                        })
-                        .collect(),
-                    max_input_bytes: rule.max_input_bytes,
-                    detector: build_guardrail_detector(rule, &guardrail_secret_registry)?,
-                    provider_timeout_ms: rule.provider_timeout_ms,
-                    provider_on_error: rule.provider_runtime.provider_on_error,
-                    code: rule.code.clone(),
-                    message: rule.message.clone(),
+            .filter(|rule| rule.enabled)
+            .map(compile_static_guardrail_policy)
+            .map(|revision| {
+                revision.and_then(|revision| {
+                    build_guardrail_policy_runtime(revision, &guardrail_secret_registry)
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let static_policy_ids = guardrail_policies
+            .iter()
+            .map(|policy| policy.revision.policy_id.clone())
+            .collect::<HashSet<_>>();
+        for binding in repositories.list_guardrail_policy_bindings()? {
+            let Some(active_revision) = binding.active_revision else {
+                continue;
+            };
+            if static_policy_ids.contains(binding.policy_id.as_str()) {
+                anyhow::bail!(
+                    "active durable guardrail policy {} conflicts with a static guardrail id",
+                    binding.policy_id
+                );
+            }
+            let stored = repositories
+                .get_guardrail_policy_revision(&binding.policy_id, active_revision)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "active guardrail policy {}@{} is missing its immutable revision",
+                        binding.policy_id,
+                        active_revision
+                    )
+                })?;
+            let revision = deserialize_guardrail_policy_revision(&stored)?;
+            guardrail_policies.push(build_guardrail_policy_runtime(
+                revision,
+                &guardrail_secret_registry,
+            )?);
+        }
+        guardrail_policies.sort_by(|left, right| {
+            left.revision
+                .scope
+                .administrative_rank()
+                .cmp(&right.revision.scope.administrative_rank())
+                .then_with(|| left.revision.policy_id.cmp(&right.revision.policy_id))
+                .then_with(|| left.revision.revision.cmp(&right.revision.revision))
+        });
         let provider_circuit_config = provider_circuit_config(&config);
         let provider_circuits = if provider_circuit_config.is_some() {
             config
@@ -3351,7 +3499,7 @@ impl AppState {
             approvals: ApprovalRegistry::new(),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
-            guardrail_rules: Arc::new(guardrail_rules),
+            guardrail_policies: Arc::new(guardrail_policies),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
             request_ids: Arc::new(AtomicU64::new(1)),
@@ -3368,7 +3516,8 @@ impl AppState {
     }
 
     fn with_reloaded_config(&self, config: Config) -> anyhow::Result<Self> {
-        let mut next = AppState::try_new(config)?;
+        let mut next =
+            AppState::try_new_with_repositories(config, Arc::clone(&self.repositories), false)?;
         next.cluster_identity = Arc::clone(&self.cluster_identity);
         next.cluster_counters = Arc::new(ClusterCounterBackend::from_reloaded_config(
             &next.config,
@@ -3376,7 +3525,6 @@ impl AppState {
         ));
         next.provider_routing_metrics = Arc::clone(&self.provider_routing_metrics);
         next.metering_events = Arc::clone(&self.metering_events);
-        next.repositories = Arc::clone(&self.repositories);
         next.durable_api_key_authenticator = Arc::new(
             ferrogate_auth::StorageApiKeyAuthenticator::new(Arc::clone(&next.repositories)),
         );
@@ -4335,59 +4483,257 @@ fn sanitize_redis_key_part(value: &str) -> String {
         .collect()
 }
 
-fn build_guardrail_detector(
-    rule: &GuardrailRule,
-    secret_registry: &ferrogate_secrets::SecretResolverRegistry,
-) -> anyhow::Result<Option<Arc<dyn GuardrailDetector>>> {
-    if rule.provider == GuardrailProviderKind::None {
-        return Ok(None);
-    }
-    let endpoint = rule.provider_endpoint.clone().ok_or_else(|| {
+fn compile_static_guardrail_policy(rule: &GuardrailRule) -> anyhow::Result<PolicyRevision> {
+    let local = DetectorDefinition::local(
+        rule.keywords.clone(),
+        rule.regex.clone(),
+        rule.max_input_bytes,
+    );
+    let has_local =
+        !rule.keywords.is_empty() || !rule.regex.is_empty() || rule.max_input_bytes.is_some();
+    let detector = match rule.provider {
+        GuardrailProviderKind::None => local.clone(),
+        GuardrailProviderKind::CustomHttp => DetectorDefinition::CustomHttp {
+            endpoint: rule.provider_endpoint.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "guardrail {} custom_http provider is missing provider_endpoint",
+                    rule.id
+                )
+            })?,
+            timeout_ms: rule.provider_timeout_ms,
+            max_concurrency: rule.provider_runtime.provider_max_concurrency,
+            circuit_failure_threshold: rule.provider_runtime.provider_circuit_failure_threshold,
+            circuit_cooldown_ms: rule.provider_runtime.provider_circuit_cooldown_ms,
+            max_retries: rule.provider_runtime.provider_max_retries,
+            max_payload_bytes: rule.provider_runtime.provider_max_payload_bytes,
+            max_response_bytes: rule.provider_runtime.provider_max_response_bytes,
+            allow_private_network: rule.provider_runtime.provider_allow_private_network,
+            secret_ref: rule.provider_runtime.provider_secret_ref.clone(),
+        },
+    };
+    let fallback_detector = (rule.provider == GuardrailProviderKind::CustomHttp
+        && rule.provider_runtime.provider_on_error == GuardrailProviderErrorMode::FallbackDetector
+        && has_local)
+        .then_some(local);
+    let enforcement_action = match rule.effect {
+        GuardrailEffect::Deny => PolicyAction::block(&rule.code, &rule.message),
+        GuardrailEffect::Redact => PolicyAction::redact(&rule.code, &rule.message),
+    };
+    let on_error = match rule.provider_runtime.provider_on_error {
+        GuardrailProviderErrorMode::Block => vec![PolicyAction::block(
+            "guardrail_provider_unavailable",
+            format!("guardrail detector for rule '{}' failed", rule.name),
+        )],
+        GuardrailProviderErrorMode::Record | GuardrailProviderErrorMode::FallbackDetector => {
+            vec![PolicyAction::record()]
+        }
+    };
+    let revision = PolicyRevision {
+        policy_id: rule.id.clone(),
+        revision: 1,
+        name: rule.name.clone(),
+        description: Some("compiled from static guardrails configuration".to_string()),
+        enforced: true,
+        scope: PolicyScopeSelector {
+            organization_ids: rule.organization_ids.clone(),
+            project_ids: rule.project_ids.clone(),
+            api_key_ids: rule.api_key_ids.clone(),
+            models: rule.models.clone(),
+            providers: rule.providers.clone(),
+            ..PolicyScopeSelector::default()
+        },
+        checks: vec![CheckBinding {
+            id: "static-check".to_string(),
+            enabled: true,
+            stage: match rule.stage {
+                GuardrailStage::Request => DetectorStage::Request,
+                GuardrailStage::Response => DetectorStage::Response,
+            },
+            detector,
+            fallback_detector,
+        }],
+        aggregation: PolicyAggregation::All,
+        execution: PolicyExecution::Sequential,
+        mode: PolicyMode::Enforce,
+        streaming: PolicyStreamingMode::BufferAndEnforce,
+        on_pass: vec![PolicyAction::allow()],
+        on_fail: vec![enforcement_action],
+        on_error,
+        deadline_ms: rule.provider_timeout_ms,
+        created_at_unix: 0,
+        created_by: "static_config".to_string(),
+    };
+    revision.validate().map_err(|error| {
         anyhow::anyhow!(
-            "guardrail {} custom_http provider is missing provider_endpoint",
-            rule.id
+            "failed to compile static guardrail {}: {}",
+            rule.id,
+            error.safe_message()
         )
     })?;
-    let bearer_token = match rule.provider_runtime.provider_secret_ref.as_deref() {
+    Ok(revision)
+}
+
+fn deserialize_guardrail_policy_revision(
+    stored: &StoredGuardrailPolicyRevision,
+) -> anyhow::Result<PolicyRevision> {
+    let revision: PolicyRevision = serde_json::from_str(&stored.policy_json).map_err(|error| {
+        anyhow::anyhow!(
+            "guardrail policy revision {} is invalid JSON: {error}",
+            stored.id
+        )
+    })?;
+    if revision.policy_id != stored.policy_id
+        || revision.revision != stored.revision
+        || revision.immutable_id() != stored.id
+        || revision.created_at_unix != stored.created_at_unix
+        || revision.created_by != stored.created_by
+    {
+        anyhow::bail!(
+            "guardrail policy revision {} metadata does not match its immutable document",
+            stored.id
+        );
+    }
+    revision.validate().map_err(|error| {
+        anyhow::anyhow!(
+            "guardrail policy revision {} is invalid: {}",
+            stored.id,
+            error.safe_message()
+        )
+    })?;
+    Ok(revision)
+}
+
+fn stored_guardrail_policy_revision(
+    revision: &PolicyRevision,
+) -> anyhow::Result<StoredGuardrailPolicyRevision> {
+    Ok(StoredGuardrailPolicyRevision {
+        id: guardrail_policy_revision_id(&revision.policy_id, revision.revision),
+        policy_id: revision.policy_id.clone(),
+        revision: revision.revision,
+        policy_json: serde_json::to_string(revision)?,
+        created_at_unix: revision.created_at_unix,
+        created_by: revision.created_by.clone(),
+    })
+}
+
+fn build_guardrail_policy_runtime(
+    revision: PolicyRevision,
+    secret_registry: &ferrogate_secrets::SecretResolverRegistry,
+) -> anyhow::Result<GuardrailPolicyRuntime> {
+    revision.validate().map_err(|error| {
+        anyhow::anyhow!(
+            "failed to initialize guardrail {}: {}",
+            revision.immutable_id(),
+            error.safe_message()
+        )
+    })?;
+    let checks = revision
+        .checks
+        .iter()
+        .map(|check| {
+            Ok(GuardrailCheckRuntime {
+                id: check.id.clone(),
+                enabled: check.enabled,
+                stage: check.stage,
+                detector: build_guardrail_detector(
+                    &revision.immutable_id(),
+                    &check.id,
+                    &check.detector,
+                    secret_registry,
+                )?,
+                fallback_detector: check
+                    .fallback_detector
+                    .as_ref()
+                    .map(build_local_guardrail_detector)
+                    .transpose()?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(GuardrailPolicyRuntime { revision, checks })
+}
+
+fn build_local_guardrail_detector(
+    definition: &DetectorDefinition,
+) -> anyhow::Result<LocalGuardrailDetectorRuntime> {
+    let DetectorDefinition::Local {
+        keywords,
+        regex,
+        max_input_bytes,
+    } = definition
+    else {
+        anyhow::bail!("guardrail fallback detector must be local");
+    };
+    Ok(LocalGuardrailDetectorRuntime {
+        keywords: keywords.clone(),
+        regex: regex
+            .iter()
+            .map(|pattern| Regex::new(pattern))
+            .collect::<Result<Vec<_>, _>>()?,
+        max_input_bytes: *max_input_bytes,
+    })
+}
+
+fn build_guardrail_detector(
+    policy_id: &str,
+    check_id: &str,
+    definition: &DetectorDefinition,
+    secret_registry: &ferrogate_secrets::SecretResolverRegistry,
+) -> anyhow::Result<GuardrailDetectorRuntime> {
+    if matches!(definition, DetectorDefinition::Local { .. }) {
+        return Ok(GuardrailDetectorRuntime::Local(
+            build_local_guardrail_detector(definition)?,
+        ));
+    }
+    let DetectorDefinition::CustomHttp {
+        endpoint,
+        timeout_ms,
+        max_concurrency,
+        circuit_failure_threshold,
+        circuit_cooldown_ms,
+        max_retries,
+        max_payload_bytes,
+        max_response_bytes,
+        allow_private_network,
+        secret_ref,
+    } = definition
+    else {
+        unreachable!("local detector returned above")
+    };
+    let bearer_token = match secret_ref.as_deref() {
         Some(secret_ref) => Some(DetectorSecret::new(
             secret_registry
                 .resolve(secret_ref)
                 .map_err(|error| {
                     anyhow::anyhow!(
-                        "failed to resolve secret for guardrail {} detector: {error}",
-                        rule.id
+                        "failed to resolve secret for guardrail {policy_id}/{check_id}: {error}"
                     )
                 })?
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "secret for guardrail {} detector resolved no value",
-                        rule.id
-                    )
+                    anyhow::anyhow!("secret for guardrail {policy_id}/{check_id} resolved no value")
                 })?,
         )),
         None => None,
     };
     let detector = CustomHttpDetector::new(CustomHttpDetectorConfig {
-        id: rule.id.clone(),
-        endpoint,
-        timeout: Duration::from_millis(rule.provider_timeout_ms),
-        max_concurrency: rule.provider_runtime.provider_max_concurrency,
-        circuit_failure_threshold: rule.provider_runtime.provider_circuit_failure_threshold,
-        circuit_cooldown: Duration::from_millis(rule.provider_runtime.provider_circuit_cooldown_ms),
-        max_retries: rule.provider_runtime.provider_max_retries,
-        max_payload_bytes: rule.provider_runtime.provider_max_payload_bytes,
-        max_response_bytes: rule.provider_runtime.provider_max_response_bytes,
-        allow_private_network: rule.provider_runtime.provider_allow_private_network,
+        id: format!("{policy_id}/{check_id}"),
+        endpoint: endpoint.clone(),
+        timeout: Duration::from_millis(*timeout_ms),
+        max_concurrency: *max_concurrency,
+        circuit_failure_threshold: *circuit_failure_threshold,
+        circuit_cooldown: Duration::from_millis(*circuit_cooldown_ms),
+        max_retries: *max_retries,
+        max_payload_bytes: *max_payload_bytes,
+        max_response_bytes: *max_response_bytes,
+        allow_private_network: *allow_private_network,
         bearer_token,
     })
     .map_err(|error| {
         anyhow::anyhow!(
-            "failed to initialize guardrail {} detector: {}",
-            rule.id,
+            "failed to initialize guardrail {policy_id}/{check_id}: {}",
             error.safe_message()
         )
     })?;
-    Ok(Some(Arc::new(detector)))
+    Ok(GuardrailDetectorRuntime::External(Arc::new(detector)))
 }
 
 /// Resolves every configured `Provider.secret_ref` once (issue #163),

@@ -83,6 +83,15 @@ impl AuthContext {
     pub(crate) fn can_record_bodies(&self, global_log_bodies: bool) -> bool {
         global_log_bodies && self.log_bodies
     }
+
+    pub(crate) fn service_account_id(&self) -> Option<&str> {
+        match self.rbac_subject.as_ref() {
+            Some(ferrogate_auth::PolicySubject::ServiceAccount { service_account_id }) => {
+                Some(service_account_id)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]

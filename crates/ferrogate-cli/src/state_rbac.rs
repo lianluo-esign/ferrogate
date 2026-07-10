@@ -59,22 +59,40 @@ impl AppState {
         Ok(self.repositories.unbind_tenant_role(tenant_id, role_id)?)
     }
 
-    /// Resolves a tenant's effective permission set: the union of every
-    /// bound role's `permission_keys` (issue #182). Storage errors fail
-    /// closed (empty set) via `unwrap_or_default`, matching the
-    /// fail-closed convention `resolve_tenant_plan`'s callers already use
-    /// for missing/errored plan lookups.
-    pub(crate) fn tenant_has_permission(&self, tenant_id: &str, permission_key: &str) -> bool {
-        let bindings = self
+    /// Resolves a tenant's effective permission set from the durable
+    /// Permission -> Role -> TenantRoleBinding graph. Callers that need to
+    /// distinguish a denied action from an unavailable control plane use the
+    /// result-returning form so a database outage cannot masquerade as a
+    /// normal authorization decision.
+    pub(crate) fn tenant_has_permission_result(
+        &self,
+        tenant_id: &str,
+        permission_key: &str,
+    ) -> anyhow::Result<bool> {
+        let permission_exists = self
             .repositories
-            .list_tenant_role_bindings(tenant_id)
-            .unwrap_or_default();
-        bindings.iter().any(|binding| {
-            self.repositories
-                .get_role(&binding.role_id)
-                .ok()
-                .flatten()
-                .is_some_and(|role| role.permission_keys.iter().any(|key| key == permission_key))
-        })
+            .list_permissions()?
+            .iter()
+            .any(|permission| permission.key == permission_key);
+        if !permission_exists {
+            return Ok(false);
+        }
+        let bindings = self.repositories.list_tenant_role_bindings(tenant_id)?;
+        for binding in bindings {
+            let Some(role) = self.repositories.get_role(&binding.role_id)? else {
+                continue;
+            };
+            if role.permission_keys.iter().any(|key| key == permission_key) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Compatibility helper for existing product-entitlement call sites.
+    /// Storage failures remain fail-closed for those boolean gates.
+    pub(crate) fn tenant_has_permission(&self, tenant_id: &str, permission_key: &str) -> bool {
+        self.tenant_has_permission_result(tenant_id, permission_key)
+            .unwrap_or(false)
     }
 }

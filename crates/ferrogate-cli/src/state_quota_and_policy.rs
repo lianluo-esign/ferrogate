@@ -6,8 +6,89 @@
 // api-key token accounting, guardrail policy evaluation and matching.
 
 use super::*;
+use futures_util::future::join_all;
 
 impl AppState {
+    pub(crate) fn guardrail_policy_revision_views(
+        &self,
+        policy_id: Option<&str>,
+    ) -> anyhow::Result<Vec<PolicyRevisionView>> {
+        let bindings = self
+            .repositories
+            .list_guardrail_policy_bindings()?
+            .into_iter()
+            .map(|binding| (binding.policy_id.clone(), binding))
+            .collect::<HashMap<_, _>>();
+        let mut views = self
+            .repositories
+            .list_guardrail_policy_revisions(policy_id)?
+            .into_iter()
+            .map(|stored| {
+                let revision = deserialize_guardrail_policy_revision(&stored)?;
+                let status = bindings
+                    .get(&revision.policy_id)
+                    .map(|binding| {
+                        if binding.active_revision == Some(revision.revision) {
+                            PolicyRevisionStatus::Active
+                        } else if binding.archived_revisions.contains(&revision.revision) {
+                            PolicyRevisionStatus::Archived
+                        } else {
+                            PolicyRevisionStatus::Draft
+                        }
+                    })
+                    .unwrap_or(PolicyRevisionStatus::Draft);
+                Ok(PolicyRevisionView { revision, status })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        views.extend(
+            self.guardrail_policies
+                .iter()
+                .filter(|policy| policy.revision.created_by == "static_config")
+                .filter(|policy| {
+                    policy_id.is_none_or(|policy_id| policy.revision.policy_id == policy_id)
+                })
+                .map(|policy| PolicyRevisionView {
+                    revision: policy.revision.clone(),
+                    status: PolicyRevisionStatus::Active,
+                }),
+        );
+        views.sort_by(|left, right| {
+            left.revision
+                .policy_id
+                .cmp(&right.revision.policy_id)
+                .then_with(|| left.revision.revision.cmp(&right.revision.revision))
+        });
+        Ok(views)
+    }
+
+    pub(crate) fn guardrail_policy_revision_view(
+        &self,
+        policy_id: &str,
+        revision: u32,
+    ) -> anyhow::Result<Option<PolicyRevisionView>> {
+        Ok(self
+            .guardrail_policy_revision_views(Some(policy_id))?
+            .into_iter()
+            .find(|view| view.revision.revision == revision))
+    }
+
+    pub(crate) fn guardrail_policy_binding(
+        &self,
+        policy_id: &str,
+    ) -> anyhow::Result<Option<StoredGuardrailPolicyBinding>> {
+        Ok(self.repositories.get_guardrail_policy_binding(policy_id)?)
+    }
+
+    pub(crate) fn next_guardrail_policy_revision(&self, policy_id: &str) -> anyhow::Result<u32> {
+        self.guardrail_policy_revision_views(Some(policy_id))?
+            .into_iter()
+            .map(|view| view.revision.revision)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("guardrail policy revision overflow"))
+    }
+
     /// Filters (and optionally aggregates) the P1-4 monthly usage/cost
     /// rollups for the `/admin/v1/usage-reports` surface. `YYYY-MM` period
     /// strings sort and compare lexicographically, so `from_month`/
@@ -196,123 +277,196 @@ impl AppState {
         stage: GuardrailStage,
         context: GuardrailEvaluationContext<'_>,
     ) -> Option<GuardrailMatch> {
-        for rule in self.guardrail_rules.iter() {
-            if !rule.enabled {
+        let detector_stage = match stage {
+            GuardrailStage::Request => DetectorStage::Request,
+            GuardrailStage::Response => DetectorStage::Response,
+        };
+        let selection = PolicySelectionContext {
+            organization_id: context.tenant.organization_id.as_deref(),
+            project_id: context.tenant.project_id.as_deref(),
+            workspace_id: context.tenant.workspace_id.as_deref(),
+            api_key_id: context.tenant.api_key_id.as_deref(),
+            service_account_id: context.service_account_id,
+            gateway_config_id: context.gateway_config_id,
+            model: context.model,
+            provider: context.provider,
+        };
+        let mut enforcement = None;
+        for policy in self
+            .guardrail_policies
+            .iter()
+            .filter(|policy| policy.revision.scope.matches(selection))
+        {
+            if context.streaming
+                && policy.revision.streaming == PolicyStreamingMode::RejectStreaming
+            {
+                let shadow = policy.revision.mode == PolicyMode::Shadow;
+                self.record_guardrail_audit_event(AdminAuditEventDraft {
+                    request_id: context.request_id.to_string(),
+                    trace_id: context.trace_id.map(str::to_string),
+                    agent_run_id: context.agent_run_id.map(str::to_string),
+                    workflow_id: context.workflow_id.map(str::to_string),
+                    workflow_version: context.workflow_version,
+                    workflow_node_id: context.workflow_node_id.map(str::to_string),
+                    actor_api_key_id: context.actor_api_key_id.map(str::to_string),
+                    tenant: context.tenant.clone(),
+                    action: "guardrail.policy_evaluate".to_string(),
+                    target: policy.revision.immutable_id(),
+                    outcome: if shadow { "shadow_fail" } else { "fail" }.to_string(),
+                    message: "guardrail policy rejected streaming before provider dispatch"
+                        .to_string(),
+                })
+                .await;
+                if !shadow {
+                    enforcement = Some(GuardrailMatch {
+                        rule_id: policy.revision.policy_id.clone(),
+                        rule_name: policy.revision.name.clone(),
+                        policy_revision: policy.revision.revision,
+                        check_id: None,
+                        effect: GuardrailEffect::Deny,
+                        matched_text: String::new(),
+                        redaction_regex: None,
+                        content_patches: Vec::new(),
+                        code: "guardrail_streaming_unsupported".to_string(),
+                        message: format!(
+                            "guardrail policy '{}' does not allow streaming",
+                            policy.revision.name
+                        ),
+                    });
+                }
                 continue;
             }
-            if rule.stage != stage {
+            let stage_checks = policy
+                .checks
+                .iter()
+                .filter(|check| check.stage == detector_stage)
+                .collect::<Vec<_>>();
+            if !stage_checks.iter().any(|check| check.enabled) {
                 continue;
             }
-            if !allows_optional_scope(
-                &rule.organization_ids,
-                context.tenant.organization_id.as_deref(),
-            ) {
-                continue;
-            }
-            if !allows_optional_scope(&rule.project_ids, context.tenant.project_id.as_deref()) {
-                continue;
-            }
-            if !allows_optional_scope(&rule.api_key_ids, context.tenant.api_key_id.as_deref()) {
-                continue;
-            }
-            if !allows_optional_scope(&rule.models, context.model) {
-                continue;
-            }
-            if !allows_optional_scope(&rule.providers, context.provider) {
-                continue;
-            }
-            if let Some(detector) = &rule.detector {
-                let detector_input = DetectorInput {
-                    stage: match stage {
-                        GuardrailStage::Request => DetectorStage::Request,
-                        GuardrailStage::Response => DetectorStage::Response,
-                    },
-                    tenant: DetectorTenant {
-                        organization_id: context.tenant.organization_id.as_deref(),
-                        team_id: context.tenant.team_id.as_deref(),
-                        project_id: context.tenant.project_id.as_deref(),
-                        user_id: context.tenant.user_id.as_deref(),
-                        api_key_id: context.tenant.api_key_id.as_deref(),
-                    },
-                    model: context.model,
-                    provider: context.provider,
-                    text: context.body_text,
-                };
-                let deadline = Instant::now() + Duration::from_millis(rule.provider_timeout_ms);
-                match detector.evaluate(&detector_input, deadline).await {
-                    Ok(result) if result.verdict == DetectorVerdict::Pass => continue,
-                    Ok(result) => {
-                        if rule.effect == GuardrailEffect::Redact
-                            && result.patches.is_empty()
-                            && result.first_matched_text().is_none()
-                        {
-                            let error = ferrogate_guardrails::DetectorError::new(
-                                DetectorErrorKind::InvalidResponse,
-                                "guardrail detector failed without redaction data",
-                            );
-                            self.record_guardrail_detector_error(rule, &context, &error, "blocked");
-                            return Some(detector_error_guardrail_match(rule, &error));
-                        }
-                        return Some(GuardrailMatch {
-                            rule_id: rule.id.clone(),
-                            rule_name: rule.name.clone(),
-                            effect: rule.effect,
-                            matched_text: result
-                                .first_matched_text()
-                                .unwrap_or_default()
-                                .to_string(),
-                            redaction_regex: None,
-                            content_patches: result.patches,
-                            code: rule.code.clone(),
-                            message: rule.message.clone(),
-                        });
+            let deadline = Instant::now() + Duration::from_millis(policy.revision.deadline_ms);
+            let evaluations = match policy.revision.execution {
+                PolicyExecution::Sequential => {
+                    let mut evaluations = Vec::with_capacity(stage_checks.len());
+                    for check in stage_checks {
+                        evaluations.push(
+                            evaluate_guardrail_check(check, detector_stage, context, deadline)
+                                .await,
+                        );
                     }
-                    Err(error) => {
-                        let outcome = match rule.provider_on_error {
-                            GuardrailProviderErrorMode::Block => "blocked",
-                            GuardrailProviderErrorMode::Record => "recorded",
-                            GuardrailProviderErrorMode::FallbackDetector => "fallback",
-                        };
-                        self.record_guardrail_detector_error(rule, &context, &error, outcome);
-                        match rule.provider_on_error {
-                            GuardrailProviderErrorMode::Block => {
-                                return Some(detector_error_guardrail_match(rule, &error));
-                            }
-                            GuardrailProviderErrorMode::Record => continue,
-                            GuardrailProviderErrorMode::FallbackDetector => {
-                                if let Some(matched) =
-                                    local_guardrail_match(rule, context.body_text)
-                                {
-                                    return Some(matched);
-                                }
-                                continue;
-                            }
-                        }
-                    }
+                    evaluations
+                }
+                PolicyExecution::Parallel => {
+                    join_all(stage_checks.into_iter().map(|check| {
+                        evaluate_guardrail_check(check, detector_stage, context, deadline)
+                    }))
+                    .await
+                }
+            };
+            for evaluation in &evaluations {
+                if let Some(error) = &evaluation.detector_error {
+                    let detector_error_outcome = if evaluation.used_fallback {
+                        "fallback"
+                    } else if policy.revision.on_error.iter().any(|action| {
+                        matches!(
+                            action.kind,
+                            GuardrailActionKind::Block | GuardrailActionKind::Redact
+                        )
+                    }) {
+                        "blocked"
+                    } else {
+                        "recorded"
+                    };
+                    self.record_guardrail_detector_error(
+                        policy,
+                        &evaluation.check_id,
+                        &context,
+                        error,
+                        detector_error_outcome,
+                    )
+                    .await;
                 }
             }
-            if let Some(matched) = local_guardrail_match(rule, context.body_text) {
-                return Some(matched);
+            let aggregate = ferrogate_guardrails::aggregate_check_outcomes(
+                &policy.revision.aggregation,
+                &evaluations
+                    .iter()
+                    .map(|evaluation| evaluation.outcome)
+                    .collect::<Vec<_>>(),
+            );
+            let actions = match aggregate {
+                AggregateOutcome::Pass => &policy.revision.on_pass,
+                AggregateOutcome::Fail => &policy.revision.on_fail,
+                AggregateOutcome::Error => &policy.revision.on_error,
+            };
+            let effective_shadow = policy.revision.mode == PolicyMode::Shadow
+                || (context.streaming
+                    && detector_stage == DetectorStage::Response
+                    && policy.revision.streaming == PolicyStreamingMode::ShadowAfterComplete);
+            let outcome = match (effective_shadow, aggregate) {
+                (true, AggregateOutcome::Pass) => "shadow_pass",
+                (true, AggregateOutcome::Fail) => "shadow_fail",
+                (true, AggregateOutcome::Error) => "shadow_error",
+                (false, AggregateOutcome::Pass) => "pass",
+                (false, AggregateOutcome::Fail) => "fail",
+                (false, AggregateOutcome::Error) => "error",
+            };
+            self.record_guardrail_audit_event(AdminAuditEventDraft {
+                request_id: context.request_id.to_string(),
+                trace_id: context.trace_id.map(str::to_string),
+                agent_run_id: context.agent_run_id.map(str::to_string),
+                workflow_id: context.workflow_id.map(str::to_string),
+                workflow_version: context.workflow_version,
+                workflow_node_id: context.workflow_node_id.map(str::to_string),
+                actor_api_key_id: context.actor_api_key_id.map(str::to_string),
+                tenant: context.tenant.clone(),
+                action: "guardrail.policy_evaluate".to_string(),
+                target: policy.revision.immutable_id(),
+                outcome: outcome.to_string(),
+                message: format!(
+                    "guardrail policy evaluated {} checks with {} action(s)",
+                    evaluations.len(),
+                    actions.len()
+                ),
+            })
+            .await;
+            if effective_shadow {
+                continue;
+            }
+            if let Some(candidate) = guardrail_enforcement(policy, &evaluations, aggregate, actions)
+            {
+                let candidate_is_block = candidate.effect == GuardrailEffect::Deny;
+                let current_is_block =
+                    enforcement
+                        .as_ref()
+                        .is_some_and(|current: &GuardrailMatch| {
+                            current.effect == GuardrailEffect::Deny
+                        });
+                if enforcement.is_none() || (candidate_is_block && !current_is_block) {
+                    enforcement = Some(candidate);
+                }
             }
         }
-        None
+        enforcement
     }
 
     pub(crate) fn has_guardrail_candidate(
         &self,
         stage: GuardrailStage,
-        tenant: &ferrogate_core::TenantContext,
-        model: Option<&str>,
-        provider: Option<&str>,
+        selection: PolicySelectionContext<'_>,
+        streaming: bool,
     ) -> bool {
-        self.guardrail_rules.iter().any(|rule| {
-            rule.enabled
-                && rule.stage == stage
-                && allows_optional_scope(&rule.organization_ids, tenant.organization_id.as_deref())
-                && allows_optional_scope(&rule.project_ids, tenant.project_id.as_deref())
-                && allows_optional_scope(&rule.api_key_ids, tenant.api_key_id.as_deref())
-                && allows_optional_scope(&rule.models, model)
-                && allows_optional_scope(&rule.providers, provider)
+        let detector_stage = match stage {
+            GuardrailStage::Request => DetectorStage::Request,
+            GuardrailStage::Response => DetectorStage::Response,
+        };
+        self.guardrail_policies.iter().any(|policy| {
+            policy.revision.scope.matches(selection)
+                && !(streaming && policy.revision.streaming == PolicyStreamingMode::RejectStreaming)
+                && policy
+                    .checks
+                    .iter()
+                    .any(|check| check.enabled && check.stage == detector_stage)
         })
     }
 
@@ -322,11 +476,12 @@ impl AppState {
         }
     }
 
-    fn record_guardrail_detector_error(
+    async fn record_guardrail_detector_error(
         &self,
-        rule: &GuardrailRuleRuntime,
+        policy: &GuardrailPolicyRuntime,
+        check_id: &str,
         context: &GuardrailEvaluationContext<'_>,
-        error: &ferrogate_guardrails::DetectorError,
+        error: &DetectorError,
         outcome: &str,
     ) {
         if let Ok(mut metrics) = self.metrics.lock() {
@@ -334,12 +489,13 @@ impl AppState {
         }
         warn!(
             request_id = %context.request_id,
-            rule_id = %rule.id,
+            policy_revision = %policy.revision.immutable_id(),
+            check_id,
             error_kind = error.kind.as_str(),
             outcome,
             "guardrail detector evaluation failed"
         );
-        self.record_admin_audit_event(AdminAuditEventDraft {
+        self.record_guardrail_audit_event(AdminAuditEventDraft {
             request_id: context.request_id.to_string(),
             trace_id: context.trace_id.map(str::to_string),
             agent_run_id: context.agent_run_id.map(str::to_string),
@@ -349,39 +505,134 @@ impl AppState {
             actor_api_key_id: context.actor_api_key_id.map(str::to_string),
             tenant: context.tenant.clone(),
             action: "guardrail.detector_error".to_string(),
-            target: rule.id.clone(),
+            target: format!("{}/{}", policy.revision.immutable_id(), check_id),
             outcome: outcome.to_string(),
             message: format!(
-                "guardrail detector for rule {} failed with {}",
-                rule.name,
+                "guardrail detector for policy {} check {} failed with {}",
+                policy.revision.name,
+                check_id,
                 error.kind.as_str()
             ),
-        });
+        })
+        .await;
+    }
+
+    async fn record_guardrail_audit_event(&self, event: AdminAuditEventDraft) {
+        if self.storage_status().durable {
+            let state = self.clone();
+            if let Err(error) =
+                tokio::task::spawn_blocking(move || state.record_admin_audit_event(event)).await
+            {
+                warn!(error = %error, "guardrail audit persistence task failed");
+            }
+        } else {
+            self.record_admin_audit_event(event);
+        }
     }
 }
 
-fn detector_error_guardrail_match(
-    rule: &GuardrailRuleRuntime,
-    error: &ferrogate_guardrails::DetectorError,
-) -> GuardrailMatch {
-    GuardrailMatch {
-        rule_id: rule.id.clone(),
-        rule_name: rule.name.clone(),
-        effect: GuardrailEffect::Deny,
-        matched_text: String::new(),
+#[derive(Debug)]
+struct GuardrailCheckEvaluation {
+    check_id: String,
+    outcome: CheckOutcome,
+    matched_text: String,
+    redaction_regex: Option<Regex>,
+    content_patches: Vec<ContentPatch>,
+    detector_error: Option<DetectorError>,
+    used_fallback: bool,
+}
+
+async fn evaluate_guardrail_check(
+    check: &GuardrailCheckRuntime,
+    stage: DetectorStage,
+    context: GuardrailEvaluationContext<'_>,
+    deadline: Instant,
+) -> GuardrailCheckEvaluation {
+    if !check.enabled {
+        return GuardrailCheckEvaluation::disabled(&check.id);
+    }
+    match &check.detector {
+        GuardrailDetectorRuntime::Local(detector) => {
+            local_guardrail_evaluation(&check.id, detector, context.body_text)
+        }
+        GuardrailDetectorRuntime::External(detector) => {
+            let input = DetectorInput {
+                stage,
+                tenant: DetectorTenant {
+                    organization_id: context.tenant.organization_id.as_deref(),
+                    team_id: context.tenant.team_id.as_deref(),
+                    project_id: context.tenant.project_id.as_deref(),
+                    user_id: context.tenant.user_id.as_deref(),
+                    api_key_id: context.tenant.api_key_id.as_deref(),
+                },
+                model: context.model,
+                provider: context.provider,
+                text: context.body_text,
+            };
+            match detector.evaluate(&input, deadline).await {
+                Ok(result) => external_guardrail_evaluation(&check.id, result),
+                Err(error) => {
+                    if let Some(fallback) = &check.fallback_detector {
+                        let mut evaluation =
+                            local_guardrail_evaluation(&check.id, fallback, context.body_text);
+                        evaluation.detector_error = Some(error);
+                        evaluation.used_fallback = true;
+                        evaluation
+                    } else {
+                        GuardrailCheckEvaluation {
+                            check_id: check.id.clone(),
+                            outcome: CheckOutcome::Error,
+                            matched_text: String::new(),
+                            redaction_regex: None,
+                            content_patches: Vec::new(),
+                            detector_error: Some(error),
+                            used_fallback: false,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl GuardrailCheckEvaluation {
+    fn disabled(check_id: &str) -> Self {
+        Self {
+            check_id: check_id.to_string(),
+            outcome: CheckOutcome::Disabled,
+            matched_text: String::new(),
+            redaction_regex: None,
+            content_patches: Vec::new(),
+            detector_error: None,
+            used_fallback: false,
+        }
+    }
+}
+
+fn external_guardrail_evaluation(
+    check_id: &str,
+    result: DetectorResult,
+) -> GuardrailCheckEvaluation {
+    GuardrailCheckEvaluation {
+        check_id: check_id.to_string(),
+        outcome: match result.verdict {
+            DetectorVerdict::Pass => CheckOutcome::Pass,
+            DetectorVerdict::Fail => CheckOutcome::Fail,
+        },
+        matched_text: result.first_matched_text().unwrap_or_default().to_string(),
         redaction_regex: None,
-        content_patches: Vec::new(),
-        code: "guardrail_provider_unavailable".to_string(),
-        message: format!(
-            "guardrail detector for rule '{}' failed: {}",
-            rule.name,
-            error.safe_message()
-        ),
+        content_patches: result.patches,
+        detector_error: None,
+        used_fallback: false,
     }
 }
 
-fn local_guardrail_match(rule: &GuardrailRuleRuntime, body_text: &str) -> Option<GuardrailMatch> {
-    let matched = if let Some(max_input_bytes) = rule.max_input_bytes {
+fn local_guardrail_evaluation(
+    check_id: &str,
+    detector: &LocalGuardrailDetectorRuntime,
+    body_text: &str,
+) -> GuardrailCheckEvaluation {
+    let matched = if let Some(max_input_bytes) = detector.max_input_bytes {
         if body_text.len() > max_input_bytes {
             Some(("length".to_string(), None))
         } else {
@@ -391,28 +642,97 @@ fn local_guardrail_match(rule: &GuardrailRuleRuntime, body_text: &str) -> Option
         None
     }
     .or_else(|| {
-        rule.keywords
+        detector
+            .keywords
             .iter()
             .find(|keyword| body_text.contains(keyword.as_str()))
             .map(|keyword| (keyword.clone(), None))
     })
     .or_else(|| {
-        rule.regex.iter().find_map(|regex| {
+        detector.regex.iter().find_map(|regex| {
             regex
                 .find(body_text)
                 .map(|matched| (matched.as_str().to_string(), Some(regex.clone())))
         })
-    })?;
-    Some(GuardrailMatch {
-        rule_id: rule.id.clone(),
-        rule_name: rule.name.clone(),
-        effect: rule.effect,
-        matched_text: matched.0,
-        redaction_regex: matched.1,
+    });
+    GuardrailCheckEvaluation {
+        check_id: check_id.to_string(),
+        outcome: if matched.is_some() {
+            CheckOutcome::Fail
+        } else {
+            CheckOutcome::Pass
+        },
+        matched_text: matched
+            .as_ref()
+            .map(|matched| matched.0.clone())
+            .unwrap_or_default(),
+        redaction_regex: matched.and_then(|matched| matched.1),
         content_patches: Vec::new(),
-        code: rule.code.clone(),
-        message: rule.message.clone(),
-    })
+        detector_error: None,
+        used_fallback: false,
+    }
+}
+
+fn guardrail_enforcement(
+    policy: &GuardrailPolicyRuntime,
+    evaluations: &[GuardrailCheckEvaluation],
+    aggregate: AggregateOutcome,
+    actions: &[PolicyAction],
+) -> Option<GuardrailMatch> {
+    let evidence = match aggregate {
+        AggregateOutcome::Fail => evaluations
+            .iter()
+            .find(|evaluation| evaluation.outcome == CheckOutcome::Fail),
+        AggregateOutcome::Error => evaluations
+            .iter()
+            .find(|evaluation| evaluation.outcome == CheckOutcome::Error),
+        AggregateOutcome::Pass => evaluations.first(),
+    };
+    let mut selected = None;
+    for action in actions {
+        let effect = match action.kind {
+            GuardrailActionKind::Allow | GuardrailActionKind::Record => continue,
+            GuardrailActionKind::Block => GuardrailEffect::Deny,
+            GuardrailActionKind::Redact => GuardrailEffect::Redact,
+        };
+        let mut candidate = GuardrailMatch {
+            rule_id: policy.revision.policy_id.clone(),
+            rule_name: policy.revision.name.clone(),
+            policy_revision: policy.revision.revision,
+            check_id: evidence.map(|evaluation| evaluation.check_id.clone()),
+            effect,
+            matched_text: evidence
+                .map(|evaluation| evaluation.matched_text.clone())
+                .unwrap_or_default(),
+            redaction_regex: evidence.and_then(|evaluation| evaluation.redaction_regex.clone()),
+            content_patches: evidence
+                .map(|evaluation| evaluation.content_patches.clone())
+                .unwrap_or_default(),
+            code: action
+                .code
+                .clone()
+                .unwrap_or_else(|| "guardrail_blocked".to_string()),
+            message: action
+                .message
+                .clone()
+                .unwrap_or_else(|| "request blocked by guardrail policy".to_string()),
+        };
+        if candidate.effect == GuardrailEffect::Redact
+            && candidate.content_patches.is_empty()
+            && candidate.matched_text.is_empty()
+        {
+            candidate.effect = GuardrailEffect::Deny;
+            candidate.code = "guardrail_invalid_redaction".to_string();
+            candidate.message = format!(
+                "guardrail policy '{}' could not produce safe redaction evidence",
+                policy.revision.name
+            );
+        }
+        if selected.is_none() || candidate.effect == GuardrailEffect::Deny {
+            selected = Some(candidate);
+        }
+    }
+    selected
 }
 
 #[cfg(test)]
@@ -427,6 +747,18 @@ mod tests {
         provider: Option<&'a str>,
         body: &'a str,
     ) -> Option<GuardrailMatch> {
+        match_guardrail_for_test_with_streaming(state, stage, tenant, model, provider, body, false)
+    }
+
+    fn match_guardrail_for_test_with_streaming<'a>(
+        state: &AppState,
+        stage: crate::config::GuardrailStage,
+        tenant: &'a ferrogate_core::TenantContext,
+        model: Option<&'a str>,
+        provider: Option<&'a str>,
+        body: &'a str,
+        streaming: bool,
+    ) -> Option<GuardrailMatch> {
         tokio::runtime::Runtime::new()
             .expect("test runtime")
             .block_on(state.match_guardrail(
@@ -440,8 +772,11 @@ mod tests {
                     workflow_node_id: None,
                     actor_api_key_id: None,
                     tenant,
+                    service_account_id: None,
+                    gateway_config_id: None,
                     model,
                     provider,
+                    streaming,
                     body_text: body,
                 },
             ))
@@ -482,6 +817,280 @@ mod tests {
             enabled: true,
             cache_enabled: None,
         }
+    }
+
+    fn durable_guardrail_revision(
+        policy_id: &str,
+        revision: u32,
+        keyword: &str,
+        scope: PolicyScopeSelector,
+    ) -> PolicyRevision {
+        PolicyRevision {
+            policy_id: policy_id.to_string(),
+            revision,
+            name: format!("{policy_id} revision {revision}"),
+            description: None,
+            enforced: true,
+            scope,
+            checks: vec![CheckBinding {
+                id: "keyword".to_string(),
+                enabled: true,
+                stage: DetectorStage::Request,
+                detector: DetectorDefinition::local(vec![keyword.to_string()], Vec::new(), None),
+                fallback_detector: None,
+            }],
+            aggregation: PolicyAggregation::All,
+            execution: PolicyExecution::Sequential,
+            mode: PolicyMode::Enforce,
+            streaming: PolicyStreamingMode::BufferAndEnforce,
+            on_pass: vec![PolicyAction::allow()],
+            on_fail: vec![PolicyAction::block(
+                "durable_guardrail_blocked",
+                "blocked by durable guardrail policy",
+            )],
+            on_error: vec![PolicyAction::block(
+                "durable_guardrail_unavailable",
+                "durable guardrail policy unavailable",
+            )],
+            deadline_ms: 2_000,
+            created_at_unix: u64::from(revision),
+            created_by: "test-admin".to_string(),
+        }
+    }
+
+    #[test]
+    fn immutable_policy_activation_and_rollback_change_the_live_evaluator() {
+        let shared = SharedAppState::with_source_path(Config::default(), None);
+        let first = durable_guardrail_revision(
+            "durable-policy",
+            1,
+            "secret-v1",
+            PolicyScopeSelector::default(),
+        );
+        shared
+            .create_guardrail_policy_revision(first.clone())
+            .expect("create first revision");
+        assert!(shared
+            .create_guardrail_policy_revision(first)
+            .unwrap_err()
+            .to_string()
+            .contains("already exists"));
+        shared
+            .activate_guardrail_policy_revision("durable-policy", 1, "test-admin", 10, false)
+            .expect("activate first revision");
+        assert!(match_guardrail_for_test(
+            &shared.current(),
+            GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "contains secret-v1"
+        )
+        .is_some());
+
+        let second = durable_guardrail_revision(
+            "durable-policy",
+            2,
+            "secret-v2",
+            PolicyScopeSelector::default(),
+        );
+        shared
+            .create_guardrail_policy_revision(second)
+            .expect("create second revision");
+        shared
+            .activate_guardrail_policy_revision("durable-policy", 2, "test-admin", 20, false)
+            .expect("activate second revision");
+        assert!(match_guardrail_for_test(
+            &shared.current(),
+            GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "contains secret-v1"
+        )
+        .is_none());
+        assert!(match_guardrail_for_test(
+            &shared.current(),
+            GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "contains secret-v2"
+        )
+        .is_some());
+
+        shared
+            .activate_guardrail_policy_revision("durable-policy", 1, "test-admin", 30, true)
+            .expect("roll back first revision");
+        assert!(match_guardrail_for_test(
+            &shared.current(),
+            GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "contains secret-v1"
+        )
+        .is_some());
+        let views = shared
+            .current()
+            .guardrail_policy_revision_views(Some("durable-policy"))
+            .unwrap();
+        assert_eq!(views[0].status, PolicyRevisionStatus::Active);
+        assert_eq!(views[1].status, PolicyRevisionStatus::Archived);
+    }
+
+    #[test]
+    fn lower_scope_allow_action_cannot_remove_organization_enforcement() {
+        let shared = SharedAppState::with_source_path(Config::default(), None);
+        let organization = durable_guardrail_revision(
+            "organization-policy",
+            1,
+            "secret",
+            PolicyScopeSelector {
+                organization_ids: vec!["org-a".to_string()],
+                ..PolicyScopeSelector::default()
+            },
+        );
+        let mut key = durable_guardrail_revision(
+            "key-policy",
+            1,
+            "secret",
+            PolicyScopeSelector {
+                api_key_ids: vec!["key-a".to_string()],
+                ..PolicyScopeSelector::default()
+            },
+        );
+        key.on_fail = vec![PolicyAction::allow()];
+        for policy in [organization, key] {
+            let policy_id = policy.policy_id.clone();
+            shared.create_guardrail_policy_revision(policy).unwrap();
+            shared
+                .activate_guardrail_policy_revision(&policy_id, 1, "test-admin", 1, false)
+                .unwrap();
+        }
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("org-a".to_string()),
+            api_key_id: Some("key-a".to_string()),
+            ..Default::default()
+        };
+        let matched = match_guardrail_for_test(
+            &shared.current(),
+            GuardrailStage::Request,
+            &tenant,
+            None,
+            None,
+            "contains secret",
+        )
+        .expect("organization policy must still block");
+        assert_eq!(matched.rule_id, "organization-policy");
+        assert_eq!(matched.policy_revision, 1);
+    }
+
+    #[test]
+    fn sequential_and_parallel_execution_use_the_same_aggregation_semantics() {
+        for execution in [PolicyExecution::Sequential, PolicyExecution::Parallel] {
+            let shared = SharedAppState::with_source_path(Config::default(), None);
+            let mut policy = durable_guardrail_revision(
+                "execution-policy",
+                1,
+                "secret",
+                PolicyScopeSelector::default(),
+            );
+            policy.execution = execution;
+            policy.checks.push(CheckBinding {
+                id: "non-match".to_string(),
+                enabled: true,
+                stage: DetectorStage::Request,
+                detector: DetectorDefinition::local(
+                    vec!["not-present".to_string()],
+                    Vec::new(),
+                    None,
+                ),
+                fallback_detector: None,
+            });
+            shared.create_guardrail_policy_revision(policy).unwrap();
+            shared
+                .activate_guardrail_policy_revision("execution-policy", 1, "test-admin", 1, false)
+                .unwrap();
+            assert!(match_guardrail_for_test(
+                &shared.current(),
+                GuardrailStage::Request,
+                &ferrogate_core::TenantContext::default(),
+                None,
+                None,
+                "contains secret"
+            )
+            .is_some());
+        }
+    }
+
+    #[test]
+    fn streaming_modes_reject_before_dispatch_or_force_shadow_evaluation() {
+        let reject_state = SharedAppState::with_source_path(Config::default(), None);
+        let mut reject = durable_guardrail_revision(
+            "reject-streaming",
+            1,
+            "secret",
+            PolicyScopeSelector::default(),
+        );
+        reject.streaming = PolicyStreamingMode::RejectStreaming;
+        reject_state
+            .create_guardrail_policy_revision(reject)
+            .unwrap();
+        reject_state
+            .activate_guardrail_policy_revision("reject-streaming", 1, "test-admin", 1, false)
+            .unwrap();
+        let rejected = match_guardrail_for_test_with_streaming(
+            &reject_state.current(),
+            GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "safe",
+            true,
+        )
+        .expect("reject_streaming must block before provider dispatch");
+        assert_eq!(rejected.code, "guardrail_streaming_unsupported");
+
+        let shadow_state = SharedAppState::with_source_path(Config::default(), None);
+        let mut shadow = durable_guardrail_revision(
+            "streaming-shadow",
+            1,
+            "secret",
+            PolicyScopeSelector::default(),
+        );
+        shadow.streaming = PolicyStreamingMode::ShadowAfterComplete;
+        shadow.checks[0].stage = DetectorStage::Response;
+        shadow_state
+            .create_guardrail_policy_revision(shadow)
+            .unwrap();
+        shadow_state
+            .activate_guardrail_policy_revision("streaming-shadow", 1, "test-admin", 1, false)
+            .unwrap();
+        assert!(match_guardrail_for_test_with_streaming(
+            &shadow_state.current(),
+            GuardrailStage::Response,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "contains secret",
+            true,
+        )
+        .is_none());
+        assert!(shadow_state.current().audit_events().iter().any(|event| {
+            event.action == "guardrail.policy_evaluate"
+                && event.target == "streaming-shadow@1"
+                && event.outcome == "shadow_fail"
+        }));
+        assert!(match_guardrail_for_test(
+            &shadow_state.current(),
+            GuardrailStage::Response,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "contains secret",
+        )
+        .is_some());
     }
 
     #[test]
@@ -901,11 +1510,18 @@ mod tests {
             1
         );
         let audit = state.audit_events();
-        assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].request_id, "test-request");
-        assert_eq!(audit[0].action, "guardrail.detector_error");
-        assert_eq!(audit[0].target, "pii-detector");
-        assert_eq!(audit[0].outcome, "blocked");
+        let detector_error = audit
+            .iter()
+            .find(|event| event.action == "guardrail.detector_error")
+            .expect("detector error audit");
+        assert_eq!(detector_error.request_id, "test-request");
+        assert_eq!(detector_error.target, "pii-detector@1/static-check");
+        assert_eq!(detector_error.outcome, "blocked");
+        assert!(audit.iter().any(|event| {
+            event.action == "guardrail.policy_evaluate"
+                && event.target == "pii-detector@1"
+                && event.outcome == "error"
+        }));
     }
 
     #[test]
@@ -939,9 +1555,16 @@ mod tests {
             1
         );
         let audit = state.audit_events();
-        assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].action, "guardrail.detector_error");
-        assert_eq!(audit[0].outcome, "recorded");
+        let detector_error = audit
+            .iter()
+            .find(|event| event.action == "guardrail.detector_error")
+            .expect("detector error audit");
+        assert_eq!(detector_error.outcome, "recorded");
+        assert!(audit.iter().any(|event| {
+            event.action == "guardrail.policy_evaluate"
+                && event.target == "pii-detector@1"
+                && event.outcome == "error"
+        }));
     }
 
     #[test]

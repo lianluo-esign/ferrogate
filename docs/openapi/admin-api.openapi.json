@@ -3829,6 +3829,215 @@
         }
       }
     },
+    "/admin/v1/guardrail-policies": {
+      "get": {
+        "operationId": "listGuardrailPolicyRevisions",
+        "tags": ["admin-read"],
+        "summary": "List immutable Guardrail policy revisions and their draft, active, or archived state.",
+        "description": "Requires admin.read plus the Supabase-backed guardrails.policy.read action. Tenant roles see only revisions explicitly scoped to their own tenant.",
+        "responses": {
+          "200": {
+            "description": "Guardrail policy revision list.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionList"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      },
+      "post": {
+        "operationId": "createGuardrailPolicyRevision",
+        "tags": ["admin-write"],
+        "summary": "Create the first immutable revision of a Guardrail policy.",
+        "description": "Requires admin.write plus the Supabase-backed guardrails.policy.create_revision action. Platform-operator keys remain the RBAC bootstrap path. Server assigns revision, created_at_unix, and created_by.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionMutation"}
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Draft revision created.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionResponse"}
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        }
+      }
+    },
+    "/admin/v1/guardrail-policies/{policy_id}": {
+      "get": {
+        "operationId": "listGuardrailPolicyRevisionsByPolicy",
+        "tags": ["admin-read"],
+        "summary": "List every immutable revision for one Guardrail policy.",
+        "description": "Requires admin.read plus the Supabase-backed guardrails.policy.read action. Tenant roles may only read their own tenant-scoped policies.",
+        "parameters": [{"$ref": "#/components/parameters/GuardrailPolicyId"}],
+        "responses": {
+          "200": {
+            "description": "Guardrail policy revision list.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionList"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/admin/v1/guardrail-policies/{policy_id}/revisions": {
+      "get": {
+        "operationId": "listGuardrailPolicyRevisionHistory",
+        "tags": ["admin-read"],
+        "summary": "List Guardrail policy revision history.",
+        "description": "Requires admin.read plus the Supabase-backed guardrails.policy.read action. Tenant roles may only read their own tenant-scoped policies.",
+        "parameters": [{"$ref": "#/components/parameters/GuardrailPolicyId"}],
+        "responses": {
+          "200": {
+            "description": "Guardrail policy revision history.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionList"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      },
+      "post": {
+        "operationId": "createNextGuardrailPolicyRevision",
+        "tags": ["admin-write"],
+        "summary": "Create the next immutable revision for a Guardrail policy.",
+        "description": "Requires admin.write plus the Supabase-backed guardrails.policy.create_revision action. Tenant roles may only create revisions explicitly scoped to their own tenant. The policy_id may be omitted from the body; if supplied it must match the path.",
+        "parameters": [{"$ref": "#/components/parameters/GuardrailPolicyId"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionMutation"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "Draft revision created.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        }
+      }
+    },
+    "/admin/v1/guardrail-policies/{policy_id}/revisions/{revision}": {
+      "get": {
+        "operationId": "getGuardrailPolicyRevision",
+        "tags": ["admin-read"],
+        "summary": "Get an exact immutable Guardrail policy revision.",
+        "description": "Requires admin.read plus the Supabase-backed guardrails.policy.read action. Tenant roles may only read their own tenant-scoped revisions.",
+        "parameters": [
+          {"$ref": "#/components/parameters/GuardrailPolicyId"},
+          {"$ref": "#/components/parameters/GuardrailPolicyRevision"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact policy revision.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionResponse"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      },
+      "delete": {
+        "operationId": "archiveGuardrailPolicyRevision",
+        "tags": ["admin-write"],
+        "summary": "Archive an inactive Guardrail policy revision.",
+        "description": "Requires admin.write plus the Supabase-backed guardrails.policy.archive action. Tenant roles may only archive their own tenant-scoped revisions. An active revision cannot be archived.",
+        "parameters": [
+          {"$ref": "#/components/parameters/GuardrailPolicyId"},
+          {"$ref": "#/components/parameters/GuardrailPolicyRevision"}
+        ],
+        "responses": {
+          "200": {"description": "Revision archived and runtime reloaded."},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"}
+        }
+      }
+    },
+    "/admin/v1/guardrail-policies/{policy_id}/activate": {
+      "post": {
+        "operationId": "activateGuardrailPolicyRevision",
+        "tags": ["admin-write"],
+        "summary": "Atomically activate a validated Guardrail policy revision and reload the runtime.",
+        "description": "Requires admin.write plus the Supabase-backed guardrails.policy.activate action. Tenant roles may only activate their own tenant-scoped revisions. The previous active revision is archived. A failed runtime reload restores the prior binding.",
+        "parameters": [{"$ref": "#/components/parameters/GuardrailPolicyId"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyRevisionSelection"}}}
+        },
+        "responses": {
+          "200": {"description": "Revision activated.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyBindingResponse"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"}
+        }
+      }
+    },
+    "/admin/v1/guardrail-policies/{policy_id}/rollback": {
+      "post": {
+        "operationId": "rollbackGuardrailPolicyRevision",
+        "tags": ["admin-write"],
+        "summary": "Atomically roll back to an archived Guardrail policy revision.",
+        "description": "Requires admin.write plus the Supabase-backed guardrails.policy.rollback action. Tenant roles may only roll back their own tenant-scoped revisions. Omitting revision selects the highest archived revision.",
+        "parameters": [{"$ref": "#/components/parameters/GuardrailPolicyId"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyRollbackSelection"}}}
+        },
+        "responses": {
+          "200": {"description": "Revision rolled back.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyBindingResponse"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/Conflict"}
+        }
+      }
+    },
+    "/admin/v1/guardrail-policies/{policy_id}/dry-run": {
+      "post": {
+        "operationId": "dryRunGuardrailPolicyRevision",
+        "tags": ["admin-read"],
+        "summary": "Select and inspect a Guardrail policy revision without dispatching a model provider, external detector, or action.",
+        "description": "Requires admin.read plus the Supabase-backed guardrails.policy.dry_run action. Tenant roles may only dry-run their own tenant-scoped revisions, and the organization context is pinned to the caller's tenant.",
+        "parameters": [{"$ref": "#/components/parameters/GuardrailPolicyId"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyDryRunRequest"}}}
+        },
+        "responses": {
+          "200": {"description": "Sanitized dry-run plan.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailPolicyDryRunResponse"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        }
+      }
+    },
     "/admin/v1/self-hosted-workers/{id}/rotate": {
       "post": {
         "operationId": "rotateAdminSelfHostedWorkerIdentity",
@@ -3911,6 +4120,24 @@
         "required": true,
         "schema": {
           "type": "string"
+        }
+      },
+      "GuardrailPolicyId": {
+        "name": "policy_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "GuardrailPolicyRevision": {
+        "name": "revision",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "GatewayConfigId": {
@@ -11425,6 +11652,239 @@
             "minimum": 0,
             "description": "Optional replacement expiry for the rotated identity. Null clears gateway-enforced identity expiry."
           }
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyScope": {
+        "type": "object",
+        "properties": {
+          "tenant_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+          "organization_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+          "project_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+          "workspace_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+          "api_key_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+          "service_account_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+          "gateway_config_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+          "models": {"type": "array", "items": {"type": "string"}, "default": []},
+          "providers": {"type": "array", "items": {"type": "string"}, "default": []}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailLocalDetector": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": {"type": "string", "const": "local"},
+          "keywords": {"type": "array", "minItems": 1, "items": {"type": "string"}, "default": []},
+          "regex": {"type": "array", "minItems": 1, "items": {"type": "string"}, "default": []},
+          "max_input_bytes": {"type": ["integer", "null"], "minimum": 1}
+        },
+        "anyOf": [
+          {"required": ["keywords"]},
+          {"required": ["regex"]},
+          {"required": ["max_input_bytes"]}
+        ],
+        "additionalProperties": false
+      },
+      "GuardrailCustomHttpDetector": {
+        "type": "object",
+        "required": ["kind", "endpoint"],
+        "properties": {
+          "kind": {"type": "string", "const": "custom_http"},
+          "endpoint": {"type": "string", "format": "uri"},
+          "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000, "default": 2000},
+          "max_concurrency": {"type": "integer", "minimum": 1, "default": 16},
+          "circuit_failure_threshold": {"type": "integer", "minimum": 1, "default": 3},
+          "circuit_cooldown_ms": {"type": "integer", "minimum": 1, "default": 30000},
+          "max_retries": {"type": "integer", "minimum": 0, "maximum": 1, "default": 0},
+          "max_payload_bytes": {"type": "integer", "minimum": 1, "default": 1048576},
+          "max_response_bytes": {"type": "integer", "minimum": 1, "default": 262144},
+          "allow_private_network": {"type": "boolean", "default": false},
+          "secret_ref": {"type": ["string", "null"], "description": "Secret reference resolved during activation/reload; raw bearer tokens are not accepted."}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailDetectorDefinition": {
+        "oneOf": [
+          {"$ref": "#/components/schemas/GuardrailLocalDetector"},
+          {"$ref": "#/components/schemas/GuardrailCustomHttpDetector"}
+        ],
+        "discriminator": {"propertyName": "kind"}
+      },
+      "GuardrailCheckBinding": {
+        "type": "object",
+        "required": ["id", "stage", "detector"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "enabled": {"type": "boolean", "default": true},
+          "stage": {"type": "string", "enum": ["request", "response"]},
+          "detector": {"$ref": "#/components/schemas/GuardrailDetectorDefinition"},
+          "fallback_detector": {
+            "oneOf": [
+              {"$ref": "#/components/schemas/GuardrailLocalDetector"},
+              {"type": "null"}
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyAction": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": {"type": "string", "enum": ["allow", "block", "redact", "record"]},
+          "code": {"type": ["string", "null"], "description": "Required for block and redact actions."},
+          "message": {"type": ["string", "null"], "description": "Required for block and redact actions; must not echo detector input."}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyAggregation": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["type"],
+            "properties": {"type": {"type": "string", "const": "all"}},
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["type"],
+            "properties": {"type": {"type": "string", "const": "any"}},
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["type", "minimum"],
+            "properties": {
+              "type": {"type": "string", "const": "threshold"},
+              "minimum": {"type": "integer", "minimum": 1}
+            },
+            "additionalProperties": false
+          }
+        ],
+        "discriminator": {"propertyName": "type"}
+      },
+      "GuardrailPolicyDefinition": {
+        "type": "object",
+        "required": ["name", "checks", "on_pass", "on_fail", "on_error"],
+        "properties": {
+          "policy_id": {"type": "string", "minLength": 1, "description": "Required on the collection endpoint; optional when the path supplies policy_id."},
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": ["string", "null"]},
+          "enforced": {"type": "boolean", "default": true},
+          "scope": {"$ref": "#/components/schemas/GuardrailPolicyScope"},
+          "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/components/schemas/GuardrailCheckBinding"}},
+          "aggregation": {"$ref": "#/components/schemas/GuardrailPolicyAggregation"},
+          "execution": {"type": "string", "enum": ["sequential", "parallel"], "default": "sequential"},
+          "mode": {"type": "string", "enum": ["enforce", "shadow"], "default": "enforce"},
+          "streaming": {"type": "string", "enum": ["buffer_and_enforce", "shadow_after_complete", "reject_streaming"], "default": "buffer_and_enforce"},
+          "on_pass": {"type": "array", "minItems": 1, "items": {"$ref": "#/components/schemas/GuardrailPolicyAction"}},
+          "on_fail": {"type": "array", "minItems": 1, "items": {"$ref": "#/components/schemas/GuardrailPolicyAction"}},
+          "on_error": {"type": "array", "minItems": 1, "items": {"$ref": "#/components/schemas/GuardrailPolicyAction"}},
+          "deadline_ms": {"type": "integer", "minimum": 1, "maximum": 30000, "default": 2000}
+        }
+      },
+      "GuardrailPolicyRevisionMutation": {
+        "$ref": "#/components/schemas/GuardrailPolicyDefinition"
+      },
+      "GuardrailPolicyRevisionView": {
+        "allOf": [
+          {"$ref": "#/components/schemas/GuardrailPolicyDefinition"},
+          {
+            "type": "object",
+            "required": ["policy_id", "revision", "created_at_unix", "created_by", "status"],
+            "properties": {
+              "revision": {"type": "integer", "minimum": 1},
+              "created_at_unix": {"type": "integer", "minimum": 0},
+              "created_by": {"type": "string", "minLength": 1},
+              "status": {"type": "string", "enum": ["draft", "active", "archived"]}
+            }
+          }
+        ]
+      },
+      "GuardrailPolicyRevisionResponse": {
+        "type": "object",
+        "required": ["object", "policy"],
+        "properties": {
+          "object": {"type": "string", "const": "guardrail_policy_revision"},
+          "policy": {"$ref": "#/components/schemas/GuardrailPolicyRevisionView"}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyRevisionList": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": {"type": "string", "const": "list"},
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailPolicyRevisionView"}}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyRevisionSelection": {
+        "type": "object",
+        "required": ["revision"],
+        "properties": {"revision": {"type": "integer", "minimum": 1}},
+        "additionalProperties": false
+      },
+      "GuardrailPolicyRollbackSelection": {
+        "type": "object",
+        "properties": {"revision": {"type": ["integer", "null"], "minimum": 1}},
+        "additionalProperties": false
+      },
+      "GuardrailPolicyBindingResponse": {
+        "type": "object",
+        "required": ["object", "policy_id", "active_revision", "rollback", "reload"],
+        "properties": {
+          "object": {"type": "string", "const": "guardrail_policy_binding"},
+          "policy_id": {"type": "string"},
+          "active_revision": {"type": "integer", "minimum": 1},
+          "rollback": {"type": "boolean"},
+          "reload": {"type": "object"}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyDryRunRequest": {
+        "type": "object",
+        "required": ["stage"],
+        "properties": {
+          "revision": {"type": ["integer", "null"], "minimum": 1},
+          "stage": {"type": "string", "enum": ["request", "response"]},
+          "organization_id": {"type": ["string", "null"]},
+          "project_id": {"type": ["string", "null"]},
+          "workspace_id": {"type": ["string", "null"]},
+          "api_key_id": {"type": ["string", "null"]},
+          "service_account_id": {"type": ["string", "null"]},
+          "gateway_config_id": {"type": ["string", "null"]},
+          "model": {"type": ["string", "null"]},
+          "provider": {"type": ["string", "null"]},
+          "text": {"type": "string", "default": "", "description": "Used only by local deterministic checks and never persisted in dry-run evidence."}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyDryRunCheck": {
+        "type": "object",
+        "required": ["id", "detector", "result"],
+        "properties": {
+          "id": {"type": "string"},
+          "detector": {"type": "string", "enum": ["local", "custom_http"]},
+          "result": {"type": "string", "enum": ["pass", "fail", "disabled", "not_executed"]}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailPolicyDryRunResponse": {
+        "type": "object",
+        "required": ["object", "policy_revision", "selected", "result", "checks", "on_pass", "on_fail", "on_error", "provider_dispatched", "external_action_dispatched"],
+        "properties": {
+          "object": {"type": "string", "const": "guardrail_policy_dry_run"},
+          "policy_revision": {"type": "string", "description": "Exact immutable policy_id@revision."},
+          "selected": {"type": "boolean"},
+          "result": {"type": "string", "const": "planned"},
+          "checks": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailPolicyDryRunCheck"}},
+          "on_pass": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailPolicyAction"}},
+          "on_fail": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailPolicyAction"}},
+          "on_error": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailPolicyAction"}},
+          "provider_dispatched": {"type": "boolean", "const": false},
+          "external_action_dispatched": {"type": "boolean", "const": false}
         },
         "additionalProperties": false
       },

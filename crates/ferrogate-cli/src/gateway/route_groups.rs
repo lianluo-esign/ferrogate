@@ -54,6 +54,7 @@ pub(super) enum RouteGroup {
     AdminAgentWorkflow,
     AdminApiKey,
     AdminPolicy,
+    GuardrailPolicy,
     TenantHierarchy,
     AdminVirtualKey,
     QuotaPolicy,
@@ -215,6 +216,11 @@ fn build_route_group_router() -> Router<RouteGroup> {
 
     insert("/admin/v1/policies", RouteGroup::AdminPolicy);
     insert("/admin/v1/policies/{*rest}", RouteGroup::AdminPolicy);
+    insert("/admin/v1/guardrail-policies", RouteGroup::GuardrailPolicy);
+    insert(
+        "/admin/v1/guardrail-policies/{*rest}",
+        RouteGroup::GuardrailPolicy,
+    );
 
     insert("/admin/v1/tenant-accounts", RouteGroup::TenantHierarchy);
     insert(
@@ -313,6 +319,11 @@ impl FerroGateway {
             }
             RouteGroup::AdminApiKey => self.try_admin_api_key_routes(session, ctx, req).await,
             RouteGroup::AdminPolicy => self.try_admin_policy_routes(session, ctx, req).await,
+            RouteGroup::GuardrailPolicy => {
+                self.handle_guardrail_policies(session, ctx, &req.headers, &req.method, &req.path)
+                    .await?;
+                Ok(true)
+            }
             RouteGroup::TenantHierarchy => {
                 self.try_tenant_hierarchy_routes(session, ctx, req).await
             }
@@ -1061,6 +1072,10 @@ mod tests {
             "/admin/v1/api-keys/key-1",
             "/admin/v1/policies",
             "/admin/v1/policies/policy-1",
+            "/admin/v1/guardrail-policies",
+            "/admin/v1/guardrail-policies/policy-1/revisions",
+            "/admin/v1/guardrail-policies/policy-1/activate",
+            "/admin/v1/guardrail-policies/policy-1/dry-run",
             "/admin/v1/tenant-accounts",
             "/admin/v1/projects",
             "/admin/v1/workspaces",

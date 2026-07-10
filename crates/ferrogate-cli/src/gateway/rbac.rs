@@ -165,6 +165,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 match state.delete_permission(id) {
                     Ok(true) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -237,6 +247,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let payload =
             match read_json_body::<AdminPermissionMutation>(session, &ctx.request_id).await? {
                 Ok(payload) => payload,
@@ -440,6 +460,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 match state.delete_role(id) {
                     Ok(true) => {
                         state.record_admin_audit_event(admin_audit_event_draft_for_target(
@@ -512,6 +542,16 @@ impl FerroGateway {
                 .await;
             }
         };
+        if let Err(error) = crate::auth::require_platform_operator(&auth) {
+            return write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await;
+        }
         let payload = match read_json_body::<AdminRoleMutation>(session, &ctx.request_id).await? {
             Ok(payload) => payload,
             Err(()) => return Ok(()),
@@ -675,6 +715,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
                     return write_json_error(
                         session,
@@ -748,6 +798,16 @@ impl FerroGateway {
                         .await;
                     }
                 };
+                if let Err(error) = crate::auth::require_platform_operator(&auth) {
+                    return write_json_error(
+                        session,
+                        error.status,
+                        error.code,
+                        error.message,
+                        &ctx.request_id,
+                    )
+                    .await;
+                }
                 if let Err(error) = crate::auth::authorize_tenant_scope(&auth, tenant_id) {
                     return write_json_error(
                         session,

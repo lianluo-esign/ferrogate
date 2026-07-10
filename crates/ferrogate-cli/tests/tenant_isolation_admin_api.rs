@@ -404,6 +404,43 @@ fn cross_tenant_admin_key_is_denied_across_identity_and_quota_surfaces() {
         "tenant B must not be able to list tenant A's role bindings: {stolen_role_list}"
     );
 
+    // Tenant-level RBAC is a platform-granted capability model. A tenant
+    // admin must not be able to manufacture actions, rewrite a global role,
+    // or bind a privileged role to itself.
+    let self_bind = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/tenant-roles/tenant-iso-a",
+        &TENANT_A,
+        &format!(r#"{{"role_id":"{role_id}"}}"#),
+    );
+    assert!(
+        status_line(&self_bind).contains("403"),
+        "tenant A must not be able to self-grant a role: {self_bind}"
+    );
+    let permission_create = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/permissions",
+        &TENANT_A,
+        r#"{"key":"guardrails.policy.activate","name":"Escalated action"}"#,
+    );
+    assert!(
+        status_line(&permission_create).contains("403"),
+        "tenant A must not be able to create global permission actions: {permission_create}"
+    );
+    let role_create = http_request(
+        &gateway_addr,
+        "POST",
+        "/admin/v1/roles",
+        &TENANT_A,
+        r#"{"name":"Escalated","slug":"escalated","permission_keys":["guardrails.policy.activate"]}"#,
+    );
+    assert!(
+        status_line(&role_create).contains("403"),
+        "tenant A must not be able to create global roles: {role_create}"
+    );
+
     // Sanity: the platform operator can still do all of the above.
     let operator_bind = http_request(
         &gateway_addr,

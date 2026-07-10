@@ -31,10 +31,13 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+mod policy;
+pub use policy::*;
+
 const CONTRACT_VERSION: u32 = 1;
 pub const MAX_DETECTOR_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectorStage {
     Request,

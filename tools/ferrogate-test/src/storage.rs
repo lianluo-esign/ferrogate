@@ -1070,6 +1070,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "self_hosted_run_dispatches",
         "self_hosted_run_dispatch_capabilities",
         "request_logs",
+        "guardrail_policy_revisions",
+        "guardrail_policy_bindings",
         "audit_events",
         "billing_metering_events",
         "usage_aggregates",
@@ -1112,6 +1114,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         ("self_hosted_worker_artifacts", "artifact_json"),
         ("self_hosted_worker_checkpoints", "checkpoint_json"),
         ("request_logs", "request_json"),
+        ("guardrail_policy_revisions", "policy_json"),
+        ("guardrail_policy_bindings", "archived_revisions_json"),
         ("audit_events", "audit_json"),
     ];
     for (table, column) in jsonb_columns {
@@ -1165,6 +1169,8 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_self_hosted_run_dispatches_worker_lease",
         "idx_self_hosted_run_dispatch_capabilities_capability",
         "idx_request_logs_model_provider_started",
+        "idx_guardrail_policy_revisions_created",
+        "idx_guardrail_policy_bindings_active",
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
         "idx_usage_aggregates_tenant_model_provider",
@@ -1185,16 +1191,13 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         }
     }
 
-    let migration_versions = postgres_scalar(&format!(
-        "SELECT string_agg(version::text || ':' || name, ',' ORDER BY version) \
-         FROM {}.storage_schema_migrations \
-         WHERE version IN (1, 2, 3, 4, 5, 6, 7, 8)",
+    let migration_version = postgres_scalar(&format!(
+        "SELECT version::text || ':' || name \
+         FROM {}.storage_schema_migrations WHERE version = 26",
         quote_ident(schema)
     ))?;
-    if migration_versions.trim()
-        != "1:001_init_postgres,2:002_supabase_control_plane_billing_evidence,3:003_supabase_structured_metering_usage,4:004_supabase_managed_worker_lifecycle,5:005_supabase_self_hosted_worker_lifecycle,6:006_self_hosted_worker_identity_expiry,7:007_self_hosted_run_dispatch_state,8:008_managed_worker_isolation_evidence"
-    {
-        bail!("unexpected Supabase migration versions: {migration_versions}");
+    if migration_version.trim() != "26:026_guardrail_policy_revisions" {
+        bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
     Ok(())
@@ -1771,8 +1774,11 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 16);
-                assert_eq!(body["storage"]["schema"]["name"], "016_admin_console_users");
+                assert_eq!(body["storage"]["schema"]["version"], 26);
+                assert_eq!(
+                    body["storage"]["schema"]["name"],
+                    "026_guardrail_policy_revisions"
+                );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]
                     .as_str()
