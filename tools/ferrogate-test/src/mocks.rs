@@ -512,7 +512,7 @@ fn third_party_auth_response_body(request: &str) -> String {
         .to_string()
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<String> {
+pub(crate) fn read_http_request(stream: &mut TcpStream) -> Result<String> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];

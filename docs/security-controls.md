@@ -104,14 +104,29 @@ configured should still place FerroGate behind a network-level control
 The built-in guardrail engine supports keyword, regex, and max-input-length
 rules with deny or redact effects, scoped by tenant/model/provider
 (`crates/ferrogate-cli/src/config/types.rs` `GuardrailRule`,
-`crates/ferrogate-cli/src/state.rs` `match_guardrail`). A rule can instead
+`crates/ferrogate-cli/src/state_quota_and_policy.rs` `match_guardrail`). A rule can instead
 delegate detection to an external HTTP endpoint (`provider: custom_http`) —
 e.g. a dedicated PII/jailbreak/toxicity classifier that can't be expressed as
-a regex — via a JSON callout (`crates/ferrogate-cli/src/state.rs`
-`call_guardrail_provider`). If the external provider is unreachable or
-returns a malformed response, the rule fails closed (denies) regardless of
-its configured effect, since there is nothing to safely redact without a
-detection result.
+a regex — through the async `GuardrailDetector` contract in
+`ferrogate-guardrails`. The external runtime uses a pooled `reqwest` client,
+one parent deadline, a per-detector semaphore and circuit breaker, bounded
+request/response bodies, at most one opt-in retry, typed findings, and
+validated UTF-8 content patches. It does not call the synchronous secret HTTP
+helper from the Pingora request path.
+
+`provider_on_error` is explicit: `block` is the fail-closed default, `record`
+allows the request while emitting detector-error evidence, and
+`fallback_detector` evaluates the rule's local keyword/regex/length matcher.
+Detector credentials use `provider_secret_ref` (`env://` or `vault://`) and
+are resolved once when runtime state is built. Debug, audit, and client error
+surfaces do not contain the credential or configured endpoint path.
+
+External detector URLs reject credentials, query strings, fragments,
+localhost, private/link-local/special-use addresses, and cloud metadata IPs by
+default. Redirects are disabled, and every DNS resolution filters disallowed
+addresses so a hostname cannot rebind to a private target. An operator must
+set `provider_allow_private_network: true` for a deliberately configured
+private detector endpoint. Detector timeouts cannot exceed 30 seconds.
 
 ## Supply-Chain Security
 
@@ -124,9 +139,10 @@ licenses bans sources`, and `cargo audit`. CI runs this gate in strict mode
 fails the build rather than silently skipping —
 see [`.github/workflows/rust-quality.yml`](../.github/workflows/rust-quality.yml).
 
-Published container images (`.github/workflows/ci-image.yml` per-commit,
-`.github/workflows/package.yml` releases) are additionally covered by a
-shared `.github/actions/image-supply-chain` step: an SPDX SBOM
+Published release images (`.github/workflows/ci-image.yml` and
+`.github/workflows/package.yml`, both reached only from a published release)
+are additionally covered by a shared `.github/actions/image-supply-chain`
+step: an SPDX SBOM
 (`anchore/sbom-action`), a keyless `cosign` signature over the image digest
 using GitHub Actions OIDC identity (no stored private key), and a GitHub
 build-provenance attestation (`actions/attest-build-provenance`) (issue

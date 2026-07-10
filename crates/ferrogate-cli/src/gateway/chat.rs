@@ -24,7 +24,7 @@ use crate::{
     },
     state::{
         AppState, BillingEventDraft, GatewayConfigResolveError, GatewayConfigUse,
-        ToolInjectionContext,
+        GuardrailEvaluationContext, ToolInjectionContext,
     },
 };
 use ferrogate_billing::TokenUsage as BillingTokenUsage;
@@ -382,13 +382,25 @@ impl FerroGateway {
                 upstream: Some(provider.name.clone()),
                 tenant: auth.tenant_context(),
             };
-            if let Some(guardrail) = state.match_guardrail(
-                GuardrailStage::Request,
-                &policy_request.tenant,
-                Some(&request.model),
-                Some(&provider.name),
-                &body_text,
-            ) {
+            if let Some(guardrail) = state
+                .match_guardrail(
+                    GuardrailStage::Request,
+                    GuardrailEvaluationContext {
+                        request_id: &ctx.request_id,
+                        trace_id: ctx.trace_id.as_deref(),
+                        agent_run_id: Some(&agent_run_id),
+                        workflow_id: workflow_id.as_deref(),
+                        workflow_version,
+                        workflow_node_id: workflow_node_id.as_deref(),
+                        actor_api_key_id: auth.api_key_id.as_deref(),
+                        tenant: &policy_request.tenant,
+                        model: Some(&request.model),
+                        provider: Some(&provider.name),
+                        body_text: &body_text,
+                    },
+                )
+                .await
+            {
                 state.record_guardrail_match(&guardrail);
                 self.record_ai_error_log(
                     endpoint,
@@ -885,13 +897,27 @@ impl FerroGateway {
                                 let mut final_status = response.status;
                                 let mut final_content_type = response.content_type;
                                 let mut final_error_code = None;
-                                if let Some(guardrail) = state.match_guardrail(
-                                    GuardrailStage::Response,
-                                    &policy_request.tenant,
-                                    Some(&request.model),
-                                    Some(&provider.name),
-                                    &String::from_utf8_lossy(&final_body),
-                                ) {
+                                let guardrail_body =
+                                    String::from_utf8_lossy(&final_body).into_owned();
+                                if let Some(guardrail) = state
+                                    .match_guardrail(
+                                        GuardrailStage::Response,
+                                        GuardrailEvaluationContext {
+                                            request_id: &ctx.request_id,
+                                            trace_id: ctx.trace_id.as_deref(),
+                                            agent_run_id: Some(&agent_run_id),
+                                            workflow_id: workflow_id.as_deref(),
+                                            workflow_version,
+                                            workflow_node_id: workflow_node_id.as_deref(),
+                                            actor_api_key_id: auth.api_key_id.as_deref(),
+                                            tenant: &policy_request.tenant,
+                                            model: Some(&request.model),
+                                            provider: Some(&provider.name),
+                                            body_text: &guardrail_body,
+                                        },
+                                    )
+                                    .await
+                                {
                                     state.record_guardrail_match(&guardrail);
                                     match guardrail.effect {
                                         GuardrailEffect::Deny => {
@@ -1269,13 +1295,26 @@ impl FerroGateway {
                         let mut final_body = response.body;
                         let mut final_content_type = response.content_type;
                         let mut final_error_code = None;
-                        if let Some(guardrail) = state.match_guardrail(
-                            GuardrailStage::Response,
-                            &policy_request.tenant,
-                            Some(&request.model),
-                            Some(&provider.name),
-                            &String::from_utf8_lossy(&final_body),
-                        ) {
+                        let guardrail_body = String::from_utf8_lossy(&final_body).into_owned();
+                        if let Some(guardrail) = state
+                            .match_guardrail(
+                                GuardrailStage::Response,
+                                GuardrailEvaluationContext {
+                                    request_id: &ctx.request_id,
+                                    trace_id: ctx.trace_id.as_deref(),
+                                    agent_run_id: Some(&agent_run_id),
+                                    workflow_id: workflow_id.as_deref(),
+                                    workflow_version,
+                                    workflow_node_id: workflow_node_id.as_deref(),
+                                    actor_api_key_id: auth.api_key_id.as_deref(),
+                                    tenant: &policy_request.tenant,
+                                    model: Some(&request.model),
+                                    provider: Some(&provider.name),
+                                    body_text: &guardrail_body,
+                                },
+                            )
+                            .await
+                        {
                             state.record_guardrail_match(&guardrail);
                             match guardrail.effect {
                                 GuardrailEffect::Deny => {

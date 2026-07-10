@@ -1306,6 +1306,7 @@ fn validates_guardrail_keyword_scope_and_effect() {
             provider: GuardrailProviderKind::None,
             provider_endpoint: None,
             provider_timeout_ms: 2_000,
+            provider_runtime: Default::default(),
             effect: GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),
@@ -1338,6 +1339,7 @@ fn validates_response_guardrail_redact_effect() {
             provider: GuardrailProviderKind::None,
             provider_endpoint: None,
             provider_timeout_ms: 2_000,
+            provider_runtime: Default::default(),
             effect: GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
@@ -1371,6 +1373,7 @@ fn validates_guardrail_regex_and_max_input_bytes() {
                 provider: GuardrailProviderKind::None,
                 provider_endpoint: None,
                 provider_timeout_ms: 2_000,
+                provider_runtime: Default::default(),
                 effect: GuardrailEffect::Deny,
                 code: "guardrail_regex_blocked".into(),
                 message: "blocked by regex guardrail".into(),
@@ -1391,6 +1394,7 @@ fn validates_guardrail_regex_and_max_input_bytes() {
                 provider: GuardrailProviderKind::None,
                 provider_endpoint: None,
                 provider_timeout_ms: 2_000,
+                provider_runtime: Default::default(),
                 effect: GuardrailEffect::Deny,
                 code: "guardrail_input_too_large".into(),
                 message: "input is too large".into(),
@@ -1424,6 +1428,7 @@ fn rejects_invalid_guardrail_regex() {
             provider: GuardrailProviderKind::None,
             provider_endpoint: None,
             provider_timeout_ms: 2_000,
+            provider_runtime: Default::default(),
             effect: GuardrailEffect::Deny,
             code: "guardrail_regex_blocked".into(),
             message: "blocked by regex guardrail".into(),
@@ -1457,6 +1462,7 @@ fn rejects_response_guardrail_max_input_bytes() {
             provider: GuardrailProviderKind::None,
             provider_endpoint: None,
             provider_timeout_ms: 2_000,
+            provider_runtime: Default::default(),
             effect: GuardrailEffect::Deny,
             code: "guardrail_input_too_large".into(),
             message: "input is too large".into(),
@@ -1490,6 +1496,7 @@ fn rejects_request_guardrail_redact_effect() {
             provider: GuardrailProviderKind::None,
             provider_endpoint: None,
             provider_timeout_ms: 2_000,
+            provider_runtime: Default::default(),
             effect: GuardrailEffect::Redact,
             code: "guardrail_redacted".into(),
             message: "redacted by guardrail".into(),
@@ -1522,6 +1529,7 @@ fn rejects_guardrail_with_unknown_model() {
             provider: GuardrailProviderKind::None,
             provider_endpoint: None,
             provider_timeout_ms: 2_000,
+            provider_runtime: Default::default(),
             effect: GuardrailEffect::Deny,
             code: "guardrail_blocked".into(),
             message: "blocked by guardrail".into(),
@@ -1550,6 +1558,7 @@ fn custom_http_guardrail() -> GuardrailRule {
         provider: GuardrailProviderKind::CustomHttp,
         provider_endpoint: Some("https://guardrails.example.test/check".into()),
         provider_timeout_ms: 2_000,
+        provider_runtime: Default::default(),
         effect: GuardrailEffect::Deny,
         code: "guardrail_pii_detected".into(),
         message: "blocked by external PII detector".into(),
@@ -1598,7 +1607,100 @@ fn rejects_custom_http_guardrail_with_invalid_endpoint_scheme() {
     };
 
     let error = config.validate().unwrap_err().to_string();
-    assert!(error.contains("must use http or https"));
+    assert!(error.contains("must be an http(s) URL"));
+}
+
+#[test]
+fn rejects_private_custom_http_guardrail_endpoint_without_explicit_opt_in() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_endpoint = Some("http://127.0.0.1:8080/check".into());
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("requires explicit allow_private_network"));
+}
+
+#[test]
+fn accepts_private_custom_http_guardrail_endpoint_with_explicit_opt_in() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_endpoint = Some("http://127.0.0.1:8080/check".into());
+    guardrail.provider_runtime.provider_allow_private_network = true;
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[test]
+fn rejects_custom_http_guardrail_fallback_mode_without_local_detector() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_runtime.provider_on_error = GuardrailProviderErrorMode::FallbackDetector;
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("fallback_detector requires a keyword, regex, or max_input_bytes"));
+}
+
+#[test]
+fn rejects_invalid_custom_http_guardrail_runtime_limits() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_runtime.provider_max_concurrency = 0;
+    let mut config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+    assert!(config
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("provider_max_concurrency"));
+
+    config.guardrails[0]
+        .provider_runtime
+        .provider_max_concurrency = 1;
+    config.guardrails[0].provider_runtime.provider_max_retries = 2;
+    assert!(config
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("provider_max_retries"));
+}
+
+#[test]
+fn rejects_invalid_custom_http_guardrail_secret_reference() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_runtime.provider_secret_ref = Some("aws-sm://detector".into());
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("provider_secret_ref"));
+    assert!(error.contains("env:// or vault://"));
 }
 
 #[test]
@@ -1632,6 +1734,22 @@ fn rejects_guardrail_with_zero_provider_timeout() {
 
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("provider_timeout_ms: must be greater than zero"));
+}
+
+#[test]
+fn rejects_guardrail_provider_timeout_above_runtime_ceiling() {
+    let mut guardrail = custom_http_guardrail();
+    guardrail.provider_timeout_ms = 30_001;
+    let config = Config {
+        providers: vec![provider()],
+        models: vec![model()],
+        api_keys: vec![api_key("key_dev", "Development key")],
+        guardrails: vec![guardrail],
+        ..Config::default()
+    };
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("must not exceed 30000 milliseconds"));
 }
 
 #[test]

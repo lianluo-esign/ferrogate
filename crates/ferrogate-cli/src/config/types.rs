@@ -782,12 +782,63 @@ pub(crate) struct GuardrailRule {
     pub(crate) provider_endpoint: Option<String>,
     #[serde(default = "default_guardrail_provider_timeout_ms")]
     pub(crate) provider_timeout_ms: u64,
+    #[serde(flatten)]
+    pub(crate) provider_runtime: GuardrailProviderRuntimeConfig,
     #[serde(default = "default_guardrail_effect")]
     pub(crate) effect: GuardrailEffect,
     #[serde(default = "default_guardrail_code")]
     pub(crate) code: String,
     #[serde(default = "default_guardrail_message")]
     pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuardrailProviderRuntimeConfig {
+    #[serde(default)]
+    pub(crate) provider_on_error: GuardrailProviderErrorMode,
+    #[serde(default = "default_guardrail_provider_max_concurrency")]
+    pub(crate) provider_max_concurrency: usize,
+    #[serde(default = "default_guardrail_provider_circuit_failure_threshold")]
+    pub(crate) provider_circuit_failure_threshold: u32,
+    #[serde(default = "default_guardrail_provider_circuit_cooldown_ms")]
+    pub(crate) provider_circuit_cooldown_ms: u64,
+    #[serde(default)]
+    pub(crate) provider_max_retries: u8,
+    #[serde(default = "default_guardrail_provider_max_payload_bytes")]
+    pub(crate) provider_max_payload_bytes: usize,
+    #[serde(default = "default_guardrail_provider_max_response_bytes")]
+    pub(crate) provider_max_response_bytes: usize,
+    #[serde(default)]
+    pub(crate) provider_allow_private_network: bool,
+    #[serde(default)]
+    pub(crate) provider_secret_ref: Option<String>,
+}
+
+impl Default for GuardrailProviderRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            provider_on_error: GuardrailProviderErrorMode::Block,
+            provider_max_concurrency: default_guardrail_provider_max_concurrency(),
+            provider_circuit_failure_threshold:
+                default_guardrail_provider_circuit_failure_threshold(),
+            provider_circuit_cooldown_ms: default_guardrail_provider_circuit_cooldown_ms(),
+            provider_max_retries: 0,
+            provider_max_payload_bytes: default_guardrail_provider_max_payload_bytes(),
+            provider_max_response_bytes: default_guardrail_provider_max_response_bytes(),
+            provider_allow_private_network: false,
+            provider_secret_ref: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuardrailProviderErrorMode {
+    #[default]
+    Block,
+    Record,
+    FallbackDetector,
 }
 
 /// Selects how a [`GuardrailRule`] decides whether text matches: in-process
@@ -1462,6 +1513,26 @@ fn default_guardrail_message() -> String {
 
 fn default_guardrail_provider_timeout_ms() -> u64 {
     2_000
+}
+
+fn default_guardrail_provider_max_concurrency() -> usize {
+    16
+}
+
+fn default_guardrail_provider_circuit_failure_threshold() -> u32 {
+    3
+}
+
+fn default_guardrail_provider_circuit_cooldown_ms() -> u64 {
+    30_000
+}
+
+fn default_guardrail_provider_max_payload_bytes() -> usize {
+    1024 * 1024
+}
+
+fn default_guardrail_provider_max_response_bytes() -> usize {
+    256 * 1024
 }
 
 fn default_extension_source() -> String {

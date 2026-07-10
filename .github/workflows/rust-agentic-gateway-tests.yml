@@ -33,6 +33,9 @@ jobs:
           - slice: runtime
             package: ferrogate-runtime
             args: --all-features
+          - slice: guardrails
+            package: ferrogate-guardrails
+            args: --all-features
           - slice: agentic_lite
             package: ferrogate-cli
             args: --all-features --test agentic_lite

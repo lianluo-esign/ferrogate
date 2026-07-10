@@ -520,6 +520,7 @@ impl AppState {
                 guardrail_match_total: 0,
                 guardrail_denial_total: 0,
                 guardrail_redaction_total: 0,
+                guardrail_detector_error_total: 0,
                 billing_event_total: 0,
                 billing_report_enqueue_failure_total: 0,
                 tool_call_total: 0,

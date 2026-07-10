@@ -44,6 +44,8 @@ pub(crate) enum Commands {
     SupabaseLiveRestart(SupabaseLiveRestartArgs),
     /// Opt-in live Supabase and Token4AI OpenAI-compatible provider billing scenario.
     SupabaseLiveToken4aiProvider(SupabaseLiveToken4aiProviderArgs),
+    /// Run Guardrail detector E2E and verify durable evidence directly in live Supabase.
+    GuardrailSupabase(SupabaseLiveRestartArgs),
     /// Run local PostgreSQL-to-Supabase-compatible migration tooling coverage.
     SupabaseMigration(LocalArgs),
     /// Run local Docker-backed PostgreSQL restart durability coverage.
@@ -192,6 +194,7 @@ pub(crate) struct Dispatch {
     pub(crate) supabase_live_smoke: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) supabase_live_restart: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) supabase_live_token4ai_provider: fn(&SupabaseLiveToken4aiProviderArgs) -> Result<()>,
+    pub(crate) guardrail_supabase: fn(&SupabaseLiveRestartArgs) -> Result<()>,
     pub(crate) supabase_migration: fn(&LocalArgs) -> Result<()>,
     pub(crate) postgres_restart: fn(&LocalArgs) -> Result<()>,
     pub(crate) postgres_tls_restart: fn(&LocalArgs) -> Result<()>,
@@ -206,7 +209,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
     match cli.command {
         Commands::List => {
             println!(
-                "local: admin-api, auth-api, gateway-api, ci, supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
+                "local: admin-api, auth-api, gateway-api, ci, guardrail-supabase (live Supabase required), supabase-migration, supabase-restart, supabase-live-smoke (opt-in), supabase-live-restart (opt-in), supabase-live-token4ai-provider (opt-in), postgres-restart, postgres-tls-restart"
             );
             println!("docker: {}", DockerScenario::names().join(", "));
             Ok(())
@@ -229,6 +232,7 @@ pub(crate) fn run(dispatch: Dispatch) -> Result<()> {
         Commands::SupabaseLiveToken4aiProvider(args) => {
             (dispatch.supabase_live_token4ai_provider)(&args)
         }
+        Commands::GuardrailSupabase(args) => (dispatch.guardrail_supabase)(&args),
         Commands::SupabaseMigration(args) => (dispatch.supabase_migration)(&args),
         Commands::PostgresRestart(args) => (dispatch.postgres_restart)(&args),
         Commands::PostgresTlsRestart(args) => (dispatch.postgres_tls_restart)(&args),

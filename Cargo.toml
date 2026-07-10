@@ -13,6 +13,7 @@ members = [
     "crates/ferrogate-cli",
     "crates/ferrogate-config",
     "crates/ferrogate-core",
+    "crates/ferrogate-guardrails",
     "crates/ferrogate-mcp",
     "crates/ferrogate-observability",
     "crates/ferrogate-policy",
@@ -75,7 +76,7 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 subtle = "2.6"
 tempfile = "3.10"
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

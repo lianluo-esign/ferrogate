@@ -33,6 +33,7 @@ ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-auth = { path = "../ferrogate-auth" }
 ferrogate-config = { path = "../ferrogate-config" }
 ferrogate-core = { path = "../ferrogate-core" }
+ferrogate-guardrails = { path = "../ferrogate-guardrails" }
 ferrogate-mcp = { path = "../ferrogate-mcp" }
 ferrogate-observability = { path = "../ferrogate-observability" }
 ferrogate-policy = { path = "../ferrogate-policy" }

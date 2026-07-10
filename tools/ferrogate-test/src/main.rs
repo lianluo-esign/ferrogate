@@ -11,6 +11,7 @@ mod cli;
 mod constants;
 mod docker;
 mod fixtures;
+mod guardrails;
 mod http;
 mod local;
 mod mocks;
@@ -18,6 +19,7 @@ mod scenarios;
 mod storage;
 
 use docker::{run_all_docker_scenarios, run_docker_scenario};
+use guardrails::run_guardrail_supabase;
 use scenarios::{
     run_admin_api, run_auth_api, run_function_egress_api, run_gateway_api,
     run_gateway_billing_chain, run_gateway_external_auth_api, run_gateway_third_party_auth_api,
@@ -39,6 +41,7 @@ fn main() -> Result<()> {
         supabase_live_smoke: run_supabase_live_smoke,
         supabase_live_restart: run_supabase_live_restart,
         supabase_live_token4ai_provider: run_supabase_live_token4ai_provider,
+        guardrail_supabase: run_guardrail_supabase,
         supabase_migration: run_supabase_migration,
         postgres_restart: run_postgres_restart,
         postgres_tls_restart: run_postgres_tls_restart,

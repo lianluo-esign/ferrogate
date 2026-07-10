@@ -1008,6 +1008,7 @@ dependencies = [
  "ferrogate-billing",
  "ferrogate-config",
  "ferrogate-core",
+ "ferrogate-guardrails",
  "ferrogate-mcp",
  "ferrogate-observability",
  "ferrogate-policy",
@@ -1050,6 +1051,18 @@ version = "2026.7.9"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ferrogate-guardrails"
+version = "2026.7.9"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1160,6 +1173,9 @@ dependencies = [
  "anyhow",
  "clap",
  "ferrogate-runtime",
+ "native-tls",
+ "postgres",
+ "postgres-native-tls",
  "rcgen",
  "serde_json",
  "tempfile",

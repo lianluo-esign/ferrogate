@@ -191,107 +191,111 @@ impl AppState {
         self.policy_engine.evaluate(request, model, provider)
     }
 
-    pub(crate) fn match_guardrail(
+    pub(crate) async fn match_guardrail(
         &self,
         stage: GuardrailStage,
-        tenant: &ferrogate_core::TenantContext,
-        model: Option<&str>,
-        provider: Option<&str>,
-        body_text: &str,
+        context: GuardrailEvaluationContext<'_>,
     ) -> Option<GuardrailMatch> {
-        self.guardrail_rules.iter().find_map(|rule| {
+        for rule in self.guardrail_rules.iter() {
             if !rule.enabled {
-                return None;
+                continue;
             }
             if rule.stage != stage {
-                return None;
+                continue;
             }
-            if !allows_optional_scope(&rule.organization_ids, tenant.organization_id.as_deref()) {
-                return None;
+            if !allows_optional_scope(
+                &rule.organization_ids,
+                context.tenant.organization_id.as_deref(),
+            ) {
+                continue;
             }
-            if !allows_optional_scope(&rule.project_ids, tenant.project_id.as_deref()) {
-                return None;
+            if !allows_optional_scope(&rule.project_ids, context.tenant.project_id.as_deref()) {
+                continue;
             }
-            if !allows_optional_scope(&rule.api_key_ids, tenant.api_key_id.as_deref()) {
-                return None;
+            if !allows_optional_scope(&rule.api_key_ids, context.tenant.api_key_id.as_deref()) {
+                continue;
             }
-            if !allows_optional_scope(&rule.models, model) {
-                return None;
+            if !allows_optional_scope(&rule.models, context.model) {
+                continue;
             }
-            if !allows_optional_scope(&rule.providers, provider) {
-                return None;
+            if !allows_optional_scope(&rule.providers, context.provider) {
+                continue;
             }
-            if rule.provider == GuardrailProviderKind::CustomHttp {
-                let endpoint = rule.provider_endpoint.as_deref()?;
-                return match call_guardrail_provider(
-                    endpoint,
-                    rule.provider_timeout_ms,
-                    stage,
-                    tenant,
-                    model,
-                    provider,
-                    body_text,
-                ) {
-                    Ok(Some(matched_text)) => Some(GuardrailMatch {
-                        rule_id: rule.id.clone(),
-                        rule_name: rule.name.clone(),
-                        effect: rule.effect,
-                        matched_text,
-                        redaction_regex: None,
-                        code: rule.code.clone(),
-                        message: rule.message.clone(),
-                    }),
-                    Ok(None) => None,
-                    Err(reason) => Some(GuardrailMatch {
-                        rule_id: rule.id.clone(),
-                        rule_name: rule.name.clone(),
-                        // Fail closed: a security control we can't reach is
-                        // treated as a deny regardless of the rule's
-                        // configured effect, since there is nothing to
-                        // redact when the provider never responded.
-                        effect: GuardrailEffect::Deny,
-                        matched_text: String::new(),
-                        redaction_regex: None,
-                        code: "guardrail_provider_unavailable".to_string(),
-                        message: format!(
-                            "guardrail provider for rule '{}' is unavailable: {reason}",
-                            rule.name
-                        ),
-                    }),
+            if let Some(detector) = &rule.detector {
+                let detector_input = DetectorInput {
+                    stage: match stage {
+                        GuardrailStage::Request => DetectorStage::Request,
+                        GuardrailStage::Response => DetectorStage::Response,
+                    },
+                    tenant: DetectorTenant {
+                        organization_id: context.tenant.organization_id.as_deref(),
+                        team_id: context.tenant.team_id.as_deref(),
+                        project_id: context.tenant.project_id.as_deref(),
+                        user_id: context.tenant.user_id.as_deref(),
+                        api_key_id: context.tenant.api_key_id.as_deref(),
+                    },
+                    model: context.model,
+                    provider: context.provider,
+                    text: context.body_text,
                 };
-            }
-            let matched = if let Some(max_input_bytes) = rule.max_input_bytes {
-                if body_text.len() > max_input_bytes {
-                    Some(("length".to_string(), None))
-                } else {
-                    None
+                let deadline = Instant::now() + Duration::from_millis(rule.provider_timeout_ms);
+                match detector.evaluate(&detector_input, deadline).await {
+                    Ok(result) if result.verdict == DetectorVerdict::Pass => continue,
+                    Ok(result) => {
+                        if rule.effect == GuardrailEffect::Redact
+                            && result.patches.is_empty()
+                            && result.first_matched_text().is_none()
+                        {
+                            let error = ferrogate_guardrails::DetectorError::new(
+                                DetectorErrorKind::InvalidResponse,
+                                "guardrail detector failed without redaction data",
+                            );
+                            self.record_guardrail_detector_error(rule, &context, &error, "blocked");
+                            return Some(detector_error_guardrail_match(rule, &error));
+                        }
+                        return Some(GuardrailMatch {
+                            rule_id: rule.id.clone(),
+                            rule_name: rule.name.clone(),
+                            effect: rule.effect,
+                            matched_text: result
+                                .first_matched_text()
+                                .unwrap_or_default()
+                                .to_string(),
+                            redaction_regex: None,
+                            content_patches: result.patches,
+                            code: rule.code.clone(),
+                            message: rule.message.clone(),
+                        });
+                    }
+                    Err(error) => {
+                        let outcome = match rule.provider_on_error {
+                            GuardrailProviderErrorMode::Block => "blocked",
+                            GuardrailProviderErrorMode::Record => "recorded",
+                            GuardrailProviderErrorMode::FallbackDetector => "fallback",
+                        };
+                        self.record_guardrail_detector_error(rule, &context, &error, outcome);
+                        match rule.provider_on_error {
+                            GuardrailProviderErrorMode::Block => {
+                                return Some(detector_error_guardrail_match(rule, &error));
+                            }
+                            GuardrailProviderErrorMode::Record => continue,
+                            GuardrailProviderErrorMode::FallbackDetector => {
+                                if let Some(matched) =
+                                    local_guardrail_match(rule, context.body_text)
+                                {
+                                    return Some(matched);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                 }
-            } else {
-                None
             }
-            .or_else(|| {
-                rule.keywords
-                    .iter()
-                    .find(|keyword| body_text.contains(keyword.as_str()))
-                    .map(|keyword| (keyword.clone(), None))
-            })
-            .or_else(|| {
-                rule.regex.iter().find_map(|regex| {
-                    regex
-                        .find(body_text)
-                        .map(|matched| (matched.as_str().to_string(), Some(regex.clone())))
-                })
-            })?;
-            Some(GuardrailMatch {
-                rule_id: rule.id.clone(),
-                rule_name: rule.name.clone(),
-                effect: rule.effect,
-                matched_text: matched.0,
-                redaction_regex: matched.1,
-                code: rule.code.clone(),
-                message: rule.message.clone(),
-            })
-        })
+            if let Some(matched) = local_guardrail_match(rule, context.body_text) {
+                return Some(matched);
+            }
+        }
+        None
     }
 
     pub(crate) fn has_guardrail_candidate(
@@ -317,11 +321,131 @@ impl AppState {
             metrics.record_guardrail_match(guardrail.effect);
         }
     }
+
+    fn record_guardrail_detector_error(
+        &self,
+        rule: &GuardrailRuleRuntime,
+        context: &GuardrailEvaluationContext<'_>,
+        error: &ferrogate_guardrails::DetectorError,
+        outcome: &str,
+    ) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_guardrail_detector_error();
+        }
+        warn!(
+            request_id = %context.request_id,
+            rule_id = %rule.id,
+            error_kind = error.kind.as_str(),
+            outcome,
+            "guardrail detector evaluation failed"
+        );
+        self.record_admin_audit_event(AdminAuditEventDraft {
+            request_id: context.request_id.to_string(),
+            trace_id: context.trace_id.map(str::to_string),
+            agent_run_id: context.agent_run_id.map(str::to_string),
+            workflow_id: context.workflow_id.map(str::to_string),
+            workflow_version: context.workflow_version,
+            workflow_node_id: context.workflow_node_id.map(str::to_string),
+            actor_api_key_id: context.actor_api_key_id.map(str::to_string),
+            tenant: context.tenant.clone(),
+            action: "guardrail.detector_error".to_string(),
+            target: rule.id.clone(),
+            outcome: outcome.to_string(),
+            message: format!(
+                "guardrail detector for rule {} failed with {}",
+                rule.name,
+                error.kind.as_str()
+            ),
+        });
+    }
+}
+
+fn detector_error_guardrail_match(
+    rule: &GuardrailRuleRuntime,
+    error: &ferrogate_guardrails::DetectorError,
+) -> GuardrailMatch {
+    GuardrailMatch {
+        rule_id: rule.id.clone(),
+        rule_name: rule.name.clone(),
+        effect: GuardrailEffect::Deny,
+        matched_text: String::new(),
+        redaction_regex: None,
+        content_patches: Vec::new(),
+        code: "guardrail_provider_unavailable".to_string(),
+        message: format!(
+            "guardrail detector for rule '{}' failed: {}",
+            rule.name,
+            error.safe_message()
+        ),
+    }
+}
+
+fn local_guardrail_match(rule: &GuardrailRuleRuntime, body_text: &str) -> Option<GuardrailMatch> {
+    let matched = if let Some(max_input_bytes) = rule.max_input_bytes {
+        if body_text.len() > max_input_bytes {
+            Some(("length".to_string(), None))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .or_else(|| {
+        rule.keywords
+            .iter()
+            .find(|keyword| body_text.contains(keyword.as_str()))
+            .map(|keyword| (keyword.clone(), None))
+    })
+    .or_else(|| {
+        rule.regex.iter().find_map(|regex| {
+            regex
+                .find(body_text)
+                .map(|matched| (matched.as_str().to_string(), Some(regex.clone())))
+        })
+    })?;
+    Some(GuardrailMatch {
+        rule_id: rule.id.clone(),
+        rule_name: rule.name.clone(),
+        effect: rule.effect,
+        matched_text: matched.0,
+        redaction_regex: matched.1,
+        content_patches: Vec::new(),
+        code: rule.code.clone(),
+        message: rule.message.clone(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn match_guardrail_for_test<'a>(
+        state: &AppState,
+        stage: crate::config::GuardrailStage,
+        tenant: &'a ferrogate_core::TenantContext,
+        model: Option<&'a str>,
+        provider: Option<&'a str>,
+        body: &'a str,
+    ) -> Option<GuardrailMatch> {
+        tokio::runtime::Runtime::new()
+            .expect("test runtime")
+            .block_on(state.match_guardrail(
+                stage,
+                GuardrailEvaluationContext {
+                    request_id: "test-request",
+                    trace_id: Some("test-trace"),
+                    agent_run_id: None,
+                    workflow_id: None,
+                    workflow_version: None,
+                    workflow_node_id: None,
+                    actor_api_key_id: None,
+                    tenant,
+                    model,
+                    provider,
+                    body_text: body,
+                },
+            ))
+    }
 
     fn test_provider() -> Provider {
         Provider {
@@ -410,6 +534,7 @@ mod tests {
                 provider: GuardrailProviderKind::None,
                 provider_endpoint: None,
                 provider_timeout_ms: 2_000,
+                provider_runtime: Default::default(),
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_blocked".into(),
                 message: "blocked by guardrail".into(),
@@ -424,15 +549,15 @@ mod tests {
             ..Default::default()
         };
 
-        let matched = state
-            .match_guardrail(
-                crate::config::GuardrailStage::Request,
-                &tenant,
-                Some("fast-chat"),
-                Some("openai"),
-                "contains secret",
-            )
-            .expect("guardrail should match");
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &tenant,
+            Some("fast-chat"),
+            Some("openai"),
+            "contains secret",
+        )
+        .expect("guardrail should match");
 
         assert_eq!(matched.rule_id, "block-secret");
         assert_eq!(matched.rule_name, "Block secret");
@@ -492,6 +617,7 @@ mod tests {
                 provider: GuardrailProviderKind::None,
                 provider_endpoint: None,
                 provider_timeout_ms: 2_000,
+                provider_runtime: Default::default(),
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_blocked".into(),
                 message: "blocked by guardrail".into(),
@@ -500,15 +626,15 @@ mod tests {
         };
         let state = AppState::new(config);
 
-        assert!(state
-            .match_guardrail(
-                crate::config::GuardrailStage::Request,
-                &ferrogate_core::TenantContext::default(),
-                Some("fast-chat"),
-                Some("openai"),
-                "contains secret"
-            )
-            .is_none());
+        assert!(match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "contains secret"
+        )
+        .is_none());
     }
 
     #[test]
@@ -561,6 +687,7 @@ mod tests {
                 provider: GuardrailProviderKind::None,
                 provider_endpoint: None,
                 provider_timeout_ms: 2_000,
+                provider_runtime: Default::default(),
                 effect: crate::config::GuardrailEffect::Redact,
                 code: "guardrail_redacted".into(),
                 message: "redacted by guardrail".into(),
@@ -569,15 +696,15 @@ mod tests {
         };
         let state = AppState::new(config);
 
-        let matched = state
-            .match_guardrail(
-                crate::config::GuardrailStage::Response,
-                &ferrogate_core::TenantContext::default(),
-                Some("fast-chat"),
-                Some("openai"),
-                "provider returned secret",
-            )
-            .expect("response guardrail should match");
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "provider returned secret",
+        )
+        .expect("response guardrail should match");
 
         assert_eq!(matched.rule_id, "redact-secret");
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Redact);
@@ -590,8 +717,7 @@ mod tests {
 
     /// Spawns a one-shot plain-HTTP mock guardrail provider on `127.0.0.1`
     /// that reads a single `Content-Length`-bounded request, records its
-    /// JSON body, and replies with `response_body`. `http_post` always sends
-    /// `Connection: close`, so a single accepted connection is enough.
+    /// JSON body, and replies with `response_body`.
     fn spawn_guardrail_provider_mock(
         response_body: &'static str,
     ) -> (String, Arc<Mutex<Option<serde_json::Value>>>) {
@@ -617,8 +743,12 @@ mod tests {
             };
             let content_length: usize = String::from_utf8_lossy(&raw[..header_end])
                 .lines()
-                .find_map(|line| line.strip_prefix("Content-Length: "))
-                .and_then(|value| value.trim().parse().ok())
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
                 .unwrap_or(0);
             while raw.len() < header_end + content_length {
                 let read = stream.read(&mut buffer).unwrap();
@@ -656,6 +786,10 @@ mod tests {
             provider: GuardrailProviderKind::CustomHttp,
             provider_endpoint: Some(provider_endpoint),
             provider_timeout_ms: 2_000,
+            provider_runtime: crate::config::GuardrailProviderRuntimeConfig {
+                provider_allow_private_network: true,
+                ..Default::default()
+            },
             effect: crate::config::GuardrailEffect::Deny,
             code: "guardrail_pii_detected".into(),
             message: "blocked by external PII detector".into(),
@@ -680,15 +814,15 @@ mod tests {
             ..Default::default()
         };
 
-        let matched = state
-            .match_guardrail(
-                crate::config::GuardrailStage::Request,
-                &tenant,
-                Some("fast-chat"),
-                Some("openai"),
-                "my email is john@example.com",
-            )
-            .expect("custom_http provider should report a match");
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &tenant,
+            Some("fast-chat"),
+            Some("openai"),
+            "my email is john@example.com",
+        )
+        .expect("custom_http provider should report a match");
 
         assert_eq!(matched.rule_id, "pii-detector");
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
@@ -718,15 +852,15 @@ mod tests {
         };
         let state = AppState::new(config);
 
-        assert!(state
-            .match_guardrail(
-                crate::config::GuardrailStage::Request,
-                &ferrogate_core::TenantContext::default(),
-                Some("fast-chat"),
-                Some("openai"),
-                "nothing suspicious here",
-            )
-            .is_none());
+        assert!(match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "nothing suspicious here",
+        )
+        .is_none());
     }
 
     #[test]
@@ -747,19 +881,127 @@ mod tests {
         };
         let state = AppState::new(config);
 
-        let matched = state
-            .match_guardrail(
-                crate::config::GuardrailStage::Request,
-                &ferrogate_core::TenantContext::default(),
-                Some("fast-chat"),
-                Some("openai"),
-                "hello",
-            )
-            .expect("unreachable provider must fail closed with a match");
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "hello",
+        )
+        .expect("unreachable provider must fail closed with a match");
 
         assert_eq!(matched.effect, crate::config::GuardrailEffect::Deny);
         assert_eq!(matched.code, "guardrail_provider_unavailable");
         assert!(matched.message.contains("External PII detector"));
+        assert_eq!(
+            state
+                .prometheus_metrics_snapshot()
+                .guardrail_detector_error_total,
+            1
+        );
+        let audit = state.audit_events();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].request_id, "test-request");
+        assert_eq!(audit[0].action, "guardrail.detector_error");
+        assert_eq!(audit[0].target, "pii-detector");
+        assert_eq!(audit[0].outcome, "blocked");
+    }
+
+    #[test]
+    fn custom_http_provider_record_mode_audits_and_allows_on_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/check", listener.local_addr().unwrap());
+        drop(listener);
+
+        let mut rule = custom_http_guardrail_rule(endpoint);
+        rule.provider_runtime.provider_on_error = GuardrailProviderErrorMode::Record;
+        let state = AppState::new(Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            guardrails: vec![rule],
+            ..Config::default()
+        });
+
+        assert!(match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "hello",
+        )
+        .is_none());
+        assert_eq!(
+            state
+                .prometheus_metrics_snapshot()
+                .guardrail_detector_error_total,
+            1
+        );
+        let audit = state.audit_events();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].action, "guardrail.detector_error");
+        assert_eq!(audit[0].outcome, "recorded");
+    }
+
+    #[test]
+    fn custom_http_provider_fallback_mode_runs_local_detector_on_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/check", listener.local_addr().unwrap());
+        drop(listener);
+
+        let mut rule = custom_http_guardrail_rule(endpoint);
+        rule.keywords = vec!["secret".into()];
+        rule.provider_runtime.provider_on_error = GuardrailProviderErrorMode::FallbackDetector;
+        let state = AppState::new(Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            guardrails: vec![rule],
+            ..Config::default()
+        });
+
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "contains secret",
+        )
+        .expect("local fallback detector should match");
+        assert_eq!(matched.code, "guardrail_pii_detected");
+        assert_eq!(matched.matched_text, "secret");
+        assert_eq!(state.audit_events()[0].outcome, "fallback");
+    }
+
+    #[test]
+    fn custom_http_provider_applies_typed_redaction_patches() {
+        let (endpoint, _) = spawn_guardrail_provider_mock(
+            r#"{"verdict":"fail","findings":[{"category":"pii","severity":"high","byte_start":6,"byte_end":22}],"patches":[{"byte_start":6,"byte_end":22,"replacement":"[EMAIL]"}],"detector_version":"test-1"}"#,
+        );
+        let mut rule = custom_http_guardrail_rule(endpoint);
+        rule.stage = crate::config::GuardrailStage::Response;
+        rule.effect = crate::config::GuardrailEffect::Redact;
+        let state = AppState::new(Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            guardrails: vec![rule],
+            ..Config::default()
+        });
+
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "email john@example.com",
+        )
+        .expect("typed patch detector should match");
+        assert_eq!(
+            matched.redact_text("email john@example.com"),
+            "email [EMAIL]"
+        );
     }
 
     #[test]
@@ -812,6 +1054,7 @@ mod tests {
                 provider: GuardrailProviderKind::None,
                 provider_endpoint: None,
                 provider_timeout_ms: 2_000,
+                provider_runtime: Default::default(),
                 effect: crate::config::GuardrailEffect::Redact,
                 code: "guardrail_redacted".into(),
                 message: "redacted by guardrail".into(),
@@ -820,15 +1063,15 @@ mod tests {
         };
         let state = AppState::new(config);
 
-        let matched = state
-            .match_guardrail(
-                crate::config::GuardrailStage::Response,
-                &ferrogate_core::TenantContext::default(),
-                Some("fast-chat"),
-                Some("openai"),
-                "provider returned token-123 and token-456",
-            )
-            .expect("regex guardrail should match");
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "provider returned token-123 and token-456",
+        )
+        .expect("regex guardrail should match");
 
         assert_eq!(matched.rule_id, "redact-token");
         assert_eq!(matched.matched_text, "token-123");
@@ -857,6 +1100,7 @@ mod tests {
                 provider: GuardrailProviderKind::None,
                 provider_endpoint: None,
                 provider_timeout_ms: 2_000,
+                provider_runtime: Default::default(),
                 effect: crate::config::GuardrailEffect::Deny,
                 code: "guardrail_input_too_large".into(),
                 message: "input is too large".into(),
@@ -865,15 +1109,15 @@ mod tests {
         };
         let state = AppState::new(config);
 
-        let matched = state
-            .match_guardrail(
-                crate::config::GuardrailStage::Request,
-                &ferrogate_core::TenantContext::default(),
-                None,
-                None,
-                "012345678",
-            )
-            .expect("length guardrail should match");
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &ferrogate_core::TenantContext::default(),
+            None,
+            None,
+            "012345678",
+        )
+        .expect("length guardrail should match");
 
         assert_eq!(matched.rule_id, "max-input");
         assert_eq!(matched.matched_text, "length");

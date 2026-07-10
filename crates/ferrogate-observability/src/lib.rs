@@ -348,6 +348,7 @@ pub struct GatewayMetricsSnapshot {
     pub guardrail_match_total: u64,
     pub guardrail_denial_total: u64,
     pub guardrail_redaction_total: u64,
+    pub guardrail_detector_error_total: u64,
     pub billing_event_total: u64,
     /// Failures durably enqueueing a settled usage event for delivery to the
     /// billing service (issue #151) — distinguishable from successful
@@ -522,6 +523,17 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_guardrail_redactions_total {}\n",
         snapshot.guardrail_redaction_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_detector_errors_total",
+        "Total external guardrail detector evaluation errors.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_guardrail_detector_errors_total {}\n",
+        snapshot.guardrail_detector_error_total
     ));
 
     push_help(
@@ -795,6 +807,12 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "ferrogate.guardrail.redactions",
             "Total guardrail matches that redacted response content.",
             snapshot.guardrail_redaction_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.detector_errors",
+            "Total external guardrail detector evaluation errors.",
+            snapshot.guardrail_detector_error_total as f64,
             vec![],
         ),
         sum_metric_json(
@@ -1166,6 +1184,7 @@ mod tests {
             guardrail_match_total: 2,
             guardrail_denial_total: 1,
             guardrail_redaction_total: 1,
+            guardrail_detector_error_total: 3,
             billing_event_total: 1,
             billing_report_enqueue_failure_total: 1,
             tool_call_total: 2,
@@ -1194,6 +1213,7 @@ mod tests {
         assert!(text.contains("ferrogate_guardrail_matches_total 2"));
         assert!(text.contains("ferrogate_guardrail_denials_total 1"));
         assert!(text.contains("ferrogate_guardrail_redactions_total 1"));
+        assert!(text.contains("ferrogate_guardrail_detector_errors_total 3"));
         assert!(text.contains("ferrogate_network_access_denied_total 3"));
         assert!(text.contains("ferrogate_network_access_rate_limited_total 4"));
         assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));

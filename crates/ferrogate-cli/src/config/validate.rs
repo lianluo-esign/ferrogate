@@ -1938,6 +1938,13 @@ impl Config {
                             "field guardrails[{index}].provider_endpoint: only valid when provider is custom_http"
                         );
                     }
+                    if guardrail.provider_runtime
+                        != super::GuardrailProviderRuntimeConfig::default()
+                    {
+                        bail!(
+                            "field guardrails[{index}].provider_*: detector runtime settings are only valid when provider is custom_http"
+                        );
+                    }
                 }
                 super::GuardrailProviderKind::CustomHttp => {
                     let endpoint = guardrail.provider_endpoint.as_deref().unwrap_or_default();
@@ -1946,15 +1953,90 @@ impl Config {
                             "field guardrails[{index}].provider_endpoint: required when provider is custom_http"
                         );
                     }
-                    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    let endpoint = reqwest::Url::parse(endpoint).map_err(|_| {
+                        anyhow::anyhow!("field guardrails[{index}].provider_endpoint: invalid URL")
+                    })?;
+                    ferrogate_guardrails::validate_custom_http_endpoint(
+                        &endpoint,
+                        guardrail.provider_runtime.provider_allow_private_network,
+                    )
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "field guardrails[{index}].provider_endpoint: {}",
+                            error.safe_message()
+                        )
+                    })?;
+                    if let Some(secret_ref) =
+                        guardrail.provider_runtime.provider_secret_ref.as_deref()
+                    {
+                        ferrogate_secrets::SecretRef::parse(secret_ref).map_err(|error| {
+                            anyhow::anyhow!(
+                                "field guardrails[{index}].provider_secret_ref: {error}"
+                            )
+                        })?;
+                    }
+                    if guardrail.provider_runtime.provider_max_concurrency == 0 {
                         bail!(
-                            "field guardrails[{index}].provider_endpoint: must use http or https"
+                            "field guardrails[{index}].provider_max_concurrency: must be greater than zero"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_max_concurrency
+                        > tokio::sync::Semaphore::MAX_PERMITS
+                    {
+                        bail!(
+                            "field guardrails[{index}].provider_max_concurrency: exceeds the runtime semaphore limit"
+                        );
+                    }
+                    if guardrail
+                        .provider_runtime
+                        .provider_circuit_failure_threshold
+                        == 0
+                    {
+                        bail!(
+                            "field guardrails[{index}].provider_circuit_failure_threshold: must be greater than zero"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_circuit_cooldown_ms == 0 {
+                        bail!(
+                            "field guardrails[{index}].provider_circuit_cooldown_ms: must be greater than zero"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_max_retries > 1 {
+                        bail!(
+                            "field guardrails[{index}].provider_max_retries: must be zero or one"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_max_payload_bytes == 0 {
+                        bail!(
+                            "field guardrails[{index}].provider_max_payload_bytes: must be greater than zero"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_max_response_bytes == 0 {
+                        bail!(
+                            "field guardrails[{index}].provider_max_response_bytes: must be greater than zero"
+                        );
+                    }
+                    if guardrail.provider_runtime.provider_on_error
+                        == super::GuardrailProviderErrorMode::FallbackDetector
+                        && guardrail.keywords.is_empty()
+                        && guardrail.regex.is_empty()
+                        && guardrail.max_input_bytes.is_none()
+                    {
+                        bail!(
+                            "field guardrails[{index}].provider_on_error: fallback_detector requires a keyword, regex, or max_input_bytes fallback"
                         );
                     }
                 }
             }
             if guardrail.provider_timeout_ms == 0 {
                 bail!("field guardrails[{index}].provider_timeout_ms: must be greater than zero");
+            }
+            if guardrail.provider_timeout_ms
+                > ferrogate_guardrails::MAX_DETECTOR_TIMEOUT.as_millis() as u64
+            {
+                bail!(
+                    "field guardrails[{index}].provider_timeout_ms: must not exceed 30000 milliseconds"
+                );
             }
         }
 

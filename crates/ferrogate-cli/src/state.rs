@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::acme::{AcmeRenewalStatus, SharedAcmeRenewalState};
@@ -26,9 +26,9 @@ use crate::billing_client::BillingReporter;
 use crate::config::{
     config_snapshot_id, resolve_env_placeholders, AccessLogMode, AgentWorkflowPolicy,
     AnalyticsConfig, AnalyticsProvider, ApiKey, Config, GatewayConfigProfile, GuardrailEffect,
-    GuardrailProviderKind, GuardrailStage, HeaderMutation, Model, PolicyRule as ConfigPolicyRule,
-    PromptTemplate, PromptTemplateStatus, Provider, RouteRule, SkillPackage, StorageConfig,
-    StorageMigrationMode, Upstream,
+    GuardrailProviderErrorMode, GuardrailProviderKind, GuardrailRule, GuardrailStage,
+    HeaderMutation, Model, PolicyRule as ConfigPolicyRule, PromptTemplate, PromptTemplateStatus,
+    Provider, RouteRule, SkillPackage, StorageConfig, StorageMigrationMode, Upstream,
 };
 use crate::extensions::{
     ExtensionRegistry, ExtensionStatus, RegisteredTool, ToolExecutionError, ToolExecutionRequest,
@@ -42,6 +42,11 @@ use ferrogate_billing::{
     TokenUsage as BillingTokenUsage,
 };
 use ferrogate_core::{RequestContext, WorkspaceScope};
+use ferrogate_guardrails::{
+    apply_content_patches, ContentPatch, CustomHttpDetector, CustomHttpDetectorConfig,
+    DetectorErrorKind, DetectorInput, DetectorSecret, DetectorStage, DetectorTenant,
+    DetectorVerdict, GuardrailDetector,
+};
 use ferrogate_mcp::{
     McpExecutionError, McpManager, McpServerStatus, McpToolExecutionRequest, McpToolExecutionResult,
 };
@@ -1498,9 +1503,9 @@ struct GuardrailRuleRuntime {
     keywords: Vec<String>,
     regex: Vec<Regex>,
     max_input_bytes: Option<usize>,
-    provider: GuardrailProviderKind,
-    provider_endpoint: Option<String>,
+    detector: Option<Arc<dyn GuardrailDetector>>,
     provider_timeout_ms: u64,
+    provider_on_error: GuardrailProviderErrorMode,
     code: String,
     message: String,
 }
@@ -1512,18 +1517,40 @@ pub(crate) struct GuardrailMatch {
     pub(crate) effect: GuardrailEffect,
     pub(crate) matched_text: String,
     redaction_regex: Option<Regex>,
+    content_patches: Vec<ContentPatch>,
     pub(crate) code: String,
     pub(crate) message: String,
 }
 
 impl GuardrailMatch {
     pub(crate) fn redact_text(&self, text: &str) -> String {
-        if let Some(regex) = &self.redaction_regex {
+        if !self.content_patches.is_empty() {
+            // Detector patches were validated against this exact text before
+            // the decision was returned. Redact the whole value if an
+            // invariant is nevertheless violated; returning the original
+            // content would turn a detector bug into a data leak.
+            apply_content_patches(text, &self.content_patches)
+                .unwrap_or_else(|_| "[REDACTED]".to_string())
+        } else if let Some(regex) = &self.redaction_regex {
             regex.replace_all(text, "[REDACTED]").into_owned()
         } else {
             text.replace(&self.matched_text, "[REDACTED]")
         }
     }
+}
+
+pub(crate) struct GuardrailEvaluationContext<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) trace_id: Option<&'a str>,
+    pub(crate) agent_run_id: Option<&'a str>,
+    pub(crate) workflow_id: Option<&'a str>,
+    pub(crate) workflow_version: Option<u32>,
+    pub(crate) workflow_node_id: Option<&'a str>,
+    pub(crate) actor_api_key_id: Option<&'a str>,
+    pub(crate) tenant: &'a ferrogate_core::TenantContext,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) provider: Option<&'a str>,
+    pub(crate) body_text: &'a str,
 }
 
 impl RequestLogExportFilter {
@@ -2054,6 +2081,7 @@ struct GatewayMetricsAccumulator {
     guardrail_match_total: u64,
     guardrail_denial_total: u64,
     guardrail_redaction_total: u64,
+    guardrail_detector_error_total: u64,
     billing_event_total: u64,
     /// Failures durably enqueueing a settled usage event for delivery to the
     /// billing service (issue #151).
@@ -2353,6 +2381,10 @@ impl GatewayMetricsAccumulator {
         }
     }
 
+    fn record_guardrail_detector_error(&mut self) {
+        self.guardrail_detector_error_total = self.guardrail_detector_error_total.saturating_add(1);
+    }
+
     fn record_tool_call(&mut self, _tool_name: &str, latency_ms: u64) {
         self.tool_call_total = self.tool_call_total.saturating_add(1);
         self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
@@ -2390,6 +2422,7 @@ impl GatewayMetricsAccumulator {
             guardrail_match_total: self.guardrail_match_total,
             guardrail_denial_total: self.guardrail_denial_total,
             guardrail_redaction_total: self.guardrail_redaction_total,
+            guardrail_detector_error_total: self.guardrail_detector_error_total,
             billing_event_total: self.billing_event_total,
             billing_report_enqueue_failure_total: self.billing_report_enqueue_failure_total,
             tool_call_total: self.tool_call_total,
@@ -3185,36 +3218,40 @@ impl AppState {
         .expect("config validation must reject invalid model registry entries");
 
         let policy_engine = build_policy_engine(&config.policies);
+        let guardrail_secret_registry = ferrogate_secrets::SecretResolverRegistry::from_env();
         let guardrail_rules = config
             .guardrails
             .iter()
-            .map(|rule| GuardrailRuleRuntime {
-                id: rule.id.clone(),
-                name: rule.name.clone(),
-                enabled: rule.enabled,
-                stage: rule.stage,
-                effect: rule.effect,
-                organization_ids: rule.organization_ids.clone(),
-                project_ids: rule.project_ids.clone(),
-                api_key_ids: rule.api_key_ids.clone(),
-                models: rule.models.clone(),
-                providers: rule.providers.clone(),
-                keywords: rule.keywords.clone(),
-                regex: rule
-                    .regex
-                    .iter()
-                    .map(|pattern| {
-                        Regex::new(pattern).expect("config validation must reject invalid regex")
-                    })
-                    .collect(),
-                max_input_bytes: rule.max_input_bytes,
-                provider: rule.provider,
-                provider_endpoint: rule.provider_endpoint.clone(),
-                provider_timeout_ms: rule.provider_timeout_ms,
-                code: rule.code.clone(),
-                message: rule.message.clone(),
+            .map(|rule| {
+                Ok(GuardrailRuleRuntime {
+                    id: rule.id.clone(),
+                    name: rule.name.clone(),
+                    enabled: rule.enabled,
+                    stage: rule.stage,
+                    effect: rule.effect,
+                    organization_ids: rule.organization_ids.clone(),
+                    project_ids: rule.project_ids.clone(),
+                    api_key_ids: rule.api_key_ids.clone(),
+                    models: rule.models.clone(),
+                    providers: rule.providers.clone(),
+                    keywords: rule.keywords.clone(),
+                    regex: rule
+                        .regex
+                        .iter()
+                        .map(|pattern| {
+                            Regex::new(pattern)
+                                .expect("config validation must reject invalid regex")
+                        })
+                        .collect(),
+                    max_input_bytes: rule.max_input_bytes,
+                    detector: build_guardrail_detector(rule, &guardrail_secret_registry)?,
+                    provider_timeout_ms: rule.provider_timeout_ms,
+                    provider_on_error: rule.provider_runtime.provider_on_error,
+                    code: rule.code.clone(),
+                    message: rule.message.clone(),
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let provider_circuit_config = provider_circuit_config(&config);
         let provider_circuits = if provider_circuit_config.is_some() {
             config
@@ -4298,6 +4335,61 @@ fn sanitize_redis_key_part(value: &str) -> String {
         .collect()
 }
 
+fn build_guardrail_detector(
+    rule: &GuardrailRule,
+    secret_registry: &ferrogate_secrets::SecretResolverRegistry,
+) -> anyhow::Result<Option<Arc<dyn GuardrailDetector>>> {
+    if rule.provider == GuardrailProviderKind::None {
+        return Ok(None);
+    }
+    let endpoint = rule.provider_endpoint.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "guardrail {} custom_http provider is missing provider_endpoint",
+            rule.id
+        )
+    })?;
+    let bearer_token = match rule.provider_runtime.provider_secret_ref.as_deref() {
+        Some(secret_ref) => Some(DetectorSecret::new(
+            secret_registry
+                .resolve(secret_ref)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to resolve secret for guardrail {} detector: {error}",
+                        rule.id
+                    )
+                })?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "secret for guardrail {} detector resolved no value",
+                        rule.id
+                    )
+                })?,
+        )),
+        None => None,
+    };
+    let detector = CustomHttpDetector::new(CustomHttpDetectorConfig {
+        id: rule.id.clone(),
+        endpoint,
+        timeout: Duration::from_millis(rule.provider_timeout_ms),
+        max_concurrency: rule.provider_runtime.provider_max_concurrency,
+        circuit_failure_threshold: rule.provider_runtime.provider_circuit_failure_threshold,
+        circuit_cooldown: Duration::from_millis(rule.provider_runtime.provider_circuit_cooldown_ms),
+        max_retries: rule.provider_runtime.provider_max_retries,
+        max_payload_bytes: rule.provider_runtime.provider_max_payload_bytes,
+        max_response_bytes: rule.provider_runtime.provider_max_response_bytes,
+        allow_private_network: rule.provider_runtime.provider_allow_private_network,
+        bearer_token,
+    })
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "failed to initialize guardrail {} detector: {}",
+            rule.id,
+            error.safe_message()
+        )
+    })?;
+    Ok(Some(Arc::new(detector)))
+}
+
 /// Resolves every configured `Provider.secret_ref` once (issue #163),
 /// keyed by provider name. Failures (bad reference syntax, unreachable
 /// Vault, missing field) are logged and skipped rather than failing
@@ -4410,59 +4502,6 @@ fn probe_provider_endpoint(base_url: &str, timeout: Duration) -> Result<(), Stri
 fn allows_optional_scope(allowed_values: &[String], actual: Option<&str>) -> bool {
     allowed_values.is_empty()
         || actual.is_some_and(|actual| allowed_values.iter().any(|allowed| allowed == actual))
-}
-
-/// Calls an external guardrail detector over HTTP for a `custom_http`
-/// [`GuardrailProviderKind`] rule. Returns `Ok(Some(matched_text))` when the
-/// provider flags the content, `Ok(None)` when it does not, and `Err` when
-/// the provider could not be reached or returned a malformed response — the
-/// caller treats `Err` as fail-closed since there is no detection result to
-/// trust either way.
-fn call_guardrail_provider(
-    endpoint: &str,
-    timeout_ms: u64,
-    stage: GuardrailStage,
-    tenant: &ferrogate_core::TenantContext,
-    model: Option<&str>,
-    provider: Option<&str>,
-    body_text: &str,
-) -> Result<Option<String>, String> {
-    let request_body = serde_json::json!({
-        "stage": stage,
-        "tenant": tenant,
-        "model": model,
-        "provider": provider,
-        "text": body_text,
-    });
-    let body_bytes = serde_json::to_vec(&request_body)
-        .map_err(|error| format!("failed to encode guardrail provider request: {error}"))?;
-    let response_bytes = ferrogate_secrets::http_post(
-        endpoint,
-        &[("Content-Type".to_string(), "application/json".to_string())],
-        &body_bytes,
-        Duration::from_millis(timeout_ms),
-        None,
-    )
-    .map_err(|error| error.to_string())?;
-    let response: serde_json::Value = serde_json::from_slice(&response_bytes)
-        .map_err(|error| format!("invalid JSON response from guardrail provider: {error}"))?;
-    let is_match = response
-        .get("match")
-        .and_then(serde_json::Value::as_bool)
-        .ok_or_else(|| {
-            "guardrail provider response is missing a boolean 'match' field".to_string()
-        })?;
-    if !is_match {
-        return Ok(None);
-    }
-    let matched_text = response
-        .get("matched_text")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            "guardrail provider reported a match but is missing 'matched_text'".to_string()
-        })?
-        .to_string();
-    Ok(Some(matched_text))
 }
 
 fn fallback_priority_group(routes: &[ModelRoute]) -> Option<(u32, usize)> {
