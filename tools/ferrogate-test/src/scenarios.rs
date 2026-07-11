@@ -11,7 +11,7 @@ use crate::{
         ADMIN_AUTH, AUTH_TEST_CLIENT_2, CLIENT_AUTH, JSON_CONTENT, OBSERVER_AUTH,
         SELF_HOSTED_MTLS_HEADER, SELF_HOSTED_SYMMETRIC_AEAD_HEADER, SUPPORT_SKILL_HEADER,
     },
-    local::{AuthHarness, BillingHarness, LocalHarness},
+    local::{AuthHarness, LocalHarness},
     mocks::spawn_mock_third_party_auth_server,
 };
 use anyhow::{Context, Result};
@@ -3968,106 +3968,12 @@ pub(crate) fn run_gateway_external_auth_api(local: &LocalArgs, auth_args: &AuthA
     Ok(())
 }
 
-/// End-to-end billing chain (issues #129/#131/#133/#134): boot the standalone
-/// `ferrogate billing serve` process, then a gateway wired to report settled
-/// usage to it over REST, drive a gpt-5.5 request through the gateway to the
-/// (mock) upstream, and assert a priced ledger entry — money and credits —
-/// lands in the billing service. This proves the whole inter-service link
-/// deterministically; the live-Supabase/Token4AI variant reuses the same
-/// billing service against a real gpt-5.5 upstream.
+/// Compatibility entrypoint for the gateway-to-billing chain. The reusable
+/// provider contract owns the success, exact gpt-5.5 price, fallback, and
+/// reported-usage error assertions so `component-compliance` and this command
+/// cannot drift into separate definitions of correct settlement.
 pub(crate) fn run_gateway_billing_chain(local: &LocalArgs) -> Result<()> {
-    let billing = BillingHarness::start(&local.ferrogate_bin)?;
-    let case =
-        LocalHarness::start_with_billing_service(&local.ferrogate_bin, 2, &billing.billing_addr)?;
-
-    // The billing service requires the shared secret (issue #136): an
-    // unauthenticated ledger read is rejected, an authenticated one is allowed.
-    let unauth = crate::http::http_request_addr(
-        &billing.billing_addr,
-        "GET",
-        "/v1/billing/ledger",
-        &[],
-        "",
-    )?;
-    assert_eq!(
-        unauth.status, 401,
-        "unauthenticated billing read must be rejected: {}",
-        unauth.raw
-    );
-    let authed = crate::http::http_request_addr(
-        &billing.billing_addr,
-        "GET",
-        "/v1/billing/ledger",
-        &[crate::constants::BILLING_AUTH],
-        "",
-    )?;
-    assert_eq!(authed.status, 200, "authenticated billing read must pass");
-
-    // Drive a gpt-5.5 request through the gateway to the upstream.
-    case.expect_json(
-        "POST",
-        "/v1/chat/completions",
-        &[CLIENT_AUTH, JSON_CONTENT],
-        r#"{"model":"gpt-5.5-chat","messages":[{"role":"user","content":"billing chain gpt-5.5"}]}"#,
-        200,
-        |body| {
-            assert_eq!(body["object"], "chat.completion");
-            assert_eq!(body["usage"]["total_tokens"], 2);
-            Ok(())
-        },
-    )?;
-    // A second model proves multi-model ledger attribution.
-    case.expect_json(
-        "POST",
-        "/v1/chat/completions",
-        &[CLIENT_AUTH, JSON_CONTENT],
-        r#"{"model":"fast-chat","messages":[{"role":"user","content":"billing chain fast-chat"}]}"#,
-        200,
-        |body| {
-            assert_eq!(body["object"], "chat.completion");
-            Ok(())
-        },
-    )?;
-
-    // The gateway reports usage fire-and-forget; poll the ledger for the
-    // settled gpt-5.5 charge and assert it was priced in money and credits.
-    let gpt55 = billing.wait_for_ledger_entry(|entry| {
-        entry["logical_model"] == "gpt-5.5-chat" && entry["provider_model"] == "gpt-5.5"
-    })?;
-    assert_eq!(gpt55["provider"], "openai");
-    assert_eq!(gpt55["tenant"]["organization_id"], "org_demo");
-    assert_eq!(gpt55["tenant"]["project_id"], "project_gateway");
-    assert_eq!(gpt55["usage"]["total_tokens"], 2);
-    assert_eq!(gpt55["cost"]["currency"], "USD");
-    // The ledger must honor the gateway-settled cost, not re-price (issue #135).
-    assert_eq!(gpt55["cost_source"], "gateway_settled");
-    let cost = gpt55["cost"]["total_cost"].as_f64().unwrap_or_default();
-    // gpt-5.5 config price 5.0/15.0 per 1M, usage 1+1 tokens => 5e-6 + 15e-6.
-    assert!(
-        (cost - 0.000_02).abs() < 1e-9,
-        "expected gateway-settled gpt-5.5 cost 2e-5, got {cost}: {gpt55}"
-    );
-    let credits = gpt55["credits"].as_f64().unwrap_or_default();
-    assert!(
-        credits > 0.0,
-        "expected positive credit consumption, got {credits}: {gpt55}"
-    );
-
-    // The fast-chat charge must also land, attributed to gpt-4o-mini. This is
-    // the divergence guard for #135: the gateway config prices fast-chat at
-    // 1.0/2.0 per 1M (settled cost 3e-6), while the billing default rate card
-    // would re-price gpt-4o-mini at 0.15/0.60 (0.75e-6). The ledger must record
-    // the gateway-settled 3e-6, proving a single source of truth.
-    let fast = billing.wait_for_ledger_entry(|entry| {
-        entry["logical_model"] == "fast-chat" && entry["provider_model"] == "gpt-4o-mini"
-    })?;
-    assert_eq!(fast["cost_source"], "gateway_settled");
-    let fast_cost = fast["cost"]["total_cost"].as_f64().unwrap_or_default();
-    assert!(
-        (fast_cost - 0.000_003).abs() < 1e-9,
-        "expected gateway-settled fast-chat cost 3e-6 (not the 0.75e-6 default re-price), got {fast_cost}: {fast}"
-    );
-
+    crate::provider_compliance::run_provider_compliance(local)?;
     println!("gateway-billing-chain scenario passed");
     Ok(())
 }

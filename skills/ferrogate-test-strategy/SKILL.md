@@ -67,11 +67,12 @@ bends to.
   do not skip the layer or downgrade the claim to fit the current tool.
 - A missing tool never silently shrinks coverage. A layer you cannot yet automate
   is still owed a manual proof at the affected surface plus a filed tooling issue.
-- Current known shortfall: the reusable `ComponentContract` executor and its
-  local/live-Supabase quota-scope implementation exist, but provider
-  telemetry/billing and Guardrail allow/block evidence remain point scenarios.
-  They are not yet forced through the shared executor. Tracked in #210; do not
-  present those component classes as automated compliance until they are wired.
+- Current known shortfall: quota, OpenAI-compatible provider settlement, and
+  Guardrail allow/block evidence use the reusable `ComponentContract` executor;
+  quota and Guardrail also have live-Supabase proof. The provider matrix is not
+  yet mechanically exhaustive across every canonical adapter family. That gap
+  is tracked in #214, and multi-attempt settlement identity in #213. Do not
+  describe non-OpenAI adapters as compliance-proven until #214 closes.
 
 ## Run the narrowest proof
 

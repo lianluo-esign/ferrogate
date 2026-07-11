@@ -873,6 +873,38 @@ impl FerroGateway {
                                     }
                                     ProviderAttemptDecision::ReturnError => {}
                                 }
+                                // The initial HTTP response of a streaming request can be an
+                                // ordinary JSON provider error carrying real usage. Settle that
+                                // reported usage exactly; do not charge an estimate when the
+                                // body has no usage or when the stream transport itself fails.
+                                if let Ok(Some(usage)) =
+                                    state.extract_provider_usage(&provider.kind, &body)
+                                {
+                                    if let Err(error) = state.record_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: response.status.as_u16(),
+                                            latency_ms: Some(
+                                                request_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: request.metadata.as_ref(),
+                                        },
+                                        &usage,
+                                    ) {
+                                        write_json_error(
+                                            session,
+                                            StatusCode::BAD_GATEWAY,
+                                            error.code,
+                                            error.message,
+                                            &ctx.request_id,
+                                        )
+                                        .await?;
+                                        return Ok(());
+                                    }
+                                }
                                 let normalized = match state.normalize_provider_error(
                                     &provider.kind,
                                     response.status.as_u16(),
@@ -1457,6 +1489,39 @@ impl FerroGateway {
                                     continue 'routes;
                                 }
                                 ProviderAttemptDecision::ReturnError => {}
+                            }
+                            // A terminal provider error may still report real usage. Settle only
+                            // that reported usage before normalizing the error response; never
+                            // estimate usage for transport failures or error bodies without usage.
+                            // Retry/fallback attempts need per-attempt billing identities before
+                            // they can be settled independently (tracked separately from #210).
+                            if let Ok(Some(usage)) =
+                                state.extract_provider_usage(&provider.kind, &response.body)
+                            {
+                                if let Err(error) = state.record_billing_event(
+                                    BillingEventDraft {
+                                        request: &policy_request,
+                                        logical_model: &request.model,
+                                        provider: &provider.name,
+                                        provider_model: &model_route.provider_model,
+                                        status_code: response.status.as_u16(),
+                                        latency_ms: Some(
+                                            request_started_at.elapsed().as_millis() as u64
+                                        ),
+                                        metadata: request.metadata.as_ref(),
+                                    },
+                                    &usage,
+                                ) {
+                                    write_json_error(
+                                        session,
+                                        StatusCode::BAD_GATEWAY,
+                                        error.code,
+                                        error.message,
+                                        &ctx.request_id,
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
                             }
                             let normalized = match state.normalize_provider_error(
                                 &provider.kind,

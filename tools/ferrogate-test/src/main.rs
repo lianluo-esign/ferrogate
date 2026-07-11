@@ -18,6 +18,7 @@ mod http;
 mod local;
 mod mcp_identity;
 mod mocks;
+mod provider_compliance;
 mod scenarios;
 mod storage;
 
@@ -76,7 +77,6 @@ fn main() -> Result<()> {
             run_gateway_external_auth_api(local, auth)?;
             run_gateway_third_party_auth_api(local)?;
             run_gateway_api(local)?;
-            run_gateway_billing_chain(local)?;
             run_function_egress_api(local)?;
             run_supabase_migration(local)?;
             run_supabase_restart(local)?;

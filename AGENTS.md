@@ -376,13 +376,14 @@ speed is not the constraint. A Bun/TypeScript layer is acceptable only as an
 additive black-box suite typed from the enforced OpenAPI contract, never as a
 replacement that re-derives internal contracts in a second language.
 
-Known gap — do not present the whole layer as done. The component compliance
-command in `ferrogate-test` provides the reusable write -> read -> runtime ->
-verify -> cleanup executor and forces tenant/project/workspace/key quota scopes
-through it; `component-compliance-supabase` proves the same contract against a
-live durable schema. Provider telemetry/billing and Guardrail allow/block
-evidence are still point scenarios rather than callers of that shared executor.
-Completing those component classes remains tracked in #210.
+Known gap — do not present the whole provider matrix as done. The component
+compliance executor now covers tenant/project/workspace/key quota scopes, the
+OpenAI-compatible provider success/fallback/reported-error settlement paths,
+and Guardrail allow/block evidence. The quota and Guardrail contracts are also
+proved against live Supabase. The remaining provider gap is mechanical matrix
+enforcement across every canonical adapter family (#214); multi-attempt billing
+identity is tracked separately in #213. Until #214 closes, a provider adapter
+outside the registered OpenAI-compatible cases is not compliance-proven.
 
 ## Verification
 

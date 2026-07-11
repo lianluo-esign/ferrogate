@@ -48,6 +48,7 @@ pub(crate) trait ComponentContract {
 pub(crate) fn run_component_compliance(args: &LocalArgs) -> Result<()> {
     let harness = LocalHarness::start(&args.ferrogate_bin, 0)?;
     run_component_compliance_at(&harness.gateway_addr)?;
+    crate::provider_compliance::run_provider_compliance(args)?;
     println!("component-compliance scenario passed");
     Ok(())
 }

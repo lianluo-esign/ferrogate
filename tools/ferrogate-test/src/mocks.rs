@@ -129,6 +129,13 @@ fn provider_response_for_request(request: &str) -> ProviderMockResponse {
             body: r#"{"id":"chatcmpl_ferrogate_fallback","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"fallback ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}"#,
         };
     }
+    if request.contains("provider upstream error with usage") {
+        return ProviderMockResponse {
+            status: "400 Bad Request",
+            content_type: "application/json",
+            body: r#"{"error":{"message":"bad provider request","type":"invalid_request_error","code":"bad_provider_request"},"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#,
+        };
+    }
     if request.contains("provider upstream error") {
         return ProviderMockResponse {
             status: "400 Bad Request",

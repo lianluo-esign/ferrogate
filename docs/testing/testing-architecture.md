@@ -76,15 +76,17 @@ through the admin API but the runtime only ever read the tenant scope.
 - **Mechanism today:** `ferrogate-test api-contract` proves the runtime's fixed
   routes and methods are the ones the OpenAPI contract declares.
   `ferrogate-test component-compliance` provides the reusable component
-  lifecycle and currently applies it to quota scopes; the live-Supabase variant
-  proves the same path through durable storage.
+  lifecycle and applies it to quota scopes plus OpenAI-compatible provider
+  settlement. `guardrail-supabase` runs Guardrail policy write/read plus
+  allow/block evidence through the same lifecycle. The live-Supabase paths
+  prove quota and Guardrail behavior through durable storage.
 - **Answers:** does the runtime actually obey the cross-cutting contract it
   claims — routes, telemetry, audit evidence, and **scope**?
 - **This is the layer that catches `#188`.** A quota/scope/telemetry claim is
   only proven here when the test asserts that *what a component writes is what
   the runtime reads*, and that the component emits the audit/telemetry evidence
-  it advertises. See "Open work" below for the component classes not yet wired
-  to the reusable runner.
+  it advertises. See "Open work" below for the provider adapter matrix that is
+  not yet mechanically complete.
 
 ### 6. Cross-component chain
 
@@ -237,7 +239,7 @@ Dynamic Workflow (work is pulled from the issue queue) and Commit Requirements
 
 Tracked in **#210**.
 
-**Current status:** `tools/ferrogate-test` now has a reusable
+**Current status:** `tools/ferrogate-test` has a reusable
 `ComponentContract` runner. It owns the lifecycle instead of trusting a
 component to call arbitrary assertions: write -> read -> runtime exercise ->
 verify -> cleanup. `component-compliance` forces all four generic quota scopes
@@ -247,23 +249,23 @@ project/workspace/key asset quota writes are rejected because stored assets and
 their usage are tenant-owned. This closes the concrete #188-style write-only
 scope gap without inventing fake narrower-scope usage semantics.
 
-**Remaining gap:** provider telemetry/billing and Guardrail allow/block evidence
-remain point scenarios (`gateway-billing-chain`, `guardrail-supabase`). They are
-not yet implementations of the shared contract, so #210 remains open and the
-full compliance layer must not be presented as complete.
+The provider contract now proves OpenAI-compatible primary success, exact
+GPT-5.5 pricing, fallback attribution, and streaming/non-streaming terminal
+errors that report usage. It compares the gateway billing event with the
+standalone billing ledger. Provider errors without usage remain non-billable.
+When multiple attempts report usage, distinct settlement identities are still
+required before both can be represented; that is tracked in #213.
 
-**Next component contracts:**
+The Guardrail contract writes and reads a DB-backed policy, exercises allow and
+block, polls the tenant-authorized evidence API, then verifies evaluation,
+per-check, audit, and request-log rows directly in live Supabase. The existing
+restart, rollback, redaction, and streaming assertions remain around that shared
+contract.
 
-- **Provider adapter:** emits usage/cost telemetry with the required attributes;
-  the cost that reaches billing equals the cost the adapter reported; fallback
-  and error paths still settle usage.
-- **Guardrail:** both the block path and the allow path emit auditable evidence;
-  blocked content produces durable, queryable evidence.
-- **Policy scope / quota override:** implemented for generic quota scope
-  enforcement and tenant asset quota; unsupported narrower asset scopes fail at
-  the write boundary instead of returning a value the runtime ignores.
-
-Sequence from here: (1) adapt the provider billing chain to the shared runner;
-(2) adapt Guardrail allow/block evidence; (3) force every concrete adapter
-through its class contract. The local quota contract is part of the `ci`
-aggregate; the durable form is part of the live Supabase release slice.
+**Remaining gap:** the deterministic provider cases cover only the
+OpenAI-compatible adapter family. `ProviderAdapterRegistry` and the compliance
+case table are not yet forced to have the same canonical adapter set, so a new
+or existing non-OpenAI adapter can still lack this runtime settlement proof.
+Tracked in #214. Do not describe Anthropic, Gemini, Grok/xAI, OpenRouter, Azure
+OpenAI, Bedrock, or Vertex as provider-compliance proven until that matrix is
+complete.
