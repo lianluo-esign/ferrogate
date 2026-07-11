@@ -121,8 +121,14 @@ through the admin API but the runtime only ever read the tenant scope.
 
 - **Mechanism:** `ferrogate-test supabase-live-smoke`, `supabase-live-restart`,
   `supabase-live-token4ai-provider`, `guardrail-supabase`,
-  `component-compliance-supabase`. Gated behind explicit DSN/credential env
-  vars; never part of the default gate.
+  `mcp-identity-supabase`, `component-compliance-supabase`. Gated behind
+  explicit DSN/credential env vars; never part of the default gate.
+- **Isolation contract:** every live scenario creates a unique per-run schema,
+  reuses that exact schema across its internal restarts, then drops it and
+  verifies its exact `pg_namespace` row is absent. Early returns use the same
+  RAII cleanup. `--keep-supabase-schema` is the only opt-in retention path.
+  Cleanup never wildcard-drops a shared prefix because live scenarios may run
+  concurrently.
 - **Answers:** does it work against real external services, not local doubles?
 - **Required for:** changes to the live Supabase/provider integration surface,
   run before release rather than on every PR.

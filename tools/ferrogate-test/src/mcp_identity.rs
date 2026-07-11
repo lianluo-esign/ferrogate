@@ -8,13 +8,12 @@ use crate::{
     cli::SupabaseLiveRestartArgs,
     http::{free_addr, http_request_addr, HttpResponse},
     mocks::read_http_request,
+    supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
 };
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use native_tls::{Certificate, TlsConnector};
-use postgres::{config::SslMode, Client, Config as PostgresConfig};
-use postgres_native_tls::MakeTlsConnector;
+use postgres::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -25,7 +24,6 @@ use std::{
     net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
-    str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Barrier, Mutex,
@@ -70,14 +68,12 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
             args.local.ferrogate_bin.display()
         );
     }
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before UNIX epoch")?
-        .as_millis();
-    let schema = format!("ferrogate_mcp_identity_e2e_{suffix}");
-    let role_id = format!("mcp-e2e-capability-{suffix}");
-    let role_slug = format!("mcp-e2e-bundle-{suffix}");
-    let mut evidence = SupabaseEvidence::connect(args, schema.clone())?;
+    let mut schema = LiveSupabaseSchema::create(args, LiveSupabaseScenario::McpIdentity)?;
+    let schema_name = schema.name().to_string();
+    let fixture_suffix = schema.run_id().replace('_', "-");
+    let role_id = format!("mcp-e2e-capability-{fixture_suffix}");
+    let role_slug = format!("mcp-e2e-bundle-{fixture_suffix}");
+    let mut evidence = SupabaseEvidence::connect(args, schema_name.clone())?;
     let services = MockIdentityServices::start()?;
     let gateway_addr = free_addr()?;
     let dir = tempfile::tempdir()?;
@@ -88,7 +84,7 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
             &gateway_addr,
             &services.oidc_addr,
             &services.mcp_addr,
-            &schema,
+            &schema_name,
             args,
         )?,
     )?;
@@ -300,8 +296,9 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     let metrics = http_request_addr(&gateway_addr, "GET", "/metrics", &[ADMIN_AUTH], "")?;
     assert_metric_nonzero(&metrics, "ferrogate_mcp_identity_revocations_total")?;
     drop(gateway);
-    evidence.cleanup()?;
+    drop(evidence);
     drop(services);
+    schema.finish()?;
     println!("mcp-identity-supabase scenario passed");
     Ok(())
 }
@@ -984,44 +981,13 @@ impl Drop for GatewayGuard {
 struct SupabaseEvidence {
     client: Client,
     schema: String,
-    cleaned: bool,
 }
 
 impl SupabaseEvidence {
     fn connect(args: &SupabaseLiveRestartArgs, schema: String) -> Result<Self> {
-        if !schema
-            .chars()
-            .all(|value| value.is_ascii_alphanumeric() || value == '_')
-        {
-            bail!("generated Supabase schema contains invalid characters");
-        }
-        let mut config = PostgresConfig::from_str(args.supabase_dsn.trim())?;
-        config.connect_timeout(Duration::from_secs(10));
-        config.ssl_mode(SslMode::Require);
-        let mut tls = TlsConnector::builder();
-        if let Some(path) = args.tls_ca_cert_path.as_ref() {
-            let bytes = fs::read(path)?;
-            tls.add_root_certificate(
-                Certificate::from_pem(&bytes).or_else(|_| Certificate::from_der(&bytes))?,
-            );
-        }
-        match args.tls_mode.as_str() {
-            "verify_full" => {}
-            "verify_ca" => {
-                tls.danger_accept_invalid_hostnames(true);
-            }
-            "require" => {
-                tls.danger_accept_invalid_certs(true);
-                tls.danger_accept_invalid_hostnames(true);
-            }
-            other => bail!("invalid live Supabase TLS mode {other}"),
-        };
-        let connector = MakeTlsConnector::new(tls.build()?);
-        let client = config.connect(connector)?;
         Ok(Self {
-            client,
+            client: connect_live_supabase(args)?,
             schema,
-            cleaned: false,
         })
     }
 
@@ -1297,23 +1263,6 @@ impl SupabaseEvidence {
             bail!("Supabase MCP revocation outcome mismatch: {outcome:?}");
         }
         Ok(())
-    }
-
-    fn cleanup(&mut self) -> Result<()> {
-        if !self.cleaned {
-            self.client.batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-                self.schema
-            ))?;
-            self.cleaned = true;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for SupabaseEvidence {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
     }
 }
 

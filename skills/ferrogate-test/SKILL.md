@@ -37,6 +37,11 @@ cargo run -p ferrogate-test --locked -- list
 # a specific local surface
 cargo run -p ferrogate-test --locked -- admin-api
 cargo run -p ferrogate-test --locked -- gateway-api
+# live Supabase scenarios create and clean a unique schema by default
+cargo run -p ferrogate-test --locked -- supabase-live-smoke
+cargo run -p ferrogate-test --locked -- component-compliance-supabase
+# retain only the exact run schema for explicit debugging
+cargo run -p ferrogate-test --locked -- supabase-live-smoke --keep-supabase-schema
 # all local API coverage, optionally with Docker scenarios (sequential)
 cargo run -p ferrogate-test --locked -- run-all
 cargo run -p ferrogate-test --locked -- run-all --include-docker
@@ -78,3 +83,7 @@ in the `ferrogate-test-strategy` skill.
   and `docker network rm ferrogate-e2e-net`, then rerun sequentially.
 - Do not weaken secret-redaction assertions unless the response format
   deliberately changed and an equivalent no-secret-leak assertion replaces them.
+- Live Supabase scenarios must reuse one schema within a restart scenario, drop
+  it on normal and error paths, and verify the exact generated name is absent.
+  Never replace this with prefix-wide deletion; another live scenario may own a
+  matching schema concurrently.

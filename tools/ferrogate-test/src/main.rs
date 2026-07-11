@@ -21,6 +21,7 @@ mod mocks;
 mod provider_compliance;
 mod scenarios;
 mod storage;
+mod supabase_schema;
 
 use api_contract::run_api_contract;
 use compliance::{run_component_compliance, run_component_compliance_supabase};

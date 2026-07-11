@@ -134,6 +134,13 @@ pub(crate) struct SupabaseLiveRestartArgs {
     /// Optional root CA path for private CA deployments.
     #[arg(long, env = "FERROGATE_SUPABASE_TLS_CA_CERT_PATH")]
     pub(crate) tls_ca_cert_path: Option<PathBuf>,
+    /// Retain the unique live-test schema for explicit post-failure debugging.
+    #[arg(
+        long,
+        env = "FERROGATE_TEST_KEEP_SUPABASE_SCHEMA",
+        default_value_t = false
+    )]
+    pub(crate) keep_supabase_schema: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -270,3 +277,7 @@ fn print_attribution_banner() {
     );
     println!();
 }
+
+#[cfg(test)]
+#[path = "cli_test.rs"]
+mod cli_test;

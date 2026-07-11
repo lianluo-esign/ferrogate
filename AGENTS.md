@@ -376,6 +376,13 @@ speed is not the constraint. A Bun/TypeScript layer is acceptable only as an
 additive black-box suite typed from the enforced OpenAPI contract, never as a
 replacement that re-derives internal contracts in a second language.
 
+Every live Supabase harness scenario owns a unique per-run schema and reuses it
+only across restarts inside that scenario. Normal completion must drop the
+exact schema and verify it is absent; early errors use the same RAII cleanup.
+Retaining state is an explicit debugging action through
+`--keep-supabase-schema`, never the default. Do not use prefix-wide cleanup that
+can delete another concurrently running scenario.
+
 Known gap — do not present the whole provider matrix as done. The component
 compliance executor now covers tenant/project/workspace/key quota scopes, the
 OpenAI-compatible provider success/fallback/reported-error settlement paths,

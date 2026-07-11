@@ -1,0 +1,38 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-07-11
+// description: CLI tests for live Supabase schema isolation controls.
+
+use super::*;
+
+#[test]
+fn live_supabase_schema_retention_is_disabled_by_default() {
+    let cli = Cli::try_parse_from([
+        "ferrogate-test",
+        "supabase-live-smoke",
+        "--supabase-dsn",
+        "postgresql://unused",
+    ])
+    .unwrap();
+    let Commands::SupabaseLiveSmoke(args) = cli.command else {
+        panic!("expected supabase-live-smoke command");
+    };
+    assert!(!args.keep_supabase_schema);
+}
+
+#[test]
+fn live_supabase_schema_retention_requires_explicit_flag() {
+    let cli = Cli::try_parse_from([
+        "ferrogate-test",
+        "component-compliance-supabase",
+        "--supabase-dsn",
+        "postgresql://unused",
+        "--keep-supabase-schema",
+    ])
+    .unwrap();
+    let Commands::ComponentComplianceSupabase(args) = cli.command else {
+        panic!("expected component-compliance-supabase command");
+    };
+    assert!(args.keep_supabase_schema);
+}

@@ -9,11 +9,10 @@ use crate::{
     compliance::{assert_component_contract, ComponentContract},
     http::{free_addr, http_request_addr, HttpResponse},
     mocks::read_http_request,
+    supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
 };
 use anyhow::{bail, Context, Result};
-use native_tls::{Certificate, TlsConnector};
-use postgres::{config::SslMode, Client, Config as PostgresConfig};
-use postgres_native_tls::MakeTlsConnector;
+use postgres::Client;
 use serde_json::Value;
 use std::{
     cell::RefCell,
@@ -23,13 +22,12 @@ use std::{
     net::{TcpListener, TcpStream},
     path::Path,
     process::{Child, Command, Stdio},
-    str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 const CLIENT_AUTH: &str = "Authorization: Bearer guardrail-client-secret";
@@ -260,14 +258,12 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
         );
     }
 
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before UNIX epoch")?
-        .as_millis();
-    let schema = format!("ferrogate_guardrail_e2e_{suffix}");
-    let policy_role_id = format!("role-e2e-{suffix}");
-    let policy_role_slug = format!("e2e-runtime-role-{suffix}");
-    let mut evidence = SupabaseEvidence::connect(args, schema.clone())?;
+    let mut schema = LiveSupabaseSchema::create(args, LiveSupabaseScenario::Guardrail)?;
+    let schema_name = schema.name().to_string();
+    let fixture_suffix = schema.run_id().replace('_', "-");
+    let policy_role_id = format!("role-e2e-{fixture_suffix}");
+    let policy_role_slug = format!("e2e-runtime-role-{fixture_suffix}");
+    let mut evidence = SupabaseEvidence::connect(args, schema_name.clone())?;
 
     let gateway_addr = free_addr()?;
     let provider_stop = Arc::new(AtomicBool::new(false));
@@ -280,7 +276,13 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     let config_path = dir.path().join("guardrail-supabase.yaml");
     fs::write(
         &config_path,
-        guardrail_supabase_config(&gateway_addr, &provider_addr, &detector.addr, &schema, args)?,
+        guardrail_supabase_config(
+            &gateway_addr,
+            &provider_addr,
+            &detector.addr,
+            &schema_name,
+            args,
+        )?,
     )?;
 
     let gateway = GatewayGuard::start(
@@ -636,7 +638,8 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     }
 
     drop(gateway);
-    evidence.cleanup()?;
+    drop(evidence);
+    schema.finish()?;
     println!("guardrail-supabase scenario passed");
     Ok(())
 }
@@ -2360,54 +2363,13 @@ impl Drop for ProtectedPatchDetector {
 struct SupabaseEvidence {
     client: Client,
     schema: String,
-    cleaned: bool,
 }
 
 impl SupabaseEvidence {
     fn connect(args: &SupabaseLiveRestartArgs, schema: String) -> Result<Self> {
-        if !schema
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-        {
-            bail!("generated Supabase schema contains invalid characters");
-        }
-        let mut config = PostgresConfig::from_str(args.supabase_dsn.trim())
-            .context("failed to parse Supabase PostgreSQL DSN")?;
-        config.connect_timeout(Duration::from_secs(10));
-        config.ssl_mode(SslMode::Require);
-        let mut tls = TlsConnector::builder();
-        if let Some(path) = args.tls_ca_cert_path.as_ref() {
-            let bytes = fs::read(path)
-                .with_context(|| format!("failed to read Supabase CA file {}", path.display()))?;
-            let certificate = Certificate::from_pem(&bytes)
-                .or_else(|_| Certificate::from_der(&bytes))
-                .context("failed to parse Supabase CA certificate")?;
-            tls.add_root_certificate(certificate);
-        }
-        match args.tls_mode.as_str() {
-            "verify_full" => {}
-            "verify_ca" => {
-                tls.danger_accept_invalid_hostnames(true);
-            }
-            "require" => {
-                tls.danger_accept_invalid_certs(true);
-                tls.danger_accept_invalid_hostnames(true);
-            }
-            other => bail!(
-                "--tls-mode must be require, verify_ca, or verify_full for live Supabase, got {other}"
-            ),
-        }
-        let connector = MakeTlsConnector::new(
-            tls.build()
-                .context("failed to initialize Supabase TLS connector")?,
-        );
-        let client = config
-            .connect(connector)
-            .context("failed to connect to live Supabase PostgreSQL")?;
         Ok(Self {
-            client,
+            client: connect_live_supabase(args)?,
             schema,
-            cleaned: false,
         })
     }
 
@@ -3106,25 +3068,5 @@ impl SupabaseEvidence {
             bail!("Supabase request_logs omitted an enforced Guardrail revision");
         }
         Ok(())
-    }
-
-    fn cleanup(&mut self) -> Result<()> {
-        if self.cleaned {
-            return Ok(());
-        }
-        self.client
-            .batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-                self.schema
-            ))
-            .context("failed to remove Guardrail E2E Supabase schema")?;
-        self.cleaned = true;
-        Ok(())
-    }
-}
-
-impl Drop for SupabaseEvidence {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
     }
 }

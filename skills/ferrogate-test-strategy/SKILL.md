@@ -73,6 +73,10 @@ bends to.
   yet mechanically exhaustive across every canonical adapter family. That gap
   is tracked in #214, and multi-attempt settlement identity in #213. Do not
   describe non-OpenAI adapters as compliance-proven until #214 closes.
+- Live Supabase proof is isolated per scenario: one unique schema is reused for
+  that scenario's restarts and removed through exact-name RAII cleanup. Use
+  `--keep-supabase-schema` only when retained state is deliberately required for
+  debugging.
 
 ## Run the narrowest proof
 

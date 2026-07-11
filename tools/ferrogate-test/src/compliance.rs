@@ -9,11 +9,10 @@ use crate::{
     constants::{ADMIN_AUTH, JSON_CONTENT},
     http::http_request_addr,
     local::LocalHarness,
+    supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
 };
 use anyhow::{bail, Context, Result};
-use native_tls::{Certificate, TlsConnector};
-use postgres::{config::SslMode, Client, Config as PostgresConfig};
-use postgres_native_tls::MakeTlsConnector;
+use postgres::Client;
 use serde_json::{json, Value};
 use std::{
     env,
@@ -21,9 +20,8 @@ use std::{
     fs,
     path::Path,
     process::{Child, Command, Stdio},
-    str::FromStr,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 pub(crate) trait ComponentContract {
@@ -63,20 +61,17 @@ pub(crate) fn run_component_compliance_supabase(args: &SupabaseLiveRestartArgs) 
             args.local.ferrogate_bin.display()
         );
     }
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before UNIX epoch")?
-        .as_millis();
-    let schema = format!("ferrogate_component_compliance_e2e_{suffix}");
-    let mut evidence = SupabaseSchema::create(args, schema.clone())?;
+    let mut schema = LiveSupabaseSchema::create(args, LiveSupabaseScenario::Compliance)?;
+    let schema_name = schema.name().to_string();
+    let mut evidence = SupabaseEvidence::connect(args, schema_name.clone())?;
     let gateway_addr = crate::http::free_addr()?;
     let dir = tempfile::tempdir()?;
     let config_path = dir.path().join("component-compliance-supabase.yaml");
     fs::write(
         &config_path,
-        compliance_supabase_config(&gateway_addr, &schema, args)?,
+        compliance_supabase_config(&gateway_addr, &schema_name, args)?,
     )?;
-    let _gateway = GatewayGuard::start(
+    let gateway = GatewayGuard::start(
         &args.local.ferrogate_bin,
         &config_path,
         &gateway_addr,
@@ -84,6 +79,9 @@ pub(crate) fn run_component_compliance_supabase(args: &SupabaseLiveRestartArgs) 
     )?;
     run_component_compliance_at(&gateway_addr)?;
     evidence.verify_contract_cleanup()?;
+    drop(gateway);
+    drop(evidence);
+    schema.finish()?;
     println!("component-compliance-supabase scenario passed");
     Ok(())
 }
@@ -667,16 +665,17 @@ impl Drop for GatewayGuard {
     }
 }
 
-struct SupabaseSchema {
+struct SupabaseEvidence {
     client: Client,
     schema: String,
 }
 
-impl SupabaseSchema {
-    fn create(args: &SupabaseLiveRestartArgs, schema: String) -> Result<Self> {
-        let mut client = connect_supabase(args)?;
-        client.batch_execute(&format!("CREATE SCHEMA \"{schema}\""))?;
-        Ok(Self { client, schema })
+impl SupabaseEvidence {
+    fn connect(args: &SupabaseLiveRestartArgs, schema: String) -> Result<Self> {
+        Ok(Self {
+            client: connect_live_supabase(args)?,
+            schema,
+        })
     }
 
     fn verify_contract_cleanup(&mut self) -> Result<()> {
@@ -730,45 +729,6 @@ impl SupabaseSchema {
         }
         Ok(())
     }
-}
-
-impl Drop for SupabaseSchema {
-    fn drop(&mut self) {
-        let _ = self.client.batch_execute(&format!(
-            "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-            self.schema
-        ));
-    }
-}
-
-fn connect_supabase(args: &SupabaseLiveRestartArgs) -> Result<Client> {
-    let mut config = PostgresConfig::from_str(args.supabase_dsn.trim())?;
-    config.connect_timeout(Duration::from_secs(10));
-    if args.tls_mode == "disable" {
-        config.ssl_mode(SslMode::Disable);
-        return config.connect(postgres::NoTls).map_err(Into::into);
-    }
-    config.ssl_mode(SslMode::Require);
-    let mut builder = TlsConnector::builder();
-    if let Some(path) = args.tls_ca_cert_path.as_deref() {
-        let bytes = fs::read(path)?;
-        let certificate =
-            Certificate::from_pem(&bytes).or_else(|_| Certificate::from_der(&bytes))?;
-        builder.add_root_certificate(certificate);
-    }
-    match args.tls_mode.as_str() {
-        "require" => {
-            builder.danger_accept_invalid_certs(true);
-            builder.danger_accept_invalid_hostnames(true);
-        }
-        "verify_ca" => {
-            builder.danger_accept_invalid_hostnames(true);
-        }
-        "prefer" | "verify_full" => {}
-        other => bail!("unsupported Supabase TLS mode {other}"),
-    }
-    let connector = MakeTlsConnector::new(builder.build()?);
-    config.connect(connector).map_err(Into::into)
 }
 
 #[cfg(test)]

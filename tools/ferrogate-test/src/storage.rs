@@ -7,7 +7,7 @@
 use crate::{
     assertions::{assert_array_contains, assert_secret_redacted, list_contains},
     cli::{LocalArgs, SupabaseLiveRestartArgs, SupabaseLiveToken4aiProviderArgs},
-    constants::{ADMIN_AUTH, CLIENT_AUTH, JSON_CONTENT},
+    constants::{ADMIN_AUTH, JSON_CONTENT},
     docker::{
         docker_args, POSTGRES_CONTAINER, POSTGRES_IMAGE, POSTGRES_MIGRATION_SOURCE_CONTAINER,
         POSTGRES_MIGRATION_TARGET_CONTAINER,
@@ -15,6 +15,7 @@ use crate::{
     fixtures::toml_basic_string,
     http::{free_addr, free_port, http_request_addr},
     mocks::spawn_local_provider_upstream,
+    supabase_schema::{LiveSupabaseScenario, LiveSupabaseSchema},
 };
 use anyhow::{bail, Context, Result};
 use rcgen::{
@@ -82,6 +83,8 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresq
             mode: "verify_full",
             ca_cert_path: Some(certs.ca_cert_path.as_path()),
         },
+        "ferrogate_control",
+        false,
         "ferrogate-supabase-test",
         true,
     )?;
@@ -98,6 +101,8 @@ fn expect_supabase_validate_only_schema_failure(
     let storage = ControlPlaneRestartStorage::Supabase {
         dsn: supabase_dsn,
         tls,
+        schema: "ferrogate_control",
+        live: false,
     };
     let gateway_addr = free_addr()?;
     let dir = tempfile::tempdir()?;
@@ -154,6 +159,7 @@ pub(crate) fn run_supabase_live_restart(args: &SupabaseLiveRestartArgs) -> Resul
     if dsn.is_empty() {
         bail!("--supabase-dsn must not be empty");
     }
+    let mut schema = LiveSupabaseSchema::create(args, LiveSupabaseScenario::Restart)?;
     run_control_plane_supabase_restart(
         &args.local.ferrogate_bin,
         dsn,
@@ -161,9 +167,12 @@ pub(crate) fn run_supabase_live_restart(args: &SupabaseLiveRestartArgs) -> Resul
             mode: supabase_live_tls_mode(&args.tls_mode)?,
             ca_cert_path: args.tls_ca_cert_path.as_deref(),
         },
+        schema.name(),
+        true,
         "ferrogate-supabase-live-test",
         false,
     )?;
+    schema.finish()?;
     println!("supabase-live-restart scenario passed");
     Ok(())
 }
@@ -173,6 +182,7 @@ pub(crate) fn run_supabase_live_smoke(args: &SupabaseLiveRestartArgs) -> Result<
     if dsn.is_empty() {
         bail!("--supabase-dsn must not be empty");
     }
+    let mut schema = LiveSupabaseSchema::create(args, LiveSupabaseScenario::Smoke)?;
     let tls = PostgresRestartTls {
         mode: supabase_live_tls_mode(&args.tls_mode)?,
         ca_cert_path: args.tls_ca_cert_path.as_deref(),
@@ -194,7 +204,12 @@ pub(crate) fn run_supabase_live_smoke(args: &SupabaseLiveRestartArgs) -> Result<
         "project_id": "project_smoke"
     })
     .to_string();
-    let storage = ControlPlaneRestartStorage::Supabase { dsn, tls };
+    let storage = ControlPlaneRestartStorage::Supabase {
+        dsn,
+        tls,
+        schema: schema.name(),
+        live: true,
+    };
 
     {
         let case = TursoRestartHarness::start(&args.local.ferrogate_bin, storage, false, false)?;
@@ -239,6 +254,7 @@ pub(crate) fn run_supabase_live_smoke(args: &SupabaseLiveRestartArgs) -> Result<
         )?;
     }
 
+    schema.finish()?;
     println!("supabase-live-smoke scenario passed");
     Ok(())
 }
@@ -263,18 +279,20 @@ pub(crate) fn run_supabase_live_token4ai_provider(
         bail!("--provider-model must not be empty");
     }
 
+    let mut schema = LiveSupabaseSchema::create(&args.supabase, LiveSupabaseScenario::Token4ai)?;
     let tls = PostgresRestartTls {
         mode: supabase_live_tls_mode(&args.supabase.tls_mode)?,
         ca_cert_path: args.supabase.tls_ca_cert_path.as_deref(),
     };
-    let resource_id = format!(
-        "ferrogate-token4ai-live-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before UNIX epoch")?
-            .as_millis()
-    );
-    let storage = ControlPlaneRestartStorage::Supabase { dsn, tls };
+    let resource_id = format!("ferrogate-token4ai-live-{}", schema.run_id());
+    let fixture = LiveToken4aiFixture::new(schema.run_id());
+    let client_auth = fixture.authorization_header();
+    let storage = ControlPlaneRestartStorage::Supabase {
+        dsn,
+        tls,
+        schema: schema.name(),
+        live: true,
+    };
 
     {
         let case = TursoRestartHarness::start_live_token4ai_provider(
@@ -283,10 +301,11 @@ pub(crate) fn run_supabase_live_token4ai_provider(
             provider_base_url,
             provider_model,
             provider_api_key,
+            &fixture,
         )?;
         case.expect_storage_status()?;
-        case.expect_live_token4ai_completion(&resource_id, provider_model)?;
-        case.expect_live_token4ai_metering_usage(&resource_id, provider_model)?;
+        case.expect_live_token4ai_completion(&resource_id, provider_model, &client_auth)?;
+        case.expect_live_token4ai_metering_usage(&resource_id, provider_model, &fixture.client_id)?;
     }
 
     {
@@ -296,12 +315,14 @@ pub(crate) fn run_supabase_live_token4ai_provider(
             provider_base_url,
             provider_model,
             provider_api_key,
+            &fixture,
             StorageMigrationMode::ValidateOnly,
         )?;
         case.expect_storage_status()?;
-        case.expect_live_token4ai_metering_usage(&resource_id, provider_model)?;
+        case.expect_live_token4ai_metering_usage(&resource_id, provider_model, &fixture.client_id)?;
     }
 
+    schema.finish()?;
     println!("supabase-live-token4ai-provider scenario passed");
     Ok(())
 }
@@ -454,6 +475,8 @@ pub(crate) fn run_supabase_migration(args: &LocalArgs) -> Result<()> {
                     mode: "require",
                     ca_cert_path: None,
                 },
+                schema: "ferrogate_control",
+                live: false,
             },
             false,
             false,
@@ -658,6 +681,8 @@ fn run_control_plane_supabase_restart(
     ferrogate_bin: &Path,
     supabase_dsn: &str,
     tls: PostgresRestartTls<'_>,
+    schema: &str,
+    live: bool,
     resource_prefix: &str,
     verify_deleted_after_restart: bool,
 ) -> Result<()> {
@@ -666,6 +691,8 @@ fn run_control_plane_supabase_restart(
         ControlPlaneRestartStorage::Supabase {
             dsn: supabase_dsn,
             tls,
+            schema,
+            live,
         },
         resource_prefix,
         verify_deleted_after_restart,
@@ -1291,10 +1318,50 @@ pub(crate) enum ControlPlaneRestartStorage<'a> {
     Supabase {
         dsn: &'a str,
         tls: PostgresRestartTls<'a>,
+        schema: &'a str,
+        live: bool,
     },
 }
 
+pub(crate) struct LiveToken4aiFixture {
+    client_id: String,
+    client_secret: String,
+    tenant_id: String,
+    project_id: String,
+}
+
+impl LiveToken4aiFixture {
+    fn new(run_id: &str) -> Self {
+        Self {
+            client_id: format!("token4ai-client-{run_id}"),
+            client_secret: format!("token4ai-client-secret-{run_id}"),
+            tenant_id: format!("token4ai-tenant-{run_id}"),
+            project_id: format!("token4ai-project-{run_id}"),
+        }
+    }
+
+    fn authorization_header(&self) -> String {
+        format!("Authorization: Bearer {}", self.client_secret)
+    }
+}
+
+fn live_token4ai_evidence_matches(value: &Value, client_id: &str) -> bool {
+    value["api_key_id"]
+        .as_str()
+        .or_else(|| value["tenant"]["api_key_id"].as_str())
+        == Some(client_id)
+        && value["logical_model"] == "live-chat"
+        && value["provider"] == "token4ai"
+}
+
 impl ControlPlaneRestartStorage<'_> {
+    fn readiness_timeout(self) -> Duration {
+        match self {
+            Self::Supabase { live: true, .. } => Duration::from_secs(180),
+            Self::Supabase { live: false, .. } | Self::Postgres { .. } => Duration::from_secs(60),
+        }
+    }
+
     pub(crate) fn supports_durable_metering(self) -> bool {
         matches!(
             self,
@@ -1354,7 +1421,7 @@ impl ControlPlaneRestartStorage<'_> {
                     migration_mode = migration_mode.as_str()
                 )
             }
-            ControlPlaneRestartStorage::Supabase { tls, .. } => {
+            ControlPlaneRestartStorage::Supabase { tls, schema, .. } => {
                 let ca_cert_path = tls
                     .ca_cert_path
                     .map(|path| {
@@ -1376,12 +1443,13 @@ impl ControlPlaneRestartStorage<'_> {
   postgres_tls_mode: {tls_mode}{ca_cert_path}
   postgres_connect_timeout_secs: 5
   postgres_statement_timeout_millis: 30000
-  postgres_schema: ferrogate_control
+  postgres_schema: {schema}
   postgres_search_path:
     - public
   migration_mode: {migration_mode}"#,
                     tls_mode = tls.mode,
                     ca_cert_path = ca_cert_path,
+                    schema = schema,
                     migration_mode = migration_mode.as_str()
                 )
             }
@@ -1475,6 +1543,7 @@ api_keys:
         gateway_addr: &str,
         provider_base_url: &str,
         provider_model: &str,
+        fixture: &LiveToken4aiFixture,
         migration_mode: StorageMigrationMode,
     ) -> String {
         format!(
@@ -1497,16 +1566,16 @@ models:
       - chat
 
 api_keys:
-  - id: client
+  - id: "{client_id}"
     name: Live Token4AI client
-    key: client-secret
+    key: "{client_secret}"
     scopes:
       - models.read
       - chat.completions
     allowed_models:
       - live-chat
-    organization_id: org_token4ai_live
-    project_id: project_gateway
+    organization_id: "{tenant_id}"
+    project_id: "{project_id}"
   - id: admin
     name: Admin
     key: admin-secret
@@ -1517,6 +1586,10 @@ api_keys:
             storage = self.storage_block_with_migration_mode(migration_mode),
             provider_base_url = provider_base_url,
             provider_model = provider_model,
+            client_id = fixture.client_id,
+            client_secret = fixture.client_secret,
+            tenant_id = fixture.tenant_id,
+            project_id = fixture.project_id,
         )
     }
 }
@@ -1543,6 +1616,7 @@ pub(crate) struct TursoRestartHarness {
     stderr: Option<std::process::ChildStderr>,
     expected_storage_provider: &'static str,
     expected_migration_mode: StorageMigrationMode,
+    readiness_timeout: Duration,
 }
 
 impl TursoRestartHarness {
@@ -1615,6 +1689,7 @@ impl TursoRestartHarness {
             stderr: None,
             expected_storage_provider: storage.provider_name(),
             expected_migration_mode: migration_mode,
+            readiness_timeout: storage.readiness_timeout(),
         };
         harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
@@ -1627,6 +1702,7 @@ impl TursoRestartHarness {
         provider_base_url: &str,
         provider_model: &str,
         provider_api_key: &str,
+        fixture: &LiveToken4aiFixture,
     ) -> Result<Self> {
         Self::start_live_token4ai_provider_with_migration_mode(
             ferrogate_bin,
@@ -1634,6 +1710,7 @@ impl TursoRestartHarness {
             provider_base_url,
             provider_model,
             provider_api_key,
+            fixture,
             StorageMigrationMode::Auto,
         )
     }
@@ -1644,6 +1721,7 @@ impl TursoRestartHarness {
         provider_base_url: &str,
         provider_model: &str,
         provider_api_key: &str,
+        fixture: &LiveToken4aiFixture,
         migration_mode: StorageMigrationMode,
     ) -> Result<Self> {
         if !ferrogate_bin.exists() {
@@ -1662,6 +1740,7 @@ impl TursoRestartHarness {
                 &gateway_addr,
                 provider_base_url,
                 provider_model,
+                fixture,
                 migration_mode,
             ),
         )?;
@@ -1690,6 +1769,7 @@ impl TursoRestartHarness {
             stderr: None,
             expected_storage_provider: storage.provider_name(),
             expected_migration_mode: migration_mode,
+            readiness_timeout: storage.readiness_timeout(),
         };
         harness.stderr = harness.gateway.stderr.take();
         harness.wait_for_gateway()?;
@@ -1699,7 +1779,7 @@ impl TursoRestartHarness {
     fn wait_for_gateway(&mut self) -> Result<()> {
         let started = Instant::now();
         let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(60) {
+        while started.elapsed() < self.readiness_timeout {
             if let Some(status) = self.gateway.try_wait()? {
                 let stderr = self.read_stderr();
                 assert_secret_redacted(&stderr);
@@ -1993,6 +2073,7 @@ impl TursoRestartHarness {
         &self,
         request_marker: &str,
         provider_model: &str,
+        client_auth: &str,
     ) -> Result<()> {
         let body = serde_json::json!({
             "model": "live-chat",
@@ -2008,7 +2089,7 @@ impl TursoRestartHarness {
         self.expect_json(
             "POST",
             "/v1/chat/completions",
-            &[CLIENT_AUTH, JSON_CONTENT],
+            &[client_auth, JSON_CONTENT],
             &body,
             200,
             |body| {
@@ -2038,8 +2119,10 @@ impl TursoRestartHarness {
         &self,
         request_marker: &str,
         provider_model: &str,
+        client_id: &str,
     ) -> Result<()> {
-        let event_total = self.live_token4ai_metering_total(request_marker, provider_model)?;
+        let event_total =
+            self.live_token4ai_metering_total(request_marker, provider_model, client_id)?;
         if event_total == 0 {
             bail!("live Token4AI metering total_tokens must be positive");
         }
@@ -2056,11 +2139,7 @@ impl TursoRestartHarness {
                     .context("usage aggregates response data must be an array")?;
                 let aggregate = aggregates
                     .iter()
-                    .find(|aggregate| {
-                        aggregate["api_key_id"] == "client"
-                            && aggregate["logical_model"] == "live-chat"
-                            && aggregate["provider"] == "token4ai"
-                    })
+                    .find(|aggregate| live_token4ai_evidence_matches(aggregate, client_id))
                     .with_context(|| {
                         format!(
                             "live Token4AI usage aggregate for marker {request_marker} was not found in {body}"
@@ -2077,6 +2156,7 @@ impl TursoRestartHarness {
         &self,
         request_marker: &str,
         provider_model: &str,
+        client_id: &str,
     ) -> Result<u64> {
         let mut total = 0;
         self.expect_json(
@@ -2092,11 +2172,7 @@ impl TursoRestartHarness {
                 let event = events
                     .iter()
                     .rev()
-                    .find(|event| {
-                        event["tenant"]["api_key_id"] == "client"
-                            && event["logical_model"] == "live-chat"
-                            && event["provider"] == "token4ai"
-                    })
+                    .find(|event| live_token4ai_evidence_matches(event, client_id))
                     .with_context(|| {
                         format!(
                             "live Token4AI metering event for marker {request_marker} was not found in {body}"
@@ -2564,3 +2640,7 @@ impl Drop for TursoRestartHarness {
         let _ = self.gateway.wait();
     }
 }
+
+#[cfg(test)]
+#[path = "storage_test.rs"]
+mod storage_test;
