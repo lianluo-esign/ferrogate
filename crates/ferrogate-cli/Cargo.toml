@@ -43,6 +43,7 @@ ferrogate-secrets = { path = "../ferrogate-secrets" }
 ferrogate-storage = { path = "../ferrogate-storage" }
 futures-util.workspace = true
 http.workspace = true
+hmac.workspace = true
 instant-acme.workspace = true
 matchit.workspace = true
 pingora.workspace = true
@@ -53,6 +54,7 @@ rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
 toml.workspace = true

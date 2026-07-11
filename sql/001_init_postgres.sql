@@ -438,6 +438,124 @@ CREATE INDEX IF NOT EXISTS idx_guardrail_policy_bindings_active
     ON guardrail_policy_bindings(active_revision)
     WHERE active_revision IS NOT NULL;
 
+-- Sanitized Guardrail evidence is stored separately from general audit logs.
+-- The overall row answers what the policy decided; child rows preserve every
+-- check verdict and detector failure without storing prompt or matched text.
+CREATE TABLE IF NOT EXISTS guardrail_evaluations (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    trace_id TEXT,
+    agent_run_id TEXT,
+    subject_id TEXT,
+    tenant_id TEXT,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    policy_revision BIGINT NOT NULL CHECK (policy_revision > 0),
+    verdict TEXT NOT NULL,
+    action TEXT NOT NULL,
+    enforcement_status TEXT NOT NULL,
+    occurred_at_unix BIGINT NOT NULL,
+    evaluation_json JSONB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_evaluations_request
+    ON guardrail_evaluations(request_id, occurred_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_evaluations_trace
+    ON guardrail_evaluations(trace_id, occurred_at_unix DESC)
+    WHERE trace_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_evaluations_agent_run
+    ON guardrail_evaluations(agent_run_id, occurred_at_unix DESC)
+    WHERE agent_run_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_evaluations_tenant_time
+    ON guardrail_evaluations(tenant_id, occurred_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_evaluations_policy_time
+    ON guardrail_evaluations(policy_id, policy_revision, occurred_at_unix DESC);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_evaluations_verdict_action
+    ON guardrail_evaluations(verdict, action, occurred_at_unix DESC);
+
+CREATE TABLE IF NOT EXISTS guardrail_check_evaluations (
+    id TEXT PRIMARY KEY,
+    evaluation_id TEXT NOT NULL REFERENCES guardrail_evaluations(id) ON DELETE CASCADE,
+    check_id TEXT NOT NULL,
+    detector_id TEXT NOT NULL,
+    detector_version TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    action TEXT NOT NULL,
+    enforcement_status TEXT NOT NULL,
+    error_kind TEXT,
+    check_json JSONB NOT NULL,
+    UNIQUE (evaluation_id, check_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_checks_evaluation
+    ON guardrail_check_evaluations(evaluation_id, check_id);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_checks_detector_verdict
+    ON guardrail_check_evaluations(detector_id, verdict);
+
+CREATE INDEX IF NOT EXISTS idx_guardrail_checks_error
+    ON guardrail_check_evaluations(error_kind)
+    WHERE error_kind IS NOT NULL;
+
+ALTER TABLE guardrail_evaluations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE guardrail_check_evaluations ENABLE ROW LEVEL SECURITY;
+
+-- These policies protect non-owner SQL/PostgREST roles. FerroGate currently
+-- connects with the schema owner/service role, and PostgreSQL table owners
+-- (and superusers) bypass ordinary RLS unless FORCE ROW LEVEL SECURITY is
+-- enabled. Owner-backed gateway access therefore still relies on the admin API
+-- authentication, tenant pinning, and database-backed RBAC checks.
+--
+-- `ferrogate.tenant_id` and `ferrogate.platform_mode` are trusted session
+-- context: connection middleware may set one tenant id, or explicitly set
+-- platform mode to `on`. Do not expose a direct SQL login that can change these
+-- custom settings to an untrusted tenant principal.
+DROP POLICY IF EXISTS guardrail_evaluations_tenant_scope ON guardrail_evaluations;
+CREATE POLICY guardrail_evaluations_tenant_scope ON guardrail_evaluations
+    FOR ALL
+    USING (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    )
+    WITH CHECK (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    );
+
+-- Check rows inherit their tenant boundary from the parent evaluation. The
+-- explicit parent predicate also prevents a tenant session from attaching a
+-- check to an evaluation owned by another tenant.
+DROP POLICY IF EXISTS guardrail_checks_tenant_scope ON guardrail_check_evaluations;
+CREATE POLICY guardrail_checks_tenant_scope ON guardrail_check_evaluations
+    FOR ALL
+    USING (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR EXISTS (
+            SELECT 1
+            FROM guardrail_evaluations AS parent
+            WHERE parent.id = guardrail_check_evaluations.evaluation_id
+              AND parent.tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+        )
+    )
+    WITH CHECK (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR EXISTS (
+            SELECT 1
+            FROM guardrail_evaluations AS parent
+            WHERE parent.id = guardrail_check_evaluations.evaluation_id
+              AND parent.tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+        )
+    );
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
     request_id TEXT,
@@ -1256,5 +1374,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (26, '026_guardrail_policy_revisions')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (27, '027_guardrail_evaluation_evidence')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

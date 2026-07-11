@@ -40,6 +40,13 @@ pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
 mod wallet;
 pub use wallet::{payment_method_id, StoredPaymentMethod, StoredWallet};
 
+mod guardrail_evidence;
+use guardrail_evidence::StoredGuardrailEvidence;
+pub use guardrail_evidence::{
+    GuardrailEvaluationQuery, GuardrailEvaluationQueryPage, GuardrailEvaluationRepository,
+    StoredGuardrailCheckEvaluation, StoredGuardrailEvaluation,
+};
+
 pub const DEFAULT_DURABLE_PROVIDER_ORDER: &[StorageProviderKind] =
     &[StorageProviderKind::Supabase, StorageProviderKind::Postgres];
 
@@ -298,8 +305,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 26;
-const POSTGRES_SCHEMA_NAME: &str = "026_guardrail_policy_revisions";
+const POSTGRES_SCHEMA_VERSION: u64 = 27;
+const POSTGRES_SCHEMA_NAME: &str = "027_guardrail_evaluation_evidence";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -3977,6 +3984,8 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "request_logs",
         "guardrail_policy_revisions",
         "guardrail_policy_bindings",
+        "guardrail_evaluations",
+        "guardrail_check_evaluations",
         "audit_events",
         "billing_metering_events",
         "usage_aggregates",
@@ -4039,6 +4048,8 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         ("request_logs", "request_json"),
         ("guardrail_policy_revisions", "policy_json"),
         ("guardrail_policy_bindings", "archived_revisions_json"),
+        ("guardrail_evaluations", "evaluation_json"),
+        ("guardrail_check_evaluations", "check_json"),
         ("audit_events", "audit_json"),
         ("api_keys", "scopes_json"),
     ];
@@ -4056,6 +4067,52 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         if data_type.as_deref() != Some("jsonb") {
             return Err(StorageError::Postgres(format!(
                 "required schema column {table}.{column} must be jsonb"
+            )));
+        }
+    }
+
+    for table in ["guardrail_evaluations", "guardrail_check_evaluations"] {
+        let row_level_security = client
+            .query_opt(
+                "SELECT class.relrowsecurity FROM pg_class AS class \
+                 JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace \
+                 WHERE namespace.nspname = current_schema() AND class.relname = $1",
+                &[&table],
+            )
+            .map_err(postgres_error)?
+            .map(|row| row.get::<_, bool>(0));
+        if row_level_security != Some(true) {
+            return Err(StorageError::Postgres(format!(
+                "required schema table {table} must enable row level security"
+            )));
+        }
+    }
+
+    for (table, policy) in [
+        (
+            "guardrail_evaluations",
+            "guardrail_evaluations_tenant_scope",
+        ),
+        (
+            "guardrail_check_evaluations",
+            "guardrail_checks_tenant_scope",
+        ),
+    ] {
+        let policy_is_complete = client
+            .query_opt(
+                "SELECT qual IS NOT NULL AND btrim(qual) <> '' \
+                        AND with_check IS NOT NULL AND btrim(with_check) <> '' \
+                 FROM pg_policies \
+                 WHERE schemaname = current_schema() \
+                   AND tablename = $1 \
+                   AND policyname = $2",
+                &[&table, &policy],
+            )
+            .map_err(postgres_error)?
+            .map(|row| row.get::<_, bool>(0));
+        if policy_is_complete != Some(true) {
+            return Err(StorageError::Postgres(format!(
+                "required tenant RLS policy {policy} on {table} must define USING and WITH CHECK"
             )));
         }
     }
@@ -4105,6 +4162,15 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_request_logs_model_provider_started",
         "idx_guardrail_policy_revisions_created",
         "idx_guardrail_policy_bindings_active",
+        "idx_guardrail_evaluations_request",
+        "idx_guardrail_evaluations_trace",
+        "idx_guardrail_evaluations_agent_run",
+        "idx_guardrail_evaluations_tenant_time",
+        "idx_guardrail_evaluations_policy_time",
+        "idx_guardrail_evaluations_verdict_action",
+        "idx_guardrail_checks_evaluation",
+        "idx_guardrail_checks_detector_verdict",
+        "idx_guardrail_checks_error",
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
         "idx_usage_aggregates_tenant_model_provider",
@@ -6718,6 +6784,8 @@ pub struct RuntimeStorageRepositories {
     control_plane: RuntimeControlPlaneBackend,
     request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
     audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
+    guardrail_evidence: Mutex<InMemoryAppendRepository<StoredGuardrailEvidence>>,
+    guardrail_evaluation_retention_records: Mutex<usize>,
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
     agent_runs: Mutex<InMemoryRepository<StoredAgentRun>>,
     agent_run_events: Mutex<InMemoryAppendRepository<StoredAgentRunEvent>>,
@@ -6744,6 +6812,7 @@ pub struct RuntimeStorageRepositories {
 struct RuntimeStorageRepositorySets {
     request_logs: Mutex<InMemoryAppendRepository<StoredRequestLog>>,
     audit_events: Mutex<InMemoryAppendRepository<StoredAuditEvent>>,
+    guardrail_evidence: Mutex<InMemoryAppendRepository<StoredGuardrailEvidence>>,
     usage_aggregates: Mutex<InMemoryRepository<StoredUsageAggregate>>,
     agent_runs: Mutex<InMemoryRepository<StoredAgentRun>>,
     agent_run_events: Mutex<InMemoryAppendRepository<StoredAgentRunEvent>>,
@@ -6774,6 +6843,9 @@ impl RuntimeStorageRepositorySets {
                 request_log_retention_records,
             )),
             audit_events: Mutex::new(InMemoryAppendRepository::with_retention_limit(
+                audit_event_retention_records,
+            )),
+            guardrail_evidence: Mutex::new(InMemoryAppendRepository::with_retention_limit(
                 audit_event_retention_records,
             )),
             usage_aggregates: Mutex::new(InMemoryRepository::new()),
@@ -6812,6 +6884,8 @@ impl RuntimeStorageRepositories {
             control_plane: RuntimeControlPlaneBackend::Memory(Box::new(Mutex::new(control_plane))),
             request_logs: repositories.request_logs,
             audit_events: repositories.audit_events,
+            guardrail_evidence: repositories.guardrail_evidence,
+            guardrail_evaluation_retention_records: Mutex::new(audit_event_retention_records),
             usage_aggregates: repositories.usage_aggregates,
             agent_runs: repositories.agent_runs,
             agent_run_events: repositories.agent_run_events,
@@ -6892,6 +6966,8 @@ impl RuntimeStorageRepositories {
             control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
             request_logs: repositories.request_logs,
             audit_events: repositories.audit_events,
+            guardrail_evidence: repositories.guardrail_evidence,
+            guardrail_evaluation_retention_records: Mutex::new(audit_event_retention_records),
             usage_aggregates: repositories.usage_aggregates,
             agent_runs: repositories.agent_runs,
             agent_run_events: repositories.agent_run_events,
@@ -6964,6 +7040,8 @@ impl RuntimeStorageRepositories {
             control_plane: RuntimeControlPlaneBackend::Postgres(Arc::new(control_plane)),
             request_logs: repositories.request_logs,
             audit_events: repositories.audit_events,
+            guardrail_evidence: repositories.guardrail_evidence,
+            guardrail_evaluation_retention_records: Mutex::new(0),
             usage_aggregates: repositories.usage_aggregates,
             agent_runs: repositories.agent_runs,
             agent_run_events: repositories.agent_run_events,

@@ -160,6 +160,11 @@ fn build_route_group_router() -> Router<RouteGroup> {
     insert("/admin/v1/request-logs", RouteGroup::AdminRequestLog);
     insert("/admin/v1/request-log-exports", RouteGroup::AdminRequestLog);
     insert("/admin/v1/audit-events", RouteGroup::AdminRequestLog);
+    insert(
+        "/admin/v1/guardrail-evaluations",
+        RouteGroup::AdminRequestLog,
+    );
+    insert("/admin/v1/investigations", RouteGroup::AdminRequestLog);
 
     insert("/admin/v1/config/validate", RouteGroup::AdminConfigOps);
     insert("/admin/v1/config/reload", RouteGroup::AdminConfigOps);
@@ -580,6 +585,26 @@ impl FerroGateway {
         if req.path == "/admin/v1/audit-events" {
             self.handle_admin_audit_events(session, ctx, &req.headers, req.query.as_deref())
                 .await?;
+            return Ok(true);
+        }
+        if req.path == "/admin/v1/guardrail-evaluations" {
+            self.handle_admin_guardrail_evaluations(
+                session,
+                ctx,
+                &req.headers,
+                req.query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        if req.path == "/admin/v1/investigations" {
+            self.handle_admin_guardrail_investigation(
+                session,
+                ctx,
+                &req.headers,
+                req.query.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         Ok(false)

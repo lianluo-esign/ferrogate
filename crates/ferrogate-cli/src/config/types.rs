@@ -1107,6 +1107,8 @@ pub(crate) struct AnalyticsConfig {
     pub(crate) request_log_retention_records: usize,
     #[serde(default = "default_audit_event_retention_records")]
     pub(crate) audit_event_retention_records: usize,
+    #[serde(default = "default_guardrail_evaluation_retention_records")]
+    pub(crate) guardrail_evaluation_retention_records: usize,
     #[serde(default = "default_billing_event_retention_records")]
     pub(crate) billing_event_retention_records: usize,
 }
@@ -1646,6 +1648,10 @@ fn default_audit_event_retention_records() -> usize {
     10_000
 }
 
+fn default_guardrail_evaluation_retention_records() -> usize {
+    10_000
+}
+
 fn default_billing_event_retention_records() -> usize {
     10_000
 }
@@ -1698,6 +1704,8 @@ impl Default for AnalyticsConfig {
             queue_capacity: default_analytics_queue_capacity(),
             request_log_retention_records: default_request_log_retention_records(),
             audit_event_retention_records: default_audit_event_retention_records(),
+            guardrail_evaluation_retention_records: default_guardrail_evaluation_retention_records(
+            ),
             billing_event_retention_records: default_billing_event_retention_records(),
         }
     }

@@ -508,6 +508,11 @@ impl Config {
         if self.analytics.audit_event_retention_records == 0 {
             bail!("field analytics.audit_event_retention_records: must be greater than zero");
         }
+        if self.analytics.guardrail_evaluation_retention_records == 0 {
+            bail!(
+                "field analytics.guardrail_evaluation_retention_records: must be greater than zero"
+            );
+        }
         if self.analytics.billing_event_retention_records == 0 {
             bail!("field analytics.billing_event_retention_records: must be greater than zero");
         }

@@ -7,6 +7,7 @@
 
 use super::*;
 use futures_util::future::join_all;
+use hmac::{Hmac, Mac};
 
 impl AppState {
     pub(crate) fn guardrail_policy_revision_views(
@@ -292,6 +293,7 @@ impl AppState {
             provider: context.provider,
         };
         let mut enforcement = None;
+        let mut pending_evidence = Vec::new();
         for policy in self
             .guardrail_policies
             .iter()
@@ -301,6 +303,19 @@ impl AppState {
                 && policy.revision.streaming == PolicyStreamingMode::RejectStreaming
             {
                 let shadow = policy.revision.mode == PolicyMode::Shadow;
+                let evidence_stage = policy
+                    .checks
+                    .iter()
+                    .find(|check| check.enabled && check.stage == detector_stage)
+                    .map(|check| check.stage)
+                    .or_else(|| {
+                        policy
+                            .checks
+                            .iter()
+                            .find(|check| check.enabled)
+                            .map(|check| check.stage)
+                    })
+                    .unwrap_or(detector_stage);
                 self.record_guardrail_audit_event(AdminAuditEventDraft {
                     request_id: context.request_id.to_string(),
                     trace_id: context.trace_id.map(str::to_string),
@@ -317,26 +332,39 @@ impl AppState {
                         .to_string(),
                 })
                 .await;
-                if !shadow {
-                    enforcement = Some(GuardrailMatch {
-                        rule_id: policy.revision.policy_id.clone(),
-                        rule_name: policy.revision.name.clone(),
-                        policy_revision: policy.revision.revision,
-                        check_id: None,
-                        effect: GuardrailEffect::Deny,
-                        matched_text: String::new(),
-                        segment_id: None,
-                        byte_start: None,
-                        byte_end: None,
-                        redaction_regex: None,
-                        content_patches: Vec::new(),
-                        code: "guardrail_streaming_unsupported".to_string(),
-                        message: format!(
-                            "guardrail policy '{}' does not allow streaming",
-                            policy.revision.name
-                        ),
-                    });
+                let candidate = (!shadow).then(|| GuardrailMatch {
+                    rule_id: policy.revision.policy_id.clone(),
+                    rule_name: policy.revision.name.clone(),
+                    policy_revision: policy.revision.revision,
+                    check_id: None,
+                    effect: GuardrailEffect::Deny,
+                    matched_text: String::new(),
+                    segment_id: None,
+                    byte_start: None,
+                    byte_end: None,
+                    redaction_regex: None,
+                    content_patches: Vec::new(),
+                    code: "guardrail_streaming_unsupported".to_string(),
+                    message: format!(
+                        "guardrail policy '{}' does not allow streaming",
+                        policy.revision.name
+                    ),
+                });
+                if let Some(candidate) = candidate.clone() {
+                    merge_guardrail_enforcement(&mut enforcement, candidate);
                 }
+                pending_evidence.push(PendingGuardrailEvidence {
+                    policy: policy.clone(),
+                    stage: evidence_stage,
+                    aggregate: AggregateOutcome::Fail,
+                    actions: policy.revision.on_fail.clone(),
+                    effective_shadow: shadow,
+                    not_enforced: false,
+                    evaluations: Vec::new(),
+                    latency: Duration::ZERO,
+                    candidate,
+                    synthetic_check: Some(("skipped", "streaming_unsupported")),
+                });
                 continue;
             }
             let stage_checks = policy
@@ -347,6 +375,7 @@ impl AppState {
             if !stage_checks.iter().any(|check| check.enabled) {
                 continue;
             }
+            let evaluation_started = Instant::now();
             let deadline = Instant::now() + Duration::from_millis(policy.revision.deadline_ms);
             let evaluations = match policy.revision.execution {
                 PolicyExecution::Sequential => {
@@ -442,21 +471,52 @@ impl AppState {
                 },
             })
             .await;
-            if effective_shadow {
-                continue;
+            let candidate = (!effective_shadow)
+                .then(|| guardrail_enforcement(policy, &evaluations, aggregate, actions))
+                .flatten();
+            if let Some(candidate) = candidate.clone() {
+                merge_guardrail_enforcement(&mut enforcement, candidate);
             }
-            if let Some(candidate) = guardrail_enforcement(policy, &evaluations, aggregate, actions)
-            {
-                let candidate_is_block = candidate.effect == GuardrailEffect::Deny;
-                let current_is_block =
-                    enforcement
-                        .as_ref()
-                        .is_some_and(|current: &GuardrailMatch| {
-                            current.effect == GuardrailEffect::Deny
-                        });
-                if enforcement.is_none() || (candidate_is_block && !current_is_block) {
-                    enforcement = Some(candidate);
-                }
+            pending_evidence.push(PendingGuardrailEvidence {
+                policy: policy.clone(),
+                stage: detector_stage,
+                aggregate,
+                actions: actions.clone(),
+                effective_shadow,
+                not_enforced,
+                evaluations,
+                latency: evaluation_started.elapsed(),
+                candidate,
+                synthetic_check: None,
+            });
+        }
+        for pending in pending_evidence {
+            let applied = pending.candidate.as_ref().is_some_and(|candidate| {
+                enforcement.as_ref().is_some_and(|selected| {
+                    selected.rule_id == candidate.rule_id
+                        && selected.policy_revision == candidate.policy_revision
+                        && selected.effect == candidate.effect
+                        && selected.check_id == candidate.check_id
+                })
+            });
+            let evidence_accepted = self
+                .record_guardrail_evaluation(
+                    &pending.policy,
+                    &context,
+                    pending.stage,
+                    pending.aggregate,
+                    &pending.actions,
+                    pending.effective_shadow,
+                    pending.not_enforced,
+                    &pending.evaluations,
+                    pending.latency,
+                    pending.candidate.as_ref(),
+                    applied,
+                    pending.synthetic_check,
+                )
+                .await;
+            if !evidence_accepted {
+                enforcement = Some(guardrail_evidence_unavailable_match(&pending.policy));
             }
         }
         enforcement
@@ -525,9 +585,9 @@ impl AppState {
                     .iter()
                     .any(|check| check.enabled && check.stage == DetectorStage::Response)
             })
-            .map(|policy| policy.revision.immutable_id())
+            .cloned()
             .collect::<Vec<_>>();
-        for target in policies {
+        for policy in policies {
             self.record_guardrail_audit_event(AdminAuditEventDraft {
                 request_id: context.request_id.to_string(),
                 trace_id: context.trace_id.map(str::to_string),
@@ -538,12 +598,27 @@ impl AppState {
                 actor_api_key_id: context.actor_api_key_id.map(str::to_string),
                 tenant: context.tenant.clone(),
                 action: "guardrail.policy_evaluate".to_string(),
-                target,
+                target: policy.revision.immutable_id(),
                 outcome: "not_enforced".to_string(),
                 message:
                     "streaming shadow capture exceeded its byte limit; evaluation was not enforced"
                         .to_string(),
             })
+            .await;
+            self.record_guardrail_evaluation(
+                &policy,
+                &context,
+                DetectorStage::Response,
+                AggregateOutcome::Error,
+                &policy.revision.on_error,
+                true,
+                true,
+                &[],
+                Duration::ZERO,
+                None,
+                false,
+                Some(("error", "shadow_capture_overflow")),
+            )
             .await;
         }
     }
@@ -580,6 +655,7 @@ impl AppState {
             .cloned()
             .collect::<Vec<_>>();
         let mut enforcement = None;
+        let mut pending_evidence = Vec::new();
         for policy in policies {
             let selected_action = policy.revision.on_error.iter().find(|action| {
                 matches!(
@@ -604,30 +680,54 @@ impl AppState {
                 ),
             })
             .await;
-            if enforcement.is_none() {
-                if let Some(action) = selected_action {
-                    enforcement = Some(GuardrailMatch {
-                        rule_id: policy.revision.policy_id.clone(),
-                        rule_name: policy.revision.name.clone(),
-                        policy_revision: policy.revision.revision,
-                        check_id: None,
-                        effect: GuardrailEffect::Deny,
-                        matched_text: String::new(),
-                        segment_id: None,
-                        byte_start: None,
-                        byte_end: None,
-                        redaction_regex: None,
-                        content_patches: Vec::new(),
-                        code: action
-                            .code
-                            .clone()
-                            .unwrap_or_else(|| error_code.to_string()),
-                        message: action.message.clone().unwrap_or_else(|| {
-                            "guarded streaming output could not be evaluated safely".to_string()
-                        }),
-                    });
-                }
+            let candidate = selected_action.map(|action| GuardrailMatch {
+                rule_id: policy.revision.policy_id.clone(),
+                rule_name: policy.revision.name.clone(),
+                policy_revision: policy.revision.revision,
+                check_id: None,
+                effect: GuardrailEffect::Deny,
+                matched_text: String::new(),
+                segment_id: None,
+                byte_start: None,
+                byte_end: None,
+                redaction_regex: None,
+                content_patches: Vec::new(),
+                code: action
+                    .code
+                    .clone()
+                    .unwrap_or_else(|| error_code.to_string()),
+                message: action.message.clone().unwrap_or_else(|| {
+                    "guarded streaming output could not be evaluated safely".to_string()
+                }),
+            });
+            if let Some(candidate) = candidate.clone() {
+                merge_guardrail_enforcement(&mut enforcement, candidate);
             }
+            pending_evidence.push((policy, candidate));
+        }
+        for (policy, candidate) in pending_evidence {
+            let applied = candidate.as_ref().is_some_and(|candidate| {
+                enforcement.as_ref().is_some_and(|selected| {
+                    selected.rule_id == candidate.rule_id
+                        && selected.policy_revision == candidate.policy_revision
+                        && selected.effect == candidate.effect
+                })
+            });
+            self.record_guardrail_evaluation(
+                &policy,
+                &context,
+                DetectorStage::Response,
+                AggregateOutcome::Error,
+                &policy.revision.on_error,
+                false,
+                false,
+                &[],
+                Duration::ZERO,
+                candidate.as_ref(),
+                applied,
+                Some(("error", error_code)),
+            )
+            .await;
         }
         enforcement
     }
@@ -676,14 +776,346 @@ impl AppState {
     async fn record_guardrail_audit_event(&self, event: AdminAuditEventDraft) {
         if self.storage_status().durable {
             let state = self.clone();
-            if let Err(error) =
-                tokio::task::spawn_blocking(move || state.record_admin_audit_event(event)).await
-            {
-                warn!(error = %error, "guardrail audit persistence task failed");
-            }
+            let Ok(permit) = Arc::clone(&self.guardrail_evidence_permits).try_acquire_owned()
+            else {
+                if let Ok(mut metrics) = self.metrics.lock() {
+                    metrics.record_guardrail_evidence_persistence_failure();
+                }
+                warn!("guardrail audit persistence queue is full");
+                return;
+            };
+            let _task = tokio::task::spawn_blocking(move || {
+                state.record_admin_audit_event(event);
+                drop(permit);
+            });
         } else {
             self.record_admin_audit_event(event);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_guardrail_evaluation(
+        &self,
+        policy: &GuardrailPolicyRuntime,
+        context: &GuardrailEvaluationContext<'_>,
+        stage: DetectorStage,
+        aggregate: AggregateOutcome,
+        actions: &[PolicyAction],
+        effective_shadow: bool,
+        not_enforced: bool,
+        evaluations: &[GuardrailCheckEvaluation],
+        latency: Duration,
+        candidate: Option<&GuardrailMatch>,
+        applied: bool,
+        synthetic_check: Option<(&str, &str)>,
+    ) -> bool {
+        let action = candidate
+            .map(|candidate| match candidate.effect {
+                GuardrailEffect::Deny => "block",
+                GuardrailEffect::Redact => "redact",
+            })
+            .unwrap_or_else(|| guardrail_evidence_action(actions));
+        let enforcement_status = if not_enforced {
+            "not_enforced"
+        } else if effective_shadow {
+            "shadow_only"
+        } else if candidate.is_some() && !applied {
+            "not_enforced"
+        } else {
+            "enforced"
+        };
+        let verdict = guardrail_aggregate_outcome_name(aggregate);
+        let evaluation_id =
+            guardrail_evaluation_id(context.request_id, &policy.revision.immutable_id(), stage);
+        let mut finding_category_counts = BTreeMap::new();
+        let mut finding_count = 0_u64;
+        for evaluation in evaluations {
+            finding_count = finding_count.saturating_add(evaluation.finding_count);
+            merge_finding_category_counts(
+                &mut finding_category_counts,
+                &evaluation.finding_category_counts,
+            );
+        }
+        let (scope_type, scope_id) = guardrail_evidence_scope(context.tenant);
+        let evaluation = StoredGuardrailEvaluation {
+            id: evaluation_id.clone(),
+            request_id: context.request_id.to_string(),
+            trace_id: context.trace_id.map(str::to_string),
+            agent_run_id: context.agent_run_id.map(str::to_string),
+            subject_id: context.actor_api_key_id.map(str::to_string),
+            tenant: context.tenant.clone(),
+            scope_type,
+            scope_id,
+            target: guardrail_evidence_target(context.model, context.provider),
+            protocol: guardrail_protocol_name(context.envelope.protocol).to_string(),
+            stage: detector_stage_name(stage).to_string(),
+            mode: guardrail_policy_mode_name(policy.revision.mode).to_string(),
+            policy_id: policy.revision.policy_id.clone(),
+            policy_revision: policy.revision.revision,
+            verdict: verdict.to_string(),
+            action: action.to_string(),
+            enforcement_status: enforcement_status.to_string(),
+            latency_ms: latency.as_millis().min(u128::from(u64::MAX)) as u64,
+            finding_category_counts,
+            finding_count,
+            transformed: applied && action == "redact" && aggregate == AggregateOutcome::Fail,
+            input_fingerprint: guardrail_envelope_fingerprint(
+                context.envelope,
+                context.tenant.organization_id.as_deref(),
+                self.guardrail_evidence_hmac_key.as_deref(),
+            ),
+            occurred_at_unix: now_unix_seconds().unwrap_or_default(),
+        };
+        let checks = if let Some((verdict, error_kind)) = synthetic_check {
+            policy
+                .checks
+                .iter()
+                .filter(|check| check.enabled && check.stage == stage)
+                .map(|check| StoredGuardrailCheckEvaluation {
+                    id: format!("{evaluation_id}/{}", check.id),
+                    evaluation_id: evaluation_id.clone(),
+                    check_id: check.id.clone(),
+                    detector_id: check.detector_id.clone(),
+                    detector_version: "not_executed".to_string(),
+                    config_digest: check.detector_config_digest.clone(),
+                    verdict: verdict.to_string(),
+                    action: action.to_string(),
+                    enforcement_status: enforcement_status.to_string(),
+                    latency_ms: 0,
+                    finding_category_counts: BTreeMap::new(),
+                    finding_count: 0,
+                    transformed: false,
+                    used_fallback: false,
+                    error_kind: Some(sanitized_guardrail_evidence_token(
+                        error_kind,
+                        "streaming_error",
+                    )),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            evaluations
+                .iter()
+                .map(|result| {
+                    let runtime = policy
+                        .checks
+                        .iter()
+                        .find(|check| check.id == result.check_id);
+                    StoredGuardrailCheckEvaluation {
+                        id: format!("{evaluation_id}/{}", result.check_id),
+                        evaluation_id: evaluation_id.clone(),
+                        check_id: result.check_id.clone(),
+                        detector_id: runtime
+                            .map(|check| check.detector_id.clone())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        detector_version: result.detector_version.clone(),
+                        config_digest: runtime
+                            .map(|check| check.detector_config_digest.clone())
+                            .unwrap_or_else(|| "sha256:unknown".to_string()),
+                        verdict: guardrail_check_outcome_name(result.outcome).to_string(),
+                        action: action.to_string(),
+                        enforcement_status: enforcement_status.to_string(),
+                        latency_ms: result.latency_ms,
+                        finding_category_counts: result.finding_category_counts.clone(),
+                        finding_count: result.finding_count,
+                        transformed: applied
+                            && action == "redact"
+                            && candidate.and_then(|candidate| candidate.check_id.as_ref())
+                                == Some(&result.check_id)
+                            && result.outcome == CheckOutcome::Fail,
+                        used_fallback: result.used_fallback,
+                        error_kind: result
+                            .detector_error
+                            .as_ref()
+                            .map(|error| error.kind.as_str().to_string()),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_guardrail_evaluation(verdict, enforcement_status);
+        }
+        if self.storage_status().durable {
+            let Ok(permit) = Arc::clone(&self.guardrail_evidence_permits).try_acquire_owned()
+            else {
+                if let Ok(mut metrics) = self.metrics.lock() {
+                    metrics.record_guardrail_evidence_persistence_failure();
+                }
+                warn!(
+                    request_id = %context.request_id,
+                    policy_revision = %policy.revision.immutable_id(),
+                    "guardrail evaluation persistence queue is full; failing closed"
+                );
+                return false;
+            };
+            let repositories = Arc::clone(&self.repositories);
+            let metrics = Arc::clone(&self.metrics);
+            let request_id = context.request_id.to_string();
+            let policy_revision = policy.revision.immutable_id();
+            let _task = tokio::task::spawn_blocking(move || {
+                let persistence = repositories
+                    .append_guardrail_evaluation(evaluation, checks)
+                    .map_err(|error| anyhow::anyhow!("{error}"));
+                drop(permit);
+                if let Err(error) = persistence {
+                    if let Ok(mut metrics) = metrics.lock() {
+                        metrics.record_guardrail_evidence_persistence_failure();
+                    }
+                    warn!(
+                        request_id = %request_id,
+                        policy_revision = %policy_revision,
+                        error = %error,
+                        "guardrail evaluation evidence persistence failed"
+                    );
+                }
+            });
+            return true;
+        }
+        if let Err(error) = self
+            .repositories
+            .append_guardrail_evaluation(evaluation, checks)
+        {
+            if let Ok(mut metrics) = self.metrics.lock() {
+                metrics.record_guardrail_evidence_persistence_failure();
+            }
+            warn!(
+                request_id = %context.request_id,
+                policy_revision = %policy.revision.immutable_id(),
+                error = %error,
+                "guardrail evaluation evidence persistence failed"
+            );
+            return false;
+        }
+        true
+    }
+}
+
+fn guardrail_evaluation_id(
+    request_id: &str,
+    policy_revision: &str,
+    stage: DetectorStage,
+) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "guardrail-eval-{request_id}-{policy_revision}-{}-{nanos}",
+        detector_stage_name(stage)
+    )
+}
+
+fn guardrail_evidence_scope(tenant: &ferrogate_core::TenantContext) -> (String, String) {
+    if let Some(api_key_id) = &tenant.api_key_id {
+        ("api_key".to_string(), api_key_id.clone())
+    } else if let Some(workspace_id) = &tenant.workspace_id {
+        ("workspace".to_string(), workspace_id.clone())
+    } else if let Some(project_id) = &tenant.project_id {
+        ("project".to_string(), project_id.clone())
+    } else if let Some(organization_id) = &tenant.organization_id {
+        ("tenant".to_string(), organization_id.clone())
+    } else {
+        ("global".to_string(), "global".to_string())
+    }
+}
+
+fn guardrail_evidence_target(model: Option<&str>, provider: Option<&str>) -> String {
+    format!(
+        "model={};provider={}",
+        model.unwrap_or("unknown"),
+        provider.unwrap_or("unknown")
+    )
+}
+
+fn guardrail_evidence_action(actions: &[PolicyAction]) -> &'static str {
+    if actions
+        .iter()
+        .any(|action| action.kind == GuardrailActionKind::Block)
+    {
+        "block"
+    } else if actions
+        .iter()
+        .any(|action| action.kind == GuardrailActionKind::Redact)
+    {
+        "redact"
+    } else if actions
+        .iter()
+        .any(|action| action.kind == GuardrailActionKind::Record)
+    {
+        "record"
+    } else {
+        "allow"
+    }
+}
+
+fn guardrail_aggregate_outcome_name(outcome: AggregateOutcome) -> &'static str {
+    match outcome {
+        AggregateOutcome::Pass => "pass",
+        AggregateOutcome::Fail => "fail",
+        AggregateOutcome::Error => "error",
+    }
+}
+
+fn guardrail_check_outcome_name(outcome: CheckOutcome) -> &'static str {
+    match outcome {
+        CheckOutcome::Pass => "pass",
+        CheckOutcome::Fail => "fail",
+        CheckOutcome::Error => "error",
+        CheckOutcome::Disabled => "skipped",
+    }
+}
+
+fn detector_stage_name(stage: DetectorStage) -> &'static str {
+    match stage {
+        DetectorStage::Request => "request",
+        DetectorStage::Response => "response",
+    }
+}
+
+fn guardrail_protocol_name(protocol: ferrogate_guardrails::GuardrailProtocol) -> &'static str {
+    match protocol {
+        ferrogate_guardrails::GuardrailProtocol::ChatCompletions => "chat_completions",
+        ferrogate_guardrails::GuardrailProtocol::Responses => "responses",
+    }
+}
+
+fn guardrail_policy_mode_name(mode: PolicyMode) -> &'static str {
+    match mode {
+        PolicyMode::Enforce => "enforce",
+        PolicyMode::Shadow => "shadow",
+    }
+}
+
+fn guardrail_envelope_fingerprint(
+    envelope: &ferrogate_guardrails::GuardrailEnvelope,
+    tenant_id: Option<&str>,
+    key: Option<&[u8]>,
+) -> String {
+    let Some(key) = key else {
+        return "hmac-sha256:unavailable".to_string();
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(key) else {
+        return "hmac-sha256:unavailable".to_string();
+    };
+    mac.update(tenant_id.unwrap_or("platform").as_bytes());
+    mac.update(&[0]);
+    mac.update(guardrail_protocol_name(envelope.protocol).as_bytes());
+    mac.update(&[0]);
+    mac.update(detector_stage_name(envelope.stage).as_bytes());
+    for segment in &envelope.segments {
+        mac.update(&[0]);
+        mac.update(segment.fingerprint.as_bytes());
+    }
+    format!("hmac-sha256:{:x}", mac.finalize().into_bytes())
+}
+
+fn merge_finding_category_counts(
+    target: &mut BTreeMap<String, u64>,
+    source: &BTreeMap<String, u64>,
+) {
+    for (category, count) in source {
+        let current = target.entry(category.clone()).or_insert(0);
+        *current = current.saturating_add(*count);
     }
 }
 
@@ -699,6 +1131,24 @@ struct GuardrailCheckEvaluation {
     content_patches: Vec<ContentPatch>,
     detector_error: Option<DetectorError>,
     used_fallback: bool,
+    detector_version: String,
+    latency_ms: u64,
+    finding_category_counts: BTreeMap<String, u64>,
+    finding_count: u64,
+}
+
+#[derive(Debug)]
+struct PendingGuardrailEvidence {
+    policy: GuardrailPolicyRuntime,
+    stage: DetectorStage,
+    aggregate: AggregateOutcome,
+    actions: Vec<PolicyAction>,
+    effective_shadow: bool,
+    not_enforced: bool,
+    evaluations: Vec<GuardrailCheckEvaluation>,
+    latency: Duration,
+    candidate: Option<GuardrailMatch>,
+    synthetic_check: Option<(&'static str, &'static str)>,
 }
 
 async fn evaluate_guardrail_check(
@@ -710,7 +1160,8 @@ async fn evaluate_guardrail_check(
     if !check.enabled {
         return GuardrailCheckEvaluation::disabled(&check.id);
     }
-    match &check.detector {
+    let started = Instant::now();
+    let mut evaluation = match &check.detector {
         GuardrailDetectorRuntime::Local(detector) => {
             local_guardrail_evaluation(&check.id, detector, &check.sources, context.envelope)
         }
@@ -755,12 +1206,18 @@ async fn evaluate_guardrail_check(
                             content_patches: Vec::new(),
                             detector_error: Some(error),
                             used_fallback: false,
+                            detector_version: "unavailable".to_string(),
+                            latency_ms: 0,
+                            finding_category_counts: BTreeMap::new(),
+                            finding_count: 0,
                         }
                     }
                 }
             }
         }
-    }
+    };
+    evaluation.latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    evaluation
 }
 
 impl GuardrailCheckEvaluation {
@@ -776,6 +1233,10 @@ impl GuardrailCheckEvaluation {
             content_patches: Vec::new(),
             detector_error: None,
             used_fallback: false,
+            detector_version: "disabled".to_string(),
+            latency_ms: 0,
+            finding_category_counts: BTreeMap::new(),
+            finding_count: 0,
         }
     }
 }
@@ -786,6 +1247,13 @@ fn external_guardrail_evaluation(
     envelope: &ferrogate_guardrails::GuardrailEnvelope,
 ) -> GuardrailCheckEvaluation {
     let finding = result.findings.first();
+    let finding_count = result.findings.len() as u64;
+    let mut finding_category_counts = BTreeMap::new();
+    for finding in &result.findings {
+        let category = sanitized_guardrail_evidence_token(&finding.category, "uncategorized");
+        let count = finding_category_counts.entry(category).or_insert(0_u64);
+        *count = count.saturating_add(1);
+    }
     let segment_id = finding
         .and_then(|finding| finding.segment_id.clone())
         .or_else(|| {
@@ -805,6 +1273,10 @@ fn external_guardrail_evaluation(
         content_patches: result.patches,
         detector_error: None,
         used_fallback: false,
+        detector_version: sanitized_guardrail_evidence_token(&result.detector_version, "unknown"),
+        latency_ms: 0,
+        finding_category_counts,
+        finding_count,
     }
 }
 
@@ -867,6 +1339,18 @@ fn local_guardrail_evaluation(
                 })
             })
     });
+    let category = matched.as_ref().map(|matched| {
+        if matched.1.is_some() {
+            "regex"
+        } else if matched.2.is_some() {
+            "keyword"
+        } else {
+            "input_size"
+        }
+    });
+    let finding_category_counts = category
+        .map(|category| BTreeMap::from([(category.to_string(), 1)]))
+        .unwrap_or_default();
     GuardrailCheckEvaluation {
         check_id: check_id.to_string(),
         outcome: if matched.is_some() {
@@ -885,7 +1369,24 @@ fn local_guardrail_evaluation(
         content_patches: Vec::new(),
         detector_error: None,
         used_fallback: false,
+        detector_version: "ferrogate-local-v1".to_string(),
+        latency_ms: 0,
+        finding_category_counts,
+        finding_count: u64::from(category.is_some()),
     }
+}
+
+fn sanitized_guardrail_evidence_token(value: &str, fallback: &str) -> String {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return fallback.to_string();
+    }
+    value.to_string()
 }
 
 fn guardrail_enforcement(
@@ -951,6 +1452,37 @@ fn guardrail_enforcement(
         }
     }
     selected
+}
+
+fn merge_guardrail_enforcement(
+    enforcement: &mut Option<GuardrailMatch>,
+    candidate: GuardrailMatch,
+) {
+    let candidate_is_block = candidate.effect == GuardrailEffect::Deny;
+    let current_is_block = enforcement
+        .as_ref()
+        .is_some_and(|current| current.effect == GuardrailEffect::Deny);
+    if enforcement.is_none() || (candidate_is_block && !current_is_block) {
+        *enforcement = Some(candidate);
+    }
+}
+
+fn guardrail_evidence_unavailable_match(policy: &GuardrailPolicyRuntime) -> GuardrailMatch {
+    GuardrailMatch {
+        rule_id: policy.revision.policy_id.clone(),
+        rule_name: policy.revision.name.clone(),
+        policy_revision: policy.revision.revision,
+        check_id: None,
+        effect: GuardrailEffect::Deny,
+        matched_text: String::new(),
+        segment_id: None,
+        byte_start: None,
+        byte_end: None,
+        redaction_regex: None,
+        content_patches: Vec::new(),
+        code: "guardrail_evidence_unavailable".to_string(),
+        message: "guardrail evidence capacity is unavailable; request denied".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1086,6 +1618,56 @@ mod tests {
             created_at_unix: u64::from(revision),
             created_by: "test-admin".to_string(),
         }
+    }
+
+    #[test]
+    fn guardrail_evidence_records_sanitized_overall_and_per_check_decisions() {
+        let shared = SharedAppState::with_source_path(Config::default(), None);
+        shared
+            .create_guardrail_policy_revision(durable_guardrail_revision(
+                "evidence-policy",
+                1,
+                "raw-secret-must-not-persist",
+                PolicyScopeSelector::default(),
+            ))
+            .unwrap();
+        shared
+            .activate_guardrail_policy_revision("evidence-policy", 1, "test-admin", 10, false)
+            .unwrap();
+        let tenant = ferrogate_core::TenantContext {
+            organization_id: Some("tenant-evidence".to_string()),
+            api_key_id: Some("key-evidence".to_string()),
+            ..ferrogate_core::TenantContext::default()
+        };
+        let state = shared.current();
+        assert!(match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Request,
+            &tenant,
+            Some("fast-chat"),
+            Some("openai"),
+            "raw-secret-must-not-persist",
+        )
+        .is_some());
+
+        let evaluations = state.repositories.list_guardrail_evaluations(None).unwrap();
+        let checks = state
+            .repositories
+            .list_guardrail_check_evaluations(None)
+            .unwrap();
+        assert_eq!(evaluations.len(), 1);
+        assert_eq!(evaluations[0].verdict, "fail");
+        assert_eq!(evaluations[0].action, "block");
+        assert_eq!(evaluations[0].enforcement_status, "enforced");
+        assert_eq!(evaluations[0].finding_category_counts["keyword"], 1);
+        assert!(evaluations[0].input_fingerprint.starts_with("hmac-sha256:"));
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].verdict, "fail");
+        assert_eq!(checks[0].detector_id, "ferrogate.local");
+        assert_eq!(checks[0].detector_version, "ferrogate-local-v1");
+        let encoded = serde_json::to_string(&(evaluations, checks)).unwrap();
+        assert!(!encoded.contains("raw-secret-must-not-persist"));
+        assert!(!encoded.contains("matched_text"));
     }
 
     #[test]
@@ -1265,6 +1847,7 @@ mod tests {
             PolicyScopeSelector::default(),
         );
         reject.streaming = PolicyStreamingMode::RejectStreaming;
+        reject.checks[0].stage = DetectorStage::Response;
         reject_state
             .create_guardrail_policy_revision(reject)
             .unwrap();
@@ -1282,6 +1865,17 @@ mod tests {
         )
         .expect("reject_streaming must block before provider dispatch");
         assert_eq!(rejected.code, "guardrail_streaming_unsupported");
+        let rejected_checks = reject_state
+            .current()
+            .repositories
+            .list_guardrail_check_evaluations(None)
+            .unwrap();
+        assert_eq!(rejected_checks.len(), 1);
+        assert_eq!(rejected_checks[0].verdict, "skipped");
+        assert_eq!(
+            rejected_checks[0].error_kind.as_deref(),
+            Some("streaming_unsupported")
+        );
 
         let shadow_state = SharedAppState::with_source_path(Config::default(), None);
         let mut shadow = durable_guardrail_revision(
@@ -1726,6 +2320,70 @@ mod tests {
         assert_eq!(snapshot.guardrail_redaction_total, 1);
     }
 
+    #[test]
+    fn later_block_marks_an_earlier_redaction_as_not_enforced() {
+        let base = crate::config::GuardrailRule {
+            id: "redact-secret".into(),
+            name: "Redact secret".into(),
+            enabled: true,
+            stage: crate::config::GuardrailStage::Response,
+            sources: ferrogate_guardrails::all_content_sources(),
+            organization_ids: vec![],
+            project_ids: vec![],
+            api_key_ids: vec![],
+            models: vec!["fast-chat".into()],
+            providers: vec!["openai".into()],
+            keywords: vec!["secret".into()],
+            regex: vec![],
+            max_input_bytes: None,
+            provider: GuardrailProviderKind::None,
+            provider_endpoint: None,
+            provider_timeout_ms: 2_000,
+            provider_runtime: Default::default(),
+            effect: crate::config::GuardrailEffect::Redact,
+            code: "guardrail_redacted".into(),
+            message: "redacted by guardrail".into(),
+        };
+        let mut block = base.clone();
+        block.id = "block-secret".into();
+        block.name = "Block secret".into();
+        block.effect = crate::config::GuardrailEffect::Deny;
+        block.code = "guardrail_blocked".into();
+        let state = AppState::new(Config {
+            providers: vec![test_provider()],
+            models: vec![test_model()],
+            guardrails: vec![base, block],
+            ..Config::default()
+        });
+
+        let matched = match_guardrail_for_test(
+            &state,
+            crate::config::GuardrailStage::Response,
+            &ferrogate_core::TenantContext::default(),
+            Some("fast-chat"),
+            Some("openai"),
+            "provider returned secret",
+        )
+        .expect("the blocking policy must win");
+        assert_eq!(matched.rule_id, "block-secret");
+
+        let evaluations = state.repositories.list_guardrail_evaluations(None).unwrap();
+        let redaction = evaluations
+            .iter()
+            .find(|evaluation| evaluation.policy_id == "redact-secret")
+            .unwrap();
+        let block = evaluations
+            .iter()
+            .find(|evaluation| evaluation.policy_id == "block-secret")
+            .unwrap();
+        assert_eq!(redaction.action, "redact");
+        assert_eq!(redaction.enforcement_status, "not_enforced");
+        assert!(!redaction.transformed);
+        assert_eq!(block.action, "block");
+        assert_eq!(block.enforcement_status, "enforced");
+        assert!(!block.transformed);
+    }
+
     /// Spawns a one-shot plain-HTTP mock guardrail provider on `127.0.0.1`
     /// that reads a single `Content-Length`-bounded request, records its
     /// JSON body, and replies with `response_body`.
@@ -1925,6 +2583,15 @@ mod tests {
                 && event.target == "pii-detector@1"
                 && event.outcome == "error"
         }));
+        let evidence = state
+            .repositories
+            .list_guardrail_check_evaluations(None)
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].verdict, "error");
+        assert_eq!(evidence[0].action, "block");
+        assert_eq!(evidence[0].enforcement_status, "enforced");
+        assert_eq!(evidence[0].error_kind.as_deref(), Some("unavailable"));
     }
 
     #[test]
@@ -1968,6 +2635,10 @@ mod tests {
                 && event.target == "pii-detector@1"
                 && event.outcome == "error"
         }));
+        let evaluation = state.repositories.list_guardrail_evaluations(None).unwrap();
+        assert_eq!(evaluation[0].verdict, "error");
+        assert_eq!(evaluation[0].action, "record");
+        assert_eq!(evaluation[0].enforcement_status, "enforced");
     }
 
     #[test]

@@ -74,11 +74,12 @@ use ferrogate_runtime::{
 };
 use ferrogate_storage::{
     budget_alert_notification_id, guardrail_policy_revision_id, ControlPlaneDocuments,
-    GuardrailPolicyRepository, PostgresStorageConfig, QuotaScopeKind, RuntimeControlPlaneState,
-    RuntimeStorageBackend, RuntimeStorageOptions, RuntimeStorageRepositories,
-    StorageBackendEvidence, StorageError, StoredAgentRun, StoredAgentRunEvent,
-    StoredAgentWorkerInstance, StoredApiKey, StoredAsset, StoredAuditEvent,
-    StoredBillingReportOutboxEntry, StoredBudgetAlertNotification, StoredGuardrailPolicyBinding,
+    GuardrailEvaluationQuery, GuardrailEvaluationRepository, GuardrailPolicyRepository,
+    PostgresStorageConfig, QuotaScopeKind, RuntimeControlPlaneState, RuntimeStorageBackend,
+    RuntimeStorageOptions, RuntimeStorageRepositories, StorageBackendEvidence, StorageError,
+    StoredAgentRun, StoredAgentRunEvent, StoredAgentWorkerInstance, StoredApiKey, StoredAsset,
+    StoredAuditEvent, StoredBillingReportOutboxEntry, StoredBudgetAlertNotification,
+    StoredGuardrailCheckEvaluation, StoredGuardrailEvaluation, StoredGuardrailPolicyBinding,
     StoredGuardrailPolicyRevision, StoredManagedWorkerIsolationEvidence,
     StoredManagedWorkerIsolationPolicy, StoredManagedWorkerIsolationSelection,
     StoredManagedWorkerLifecycleEvent, StoredManagedWorkerSession, StoredPaymentMethod,
@@ -93,10 +94,12 @@ use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 use redis::Commands;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tracing::warn;
 
 pub(crate) const RELOAD_MODE_PROCESS_LOCAL: &str = "process-local";
+const GUARDRAIL_EVIDENCE_MAX_IN_FLIGHT: usize = 64;
 pub(crate) const RELOAD_MODE_LISTENER_LEVEL_REQUIRED: &str = "listener-level-required";
 const SELF_HOSTED_WORKER_MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 const SELF_HOSTED_WORKER_STALE_THRESHOLD_SECS: u64 = 300;
@@ -1025,6 +1028,8 @@ pub(crate) struct AppState {
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
     guardrail_policies: Arc<Vec<GuardrailPolicyRuntime>>,
+    guardrail_evidence_permits: Arc<Semaphore>,
+    guardrail_evidence_hmac_key: Option<Arc<[u8]>>,
     upstream_counters: Arc<HashMap<String, AtomicU64>>,
     model_route_counter: Arc<AtomicU64>,
     request_ids: Arc<AtomicU64>,
@@ -1229,7 +1234,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
     };
     if storage.provider == ferrogate_storage::StorageProviderKind::Supabase {
         let dsn = storage_supabase_dsn(storage)?;
-        return RuntimeStorageRepositories::supabase(
+        let repositories = RuntimeStorageRepositories::supabase(
             PostgresStorageConfig {
                 dsn,
                 pool_size: storage.postgres_pool_size,
@@ -1258,11 +1263,15 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             },
             storage_options(control_plane),
         )
-        .map_err(|error| anyhow::anyhow!("{error}"));
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        repositories.set_guardrail_evaluation_retention_records(
+            config.analytics.guardrail_evaluation_retention_records,
+        );
+        return Ok(repositories);
     }
     if storage.provider == ferrogate_storage::StorageProviderKind::Postgres {
         let dsn = storage_postgres_dsn(storage)?;
-        return RuntimeStorageRepositories::postgres(
+        let repositories = RuntimeStorageRepositories::postgres(
             PostgresStorageConfig {
                 dsn,
                 pool_size: storage.postgres_pool_size,
@@ -1291,19 +1300,27 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             },
             storage_options(control_plane),
         )
-        .map_err(|error| anyhow::anyhow!("{error}"));
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        repositories.set_guardrail_evaluation_retention_records(
+            config.analytics.guardrail_evaluation_retention_records,
+        );
+        return Ok(repositories);
     }
     let backend = RuntimeStorageBackend::new(
         storage.provider,
         storage.required,
         storage.provider_order.clone(),
     )?;
-    Ok(RuntimeStorageRepositories::new(
+    let repositories = RuntimeStorageRepositories::new(
         backend,
         RuntimeControlPlaneState::from_documents(control_plane),
         config.analytics.request_log_retention_records,
         config.analytics.audit_event_retention_records,
-    ))
+    );
+    repositories.set_guardrail_evaluation_retention_records(
+        config.analytics.guardrail_evaluation_retention_records,
+    );
+    Ok(repositories)
 }
 
 fn control_plane_documents_from_config(config: &Config) -> ControlPlaneDocuments {
@@ -1603,6 +1620,8 @@ struct GuardrailCheckRuntime {
     enabled: bool,
     stage: DetectorStage,
     sources: Vec<ferrogate_guardrails::ContentSource>,
+    detector_id: String,
+    detector_config_digest: String,
     detector: GuardrailDetectorRuntime,
     fallback_detector: Option<LocalGuardrailDetectorRuntime>,
 }
@@ -2189,6 +2208,242 @@ pub(crate) struct RequestLogExportRecord {
     pub(crate) completed_at_unix: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GuardrailEvidenceFilter {
+    pub(crate) tenant_id: Option<String>,
+    pub(crate) request_id: Option<String>,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) agent_run_id: Option<String>,
+    pub(crate) scope_type: Option<String>,
+    pub(crate) scope_id: Option<String>,
+    pub(crate) subject_id: Option<String>,
+    pub(crate) policy_id: Option<String>,
+    pub(crate) policy_revision: Option<u32>,
+    pub(crate) detector_id: Option<String>,
+    pub(crate) category: Option<String>,
+    pub(crate) verdict: Option<String>,
+    pub(crate) action: Option<String>,
+    pub(crate) error_kind: Option<String>,
+    pub(crate) since_unix: Option<u64>,
+    pub(crate) until_unix: Option<u64>,
+}
+
+impl GuardrailEvidenceFilter {
+    pub(crate) fn from_query(query: Option<&str>) -> Self {
+        let mut filter = Self::default();
+        let Some(query) = query else {
+            return filter;
+        };
+        for (name, value) in query_pairs(query) {
+            match name.as_str() {
+                "tenant" | "tenant_id" | "organization_id" => filter.tenant_id = non_empty(value),
+                "request_id" => filter.request_id = non_empty(value),
+                "trace_id" => filter.trace_id = non_empty(value),
+                "agent_run_id" => filter.agent_run_id = non_empty(value),
+                "scope_type" => filter.scope_type = non_empty(value),
+                "scope_id" => filter.scope_id = non_empty(value),
+                "subject" | "subject_id" => filter.subject_id = non_empty(value),
+                "policy" | "policy_id" => filter.policy_id = non_empty(value),
+                "policy_revision" | "revision" => {
+                    filter.policy_revision = value.parse::<u32>().ok().filter(|value| *value > 0)
+                }
+                "detector" | "detector_id" => filter.detector_id = non_empty(value),
+                "category" => filter.category = non_empty(value),
+                "verdict" => filter.verdict = non_empty(value),
+                "action" => filter.action = non_empty(value),
+                "error" | "error_kind" => filter.error_kind = non_empty(value),
+                "since" | "since_unix" => filter.since_unix = value.parse::<u64>().ok(),
+                "until" | "until_unix" => filter.until_unix = value.parse::<u64>().ok(),
+                _ => {}
+            }
+        }
+        filter
+    }
+
+    fn has_investigation_selector(&self) -> bool {
+        self.request_id.is_some() || self.trace_id.is_some() || self.agent_run_id.is_some()
+    }
+
+    fn storage_query(&self, offset: usize, limit: usize) -> GuardrailEvaluationQuery {
+        GuardrailEvaluationQuery {
+            tenant_id: self.tenant_id.clone(),
+            request_id: self.request_id.clone(),
+            trace_id: self.trace_id.clone(),
+            agent_run_id: self.agent_run_id.clone(),
+            scope_type: self.scope_type.clone(),
+            scope_id: self.scope_id.clone(),
+            subject_id: self.subject_id.clone(),
+            policy_id: self.policy_id.clone(),
+            policy_revision: self.policy_revision,
+            detector_id: self.detector_id.clone(),
+            category: self.category.clone(),
+            verdict: self.verdict.clone(),
+            action: self.action.clone(),
+            error_kind: self.error_kind.clone(),
+            since_unix: self.since_unix,
+            until_unix: self.until_unix,
+            offset,
+            limit,
+        }
+    }
+
+    #[cfg(test)]
+    fn matches(
+        &self,
+        evaluation: &StoredGuardrailEvaluation,
+        checks: &[StoredGuardrailCheckEvaluation],
+    ) -> bool {
+        if self
+            .tenant_id
+            .as_ref()
+            .is_some_and(|expected| evaluation.tenant.organization_id.as_ref() != Some(expected))
+            || self
+                .request_id
+                .as_ref()
+                .is_some_and(|expected| &evaluation.request_id != expected)
+            || self
+                .trace_id
+                .as_ref()
+                .is_some_and(|expected| evaluation.trace_id.as_ref() != Some(expected))
+            || self
+                .agent_run_id
+                .as_ref()
+                .is_some_and(|expected| evaluation.agent_run_id.as_ref() != Some(expected))
+            || self
+                .scope_type
+                .as_ref()
+                .is_some_and(|expected| &evaluation.scope_type != expected)
+            || self
+                .scope_id
+                .as_ref()
+                .is_some_and(|expected| &evaluation.scope_id != expected)
+            || self
+                .subject_id
+                .as_ref()
+                .is_some_and(|expected| evaluation.subject_id.as_ref() != Some(expected))
+            || self
+                .policy_id
+                .as_ref()
+                .is_some_and(|expected| &evaluation.policy_id != expected)
+            || self
+                .policy_revision
+                .is_some_and(|expected| evaluation.policy_revision != expected)
+            || self
+                .verdict
+                .as_ref()
+                .is_some_and(|expected| &evaluation.verdict != expected)
+            || self
+                .action
+                .as_ref()
+                .is_some_and(|expected| &evaluation.action != expected)
+            || self
+                .since_unix
+                .is_some_and(|since| evaluation.occurred_at_unix < since)
+            || self
+                .until_unix
+                .is_some_and(|until| evaluation.occurred_at_unix > until)
+        {
+            return false;
+        }
+        if self.detector_id.is_none() && self.category.is_none() && self.error_kind.is_none() {
+            return true;
+        }
+        checks.iter().any(|check| {
+            self.detector_id
+                .as_ref()
+                .is_none_or(|expected| &check.detector_id == expected)
+                && self
+                    .category
+                    .as_ref()
+                    .is_none_or(|expected| check.finding_category_counts.contains_key(expected))
+                && self
+                    .error_kind
+                    .as_ref()
+                    .is_none_or(|expected| check.error_kind.as_ref() == Some(expected))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct GuardrailEvaluationView {
+    #[serde(flatten)]
+    pub(crate) evaluation: StoredGuardrailEvaluation,
+    pub(crate) checks: Vec<StoredGuardrailCheckEvaluation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct InvestigationRequestEvidence {
+    pub(crate) request_id: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) agent_run_id: Option<String>,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_version: Option<u32>,
+    pub(crate) workflow_node_id: Option<String>,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) route: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) logical_model: Option<String>,
+    pub(crate) provider_model: Option<String>,
+    pub(crate) status_code: u16,
+    pub(crate) error_code: Option<String>,
+    pub(crate) cache_status: Option<String>,
+    pub(crate) started_at_unix: Option<u64>,
+    pub(crate) completed_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct InvestigationApprovalEvidence {
+    pub(crate) id: String,
+    pub(crate) request_id: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) actor_api_key_id: Option<String>,
+    pub(crate) tool_name: String,
+    pub(crate) server_name: Option<String>,
+    pub(crate) route: Option<String>,
+    pub(crate) status: ApprovalStatus,
+    pub(crate) reviewer_api_key_id: Option<String>,
+    pub(crate) reviewer_authority: Option<String>,
+    pub(crate) terminal_reason: Option<String>,
+    pub(crate) requested_at_unix: u64,
+    pub(crate) expires_at_unix: u64,
+    pub(crate) decided_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct InvestigationBillingEvidence {
+    pub(crate) request_id: String,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) agent_run_id: Option<String>,
+    pub(crate) tenant: ferrogate_core::TenantContext,
+    pub(crate) logical_model: String,
+    pub(crate) provider: String,
+    pub(crate) provider_model: String,
+    pub(crate) usage: BillingTokenUsage,
+    pub(crate) status_code: u16,
+    pub(crate) occurred_at_unix: Option<u64>,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) latency_ms: Option<u64>,
+    pub(crate) wallet_delta_credits: Option<i64>,
+    pub(crate) wallet_balance_after_credits: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct GuardrailInvestigationTimeline {
+    pub(crate) object: &'static str,
+    pub(crate) selector: String,
+    pub(crate) identity: Option<ferrogate_core::TenantContext>,
+    pub(crate) agent_runs: Vec<StoredAgentRun>,
+    pub(crate) agent_events: Vec<StoredAgentRunEvent>,
+    pub(crate) requests: Vec<InvestigationRequestEvidence>,
+    pub(crate) guardrail_evaluations: Vec<GuardrailEvaluationView>,
+    pub(crate) audit_events: Vec<StoredAuditEvent>,
+    pub(crate) approvals: Vec<InvestigationApprovalEvidence>,
+    pub(crate) billing_events: Vec<InvestigationBillingEvidence>,
+    pub(crate) total_cost_usd: f64,
+    pub(crate) final_outcome: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct AgentRunSummary {
     pub(crate) object: &'static str,
@@ -2226,6 +2481,11 @@ struct GatewayMetricsAccumulator {
     guardrail_denial_total: u64,
     guardrail_redaction_total: u64,
     guardrail_detector_error_total: u64,
+    guardrail_evaluation_total: u64,
+    guardrail_evaluation_fail_total: u64,
+    guardrail_evaluation_error_total: u64,
+    guardrail_evaluation_shadow_total: u64,
+    guardrail_evidence_persistence_failure_total: u64,
     billing_event_total: u64,
     /// Failures durably enqueueing a settled usage event for delivery to the
     /// billing service (issue #151).
@@ -2529,6 +2789,27 @@ impl GatewayMetricsAccumulator {
         self.guardrail_detector_error_total = self.guardrail_detector_error_total.saturating_add(1);
     }
 
+    fn record_guardrail_evaluation(&mut self, verdict: &str, enforcement_status: &str) {
+        self.guardrail_evaluation_total = self.guardrail_evaluation_total.saturating_add(1);
+        if verdict == "fail" {
+            self.guardrail_evaluation_fail_total =
+                self.guardrail_evaluation_fail_total.saturating_add(1);
+        } else if verdict == "error" {
+            self.guardrail_evaluation_error_total =
+                self.guardrail_evaluation_error_total.saturating_add(1);
+        }
+        if matches!(enforcement_status, "shadow_only" | "not_enforced") {
+            self.guardrail_evaluation_shadow_total =
+                self.guardrail_evaluation_shadow_total.saturating_add(1);
+        }
+    }
+
+    fn record_guardrail_evidence_persistence_failure(&mut self) {
+        self.guardrail_evidence_persistence_failure_total = self
+            .guardrail_evidence_persistence_failure_total
+            .saturating_add(1);
+    }
+
     fn record_tool_call(&mut self, _tool_name: &str, latency_ms: u64) {
         self.tool_call_total = self.tool_call_total.saturating_add(1);
         self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
@@ -2567,6 +2848,12 @@ impl GatewayMetricsAccumulator {
             guardrail_denial_total: self.guardrail_denial_total,
             guardrail_redaction_total: self.guardrail_redaction_total,
             guardrail_detector_error_total: self.guardrail_detector_error_total,
+            guardrail_evaluation_total: self.guardrail_evaluation_total,
+            guardrail_evaluation_fail_total: self.guardrail_evaluation_fail_total,
+            guardrail_evaluation_error_total: self.guardrail_evaluation_error_total,
+            guardrail_evaluation_shadow_total: self.guardrail_evaluation_shadow_total,
+            guardrail_evidence_persistence_failure_total: self
+                .guardrail_evidence_persistence_failure_total,
             billing_event_total: self.billing_event_total,
             billing_report_enqueue_failure_total: self.billing_report_enqueue_failure_total,
             tool_call_total: self.tool_call_total,
@@ -3521,9 +3808,14 @@ impl AppState {
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),
             policy_engine: Arc::new(policy_engine),
             guardrail_policies: Arc::new(guardrail_policies),
+            guardrail_evidence_permits: Arc::new(Semaphore::new(GUARDRAIL_EVIDENCE_MAX_IN_FLIGHT)),
+            guardrail_evidence_hmac_key: env::var("FERROGATE_GUARDRAIL_EVIDENCE_HMAC_KEY")
+                .ok()
+                .filter(|key| key.len() >= 32)
+                .map(|key| Arc::from(key.into_bytes())),
             upstream_counters: Arc::new(upstream_counters),
             model_route_counter: Arc::new(AtomicU64::new(0)),
-            request_ids: Arc::new(AtomicU64::new(1)),
+            request_ids: Arc::new(AtomicU64::new(request_id_seed())),
             drain: Arc::new(AtomicBool::new(false)),
             acme_renewal: None,
             ip_allowlist: Arc::new(ip_allowlist),
@@ -3555,6 +3847,7 @@ impl AppState {
         next.mcp_manager = Arc::clone(&self.mcp_manager);
         next.mcp_manager.reconfigure(&next.config.mcp_servers);
         next.approvals = self.approvals.clone();
+        next.guardrail_evidence_permits = Arc::clone(&self.guardrail_evidence_permits);
         next.request_ids = Arc::clone(&self.request_ids);
         next.drain = Arc::clone(&self.drain);
         next.acme_renewal = self.acme_renewal.clone();
@@ -3572,6 +3865,10 @@ impl AppState {
             analytics.request_log_retention_records,
             analytics.audit_event_retention_records,
         );
+        self.repositories
+            .set_guardrail_evaluation_retention_records(
+                analytics.guardrail_evaluation_retention_records,
+            );
     }
 
     fn sync_control_plane_storage_from_config(&self, config: &Config) -> anyhow::Result<()> {
@@ -4653,11 +4950,15 @@ fn build_guardrail_policy_runtime(
         .checks
         .iter()
         .map(|check| {
+            let (detector_id, detector_config_digest) =
+                guardrail_detector_evidence_metadata(&check.detector)?;
             Ok(GuardrailCheckRuntime {
                 id: check.id.clone(),
                 enabled: check.enabled,
                 stage: check.stage,
                 sources: check.sources.clone(),
+                detector_id,
+                detector_config_digest,
                 detector: build_guardrail_detector(
                     &revision.immutable_id(),
                     &check.id,
@@ -4674,6 +4975,18 @@ fn build_guardrail_policy_runtime(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(GuardrailPolicyRuntime { revision, checks })
+}
+
+fn guardrail_detector_evidence_metadata(
+    definition: &DetectorDefinition,
+) -> anyhow::Result<(String, String)> {
+    let detector_id = match definition {
+        DetectorDefinition::Local { .. } => "ferrogate.local".to_string(),
+        DetectorDefinition::CustomHttp { .. } => "custom_http".to_string(),
+    };
+    let serialized = serde_json::to_vec(definition)?;
+    let digest = Sha256::digest(serialized);
+    Ok((detector_id, format!("sha256:{digest:x}")))
 }
 
 fn build_local_guardrail_detector(
@@ -5068,6 +5381,16 @@ fn now_unix_seconds() -> Option<u64> {
         .map(|duration| duration.as_secs())
 }
 
+fn request_id_seed() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let hostname = env::var("HOSTNAME").unwrap_or_default();
+    let material = format!("{hostname}:{}:{nanos}", std::process::id());
+    fnv1a64(material.as_bytes()).max(1)
+}
+
 /// Max billing-report outbox rows delivered per sweep (issue #137).
 const BILLING_OUTBOX_BATCH: usize = 100;
 
@@ -5157,6 +5480,8 @@ mod state_routing;
 
 #[path = "state_agent_runtime.rs"]
 mod state_agent_runtime;
+#[path = "state_guardrail_evidence.rs"]
+mod state_guardrail_evidence;
 
 #[cfg(test)]
 mod tests {
@@ -5511,6 +5836,20 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn process_local_reload_preserves_request_id_sequence() {
+        let shared = SharedAppState::with_source_path(Config::default(), None);
+        let first = shared.next_request_id();
+
+        let result = shared.reload_process_local(Config::default());
+
+        assert!(result.committed);
+        let second = shared.next_request_id();
+        let first = u64::from_str_radix(first.trim_start_matches("fg-"), 16).unwrap();
+        let second = u64::from_str_radix(second.trim_start_matches("fg-"), 16).unwrap();
+        assert_eq!(second, first.wrapping_add(1));
     }
 
     #[test]

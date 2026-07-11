@@ -36,12 +36,13 @@ const BUFFER_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-buffer-client-
 const SHADOW_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-shadow-client-secret";
 const REJECT_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-reject-client-secret";
 const UNGUARDED_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-unguarded-client-secret";
+const REDACT_CLIENT_AUTH: &str = "Authorization: Bearer guardrail-redact-client-secret";
 const ADMIN_AUTH: &str = "Authorization: Bearer guardrail-admin-secret";
 const JSON_CONTENT: &str = "Content-Type: application/json";
 const DETECTOR_SECRET: &str = "guardrail-detector-e2e-secret";
 const GATEWAY_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 const DYNAMIC_TENANT_ID: &str = "org_dynamic_guardrail_e2e";
-const GUARDRAIL_ACTIONS: [(&str, &str); 6] = [
+const GUARDRAIL_ACTIONS: [(&str, &str); 7] = [
     ("guardrails.policy.read", "Read Guardrail policies"),
     (
         "guardrails.policy.create_revision",
@@ -60,6 +61,10 @@ const GUARDRAIL_ACTIONS: [(&str, &str); 6] = [
         "Archive Guardrail policy revisions",
     ),
     ("guardrails.policy.dry_run", "Dry-run Guardrail policies"),
+    (
+        "guardrails.evidence.read",
+        "Read sanitized Guardrail evaluation evidence",
+    ),
 ];
 
 pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<()> {
@@ -109,6 +114,8 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
         "my email is pii@example.com",
     )?;
     assert_json_error(&detected, 403, "guardrail_pii_detected")?;
+    let detected_request_id = response_header(&detected, "x-request-id")
+        .context("Guardrail block response omitted x-request-id")?;
 
     let allowed = send_chat(&gateway_addr, "ordinary safe request")?;
     if allowed.status != 200 {
@@ -192,6 +199,14 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
         ),
     )?;
     assert_json_error(&tenant_create, 403, "guardrail_rbac_denied")?;
+    let evidence_before_grant =
+        dynamic_json_request(&gateway_addr, "GET", "/admin/v1/guardrail-evaluations", "")?;
+    if evidence_before_grant.status != 403 {
+        bail!(
+            "Guardrail evidence read succeeded without a DB role grant: {}",
+            evidence_before_grant.raw
+        );
+    }
 
     configure_guardrail_policy_role(&gateway_addr, &policy_role_id, &policy_role_slug)?;
     evidence.verify_guardrail_rbac_binding(&policy_role_id, true)?;
@@ -237,7 +252,19 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     let visible = tenant_list_body["data"]
         .as_array()
         .context("Guardrail policy list omitted data")?;
-    if visible.len() != 1 || visible[0]["policy_id"] != "dynamic-supabase-policy" {
+    if !visible
+        .iter()
+        .any(|policy| policy["policy_id"] == "dynamic-supabase-policy")
+        || visible.iter().any(|policy| {
+            policy["scope"]["organization_ids"]
+                .as_array()
+                .is_none_or(|organizations| {
+                    !organizations
+                        .iter()
+                        .any(|organization| organization == DYNAMIC_TENANT_ID)
+                })
+        })
+    {
         bail!("tenant Guardrail list leaked another tenant's policies: {tenant_list_body}");
     }
 
@@ -296,6 +323,19 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     assert_binding_response(&activate_v1, 1, false)?;
     let blocked_v1 = send_dynamic_chat(&gateway_addr, "contains dynamic-secret-v1")?;
     assert_json_error(&blocked_v1, 403, "dynamic_guardrail_v1")?;
+    let blocked_v1_request_id = response_header(&blocked_v1, "x-request-id")
+        .context("dynamic Guardrail block omitted x-request-id")?;
+    let redacted = send_chat_with_auth(&gateway_addr, "redaction-probe", REDACT_CLIENT_AUTH)?;
+    assert_redacted_provider_success(&redacted)?;
+    let redacted_request_id = response_header(&redacted, "x-request-id")
+        .context("Guardrail redaction response omitted x-request-id")?;
+    evidence.wait_for_guardrail_evaluations(&blocked_v1_request_id, &redacted_request_id)?;
+    verify_guardrail_evidence_api(
+        &gateway_addr,
+        &blocked_v1_request_id,
+        &redacted_request_id,
+        &detected_request_id,
+    )?;
 
     drop(gateway);
     let gateway = GatewayGuard::start(
@@ -307,6 +347,12 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
     let blocked_v1_after_restart =
         send_dynamic_chat(&gateway_addr, "contains dynamic-secret-v1 after restart")?;
     assert_json_error(&blocked_v1_after_restart, 403, "dynamic_guardrail_v1")?;
+    verify_guardrail_evidence_api(
+        &gateway_addr,
+        &blocked_v1_request_id,
+        &redacted_request_id,
+        &detected_request_id,
+    )?;
 
     let create_v2 = dynamic_json_request(
         &gateway_addr,
@@ -388,6 +434,7 @@ pub(crate) fn run_guardrail_supabase(args: &SupabaseLiveRestartArgs) -> Result<(
             .count()
     };
     if request_count("ordinary safe request") != 1
+        || request_count("redaction-probe") != 1
         || request_count("dynamic-secret-v1") != 1
         || request_count("dynamic-secret-v2") != 1
         || request_count("normalized-input-secret") != 0
@@ -932,7 +979,12 @@ fn probe_streaming_request(
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|status| status.parse::<u16>().ok())
-        .context("streaming response omitted HTTP status")?;
+        .with_context(|| {
+            format!(
+                "stream {marker} on {path} omitted HTTP status after receiving {} bytes",
+                raw.len()
+            )
+        })?;
     Ok(StreamingProbe {
         status,
         first_body_elapsed,
@@ -1022,6 +1074,194 @@ fn assert_provider_success(response: &HttpResponse, context: &str) -> Result<()>
     let body: Value = serde_json::from_str(&response.body)?;
     if body["choices"][0]["message"]["content"] != "ok" {
         bail!("{context}: provider response was incomplete");
+    }
+    Ok(())
+}
+
+fn assert_redacted_provider_success(response: &HttpResponse) -> Result<()> {
+    if response.status != 200 {
+        bail!(
+            "Guardrail redaction expected provider success, got {}",
+            response.raw
+        );
+    }
+    let body: Value = serde_json::from_str(&response.body)?;
+    let content = body["choices"][0]["message"]["content"]
+        .as_str()
+        .context("redacted provider response omitted assistant content")?;
+    if content != "prefix [REDACTED] suffix" || content.contains("provider-redact-secret") {
+        bail!("Guardrail response redaction was not applied safely: {body}");
+    }
+    Ok(())
+}
+
+fn verify_guardrail_evidence_api(
+    addr: &str,
+    blocked_request_id: &str,
+    redacted_request_id: &str,
+    cross_tenant_request_id: &str,
+) -> Result<()> {
+    let blocked = dynamic_json_request(
+        addr,
+        "GET",
+        &format!("/admin/v1/guardrail-evaluations?request_id={blocked_request_id}"),
+        "",
+    )?;
+    if blocked.status != 200 {
+        bail!("Guardrail evaluation query failed: {}", blocked.raw);
+    }
+    let blocked_body: Value = serde_json::from_str(&blocked.body)?;
+    let blocked_rows = blocked_body["data"]
+        .as_array()
+        .context("Guardrail evaluation response omitted data")?;
+    if blocked_rows.len() != 1
+        || blocked_rows[0]["policy_id"] != "dynamic-supabase-policy"
+        || blocked_rows[0]["verdict"] != "fail"
+        || blocked_rows[0]["action"] != "block"
+        || blocked_rows[0]["enforcement_status"] != "enforced"
+        || blocked_rows[0]["checks"][0]["verdict"] != "fail"
+        || blocked_rows[0]["checks"][0]["finding_category_counts"]["keyword"] != 1
+        || !blocked_rows[0]["input_fingerprint"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("hmac-sha256:"))
+    {
+        bail!("blocked Guardrail evidence was incomplete: {blocked_body}");
+    }
+    let trace_id = blocked_rows[0]["trace_id"]
+        .as_str()
+        .context("blocked Guardrail evidence omitted trace_id")?;
+    let agent_run_id = blocked_rows[0]["agent_run_id"]
+        .as_str()
+        .context("blocked Guardrail evidence omitted agent_run_id")?;
+    for (selector, value) in [("trace_id", trace_id), ("agent_run_id", agent_run_id)] {
+        let timeline = dynamic_json_request(
+            addr,
+            "GET",
+            &format!("/admin/v1/investigations?{selector}={value}"),
+            "",
+        )?;
+        let timeline_body: Value = serde_json::from_str(&timeline.body)?;
+        if timeline.status != 200
+            || timeline_body["guardrail_evaluations"]
+                .as_array()
+                .is_none_or(|rows| {
+                    !rows
+                        .iter()
+                        .any(|row| row["request_id"] == blocked_request_id)
+                })
+            || !timeline_body["agent_runs"].is_array()
+            || !timeline_body["agent_events"].is_array()
+        {
+            bail!("Guardrail investigation failed for {selector}: {timeline_body}");
+        }
+    }
+
+    let category = dynamic_json_request(
+        addr,
+        "GET",
+        "/admin/v1/guardrail-evaluations?category=keyword&verdict=fail&action=block",
+        "",
+    )?;
+    if category.status != 200
+        || !serde_json::from_str::<Value>(&category.body)?["data"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["request_id"] == blocked_request_id)
+            })
+    {
+        bail!("Guardrail evidence category filters did not find the blocked request");
+    }
+
+    let cross_tenant = dynamic_json_request(
+        addr,
+        "GET",
+        &format!("/admin/v1/guardrail-evaluations?request_id={cross_tenant_request_id}"),
+        "",
+    )?;
+    if cross_tenant.status != 200
+        || serde_json::from_str::<Value>(&cross_tenant.body)?["total"] != 0
+    {
+        bail!(
+            "tenant Guardrail evidence isolation failed (status={}): {}",
+            cross_tenant.status,
+            cross_tenant.body
+        );
+    }
+
+    let blocked_timeline = dynamic_json_request(
+        addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={blocked_request_id}"),
+        "",
+    )?;
+    if blocked_timeline.status != 200 {
+        bail!(
+            "blocked Guardrail investigation failed: {}",
+            blocked_timeline.raw
+        );
+    }
+    let blocked_timeline_body: Value = serde_json::from_str(&blocked_timeline.body)?;
+    if blocked_timeline_body["final_outcome"] != "blocked"
+        || blocked_timeline_body["identity"]["organization_id"] != DYNAMIC_TENANT_ID
+        || blocked_timeline_body["guardrail_evaluations"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+        || blocked_timeline_body["audit_events"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    {
+        bail!("blocked Guardrail investigation was incomplete: {blocked_timeline_body}");
+    }
+
+    let redacted_timeline = dynamic_json_request(
+        addr,
+        "GET",
+        &format!("/admin/v1/investigations?request_id={redacted_request_id}"),
+        "",
+    )?;
+    if redacted_timeline.status != 200 {
+        bail!(
+            "redacted Guardrail investigation failed: {}",
+            redacted_timeline.raw
+        );
+    }
+    let redacted_timeline_body: Value = serde_json::from_str(&redacted_timeline.body)?;
+    let redacted_evaluations = redacted_timeline_body["guardrail_evaluations"]
+        .as_array()
+        .context("redacted investigation omitted Guardrail evaluations")?;
+    if redacted_timeline_body["final_outcome"] != "succeeded"
+        || !redacted_evaluations.iter().any(|evaluation| {
+            evaluation["action"] == "redact"
+                && evaluation["verdict"] == "fail"
+                && evaluation["transformed"] == true
+        })
+        || redacted_timeline_body["billing_events"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    {
+        bail!("redacted Guardrail investigation was incomplete: {redacted_timeline_body}");
+    }
+
+    let combined = format!(
+        "{}{}{}{}",
+        blocked.body, category.body, blocked_timeline.body, redacted_timeline.body
+    );
+    for forbidden in [
+        "dynamic-secret-v1",
+        "provider-redact-secret",
+        "guardrail-dynamic-client-secret",
+        "guardrail-redact-client-secret",
+        DETECTOR_SECRET,
+        "authorization",
+        "matched_text",
+    ] {
+        if combined
+            .to_ascii_lowercase()
+            .contains(&forbidden.to_ascii_lowercase())
+        {
+            bail!("Guardrail evidence API leaked forbidden content: {forbidden}");
+        }
     }
     Ok(())
 }
@@ -1156,6 +1396,13 @@ api_keys:
     scopes: ["models.read", "chat.completions", "responses.create"]
     allowed_models: ["fast-chat"]
     organization_id: "org_guardrail_unguarded_e2e"
+  - id: "guardrail-redact-client"
+    name: "Guardrail redaction evidence client"
+    key: "guardrail-redact-client-secret"
+    scopes: ["models.read", "chat.completions"]
+    allowed_models: ["fast-chat"]
+    organization_id: "org_dynamic_guardrail_e2e"
+    project_id: "project_dynamic_guardrail_e2e"
 guardrails:
   - id: "e2e-pii-detector"
     name: "E2E PII detector"
@@ -1180,6 +1427,19 @@ guardrails:
     effect: "deny"
     code: "guardrail_pii_detected"
     message: "request blocked by E2E detector"
+  - id: "e2e-response-redaction"
+    name: "E2E response redaction"
+    enabled: true
+    stage: "response"
+    sources: ["assistant"]
+    organization_ids: ["org_dynamic_guardrail_e2e"]
+    models: ["fast-chat"]
+    providers: ["openai"]
+    keywords: ["provider-redact-secret"]
+    provider: "none"
+    effect: "redact"
+    code: "guardrail_response_redacted"
+    message: "response redacted by E2E Guardrail"
 "#
     ))
 }
@@ -1205,6 +1465,10 @@ impl GatewayGuard {
             .env("FERROGATE_SUPABASE_DSN", supabase_dsn)
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
             .env("FERROGATE_TEST_GUARDRAIL_SECRET", DETECTOR_SECRET)
+            .env(
+                "FERROGATE_GUARDRAIL_EVIDENCE_HMAC_KEY",
+                "ferrogate-e2e-guardrail-evidence-hmac-key-v1",
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(
@@ -1368,7 +1632,18 @@ fn write_guardrail_provider_response(
         })
         .to_string()
     } else {
-        r#"{"id":"chatcmpl_guardrail_e2e","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#.to_string()
+        let content = if request.contains("redaction-probe") {
+            "prefix provider-redact-secret suffix"
+        } else {
+            "ok"
+        };
+        serde_json::json!({
+            "id": "chatcmpl_guardrail_e2e",
+            "object": "chat.completion",
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string()
     };
     write!(
         stream,
@@ -1603,12 +1878,130 @@ impl SupabaseEvidence {
         bail!("timed out reading Guardrail evidence directly from Supabase: {last}")
     }
 
+    fn wait_for_guardrail_evaluations(
+        &mut self,
+        blocked_request_id: &str,
+        redacted_request_id: &str,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let mut last = "Guardrail evaluation rows are not visible".to_string();
+        while started.elapsed() < Duration::from_secs(15) {
+            match self.verify_guardrail_evaluations_once(blocked_request_id, redacted_request_id) {
+                Ok(()) => return Ok(()),
+                Err(error) => last = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        bail!("timed out verifying Guardrail evaluation rows in Supabase: {last}")
+    }
+
+    fn verify_guardrail_evaluations_once(
+        &mut self,
+        blocked_request_id: &str,
+        redacted_request_id: &str,
+    ) -> Result<()> {
+        let policy_count: i64 = self
+            .client
+            .query_one(
+                "SELECT count(*) FROM pg_policies WHERE schemaname = $1 AND \
+                 ((tablename = 'guardrail_evaluations' AND policyname = 'guardrail_evaluations_tenant_scope') OR \
+                  (tablename = 'guardrail_check_evaluations' AND policyname = 'guardrail_checks_tenant_scope')) \
+                 AND qual IS NOT NULL AND with_check IS NOT NULL",
+                &[&self.schema],
+            )?
+            .get(0);
+        if policy_count != 2 {
+            bail!("Supabase Guardrail evidence tenant RLS policies were incomplete");
+        }
+        let rows = self.client.query(
+            &format!(
+                "SELECT id, request_id, evaluation_json::text FROM \"{}\".guardrail_evaluations WHERE request_id IN ($1, $2) ORDER BY request_id, id",
+                self.schema
+            ),
+            &[&blocked_request_id, &redacted_request_id],
+        )?;
+        if rows.len() < 3 {
+            bail!(
+                "expected block plus request/response redaction evaluations, got {}",
+                rows.len()
+            );
+        }
+        let mut blocked = false;
+        let mut redacted = false;
+        let mut evaluation_ids = Vec::new();
+        for row in rows {
+            let id: String = row.get(0);
+            let request_id: String = row.get(1);
+            let document: String = row.get(2);
+            let value: Value = serde_json::from_str(&document)?;
+            if value["tenant"]["organization_id"] != DYNAMIC_TENANT_ID
+                || !value["input_fingerprint"]
+                    .as_str()
+                    .is_some_and(|fingerprint| fingerprint.starts_with("hmac-sha256:"))
+            {
+                bail!("Supabase Guardrail evaluation metadata was incomplete");
+            }
+            if request_id == blocked_request_id
+                && value["verdict"] == "fail"
+                && value["action"] == "block"
+                && value["enforcement_status"] == "enforced"
+            {
+                blocked = true;
+            }
+            if request_id == redacted_request_id
+                && value["verdict"] == "fail"
+                && value["action"] == "redact"
+                && value["transformed"] == true
+            {
+                redacted = true;
+            }
+            for forbidden in [
+                "dynamic-secret-v1",
+                "provider-redact-secret",
+                "guardrail-dynamic-client-secret",
+                "guardrail-redact-client-secret",
+                DETECTOR_SECRET,
+                "matched_text",
+            ] {
+                if document.contains(forbidden) {
+                    bail!("Supabase Guardrail evaluation leaked forbidden content");
+                }
+            }
+            evaluation_ids.push(id);
+        }
+        if !blocked || !redacted {
+            bail!("Supabase Guardrail evidence omitted block or redaction decision");
+        }
+        let checks = self.client.query(
+            &format!(
+                "SELECT evaluation_id, check_json::text FROM \"{}\".guardrail_check_evaluations WHERE evaluation_id = ANY($1)",
+                self.schema
+            ),
+            &[&evaluation_ids],
+        )?;
+        if checks.len() < 3 {
+            bail!("Supabase Guardrail evidence omitted per-check rows");
+        }
+        for row in checks {
+            let evaluation_id: String = row.get(0);
+            let document: String = row.get(1);
+            if !evaluation_ids.contains(&evaluation_id)
+                || document.contains("dynamic-secret-v1")
+                || document.contains("provider-redact-secret")
+                || document.contains("matched_text")
+            {
+                bail!("Supabase Guardrail per-check evidence was unsafe or orphaned");
+            }
+        }
+        Ok(())
+    }
+
     fn verify_guardrail_rbac_binding(&mut self, role_id: &str, expected_bound: bool) -> Result<()> {
         let permission_count: i64 = self
             .client
             .query_one(
                 &format!(
-                    "SELECT count(*) FROM \"{}\".permissions WHERE key LIKE 'guardrails.policy.%'",
+                    "SELECT count(*) FROM \"{}\".permissions WHERE key LIKE 'guardrails.policy.%' OR key = 'guardrails.evidence.read'",
                     self.schema
                 ),
                 &[],
@@ -1762,6 +2155,50 @@ impl SupabaseEvidence {
         }
         if !buffered_code || !buffered_error_code || !rejected_code {
             bail!("request logs omitted stable streaming Guardrail error codes");
+        }
+
+        let evaluations = self.client.query(
+            &format!(
+                "SELECT evaluation.policy_id, evaluation.enforcement_status, check_row.verdict, check_row.error_kind \
+                 FROM \"{}\".guardrail_evaluations AS evaluation \
+                 JOIN \"{}\".guardrail_check_evaluations AS check_row ON check_row.evaluation_id = evaluation.id \
+                 WHERE evaluation.policy_id IN ('stream-buffer-policy', 'stream-shadow-policy', 'stream-reject-policy')",
+                self.schema, self.schema
+            ),
+            &[],
+        )?;
+        let mut buffered_check_error = false;
+        let mut shadow_check_not_enforced = false;
+        let mut rejected_check_skipped = false;
+        for row in evaluations {
+            let policy_id: String = row.get(0);
+            let enforcement_status: String = row.get(1);
+            let verdict: String = row.get(2);
+            let error_kind: Option<String> = row.get(3);
+            match policy_id.as_str() {
+                "stream-buffer-policy"
+                    if verdict == "error"
+                        && error_kind.as_deref()
+                            == Some("guardrail_stream_buffer_limit_exceeded") =>
+                {
+                    buffered_check_error = true;
+                }
+                "stream-shadow-policy" if enforcement_status == "not_enforced" => {
+                    shadow_check_not_enforced = true;
+                }
+                "stream-reject-policy"
+                    if verdict == "skipped"
+                        && error_kind.as_deref() == Some("streaming_unsupported") =>
+                {
+                    rejected_check_skipped = true;
+                }
+                _ => {}
+            }
+        }
+        if !buffered_check_error || !shadow_check_not_enforced || !rejected_check_skipped {
+            bail!(
+                "streaming per-check evidence incomplete: buffer_error={buffered_check_error}, shadow={shadow_check_not_enforced}, rejected={rejected_check_skipped}"
+            );
         }
         Ok(())
     }

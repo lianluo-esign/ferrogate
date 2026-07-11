@@ -259,6 +259,7 @@
       <button data-view="usage">Token Usage</button>
       <button data-view="config">Config Check</button>
       <button data-view="audit">Audit</button>
+      <button data-view="investigation">Investigation</button>
     </nav>
     <section class="content" aria-live="polite">
       <div class="toolbar">
@@ -332,6 +333,11 @@
         title: "Audit",
         endpoints: ["/admin/v1/audit-events", "/admin/v1/tool-approvals"],
         columns: ["id", "request_id", "actor_api_key_id", "action", "target", "outcome", "message", "occurred_at_unix"],
+      },
+      investigation: {
+        title: "Investigation",
+        endpoints: [],
+        columns: ["time", "kind", "identity", "target", "outcome", "cost_usd"],
       },
     };
 
@@ -468,6 +474,100 @@
       action.append(format, textarea, button, reloadButton, result);
     }
 
+    function renderInvestigationAction() {
+      action.replaceChildren();
+      const selector = document.createElement("select");
+      selector.setAttribute("aria-label", "Investigation selector");
+      for (const [value, label] of [["request_id", "Request ID"], ["trace_id", "Trace ID"], ["agent_run_id", "Agent Run ID"]]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        selector.append(option);
+      }
+      const identifier = document.createElement("input");
+      identifier.type = "search";
+      identifier.setAttribute("aria-label", "Investigation identifier");
+      const button = document.createElement("button");
+      button.className = "primary";
+      button.textContent = "Search";
+      const result = document.createElement("div");
+      result.className = "action-result";
+      button.addEventListener("click", async () => {
+        const value = identifier.value.trim();
+        if (!value) return;
+        state.token = tokenInput.value.trim();
+        localStorage.setItem("ferrogate_admin_token", state.token);
+        setStatus("Loading...");
+        try {
+          const payload = await loadJson(`/admin/v1/investigations?${selector.value}=${encodeURIComponent(value)}`);
+          const rows = [];
+          for (const item of payload.agent_runs || []) rows.push({
+            time: item.completed_at_unix || item.started_at_unix,
+            kind: "agent-run",
+            identity: (item.tenant || {}).api_key_id || (item.tenant || {}).user_id,
+            target: item.provider,
+            outcome: item.status,
+            cost_usd: "",
+          });
+          for (const item of payload.agent_events || []) rows.push({
+            time: item.occurred_at_unix,
+            kind: `agent:${item.kind}`,
+            identity: (item.tenant || {}).api_key_id || (item.tenant || {}).user_id,
+            target: item.target,
+            outcome: item.outcome,
+            cost_usd: "",
+          });
+          for (const item of payload.requests || []) rows.push({
+            time: item.completed_at_unix || item.started_at_unix,
+            kind: "request",
+            identity: (item.tenant || {}).api_key_id || (item.tenant || {}).user_id,
+            target: `${item.logical_model || ""} / ${item.provider || ""}`,
+            outcome: item.error_code || item.status_code,
+            cost_usd: "",
+          });
+          for (const item of payload.guardrail_evaluations || []) rows.push({
+            time: item.occurred_at_unix,
+            kind: `guardrail:${item.stage}`,
+            identity: item.subject_id,
+            target: `${item.policy_id}@${item.policy_revision}`,
+            outcome: `${item.verdict}/${item.action}/${item.enforcement_status}`,
+            cost_usd: "",
+          });
+          for (const item of payload.audit_events || []) rows.push({
+            time: item.occurred_at_unix,
+            kind: "audit",
+            identity: item.actor_api_key_id,
+            target: item.target,
+            outcome: item.outcome,
+            cost_usd: "",
+          });
+          for (const item of payload.approvals || []) rows.push({
+            time: item.decided_at_unix || item.requested_at_unix,
+            kind: "approval",
+            identity: item.reviewer_api_key_id || item.actor_api_key_id,
+            target: item.tool_name,
+            outcome: item.status,
+            cost_usd: "",
+          });
+          for (const item of payload.billing_events || []) rows.push({
+            time: item.occurred_at_unix,
+            kind: "usage",
+            identity: (item.tenant || {}).api_key_id,
+            target: `${item.logical_model || ""} / ${item.provider || ""}`,
+            outcome: item.status_code,
+            cost_usd: item.cost_usd,
+          });
+          rows.sort((left, right) => (left.time || 0) - (right.time || 0));
+          result.textContent = `${payload.final_outcome} | $${Number(payload.total_cost_usd || 0).toFixed(6)}`;
+          renderTable(rows, views.investigation.columns);
+          setStatus("");
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      });
+      action.append(selector, identifier, button, result);
+    }
+
     function listOf(payload) {
       return payload && Array.isArray(payload.data) ? payload.data : [];
     }
@@ -501,6 +601,11 @@
       renderMetrics([]);
       if (viewName === "config") {
         renderConfigAction();
+        renderTable([], view.columns);
+        return;
+      }
+      if (viewName === "investigation") {
+        renderInvestigationAction();
         renderTable([], view.columns);
         return;
       }

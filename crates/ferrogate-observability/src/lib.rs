@@ -349,6 +349,11 @@ pub struct GatewayMetricsSnapshot {
     pub guardrail_denial_total: u64,
     pub guardrail_redaction_total: u64,
     pub guardrail_detector_error_total: u64,
+    pub guardrail_evaluation_total: u64,
+    pub guardrail_evaluation_fail_total: u64,
+    pub guardrail_evaluation_error_total: u64,
+    pub guardrail_evaluation_shadow_total: u64,
+    pub guardrail_evidence_persistence_failure_total: u64,
     pub billing_event_total: u64,
     /// Failures durably enqueueing a settled usage event for delivery to the
     /// billing service (issue #151) — distinguishable from successful
@@ -534,6 +539,46 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_guardrail_detector_errors_total {}\n",
         snapshot.guardrail_detector_error_total
+    ));
+
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_evaluations_total",
+        "Guardrail policy evaluations grouped by bounded verdict class.",
+        "counter",
+    );
+    let pass_total = snapshot
+        .guardrail_evaluation_total
+        .saturating_sub(snapshot.guardrail_evaluation_fail_total)
+        .saturating_sub(snapshot.guardrail_evaluation_error_total);
+    for (verdict, count) in [
+        ("pass", pass_total),
+        ("fail", snapshot.guardrail_evaluation_fail_total),
+        ("error", snapshot.guardrail_evaluation_error_total),
+    ] {
+        output.push_str(&format!(
+            "ferrogate_guardrail_evaluations_total{{verdict=\"{verdict}\"}} {count}\n"
+        ));
+    }
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_shadow_evaluations_total",
+        "Guardrail evaluations that were shadow-only or not enforced.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_guardrail_shadow_evaluations_total {}\n",
+        snapshot.guardrail_evaluation_shadow_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_guardrail_evidence_persistence_failures_total",
+        "Failures persisting sanitized Guardrail evaluation evidence.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_guardrail_evidence_persistence_failures_total {}\n",
+        snapshot.guardrail_evidence_persistence_failure_total
     ));
 
     push_help(
@@ -748,6 +793,10 @@ fn instrumentation_scope_json() -> serde_json::Value {
 }
 
 fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Value> {
+    let guardrail_pass_total = snapshot
+        .guardrail_evaluation_total
+        .saturating_sub(snapshot.guardrail_evaluation_fail_total)
+        .saturating_sub(snapshot.guardrail_evaluation_error_total);
     let mut metrics = vec![
         sum_metric_json(
             "ferrogate.request_logs",
@@ -813,6 +862,36 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "ferrogate.guardrail.detector_errors",
             "Total external guardrail detector evaluation errors.",
             snapshot.guardrail_detector_error_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.evaluations",
+            "Guardrail policy evaluations that passed.",
+            guardrail_pass_total as f64,
+            vec![OtlpAttribute::new("verdict", "pass")],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.evaluations",
+            "Guardrail policy evaluations that failed.",
+            snapshot.guardrail_evaluation_fail_total as f64,
+            vec![OtlpAttribute::new("verdict", "fail")],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.evaluations",
+            "Guardrail policy evaluations with detector errors.",
+            snapshot.guardrail_evaluation_error_total as f64,
+            vec![OtlpAttribute::new("verdict", "error")],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.shadow_evaluations",
+            "Guardrail evaluations that were shadow-only or not enforced.",
+            snapshot.guardrail_evaluation_shadow_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.guardrail.evidence_persistence_failures",
+            "Failures persisting Guardrail evaluation evidence.",
+            snapshot.guardrail_evidence_persistence_failure_total as f64,
             vec![],
         ),
         sum_metric_json(
@@ -1185,6 +1264,11 @@ mod tests {
             guardrail_denial_total: 1,
             guardrail_redaction_total: 1,
             guardrail_detector_error_total: 3,
+            guardrail_evaluation_total: 5,
+            guardrail_evaluation_fail_total: 2,
+            guardrail_evaluation_error_total: 1,
+            guardrail_evaluation_shadow_total: 2,
+            guardrail_evidence_persistence_failure_total: 1,
             billing_event_total: 1,
             billing_report_enqueue_failure_total: 1,
             tool_call_total: 2,
@@ -1214,6 +1298,9 @@ mod tests {
         assert!(text.contains("ferrogate_guardrail_denials_total 1"));
         assert!(text.contains("ferrogate_guardrail_redactions_total 1"));
         assert!(text.contains("ferrogate_guardrail_detector_errors_total 3"));
+        assert!(text.contains("ferrogate_guardrail_evaluations_total{verdict=\"pass\"} 2"));
+        assert!(text.contains("ferrogate_guardrail_shadow_evaluations_total 2"));
+        assert!(text.contains("ferrogate_guardrail_evidence_persistence_failures_total 1"));
         assert!(text.contains("ferrogate_network_access_denied_total 3"));
         assert!(text.contains("ferrogate_network_access_rate_limited_total 4"));
         assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));

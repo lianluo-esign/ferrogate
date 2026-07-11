@@ -170,6 +170,57 @@ pub(super) struct ToolExecutionHttpError {
     pub(super) message: String,
 }
 
+async fn require_guardrail_evidence_auth(
+    session: &mut Session,
+    ctx: &ProxyContext,
+    headers: &http::HeaderMap,
+    state: &crate::state::AppState,
+) -> PingoraResult<Option<AuthContext>> {
+    let auth = match authenticate(state, headers, "admin.read", &ctx.request_id) {
+        Ok(auth) => auth,
+        Err(error) => {
+            write_json_error(
+                session,
+                error.status,
+                error.code,
+                error.message,
+                &ctx.request_id,
+            )
+            .await?;
+            return Ok(None);
+        }
+    };
+    if let Some(tenant_id) = auth.organization_id.as_deref() {
+        match state.tenant_has_permission_result(tenant_id, "guardrails.evidence.read") {
+            Ok(true) => {}
+            Ok(false) => {
+                write_json_error(
+                    session,
+                    StatusCode::FORBIDDEN,
+                    "guardrail_rbac_denied",
+                    "tenant roles do not grant required action guardrails.evidence.read",
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(None);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Guardrail evidence RBAC lookup failed");
+                write_json_error(
+                    session,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "guardrail_rbac_unavailable",
+                    "failed to resolve Guardrail evidence role permissions",
+                    &ctx.request_id,
+                )
+                .await?;
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(auth))
+}
+
 impl FerroGateway {
     pub(super) async fn handle_healthz(
         &self,
@@ -3589,6 +3640,91 @@ impl FerroGateway {
                     error.status,
                     error.code,
                     error.message,
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_guardrail_evaluations(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let Some(auth) = require_guardrail_evidence_auth(session, ctx, headers, &state).await?
+        else {
+            return Ok(());
+        };
+        let mut filter = crate::state::GuardrailEvidenceFilter::from_query(query);
+        filter.tenant_id = crate::auth::enforce_tenant_filter(&auth, filter.tenant_id);
+        match state.guardrail_evaluations_page(state.admin_pagination(query), filter) {
+            Ok(page) => {
+                let body = AdminList::paginated(page.data, page.total, page.offset, page.limit);
+                write_json_response(session, StatusCode::OK, &body, &ctx.request_id).await
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "guardrail evidence query failed");
+                write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "guardrail_evidence_unavailable",
+                    "guardrail evaluation evidence is unavailable",
+                    &ctx.request_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn handle_admin_guardrail_investigation(
+        &self,
+        session: &mut Session,
+        ctx: &ProxyContext,
+        headers: &http::HeaderMap,
+        query: Option<&str>,
+    ) -> PingoraResult<()> {
+        let state = self.state.current();
+        let Some(auth) = require_guardrail_evidence_auth(session, ctx, headers, &state).await?
+        else {
+            return Ok(());
+        };
+        let mut filter = crate::state::GuardrailEvidenceFilter::from_query(query);
+        filter.tenant_id = crate::auth::enforce_tenant_filter(&auth, filter.tenant_id);
+        match state.guardrail_investigation(filter) {
+            Ok(Some(timeline)) => {
+                write_json_response(session, StatusCode::OK, &timeline, &ctx.request_id).await
+            }
+            Ok(None) => {
+                write_json_error(
+                    session,
+                    StatusCode::NOT_FOUND,
+                    "guardrail_investigation_not_found",
+                    "no evidence matched the investigation selector",
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) if error.to_string().contains("is required") => {
+                write_json_error(
+                    session,
+                    StatusCode::BAD_REQUEST,
+                    "guardrail_investigation_selector_required",
+                    "request_id, trace_id, or agent_run_id is required",
+                    &ctx.request_id,
+                )
+                .await
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "guardrail investigation query failed");
+                write_json_error(
+                    session,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "guardrail_evidence_unavailable",
+                    "guardrail investigation evidence is unavailable",
                     &ctx.request_id,
                 )
                 .await

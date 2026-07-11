@@ -2311,6 +2311,64 @@
         }
       }
     },
+    "/admin/v1/guardrail-evaluations": {
+      "get": {
+        "operationId": "listGuardrailEvaluations",
+        "tags": ["admin-read"],
+        "summary": "List sanitized overall and per-check Guardrail evaluation evidence.",
+        "parameters": [
+          {"$ref": "#/components/parameters/Offset"},
+          {"$ref": "#/components/parameters/Limit"},
+          {"name": "request_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "trace_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "agent_run_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "scope_type", "in": "query", "schema": {"type": "string"}},
+          {"name": "scope_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "subject_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "policy_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "policy_revision", "in": "query", "schema": {"type": "integer", "minimum": 1}},
+          {"name": "detector_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "category", "in": "query", "schema": {"type": "string"}},
+          {"name": "verdict", "in": "query", "schema": {"type": "string", "enum": ["pass", "fail", "error"]}},
+          {"name": "action", "in": "query", "schema": {"type": "string", "enum": ["allow", "block", "redact", "record"]}},
+          {"name": "error_kind", "in": "query", "schema": {"type": "string"}},
+          {"name": "since_unix", "in": "query", "schema": {"type": "integer", "minimum": 0}},
+          {"name": "until_unix", "in": "query", "schema": {"type": "integer", "minimum": 0}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated Guardrail evaluation evidence.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailEvaluationList"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"description": "Guardrail evidence storage unavailable.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}
+        }
+      }
+    },
+    "/admin/v1/investigations": {
+      "get": {
+        "operationId": "getGuardrailInvestigation",
+        "tags": ["admin-read"],
+        "summary": "Join identity, route, policy, Guardrail, approval, execution, usage, cost, and outcome evidence.",
+        "parameters": [
+          {"name": "request_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "trace_id", "in": "query", "schema": {"type": "string"}},
+          {"name": "agent_run_id", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Unified investigation timeline.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GuardrailInvestigationTimeline"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"description": "Investigation evidence storage unavailable.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}
+        }
+      }
+    },
     "/admin/v1/config/validate": {
       "post": {
         "operationId": "validateAdminConfig",
@@ -11895,6 +11953,166 @@
           "on_error": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailPolicyAction"}},
           "provider_dispatched": {"type": "boolean", "const": false},
           "external_action_dispatched": {"type": "boolean", "const": false}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailFindingCategoryCounts": {
+        "type": "object",
+        "additionalProperties": {"type": "integer", "minimum": 0},
+        "description": "Sanitized category-to-count map. Matched text is never included."
+      },
+      "GuardrailCheckEvaluation": {
+        "type": "object",
+        "required": ["id", "evaluation_id", "check_id", "detector_id", "detector_version", "config_digest", "verdict", "action", "enforcement_status", "latency_ms", "finding_category_counts", "finding_count", "transformed", "used_fallback"],
+        "properties": {
+          "id": {"type": "string"},
+          "evaluation_id": {"type": "string"},
+          "check_id": {"type": "string"},
+          "detector_id": {"type": "string"},
+          "detector_version": {"type": "string"},
+          "config_digest": {"type": "string", "pattern": "^sha256:"},
+          "verdict": {"type": "string", "enum": ["pass", "fail", "error", "skipped"]},
+          "action": {"type": "string", "enum": ["allow", "block", "redact", "record"]},
+          "enforcement_status": {"type": "string", "enum": ["enforced", "shadow_only", "not_enforced"]},
+          "latency_ms": {"type": "integer", "minimum": 0},
+          "finding_category_counts": {"$ref": "#/components/schemas/GuardrailFindingCategoryCounts"},
+          "finding_count": {"type": "integer", "minimum": 0},
+          "transformed": {"type": "boolean"},
+          "used_fallback": {"type": "boolean"},
+          "error_kind": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailEvaluation": {
+        "type": "object",
+        "required": ["id", "request_id", "tenant", "scope_type", "scope_id", "target", "protocol", "stage", "mode", "policy_id", "policy_revision", "verdict", "action", "enforcement_status", "latency_ms", "finding_category_counts", "finding_count", "transformed", "input_fingerprint", "occurred_at_unix"],
+        "properties": {
+          "id": {"type": "string"},
+          "request_id": {"type": "string"},
+          "trace_id": {"type": ["string", "null"]},
+          "agent_run_id": {"type": ["string", "null"]},
+          "subject_id": {"type": ["string", "null"]},
+          "tenant": {"$ref": "#/components/schemas/TenantContext"},
+          "scope_type": {"type": "string", "enum": ["global", "tenant", "project", "workspace", "api_key"]},
+          "scope_id": {"type": "string"},
+          "target": {"type": "string"},
+          "protocol": {"type": "string", "enum": ["chat_completions", "responses"]},
+          "stage": {"type": "string", "enum": ["request", "response"]},
+          "mode": {"type": "string", "enum": ["enforce", "shadow"]},
+          "policy_id": {"type": "string"},
+          "policy_revision": {"type": "integer", "minimum": 1},
+          "verdict": {"type": "string", "enum": ["pass", "fail", "error"]},
+          "action": {"type": "string", "enum": ["allow", "block", "redact", "record"]},
+          "enforcement_status": {"type": "string", "enum": ["enforced", "shadow_only", "not_enforced"]},
+          "latency_ms": {"type": "integer", "minimum": 0},
+          "finding_category_counts": {"$ref": "#/components/schemas/GuardrailFindingCategoryCounts"},
+          "finding_count": {"type": "integer", "minimum": 0},
+          "transformed": {"type": "boolean"},
+          "input_fingerprint": {"type": "string", "pattern": "^hmac-sha256:"},
+          "occurred_at_unix": {"type": "integer", "minimum": 0}
+        }
+      },
+      "GuardrailEvaluationView": {
+        "unevaluatedProperties": false,
+        "allOf": [
+          {"$ref": "#/components/schemas/GuardrailEvaluation"},
+          {"type": "object", "required": ["checks"], "properties": {"checks": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailCheckEvaluation"}}}}
+        ]
+      },
+      "GuardrailEvaluationList": {
+        "type": "object",
+        "required": ["object", "data", "total", "offset", "limit"],
+        "properties": {
+          "object": {"type": "string", "const": "list"},
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailEvaluationView"}},
+          "total": {"type": "integer", "minimum": 0},
+          "offset": {"type": "integer", "minimum": 0},
+          "limit": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": false
+      },
+      "InvestigationRequestEvidence": {
+        "type": "object",
+        "required": ["request_id", "tenant", "status_code"],
+        "properties": {
+          "request_id": {"type": "string"},
+          "trace_id": {"type": ["string", "null"]},
+          "agent_run_id": {"type": ["string", "null"]},
+          "workflow_id": {"type": ["string", "null"]},
+          "workflow_version": {"type": ["integer", "null"], "minimum": 0},
+          "workflow_node_id": {"type": ["string", "null"]},
+          "tenant": {"$ref": "#/components/schemas/TenantContext"},
+          "route": {"type": ["string", "null"]},
+          "provider": {"type": ["string", "null"]},
+          "logical_model": {"type": ["string", "null"]},
+          "provider_model": {"type": ["string", "null"]},
+          "status_code": {"type": "integer", "minimum": 100, "maximum": 599},
+          "error_code": {"type": ["string", "null"]},
+          "cache_status": {"type": ["string", "null"]},
+          "started_at_unix": {"type": ["integer", "null"], "minimum": 0},
+          "completed_at_unix": {"type": ["integer", "null"], "minimum": 0}
+        },
+        "additionalProperties": false
+      },
+      "InvestigationApprovalEvidence": {
+        "type": "object",
+        "required": ["id", "request_id", "tenant", "tool_name", "status", "requested_at_unix", "expires_at_unix"],
+        "properties": {
+          "id": {"type": "string"},
+          "request_id": {"type": "string"},
+          "trace_id": {"type": ["string", "null"]},
+          "tenant": {"$ref": "#/components/schemas/TenantContext"},
+          "actor_api_key_id": {"type": ["string", "null"]},
+          "tool_name": {"type": "string"},
+          "server_name": {"type": ["string", "null"]},
+          "route": {"type": ["string", "null"]},
+          "status": {"type": "string"},
+          "reviewer_api_key_id": {"type": ["string", "null"]},
+          "reviewer_authority": {"type": ["string", "null"]},
+          "terminal_reason": {"type": ["string", "null"]},
+          "requested_at_unix": {"type": "integer", "minimum": 0},
+          "expires_at_unix": {"type": "integer", "minimum": 0},
+          "decided_at_unix": {"type": ["integer", "null"], "minimum": 0}
+        },
+        "additionalProperties": false
+      },
+      "InvestigationBillingEvidence": {
+        "type": "object",
+        "required": ["request_id", "tenant", "logical_model", "provider", "provider_model", "usage", "status_code"],
+        "properties": {
+          "request_id": {"type": "string"},
+          "trace_id": {"type": ["string", "null"]},
+          "agent_run_id": {"type": ["string", "null"]},
+          "tenant": {"$ref": "#/components/schemas/TenantContext"},
+          "logical_model": {"type": "string"},
+          "provider": {"type": "string"},
+          "provider_model": {"type": "string"},
+          "usage": {"$ref": "#/components/schemas/TokenUsage"},
+          "status_code": {"type": "integer", "minimum": 100, "maximum": 599},
+          "occurred_at_unix": {"type": ["integer", "null"], "minimum": 0},
+          "cost_usd": {"type": ["number", "null"], "minimum": 0},
+          "latency_ms": {"type": ["integer", "null"], "minimum": 0},
+          "wallet_delta_credits": {"type": ["integer", "null"]},
+          "wallet_balance_after_credits": {"type": ["integer", "null"]}
+        },
+        "additionalProperties": false
+      },
+      "GuardrailInvestigationTimeline": {
+        "type": "object",
+        "required": ["object", "selector", "agent_runs", "agent_events", "requests", "guardrail_evaluations", "audit_events", "approvals", "billing_events", "total_cost_usd", "final_outcome"],
+        "properties": {
+          "object": {"type": "string", "const": "guardrail_investigation"},
+          "selector": {"type": "string"},
+          "identity": {"oneOf": [{"$ref": "#/components/schemas/TenantContext"}, {"type": "null"}]},
+          "agent_runs": {"type": "array", "items": {"$ref": "#/components/schemas/StoredAgentRun"}},
+          "agent_events": {"type": "array", "items": {"$ref": "#/components/schemas/StoredAgentRunEvent"}},
+          "requests": {"type": "array", "items": {"$ref": "#/components/schemas/InvestigationRequestEvidence"}},
+          "guardrail_evaluations": {"type": "array", "items": {"$ref": "#/components/schemas/GuardrailEvaluationView"}},
+          "audit_events": {"type": "array", "items": {"$ref": "#/components/schemas/StoredAuditEvent"}},
+          "approvals": {"type": "array", "items": {"$ref": "#/components/schemas/InvestigationApprovalEvidence"}},
+          "billing_events": {"type": "array", "items": {"$ref": "#/components/schemas/InvestigationBillingEvidence"}},
+          "total_cost_usd": {"type": "number", "minimum": 0},
+          "final_outcome": {"type": "string", "enum": ["blocked", "failed", "succeeded", "decision_only"]}
         },
         "additionalProperties": false
       },

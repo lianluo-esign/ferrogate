@@ -2635,6 +2635,16 @@ fn rejects_invalid_analytics_retention_and_storage_admin_list_limits() {
     assert!(error.contains("field analytics.request_log_retention_records"));
 
     let config = Config {
+        analytics: crate::config::AnalyticsConfig {
+            guardrail_evaluation_retention_records: 0,
+            ..crate::config::AnalyticsConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field analytics.guardrail_evaluation_retention_records"));
+
+    let config = Config {
         storage: StorageConfig {
             admin_list_default_limit: 200,
             admin_list_max_limit: 100,
