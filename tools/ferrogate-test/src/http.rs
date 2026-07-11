@@ -51,6 +51,17 @@ pub(crate) fn http_request_addr(
     headers: &[&str],
     body: &str,
 ) -> Result<HttpResponse> {
+    http_request_addr_after_write(addr, method, path, headers, body, || {})
+}
+
+pub(crate) fn http_request_addr_after_write(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[&str],
+    body: &str,
+    after_write: impl FnOnce(),
+) -> Result<HttpResponse> {
     let mut stream = TcpStream::connect(addr)
         .with_context(|| format!("failed to connect to {addr} for {method} {path}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -66,6 +77,10 @@ pub(crate) fn http_request_addr(
     }
     write!(stream, "\r\n{body}")
         .with_context(|| format!("failed to write request body to {addr} for {method} {path}"))?;
+    stream
+        .flush()
+        .with_context(|| format!("failed to flush request to {addr} for {method} {path}"))?;
+    after_write();
 
     let raw = read_http_response(&mut stream, addr, method, path)?;
     let status = raw

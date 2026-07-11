@@ -7,7 +7,7 @@
 use crate::{
     assertions::assert_secret_redacted,
     cli::SupabaseLiveRestartArgs,
-    http::{free_addr, http_request_addr, HttpResponse},
+    http::{free_addr, http_request_addr, http_request_addr_after_write, HttpResponse},
     mocks::read_http_request,
     supabase_schema::{connect_live_supabase, LiveSupabaseScenario, LiveSupabaseSchema},
 };
@@ -77,7 +77,7 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     let role_slug = format!("mcp-e2e-bundle-{fixture_suffix}");
     let mut evidence = SupabaseEvidence::connect(args, schema_name.clone())?;
     let services = MockIdentityServices::start()?;
-    let gateway_addr = free_addr()?;
+    let mut gateway_addr = free_addr()?;
     let dir = tempfile::tempdir()?;
     let config_path = dir.path().join("mcp-identity-supabase.yaml");
     fs::write(
@@ -87,6 +87,7 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
             &services.oidc_addr,
             &services.mcp_addr,
             &schema_name,
+            8,
             args,
         )?,
     )?;
@@ -261,6 +262,149 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     authorize(&gateway_addr, USER_A_AUTH, USER_A)?;
     assert_tool_subject(&call_tool(&gateway_addr, USER_A_AUTH, json!({}))?, USER_A)?;
 
+    let replacement_gateway_addr = free_addr()?;
+    let replacement_config_path = dir.path().join("mcp-identity-replacement.yaml");
+    fs::write(
+        &replacement_config_path,
+        gateway_config(
+            &replacement_gateway_addr,
+            &services.oidc_addr,
+            &services.mcp_addr,
+            &schema_name,
+            2,
+            args,
+        )?,
+    )?;
+    let replacement_gateway = GatewayGuard::start(
+        &args.local.ferrogate_bin,
+        &replacement_config_path,
+        &replacement_gateway_addr,
+        args.supabase_dsn.trim(),
+    )?;
+
+    evidence.expire_credential(USER_A)?;
+    let before_crashed_refresh = evidence.credential_snapshot(USER_A)?;
+    let refreshes_before_crash = services.refreshes.load(Ordering::SeqCst);
+    let mut crashed_owner_gate = services.arm_next_refresh_response()?;
+    let (crashed_owner_tx, crashed_owner_rx) = mpsc::channel();
+    let crashed_owner_addr = gateway_addr.clone();
+    let crashed_owner_caller = thread::spawn(move || {
+        let result = call_tool(&crashed_owner_addr, USER_A_AUTH, json!({}));
+        let _ = crashed_owner_tx.send(result);
+    });
+    crashed_owner_gate.wait_started(Duration::from_secs(60))?;
+    let (crashed_lease_id, initial_crashed_lease_expiry) =
+        evidence.wait_for_refresh_lease_claim(USER_A)?;
+    let renewed_crashed_lease_expiry = evidence.wait_for_refresh_lease_extension(
+        USER_A,
+        &crashed_lease_id,
+        initial_crashed_lease_expiry,
+    )?;
+    let abandoned_owner_grants = services
+        .refreshes
+        .load(Ordering::SeqCst)
+        .saturating_sub(refreshes_before_crash);
+    if abandoned_owner_grants != 1 {
+        bail!(
+            "crashed MCP refresh owner expected one IdP grant before termination, observed {abandoned_owner_grants}"
+        );
+    }
+
+    drop(gateway);
+    let crashed_lease_snapshot = evidence.refresh_lease_clock_snapshot(USER_A)?;
+    if crashed_lease_snapshot.lease_id.as_deref() != Some(&crashed_lease_id) {
+        bail!(
+            "crashed gateway did not leave its MCP refresh lease in Supabase: expected {}, observed {:?}",
+            crashed_lease_id,
+            crashed_lease_snapshot.lease_id
+        );
+    }
+    let crashed_lease_expiry = crashed_lease_snapshot
+        .expires_at_unix
+        .context("crashed gateway left an MCP refresh lease without an expiry")?;
+    if crashed_lease_expiry < renewed_crashed_lease_expiry
+        || crashed_lease_snapshot.db_now >= crashed_lease_expiry
+    {
+        bail!(
+            "crashed gateway did not leave a live renewed MCP refresh lease: db_now={}, renewed_expiry={renewed_crashed_lease_expiry}, final_expiry={crashed_lease_expiry}",
+            crashed_lease_snapshot.db_now
+        );
+    }
+    let crashed_owner_result = crashed_owner_rx
+        .recv_timeout(Duration::from_secs(15))
+        .context("crashed MCP refresh caller did not terminate with its gateway")?;
+    if matches!(&crashed_owner_result, Ok(response) if response.status == 200) {
+        bail!("crashed MCP refresh owner unexpectedly returned a successful tool response");
+    }
+    crashed_owner_caller
+        .join()
+        .map_err(|_| anyhow::anyhow!("crashed MCP refresh caller panicked"))?;
+    crashed_owner_gate.release();
+    crashed_owner_gate.wait_response_completed(Duration::from_secs(15))?;
+
+    services.slow_refresh.store(true, Ordering::SeqCst);
+    let (replacement_started_tx, replacement_started_rx) = mpsc::channel();
+    let (replacement_result_tx, replacement_result_rx) = mpsc::channel();
+    let replacement_call_addr = replacement_gateway_addr.clone();
+    let replacement_caller = thread::spawn(move || {
+        let result = call_tool_after_write(&replacement_call_addr, USER_A_AUTH, json!({}), || {
+            let _ = replacement_started_tx.send(());
+        });
+        let _ = replacement_result_tx.send(result);
+    });
+    replacement_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .context("replacement MCP refresh caller did not write its request")?;
+    evidence.verify_old_refresh_lease_while_request_is_pending(
+        USER_A,
+        &crashed_lease_id,
+        crashed_lease_expiry,
+        Duration::from_secs(2),
+    )?;
+    match replacement_result_rx.try_recv() {
+        Err(mpsc::TryRecvError::Empty) => {}
+        Ok(_) => bail!("replacement MCP refresh call completed before the crashed lease expired"),
+        Err(mpsc::TryRecvError::Disconnected) => {
+            bail!("replacement MCP refresh caller disconnected before takeover")
+        }
+    }
+    let replacement_lease = evidence.wait_for_refresh_lease_takeover(
+        USER_A,
+        &crashed_lease_id,
+        crashed_lease_expiry,
+    )?;
+    if replacement_lease.lease_id == crashed_lease_id {
+        bail!("replacement gateway reused the crashed owner's MCP refresh lease ID");
+    }
+    if replacement_lease.db_now <= crashed_lease_expiry {
+        bail!(
+            "replacement MCP refresh lease was observed before the crashed lease expired: db_now={}, old_expiry={crashed_lease_expiry}",
+            replacement_lease.db_now
+        );
+    }
+    let replacement_response = replacement_result_rx
+        .recv_timeout(Duration::from_secs(45))
+        .context("replacement MCP refresh caller did not complete")??;
+    replacement_caller
+        .join()
+        .map_err(|_| anyhow::anyhow!("replacement MCP refresh caller panicked"))?;
+    services.slow_refresh.store(false, Ordering::SeqCst);
+    assert_tool_subject(&replacement_response, USER_A)
+        .context("replacement gateway failed to refresh after crashed lease expiry")?;
+    evidence.verify_replacement_refresh_snapshot(USER_A, &before_crashed_refresh)?;
+    let total_crash_grants = services
+        .refreshes
+        .load(Ordering::SeqCst)
+        .saturating_sub(refreshes_before_crash);
+    let replacement_grants = total_crash_grants.saturating_sub(abandoned_owner_grants);
+    if total_crash_grants != 2 || replacement_grants != 1 {
+        bail!(
+            "crash takeover expected two IdP POSTs: one abandoned crashed-owner grant and exactly one replacement grant; observed total={total_crash_grants}, abandoned_owner={abandoned_owner_grants}, replacement={replacement_grants}"
+        );
+    }
+    gateway = replacement_gateway;
+    gateway_addr = replacement_gateway_addr;
+
     evidence.expire_credential(USER_A)?;
     services.idp_outage.store(true, Ordering::SeqCst);
     assert_error(
@@ -321,13 +465,6 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     assert_metric_nonzero(&metrics, "ferrogate_mcp_identity_failures_total")?;
     assert_metric_nonzero(&metrics, "ferrogate_mcp_identity_refreshes_total")?;
 
-    drop(gateway);
-    gateway = GatewayGuard::start(
-        &args.local.ferrogate_bin,
-        &config_path,
-        &gateway_addr,
-        args.supabase_dsn.trim(),
-    )?;
     assert_tool_subject(&call_tool(&gateway_addr, USER_B_AUTH, json!({}))?, USER_B)?;
 
     let revoked = http_request_addr(
@@ -453,6 +590,22 @@ fn callback(gateway_addr: &str, code: &str, state: &str) -> Result<HttpResponse>
 
 fn call_tool(gateway_addr: &str, auth: &str, arguments: Value) -> Result<HttpResponse> {
     call_server_tool(gateway_addr, auth, SERVER_NAME, arguments, &[])
+}
+
+fn call_tool_after_write(
+    gateway_addr: &str,
+    auth: &str,
+    arguments: Value,
+    after_write: impl FnOnce(),
+) -> Result<HttpResponse> {
+    http_request_addr_after_write(
+        gateway_addr,
+        "POST",
+        "/v1/mcp/tool/execute",
+        &[auth, JSON_CONTENT],
+        &tool_body(SERVER_NAME, arguments),
+        after_write,
+    )
 }
 
 fn call_server_tool(
@@ -684,7 +837,7 @@ impl RefreshResponseGate {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if !state.armed {
+        if !state.armed || state.started {
             return false;
         }
         state.started = true;
@@ -1238,6 +1391,17 @@ struct CredentialSnapshot {
     last_revocation_outcome: Option<String>,
 }
 
+struct RefreshLeaseClockSnapshot {
+    db_now: i64,
+    lease_id: Option<String>,
+    expires_at_unix: Option<i64>,
+}
+
+struct RefreshLeaseTakeover {
+    db_now: i64,
+    lease_id: String,
+}
+
 struct SupabaseEvidence {
     client: Client,
     schema: String,
@@ -1423,6 +1587,121 @@ impl SupabaseEvidence {
     ) -> Result<()> {
         if self.credential_snapshot(user)? != *expected {
             bail!("stale IdP refresh response changed the revoked MCP credential snapshot");
+        }
+        Ok(())
+    }
+
+    fn refresh_lease_clock_snapshot(&mut self, user: &str) -> Result<RefreshLeaseClockSnapshot> {
+        let row = self.client.query_one(
+            &format!(
+                "SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::BIGINT, \
+                        refresh_lease_id,refresh_lease_expires_at_unix \
+                 FROM \"{}\".mcp_oauth_credentials WHERE user_id=$1 AND server_name=$2",
+                self.schema
+            ),
+            &[&user, &SERVER_NAME],
+        )?;
+        Ok(RefreshLeaseClockSnapshot {
+            db_now: row.get(0),
+            lease_id: row.get(1),
+            expires_at_unix: row.get(2),
+        })
+    }
+
+    fn verify_old_refresh_lease_while_request_is_pending(
+        &mut self,
+        user: &str,
+        old_lease_id: &str,
+        old_expiry: i64,
+        observation: Duration,
+    ) -> Result<()> {
+        let first = self.refresh_lease_clock_snapshot(user)?;
+        let observation_secs = i64::try_from(observation.as_secs()).unwrap_or(i64::MAX);
+        let required_margin = observation_secs.saturating_add(3);
+        if old_expiry.saturating_sub(first.db_now) < required_margin {
+            bail!(
+                "replacement MCP refresh request did not leave enough live-lease margin for observation: db_now={}, old_expiry={old_expiry}, required_margin={required_margin}",
+                first.db_now
+            );
+        }
+        let observed_until = first.db_now.saturating_add(observation_secs);
+        let mut snapshot = first;
+        loop {
+            if snapshot.db_now >= old_expiry {
+                bail!("replacement MCP refresh lease observation crossed the old expiry");
+            }
+            if snapshot.lease_id.as_deref() != Some(old_lease_id)
+                || snapshot.expires_at_unix != Some(old_expiry)
+            {
+                bail!(
+                    "replacement gateway changed the crashed MCP refresh lease before expiry: expected id={old_lease_id}, expiry={old_expiry}, observed id={:?}, expiry={:?}",
+                    snapshot.lease_id,
+                    snapshot.expires_at_unix
+                );
+            }
+            if snapshot.db_now >= observed_until {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
+            snapshot = self.refresh_lease_clock_snapshot(user)?;
+        }
+    }
+
+    fn wait_for_refresh_lease_takeover(
+        &mut self,
+        user: &str,
+        old_lease_id: &str,
+        old_expiry: i64,
+    ) -> Result<RefreshLeaseTakeover> {
+        let started = Instant::now();
+        let mut last_snapshot = None;
+        while started.elapsed() < Duration::from_secs(30) {
+            let snapshot = self.refresh_lease_clock_snapshot(user)?;
+            if snapshot.db_now < old_expiry && snapshot.lease_id.as_deref() != Some(old_lease_id) {
+                bail!(
+                    "replacement gateway took over the MCP refresh lease before expiry: db_now={}, old_expiry={old_expiry}, old_id={old_lease_id}, observed_id={:?}",
+                    snapshot.db_now,
+                    snapshot.lease_id
+                );
+            }
+            if snapshot.db_now > old_expiry {
+                if let (Some(lease_id), Some(expires_at_unix)) =
+                    (&snapshot.lease_id, snapshot.expires_at_unix)
+                {
+                    if lease_id != old_lease_id && expires_at_unix > snapshot.db_now {
+                        return Ok(RefreshLeaseTakeover {
+                            db_now: snapshot.db_now,
+                            lease_id: lease_id.clone(),
+                        });
+                    }
+                }
+            }
+            last_snapshot = Some((snapshot.db_now, snapshot.lease_id, snapshot.expires_at_unix));
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!(
+            "replacement gateway never acquired a distinct MCP refresh lease after the crashed lease expired: old_id={old_lease_id}, old_expiry={old_expiry}, last={last_snapshot:?}"
+        )
+    }
+
+    fn verify_replacement_refresh_snapshot(
+        &mut self,
+        user: &str,
+        before: &CredentialSnapshot,
+    ) -> Result<()> {
+        let refreshed = self.credential_snapshot(user)?;
+        let db_now = self.refresh_lease_clock_snapshot(user)?.db_now;
+        if refreshed.revoked_at_unix.is_some()
+            || refreshed.refresh_lease_id.is_some()
+            || refreshed.refresh_lease_expires_at_unix.is_some()
+        {
+            bail!("replacement refresh did not leave an active credential with no lease");
+        }
+        if refreshed.version <= before.version
+            || refreshed.expires_at_unix <= db_now
+            || refreshed.last_refresh_outcome.as_deref() != Some("refreshed")
+        {
+            bail!("replacement refresh did not persist a newer usable MCP credential");
         }
         Ok(())
     }
@@ -1646,6 +1925,7 @@ fn gateway_config(
     oidc_addr: &str,
     mcp_addr: &str,
     schema: &str,
+    postgres_pool_size: usize,
     args: &SupabaseLiveRestartArgs,
 ) -> Result<String> {
     let tls_mode = match args.tls_mode.as_str() {
@@ -1669,7 +1949,7 @@ storage:
   required: true
   provider_order: ["supabase", "postgres"]
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
-  postgres_pool_size: 8
+  postgres_pool_size: {postgres_pool_size}
   postgres_tls_mode: "{tls_mode}"
 {ca}  postgres_connect_timeout_secs: 10
   postgres_statement_timeout_millis: 30000
