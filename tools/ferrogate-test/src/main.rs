@@ -9,6 +9,7 @@ use anyhow::Result;
 mod api_contract;
 mod assertions;
 mod cli;
+mod compliance;
 mod constants;
 mod docker;
 mod fixtures;
@@ -21,6 +22,7 @@ mod scenarios;
 mod storage;
 
 use api_contract::run_api_contract;
+use compliance::{run_component_compliance, run_component_compliance_supabase};
 use docker::{run_all_docker_scenarios, run_docker_scenario};
 use guardrails::run_guardrail_supabase;
 use mcp_identity::run_mcp_identity_supabase;
@@ -40,6 +42,8 @@ fn main() -> Result<()> {
         auth: run_auth_api,
         gateway: run_gateway_api,
         api_contract: run_api_contract,
+        component_compliance: run_component_compliance,
+        component_compliance_supabase: run_component_compliance_supabase,
         gateway_billing_chain: run_gateway_billing_chain,
         function_egress: run_function_egress_api,
         supabase_restart: run_supabase_restart,
@@ -58,6 +62,7 @@ fn main() -> Result<()> {
             run_gateway_external_auth_api(local, auth)?;
             run_gateway_third_party_auth_api(local)?;
             run_gateway_api(local)?;
+            run_component_compliance(local)?;
             if include_docker {
                 run_all_docker_scenarios(image)?;
             }
@@ -65,6 +70,7 @@ fn main() -> Result<()> {
         },
         ci: |local, auth| {
             run_api_contract(local)?;
+            run_component_compliance(local)?;
             run_admin_api(local)?;
             run_auth_api(auth)?;
             run_gateway_external_auth_api(local, auth)?;

@@ -312,8 +312,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 28;
-const POSTGRES_SCHEMA_NAME: &str = "028_mcp_per_user_oauth_identity";
+const POSTGRES_SCHEMA_VERSION: u64 = 29;
+const POSTGRES_SCHEMA_NAME: &str = "029_tenant_only_asset_storage_quota";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -6484,12 +6484,10 @@ pub struct StoredQuotaPolicy {
     pub tpm_limit: Option<u64>,
     #[serde(default)]
     pub monthly_budget_usd: Option<f64>,
-    /// Per-tenant/project/workspace/key override of `StoredPlan.
-    /// default_asset_storage_quota_bytes` (issue #188) -- lets a specific
-    /// scope get a different cumulative `/v1/assets/*` storage allowance
-    /// than its plan's shared default, mirroring how `rpm_limit`/
-    /// `tpm_limit` already override the plan. `None` means "no override,
-    /// fall back to the plan default".
+    /// Tenant-only override of `StoredPlan.default_asset_storage_quota_bytes`.
+    /// Assets and their cumulative usage are tenant-owned; narrower scopes do
+    /// not have independent asset ownership or usage counters. `None` means
+    /// "no override, fall back to the plan default".
     #[serde(default)]
     pub asset_storage_quota_bytes: Option<u64>,
     /// Percent-of-`monthly_budget_usd` tiers (e.g. `[75, 90, 95]`) that fire
@@ -6515,6 +6513,16 @@ fn default_true_bool() -> bool {
 /// per `(scope_type, scope_id)` without a separate lookup-then-insert step.
 pub fn quota_policy_id(scope_type: QuotaScopeKind, scope_id: &str) -> String {
     format!("{}:{}", scope_type.as_str(), scope_id)
+}
+
+pub fn validate_quota_policy(policy: &StoredQuotaPolicy) -> Result<(), StorageError> {
+    if policy.scope_type != QuotaScopeKind::Tenant && policy.asset_storage_quota_bytes.is_some() {
+        return Err(StorageError::Runtime(
+            "asset_storage_quota_bytes is tenant-only because stored assets and usage are tenant-owned"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Per-scope, per-calendar-month usage/cost rollup (P1-4). `scope_type`
@@ -7650,6 +7658,7 @@ impl RuntimeStorageRepositories {
     // --- Multi-level quota/rate-limit policies (tenant/project/workspace/key) ---
 
     pub fn upsert_quota_policy(&self, policy: StoredQuotaPolicy) -> Result<(), StorageError> {
+        validate_quota_policy(&policy)?;
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => {
                 if let Ok(mut control_plane) = control_plane.lock() {
@@ -10577,7 +10586,7 @@ mod tests {
                 rpm_limit: Some(100),
                 tpm_limit: None,
                 monthly_budget_usd: None,
-                asset_storage_quota_bytes: Some(10_485_760),
+                asset_storage_quota_bytes: None,
                 alert_threshold_pcts: vec![],
                 enabled: true,
                 created_at_unix: 1,
@@ -10594,7 +10603,7 @@ mod tests {
                 rpm_limit: Some(50),
                 tpm_limit: Some(10_000),
                 monthly_budget_usd: Some(10.0),
-                asset_storage_quota_bytes: Some(52_428_800),
+                asset_storage_quota_bytes: None,
                 alert_threshold_pcts: vec![],
                 enabled: false,
                 created_at_unix: 1,
@@ -10609,7 +10618,7 @@ mod tests {
         assert_eq!(policy.rpm_limit, Some(50));
         assert_eq!(policy.tpm_limit, Some(10_000));
         assert_eq!(policy.monthly_budget_usd, Some(10.0));
-        assert_eq!(policy.asset_storage_quota_bytes, Some(52_428_800));
+        assert_eq!(policy.asset_storage_quota_bytes, None);
         assert!(!policy.enabled);
         assert_eq!(repositories.list_quota_policies().unwrap().len(), 1);
     }

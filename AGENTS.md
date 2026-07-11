@@ -310,11 +310,11 @@ table is the binding taxonomy.
 | Unit | dedicated sibling `*_test.rs` modules (or `crates/*/tests/*.rs`); `cargo +1.88.0 test --workspace --all-features` | Is the isolated logic correct? |
 | Property | `proptest` (currently `ferrogate-billing`, `ferrogate-policy`; extend to any state-machine/invariant surface) | Do invariants hold across generated inputs, not just hand-picked cases? |
 | Crate integration | `crates/*/tests/*.rs` (`ferrogate-cli/tests/*_e2e.rs`, `rbac_*`, `assets_*`, `*_provider_e2e`, …) | Do wired-together modules behave correctly at a real in-process boundary? |
-| Contract / compliance | `ferrogate-test api-contract`; the per-component contract every provider/guardrail/policy/quota surface must pass (see gap below) | Does the runtime actually obey the cross-cutting contract it claims — routes, telemetry, audit evidence, scope? |
+| Contract / compliance | `ferrogate-test api-contract`, `component-compliance`, `component-compliance-supabase`; the per-component contract every provider/guardrail/policy/quota surface must pass (see gap below) | Does the runtime actually obey the cross-cutting contract it claims — routes, telemetry, audit evidence, scope? |
 | Cross-component chain | `ferrogate-test gateway-billing-chain`, `guardrail-supabase` | Does a full request produce the correct downstream effect (usage→ledger, block→durable evidence)? |
 | Durability | `ferrogate-test postgres-restart`, `postgres-tls-restart`, `supabase-restart` | Does persisted state survive restart/crash? |
 | E2E harness | `ferrogate-test ci` / `run-all` against a real local FerroGate image | Does the operator-visible behavior close end-to-end? |
-| Live (opt-in) | `ferrogate-test supabase-live-*`, `supabase-live-token4ai-provider` | Does it work against real external services, not just local doubles? |
+| Live (opt-in) | `ferrogate-test supabase-live-*`, `component-compliance-supabase`, `supabase-live-token4ai-provider` | Does it work against real external services, not just local doubles? |
 | Performance | `cargo test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf`; `--test parser_perf`; `docs/performance-testing.md` | Did latency/throughput regress? (separate from correctness; never a silent PR gate) |
 | Coverage | `cargo llvm-cov`; `docs/testing/coverage-baseline-*.md` (epic #112) | Which code paths are unexercised? |
 
@@ -376,12 +376,13 @@ speed is not the constraint. A Bun/TypeScript layer is acceptable only as an
 additive black-box suite typed from the enforced OpenAPI contract, never as a
 replacement that re-derives internal contracts in a second language.
 
-Known gap — do not present as done: there is no reusable component-compliance
-assertion in `tools/ferrogate-test`. `api-contract`, `gateway-billing-chain`,
-and `guardrail-supabase` are point scenarios, not a shared contract that every
-provider/guardrail/quota surface is forced through. Closing that gap is the
-highest-value test-system investment and maps directly to the #188 failure mode.
-Tracked in #210; design sketch in `docs/testing/testing-architecture.md`.
+Known gap — do not present the whole layer as done. The component compliance
+command in `ferrogate-test` provides the reusable write -> read -> runtime ->
+verify -> cleanup executor and forces tenant/project/workspace/key quota scopes
+through it; `component-compliance-supabase` proves the same contract against a
+live durable schema. Provider telemetry/billing and Guardrail allow/block
+evidence are still point scenarios rather than callers of that shared executor.
+Completing those component classes remains tracked in #210.
 
 ## Verification
 

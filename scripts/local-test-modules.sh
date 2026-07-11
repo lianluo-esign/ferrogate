@@ -133,6 +133,7 @@ run_supabase_storage() {
     if [[ -n "${FERROGATE_SUPABASE_TLS_CA_CERT_PATH:-}" ]]; then
       args+=(--tls-ca-cert-path "$FERROGATE_SUPABASE_TLS_CA_CERT_PATH")
     fi
+    ./target/debug/ferrogate-test component-compliance-supabase "${args[@]}"
     ./target/debug/ferrogate-test supabase-live-smoke "${args[@]}"
     if [[ -n "${FERROGATE_TOKEN4AI_OPENAI_API_KEY:-}" ]]; then
       ./target/debug/ferrogate-test supabase-live-token4ai-provider "${args[@]}"

@@ -80,6 +80,7 @@ jobs:
             printf '%s' "$FERROGATE_SUPABASE_TLS_CA_CERT" > "${RUNNER_TEMP}/supabase-ca.pem"
             args+=(--tls-ca-cert-path "${RUNNER_TEMP}/supabase-ca.pem")
           fi
+          ./target/debug/ferrogate-test component-compliance-supabase "${args[@]}"
           ./target/debug/ferrogate-test supabase-live-smoke "${args[@]}"
           if [ -n "$FERROGATE_TOKEN4AI_OPENAI_API_KEY" ]; then
             ./target/debug/ferrogate-test supabase-live-token4ai-provider "${args[@]}"

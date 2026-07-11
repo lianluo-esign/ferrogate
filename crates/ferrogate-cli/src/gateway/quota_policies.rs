@@ -481,6 +481,16 @@ impl FerroGateway {
                 .await;
             }
         }
+        if scope_type != QuotaScopeKind::Tenant && payload.asset_storage_quota_bytes.is_some() {
+            return write_json_error(
+                session,
+                StatusCode::BAD_REQUEST,
+                "invalid_quota_policy",
+                "asset_storage_quota_bytes is tenant-only because stored assets and usage are tenant-owned",
+                &ctx.request_id,
+            )
+            .await;
+        }
         let now = now_unix_seconds();
         let existing = state.get_quota_policy(scope_type, scope_id).ok().flatten();
         // Preserve the original created_at_unix across re-upserts of the
@@ -510,11 +520,15 @@ impl FerroGateway {
                         .as_ref()
                         .and_then(|existing| existing.monthly_budget_usd)
                 }),
-                asset_storage_quota_bytes: payload.asset_storage_quota_bytes.or_else(|| {
-                    existing
-                        .as_ref()
-                        .and_then(|existing| existing.asset_storage_quota_bytes)
-                }),
+                asset_storage_quota_bytes: if scope_type == QuotaScopeKind::Tenant {
+                    payload.asset_storage_quota_bytes.or_else(|| {
+                        existing
+                            .as_ref()
+                            .and_then(|existing| existing.asset_storage_quota_bytes)
+                    })
+                } else {
+                    None
+                },
                 alert_threshold_pcts: payload.alert_threshold_pcts.unwrap_or_else(|| {
                     existing
                         .as_ref()
@@ -536,7 +550,11 @@ impl FerroGateway {
                 rpm_limit: payload.rpm_limit,
                 tpm_limit: payload.tpm_limit,
                 monthly_budget_usd: payload.monthly_budget_usd,
-                asset_storage_quota_bytes: payload.asset_storage_quota_bytes,
+                asset_storage_quota_bytes: if scope_type == QuotaScopeKind::Tenant {
+                    payload.asset_storage_quota_bytes
+                } else {
+                    None
+                },
                 alert_threshold_pcts: payload.alert_threshold_pcts.unwrap_or_default(),
                 enabled: payload.enabled.unwrap_or(true),
                 created_at_unix,

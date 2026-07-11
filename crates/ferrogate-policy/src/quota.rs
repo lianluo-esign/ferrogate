@@ -38,6 +38,7 @@ pub struct EffectiveQuota {
     pub rpm_limit: Option<u64>,
     pub tpm_limit: Option<u64>,
     pub monthly_budget_usd: Option<f64>,
+    pub asset_storage_quota_bytes: Option<u64>,
     pub denied_by: Option<QuotaScopeKind>,
 }
 
@@ -103,6 +104,9 @@ pub fn resolve_effective_quota(
         effective.tpm_limit = min_opt_u64(effective.tpm_limit, policy.tpm_limit);
         effective.monthly_budget_usd =
             min_opt_f64(effective.monthly_budget_usd, policy.monthly_budget_usd);
+        if policy.scope_type == QuotaScopeKind::Tenant {
+            effective.asset_storage_quota_bytes = policy.asset_storage_quota_bytes;
+        }
     }
     if let Some(plan) = plan {
         if effective.model_allowlist.is_none() && !plan.default_model_allowlist.is_empty() {
@@ -113,6 +117,9 @@ pub fn resolve_effective_quota(
         effective.monthly_budget_usd = effective
             .monthly_budget_usd
             .or(plan.default_monthly_budget_usd);
+        effective.asset_storage_quota_bytes = effective
+            .asset_storage_quota_bytes
+            .or(plan.default_asset_storage_quota_bytes);
     }
     effective
 }

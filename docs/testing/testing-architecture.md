@@ -73,15 +73,18 @@ through the admin API but the runtime only ever read the tenant scope.
 
 ### 5. Contract / compliance
 
-- **Mechanism today:** `ferrogate-test api-contract` — proves the runtime's
-  fixed routes and methods are the ones the OpenAPI contract declares.
+- **Mechanism today:** `ferrogate-test api-contract` proves the runtime's fixed
+  routes and methods are the ones the OpenAPI contract declares.
+  `ferrogate-test component-compliance` provides the reusable component
+  lifecycle and currently applies it to quota scopes; the live-Supabase variant
+  proves the same path through durable storage.
 - **Answers:** does the runtime actually obey the cross-cutting contract it
   claims — routes, telemetry, audit evidence, and **scope**?
 - **This is the layer that catches `#188`.** A quota/scope/telemetry claim is
   only proven here when the test asserts that *what a component writes is what
   the runtime reads*, and that the component emits the audit/telemetry evidence
-  it advertises. See "Open work" below — the reusable version of this layer does
-  not exist yet.
+  it advertises. See "Open work" below for the component classes not yet wired
+  to the reusable runner.
 
 ### 6. Cross-component chain
 
@@ -115,8 +118,9 @@ through the admin API but the runtime only ever read the tenant scope.
 ### 9. Live (opt-in)
 
 - **Mechanism:** `ferrogate-test supabase-live-smoke`, `supabase-live-restart`,
-  `supabase-live-token4ai-provider`, `guardrail-supabase`. Gated behind explicit
-  DSN/credential env vars; never part of the default gate.
+  `supabase-live-token4ai-provider`, `guardrail-supabase`,
+  `component-compliance-supabase`. Gated behind explicit DSN/credential env
+  vars; never part of the default gate.
 - **Answers:** does it work against real external services, not local doubles?
 - **Required for:** changes to the live Supabase/provider integration surface,
   run before release rather than on every PR.
@@ -233,31 +237,33 @@ Dynamic Workflow (work is pulled from the issue queue) and Commit Requirements
 
 Tracked in **#210**.
 
-**Gap (honest status — not yet built):** `tools/ferrogate-test` has *point*
-scenarios (`api-contract`, `gateway-billing-chain`, `guardrail-supabase`) but no
-*reusable contract* that every provider adapter, guardrail, policy scope, and
-quota-override point is forced through. Each new component can therefore ship a
-green suite while silently violating a cross-cutting contract — exactly how
-`#188` passed review.
+**Current status:** `tools/ferrogate-test` now has a reusable
+`ComponentContract` runner. It owns the lifecycle instead of trusting a
+component to call arbitrary assertions: write -> read -> runtime exercise ->
+verify -> cleanup. `component-compliance` forces all four generic quota scopes
+through it locally, and `component-compliance-supabase` runs the same contract
+against a unique live schema. Tenant asset quota is asserted at runtime;
+project/workspace/key asset quota writes are rejected because stored assets and
+their usage are tenant-owned. This closes the concrete #188-style write-only
+scope gap without inventing fake narrower-scope usage semantics.
 
-**Direction (design sketch, to be validated in code before it is treated as
-real):** add a shared compliance module to `tools/ferrogate-test` (analogous to
-Vector's `src/test_util/components.rs`) that defines, per component class, the
-contract every instance must satisfy, and a single assertion each component test
-calls. Candidate contracts:
+**Remaining gap:** provider telemetry/billing and Guardrail allow/block evidence
+remain point scenarios (`gateway-billing-chain`, `guardrail-supabase`). They are
+not yet implementations of the shared contract, so #210 remains open and the
+full compliance layer must not be presented as complete.
+
+**Next component contracts:**
 
 - **Provider adapter:** emits usage/cost telemetry with the required attributes;
   the cost that reaches billing equals the cost the adapter reported; fallback
   and error paths still settle usage.
 - **Guardrail:** both the block path and the allow path emit auditable evidence;
   blocked content produces durable, queryable evidence.
-- **Policy scope / quota override:** for every scope the admin API accepts
-  (project/workspace/key/tenant), the runtime reads back the value it wrote —
-  a written scope that the runtime ignores is a hard failure. This assertion is
-  the direct regression guard for `#188`.
+- **Policy scope / quota override:** implemented for generic quota scope
+  enforcement and tenant asset quota; unsupported narrower asset scopes fail at
+  the write boundary instead of returning a value the runtime ignores.
 
-Sequence: (1) encode the write-path==read-path scope assertion first, since it
-has a proven failure it must catch; (2) generalize into a `ComponentContract`
-shared assertion; (3) wire each provider/guardrail/quota surface through it and
-join it to the `ci` aggregate. Do not claim the compliance layer exists until an
-assertion demonstrably fails against a reintroduced `#188`-style regression.
+Sequence from here: (1) adapt the provider billing chain to the shared runner;
+(2) adapt Guardrail allow/block evidence; (3) force every concrete adapter
+through its class contract. The local quota contract is part of the `ci`
+aggregate; the durable form is part of the live Supabase release slice.

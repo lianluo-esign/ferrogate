@@ -27,7 +27,7 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
     { key: "rpm_limit", header: "RPM limit" },
     { key: "tpm_limit", header: "TPM limit" },
     { key: "monthly_budget_usd", header: "Monthly budget (USD)" },
-    { key: "asset_storage_quota_bytes", header: "Asset storage quota (bytes)" },
+    { key: "asset_storage_quota_bytes", header: "Tenant asset quota (bytes)" },
     { key: "enabled", header: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
   ],
   fields: [
@@ -51,8 +51,9 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
     { name: "monthly_budget_usd", label: "Monthly budget (USD)", type: "number" },
     {
       name: "asset_storage_quota_bytes",
-      label: "Asset storage quota override (bytes)",
+      label: "Tenant-only asset storage quota (bytes)",
       type: "number",
+      description: "Valid only when scope type is tenant.",
     },
     { name: "enabled", label: "Enabled", type: "boolean" },
   ],

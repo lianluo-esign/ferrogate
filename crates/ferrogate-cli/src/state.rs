@@ -5892,20 +5892,6 @@ mod tests {
     }
 
     #[test]
-    fn process_local_reload_preserves_request_id_sequence() {
-        let shared = SharedAppState::with_source_path(Config::default(), None);
-        let first = shared.next_request_id();
-
-        let result = shared.reload_process_local(Config::default());
-
-        assert!(result.committed);
-        let second = shared.next_request_id();
-        let first = u64::from_str_radix(first.trim_start_matches("fg-"), 16).unwrap();
-        let second = u64::from_str_radix(second.trim_start_matches("fg-"), 16).unwrap();
-        assert_eq!(second, first.wrapping_add(1));
-    }
-
-    #[test]
     fn listener_runtime_config_rejects_listen_socket_changes() {
         let active = Config::default();
         let candidate = Config {
@@ -5962,3 +5948,7 @@ mod state_self_hosted_security_test;
 #[cfg(test)]
 #[path = "state_billing_outbox_test.rs"]
 mod state_billing_outbox_test;
+
+#[cfg(test)]
+#[path = "state_reload_test.rs"]
+mod state_reload_test;

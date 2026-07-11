@@ -12,7 +12,7 @@ use bytes::Bytes;
 use http::{Method, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 
-use ferrogate_storage::{sha256_hex, stored_asset_id, QuotaScopeKind, StoredAsset};
+use ferrogate_storage::{sha256_hex, stored_asset_id, StoredAsset};
 
 use super::body::read_request_body;
 use super::local::admin_audit_event_draft_for_target;
@@ -267,23 +267,13 @@ impl FerroGateway {
             .await;
         }
 
-        // A tenant-scoped StoredQuotaPolicy override (issue #188) takes
-        // precedence over the plan's shared default -- mirrors how
-        // rpm_limit/tpm_limit already override their plan defaults. Falls
-        // back to the plan default when no override exists or the override
-        // itself leaves the field unset.
-        let tenant_quota_policy = state
-            .get_quota_policy(QuotaScopeKind::Tenant, &tenant_id)
-            .ok()
-            .flatten();
-        let effective_quota = tenant_quota_policy
-            .as_ref()
-            .filter(|policy| policy.enabled)
-            .and_then(|policy| policy.asset_storage_quota_bytes)
-            .or_else(|| {
-                plan.as_ref()
-                    .and_then(|plan| plan.default_asset_storage_quota_bytes)
-            });
+        // Authentication already resolved the complete tenant -> project ->
+        // workspace -> key quota chain and failed closed on repository errors.
+        // Reading that same value here is the write-path == runtime-read-path
+        // contract. Asset quotas are tenant-only because asset ownership and
+        // usage are tenant-owned; narrower-scope writes fail at the API/DB
+        // boundary instead of becoming ignored runtime configuration.
+        let effective_quota = auth.effective_quota.asset_storage_quota_bytes;
 
         if let Some(default_quota) = effective_quota {
             let existing =

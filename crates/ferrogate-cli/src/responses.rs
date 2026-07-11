@@ -1268,9 +1268,8 @@ pub(crate) struct AdminQuotaPolicy {
     pub(crate) rpm_limit: Option<u64>,
     pub(crate) tpm_limit: Option<u64>,
     pub(crate) monthly_budget_usd: Option<f64>,
-    /// Per-scope override of `StoredPlan.default_asset_storage_quota_bytes`
-    /// (issue #188). `None` means no override; the tenant's plan default
-    /// applies.
+    /// Tenant-only override of `StoredPlan.default_asset_storage_quota_bytes`
+    /// (issue #188). `None` means the tenant's plan default applies.
     pub(crate) asset_storage_quota_bytes: Option<u64>,
     /// Percent-of-`monthly_budget_usd` tiers (e.g. `[50, 90]`) that fire a
     /// one-time proactive alert webhook when spend first crosses them

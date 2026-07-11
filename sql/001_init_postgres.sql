@@ -1031,12 +1031,28 @@ CREATE INDEX IF NOT EXISTS idx_quota_policies_scope
 ALTER TABLE quota_policies
     ADD COLUMN IF NOT EXISTS alert_threshold_pcts_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 
--- Per-scope override of plans.default_asset_storage_quota_bytes (issue
--- #188) -- lets one tenant/project/workspace/key get a different
--- cumulative /v1/assets/* storage allowance than its plan's shared
--- default. NULL means "no override, fall back to the plan default".
+-- Tenant-only override of plans.default_asset_storage_quota_bytes (issue
+-- #188). Stored assets and cumulative usage are tenant-owned, so accepting a
+-- project/workspace/key value would create a write-only control-plane field.
 ALTER TABLE quota_policies
     ADD COLUMN IF NOT EXISTS asset_storage_quota_bytes BIGINT;
+
+UPDATE quota_policies
+SET asset_storage_quota_bytes = NULL
+WHERE scope_type <> 'tenant' AND asset_storage_quota_bytes IS NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'quota_policies_asset_storage_tenant_only'
+          AND conrelid = 'quota_policies'::regclass
+    ) THEN
+        ALTER TABLE quota_policies
+            ADD CONSTRAINT quota_policies_asset_storage_tenant_only
+            CHECK (asset_storage_quota_bytes IS NULL OR scope_type = 'tenant');
+    END IF;
+END $$;
 
 -- budget_alert_notifications: idempotency ledger for issue #170 -- exactly
 -- one row per (scope, period, tier) means a threshold fires its webhook
@@ -1497,5 +1513,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (28, '028_mcp_per_user_oauth_identity')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (29, '029_tenant_only_asset_storage_quota')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;
