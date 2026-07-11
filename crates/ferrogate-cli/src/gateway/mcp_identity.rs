@@ -215,16 +215,5 @@ fn oauth_callback_params(query: Option<&str>) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn callback_parser_decodes_values_without_accepting_missing_fields() {
-        assert_eq!(
-            oauth_callback_params(Some("code=a%2Fb&state=s%2B1")),
-            Some(("a/b".into(), "s+1".into()))
-        );
-        assert!(oauth_callback_params(Some("code=only")).is_none());
-        assert!(oauth_callback_params(None).is_none());
-    }
-}
+#[path = "mcp_identity_test.rs"]
+mod mcp_identity_test;

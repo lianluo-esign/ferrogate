@@ -580,13 +580,5 @@ fn mcp_error_code(code: &str) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_method_scope_mapping_fails_closed() {
-        let error = required_scope("unmapped/method").expect_err("missing mapping must fail");
-        assert_eq!(error.method, "unmapped/method");
-        assert!(error.to_string().contains("no MCP scope mapping"));
-    }
-}
+#[path = "mcp_rpc_test.rs"]
+mod mcp_rpc_test;

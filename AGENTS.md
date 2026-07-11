@@ -307,7 +307,7 @@ table is the binding taxonomy.
 | Layer | Mechanism in this repo | Question it answers |
 |---|---|---|
 | Static gate | `cargo fmt --check`, `clippy -D warnings`, `cargo metadata --locked`, `scripts/check-openapi.py`, `git diff --check` | Does it build clean and match the declared API/schema contract? |
-| Unit | per-crate `#[cfg(test)] mod tests`; `cargo +1.88.0 test --workspace --all-features` | Is the isolated logic correct? |
+| Unit | dedicated sibling `*_test.rs` modules (or `crates/*/tests/*.rs`); `cargo +1.88.0 test --workspace --all-features` | Is the isolated logic correct? |
 | Property | `proptest` (currently `ferrogate-billing`, `ferrogate-policy`; extend to any state-machine/invariant surface) | Do invariants hold across generated inputs, not just hand-picked cases? |
 | Crate integration | `crates/*/tests/*.rs` (`ferrogate-cli/tests/*_e2e.rs`, `rbac_*`, `assets_*`, `*_provider_e2e`, …) | Do wired-together modules behave correctly at a real in-process boundary? |
 | Contract / compliance | `ferrogate-test api-contract`; the per-component contract every provider/guardrail/policy/quota surface must pass (see gap below) | Does the runtime actually obey the cross-cutting contract it claims — routes, telemetry, audit evidence, scope? |
@@ -320,6 +320,15 @@ table is the binding taxonomy.
 
 Rules that make the layers binding:
 
+- Keep test implementations out of business-logic files. Unit test bodies,
+  fixtures, assertions, and test-only helpers belong in dedicated sibling
+  `*_test.rs` files; a production module may contain only the minimal
+  `#[cfg(test)] #[path = "..."] mod ...;` wiring needed to preserve private-item
+  access. New inline `mod tests { ... }` blocks are forbidden. When a feature
+  change adds or substantively changes test logic in a legacy inline block,
+  move that block to a dedicated file in the same change instead of extending
+  the legacy layout. Mechanical fixture-field alignment alone does not require
+  an unrelated whole-module move.
 - Match the layer to the change. Pure logic needs Unit. A routing/quota/streaming
   state-machine change needs Property or an explicit invariant test. A change
   that crosses a service boundary needs the Cross-component chain or E2E layer.
@@ -377,12 +386,13 @@ Tracked in #210; design sketch in `docs/testing/testing-architecture.md`.
 ## Verification
 
 Run the narrowest verification that proves the claim, then read the output.
-In this repository, prefer local proof when the environment can provide it
-quickly: build the FerroGate Docker image locally, run it in local Docker, then
-rebuild and run the repo-local `ferrogate-test` harness against that container.
-If the local build is too slow, Docker/network access fails, dependency fetches
-stall, or the machine cannot provide a credible runtime proof, fall back to
-GitHub Actions for compilation, image build, and E2E execution.
+Day-to-day development proof is local: build FerroGate and `ferrogate-test` in
+the development container, then run the matching harness scenarios directly.
+Use Docker only in environments where Docker is actually available and the
+scenario requires an image boundary. GitHub Actions are a release gate and
+trigger only on `release: published`; they are never a per-commit fallback. If
+local network, credentials, or infrastructure cannot provide a required proof,
+record that surface as not tested instead of pretending a cloud run will appear.
 
 For meaningful code changes, run the lightweight local checks when they are
 relevant before heavier runtime validation:
@@ -405,19 +415,18 @@ cargo +1.88.0 test --workspace --all-features
 cargo +1.88.0 test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf -- --nocapture
 ```
 
-For Docker-backed runtime changes, prefer this order:
+For runtime changes, prefer this order:
 
-1. Build the local image and run it in Docker.
-2. Rebuild `ferrogate-test` locally.
-3. Run the narrowest matching `ferrogate-test` scenario against the local image
-   or running container.
-4. If local build/runtime validation is slow or blocked by environment/network
-   failure, fall back to GitHub Actions, wait for `rust-ci` and the GHCR image
-   job, pull the exact CI-published tag or digest, run that image locally, and
-   verify the relevant runtime behavior.
+1. Build the local FerroGate and `ferrogate-test` binaries.
+2. Run the narrowest matching harness scenario in the development container.
+3. When the scenario specifically requires an image boundary and Docker is
+   available, build and run the local image and repeat the matching scenario.
+4. If a required external service or image boundary is unavailable, record the
+   missing proof in the issue. Do not trigger or wait for per-commit cloud CI;
+   no such workflow is permitted.
 
-Record the local Docker command, image reference or digest, `ferrogate-test`
-result, and any CI fallback URL in the related GitHub issue.
+Record the local binary/image command, image reference or digest when relevant,
+and the `ferrogate-test` result in the related GitHub issue.
 
 For config parser, provider, policy, billing, storage, or streaming changes,
 add or update focused regression tests and run the narrowest credible local
@@ -433,8 +442,9 @@ settlement.
 
 Rust CI must stay split by business/runtime boundary instead of collapsing back
 into one monolithic GitHub Actions file. Keep `.github/workflows/ci.yml` as the
-thin orchestrator and preserve the branch-protection check named `rust-ci` as
-the aggregate gate. Put actual Rust validation work in reusable workflow files:
+thin, `release: published`-only orchestrator and preserve `rust-ci` as the
+aggregate release gate. Reusable workflow files must remain `workflow_call`-
+only. Put actual Rust validation work in reusable workflow files:
 quality/schema/deployment-manifest checks, feature-module tests, gateway runtime
 and performance smoke tests, E2E harness execution, and CI image publishing
 should remain separately owned modules.
@@ -452,9 +462,9 @@ it must get its own focused CI workflow slice for that module instead of being
 only covered by a broad workspace-wide gate.
 
 When adding a new CI concern, extend the smallest matching workflow module or
-add a new reusable module, then wire it into the `rust-ci` aggregate check. Do
-not make an independent required check without also updating branch protection
-and documenting the migration path.
+add a new reusable module, then wire it into the release-only `rust-ci`
+aggregate. Do not add `push`, `pull_request`, `workflow_dispatch`, or `schedule`
+triggers to spend cloud runner time outside a published release.
 
 ## Communication
 

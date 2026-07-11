@@ -17,6 +17,10 @@ the `ferrogate-test` skill.
 "Unit tests pass" never proves a cross-cutting or runtime-wiring change.
 
 - Pure logic → Static gate + Unit (+ Property if it is a state machine/invariant).
+- Unit test implementations live in dedicated sibling `*_test.rs` files (or
+  `crates/*/tests/*.rs`), never inline in business-logic files. A production
+  module may keep only the minimal `cfg(test)` path declaration needed for
+  private-item access.
 - Wiring inside a crate → add Crate integration (`crates/*/tests/*.rs`).
 - Provider / guardrail / policy scope / quota surface → add Contract/compliance:
   prove what it **writes** is what the runtime **reads**, and that it emits the
@@ -80,3 +84,7 @@ bends to.
 Read the output. Do not claim production readiness from unit tests alone when
 the change touches runtime wiring, live reload, TLS/ACME, provider streaming, or
 billing settlement.
+
+GitHub Actions are release-only (`release: published`) and never a per-commit
+fallback. Missing local infrastructure means the proof remains explicitly
+unverified; it does not justify adding a push/PR/manual cloud trigger.

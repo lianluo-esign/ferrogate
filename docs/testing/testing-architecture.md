@@ -26,9 +26,18 @@ through the admin API but the runtime only ever read the tenant scope.
 
 ### 2. Unit
 
-- **Mechanism:** per-crate `#[cfg(test)] mod tests`; `cargo +1.88.0 test
+- **Mechanism:** dedicated sibling `*_test.rs` modules, or public-boundary
+  integration tests under `crates/*/tests/*.rs`; `cargo +1.88.0 test
   --workspace --all-features`, or narrow with
   `cargo test -p <crate> <module::path>`.
+- **File layout:** business-logic files contain no test bodies, fixtures,
+  assertions, or test-only helpers. They may contain only a minimal
+  `#[cfg(test)] #[path = "..."] mod ...;` declaration when the sibling test
+  module needs private-item access. New inline `mod tests { ... }` blocks are
+  forbidden. If a feature change adds or substantively changes test logic in a
+  legacy inline block, move the whole block to a dedicated file instead of
+  extending it in place. Mechanical fixture-field alignment alone does not
+  require an unrelated whole-module move.
 - **Answers:** is the isolated logic correct?
 - **Scale today:** ~1,130 `#[test]` and ~22 `#[tokio::test]`. The async unit
   layer is deliberately noted as *thin*: most concurrency/streaming correctness
@@ -152,7 +161,10 @@ the aggregate branch-protection gate. Reusable modules:
 | `rust-e2e-harness.yml` | E2E harness (Contract, Cross-component chain, Durability, E2E) |
 | `rust-supabase-storage-tests.yml` | Supabase/Postgres storage + durability |
 
-Locally, `scripts/local-test-modules.sh <module>` mirrors these gates
+These workflows are release gates: the top-level orchestrators trigger only on
+`release: published`, and reusable modules are `workflow_call`-only. They do not
+replace local proof for commits between releases. Locally,
+`scripts/local-test-modules.sh <module>` mirrors these gates
 (`quality`, `core-policy`, `control-plane`, `agentic-gateway`, `ai-proxy`,
 `cli-tooling`, `gateway-runtime`, `e2e-harness`, `supabase-storage`). Run the
 narrowest module that covers your change before pushing.
