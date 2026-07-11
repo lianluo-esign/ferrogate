@@ -297,6 +297,83 @@ The gateway must be explainable under incident pressure. If an operator cannot
 answer "why did this request go to this provider and cost this much?", the
 feature is not done.
 
+## Testing Architecture
+
+FerroGate's tests are a layered system, not a single suite. Each layer answers
+a different question and none substitutes for another. Detail, file locations,
+and how to run each layer live in `docs/testing/testing-architecture.md`; this
+table is the binding taxonomy.
+
+| Layer | Mechanism in this repo | Question it answers |
+|---|---|---|
+| Static gate | `cargo fmt --check`, `clippy -D warnings`, `cargo metadata --locked`, `scripts/check-openapi.py`, `git diff --check` | Does it build clean and match the declared API/schema contract? |
+| Unit | per-crate `#[cfg(test)] mod tests`; `cargo +1.88.0 test --workspace --all-features` | Is the isolated logic correct? |
+| Property | `proptest` (currently `ferrogate-billing`, `ferrogate-policy`; extend to any state-machine/invariant surface) | Do invariants hold across generated inputs, not just hand-picked cases? |
+| Crate integration | `crates/*/tests/*.rs` (`ferrogate-cli/tests/*_e2e.rs`, `rbac_*`, `assets_*`, `*_provider_e2e`, …) | Do wired-together modules behave correctly at a real in-process boundary? |
+| Contract / compliance | `ferrogate-test api-contract`; the per-component contract every provider/guardrail/policy/quota surface must pass (see gap below) | Does the runtime actually obey the cross-cutting contract it claims — routes, telemetry, audit evidence, scope? |
+| Cross-component chain | `ferrogate-test gateway-billing-chain`, `guardrail-supabase` | Does a full request produce the correct downstream effect (usage→ledger, block→durable evidence)? |
+| Durability | `ferrogate-test postgres-restart`, `postgres-tls-restart`, `supabase-restart` | Does persisted state survive restart/crash? |
+| E2E harness | `ferrogate-test ci` / `run-all` against a real local FerroGate image | Does the operator-visible behavior close end-to-end? |
+| Live (opt-in) | `ferrogate-test supabase-live-*`, `supabase-live-token4ai-provider` | Does it work against real external services, not just local doubles? |
+| Performance | `cargo test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf`; `--test parser_perf`; `docs/performance-testing.md` | Did latency/throughput regress? (separate from correctness; never a silent PR gate) |
+| Coverage | `cargo llvm-cov`; `docs/testing/coverage-baseline-*.md` (epic #112) | Which code paths are unexercised? |
+
+Rules that make the layers binding:
+
+- Match the layer to the change. Pure logic needs Unit. A routing/quota/streaming
+  state-machine change needs Property or an explicit invariant test. A change
+  that crosses a service boundary needs the Cross-component chain or E2E layer.
+  "Unit tests pass" never proves a cross-cutting or runtime-wiring change.
+- Every provider adapter, guardrail, policy scope, and quota override point must
+  be provable at the Contract/compliance layer: what it writes must be what the
+  runtime reads, and it must emit the telemetry/audit evidence it claims. An
+  endpoint returning 200 while the runtime ignores the value is a failure, not a
+  pass — this is the #188 asset-quota-scope failure mode.
+- Property tests belong on state machines and invariants (routing fallback,
+  quota reserve/settle/rollback, streaming stage transitions, ack/settlement
+  ordering), not sprinkled over ordinary logic. Prefer `proptest`.
+- Streaming and concurrency are correctness surfaces. Do not rely on the E2E
+  layer alone to catch SSE/cancellation/backpressure/settlement races; add a
+  focused async test at the lowest layer that can reproduce the race. The unit
+  layer is currently thin on async coverage — do not let that thinness push
+  concurrency correctness up into slower layers.
+- Flaky tests are governed, not silenced. When a test fails unrelated to the
+  change, confirm it against `main`, open or link a tracking issue, and record
+  it in the affected suite (as done for the `ai_proxy_runtime` port-contention
+  flake). Do not add blind retries that hide a real race.
+- Tests feed the issue queue. A bug or missing capability that a test layer
+  surfaces and that is not fixed in the same change becomes a house-style GitHub
+  issue before the change lands — never a silent `#[ignore]`, skipped scenario,
+  or inline TODO. File it against the owning product/runtime surface, label it,
+  link it from the failing suite and from the commit, and for a regression add
+  the failing test that the fix will make pass. New features discovered
+  mid-test are filed and prioritized in the issue queue, not scope-crept into
+  the current change. This closes the same loop as the Dynamic Workflow and
+  Commit Requirements sections; the concrete procedure is the issue loop in
+  `docs/testing/testing-architecture.md`.
+
+The harness grows to meet the methodology, not the reverse. `tools/ferrogate-test`
+does not yet support every layer above. Where it falls short, the shortfall is a
+tracked issue and the tool is extended to close it — a missing tool never
+justifies skipping a layer or downgrading a claim, only a manual proof at the
+affected surface plus a filed tooling issue in the interim. Treat the harness as
+a living component that is iterated as the test system demands.
+
+The harness stays a Rust workspace member. Sharing the gateway's own types and
+contracts is what lets the Contract/compliance layer assert write-path ==
+read-path (the #188 guard); the driver language is chosen for that fidelity, not
+for authoring convenience, and E2E wall-clock is IO-bound so the driver's raw
+speed is not the constraint. A Bun/TypeScript layer is acceptable only as an
+additive black-box suite typed from the enforced OpenAPI contract, never as a
+replacement that re-derives internal contracts in a second language.
+
+Known gap — do not present as done: there is no reusable component-compliance
+assertion in `tools/ferrogate-test`. `api-contract`, `gateway-billing-chain`,
+and `guardrail-supabase` are point scenarios, not a shared contract that every
+provider/guardrail/quota surface is forced through. Closing that gap is the
+highest-value test-system investment and maps directly to the #188 failure mode.
+Tracked in #210; design sketch in `docs/testing/testing-architecture.md`.
+
 ## Verification
 
 Run the narrowest verification that proves the claim, then read the output.
