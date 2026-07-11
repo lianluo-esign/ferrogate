@@ -888,6 +888,119 @@ CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_user
 CREATE INDEX IF NOT EXISTS idx_admin_user_refresh_tokens_hash
     ON admin_user_refresh_tokens(token_hash);
 
+-- Per-user MCP OAuth material is never stored in plaintext. The gateway
+-- encrypts PKCE verifiers and access/refresh tokens with a deployment key
+-- before calling this repository. Subject and scope columns remain cleartext
+-- so authorization can fail closed without decrypting another user's token.
+CREATE TABLE IF NOT EXISTS mcp_oauth_authorization_states (
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    server_name TEXT NOT NULL,
+    generation BIGINT NOT NULL DEFAULT 1 CHECK (generation > 0),
+    updated_at_unix BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, workspace_id, user_id, server_name)
+);
+
+CREATE TABLE IF NOT EXISTS mcp_oauth_flows (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    server_name TEXT NOT NULL,
+    pkce_nonce BYTEA NOT NULL,
+    pkce_ciphertext BYTEA NOT NULL,
+    oidc_nonce TEXT NOT NULL,
+    authorization_generation BIGINT NOT NULL CHECK (authorization_generation > 0),
+    created_at_unix BIGINT NOT NULL,
+    expires_at_unix BIGINT NOT NULL,
+    consumed_at_unix BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_oauth_flows_expiry
+    ON mcp_oauth_flows(expires_at_unix)
+    WHERE consumed_at_unix IS NULL;
+
+CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    server_name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    token_type TEXT NOT NULL,
+    scopes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    access_token_nonce BYTEA NOT NULL,
+    access_token_ciphertext BYTEA NOT NULL,
+    refresh_token_nonce BYTEA,
+    refresh_token_ciphertext BYTEA,
+    expires_at_unix BIGINT NOT NULL,
+    key_version BIGINT NOT NULL DEFAULT 1,
+    version BIGINT NOT NULL DEFAULT 1,
+    authorization_generation BIGINT NOT NULL CHECK (authorization_generation > 0),
+    refresh_lease_id TEXT,
+    refresh_lease_expires_at_unix BIGINT,
+    created_at_unix BIGINT NOT NULL,
+    updated_at_unix BIGINT NOT NULL,
+    revoked_at_unix BIGINT,
+    last_refresh_outcome TEXT,
+    last_revocation_outcome TEXT,
+    UNIQUE (tenant_id, workspace_id, user_id, server_name),
+    CHECK ((refresh_token_nonce IS NULL) = (refresh_token_ciphertext IS NULL)),
+    CHECK ((refresh_lease_id IS NULL) = (refresh_lease_expires_at_unix IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_oauth_credentials_subject
+    ON mcp_oauth_credentials(tenant_id, workspace_id, user_id, server_name);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_oauth_credentials_expiry
+    ON mcp_oauth_credentials(expires_at_unix)
+    WHERE revoked_at_unix IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_mcp_oauth_credentials_refresh_lease
+    ON mcp_oauth_credentials(refresh_lease_expires_at_unix)
+    WHERE refresh_lease_id IS NOT NULL AND revoked_at_unix IS NULL;
+
+ALTER TABLE mcp_oauth_authorization_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mcp_oauth_flows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mcp_oauth_credentials ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS mcp_oauth_authorization_states_tenant_scope
+    ON mcp_oauth_authorization_states;
+CREATE POLICY mcp_oauth_authorization_states_tenant_scope
+    ON mcp_oauth_authorization_states FOR ALL
+    USING (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    )
+    WITH CHECK (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    );
+
+DROP POLICY IF EXISTS mcp_oauth_flows_tenant_scope ON mcp_oauth_flows;
+CREATE POLICY mcp_oauth_flows_tenant_scope ON mcp_oauth_flows FOR ALL
+    USING (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    )
+    WITH CHECK (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    );
+
+DROP POLICY IF EXISTS mcp_oauth_credentials_tenant_scope ON mcp_oauth_credentials;
+CREATE POLICY mcp_oauth_credentials_tenant_scope ON mcp_oauth_credentials FOR ALL
+    USING (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    )
+    WITH CHECK (
+        current_setting('ferrogate.platform_mode', TRUE) = 'on'
+        OR tenant_id = NULLIF(current_setting('ferrogate.tenant_id', TRUE), '')
+    );
+
 -- Quota/rate-limit policy attached to a scope in the tenant -> project ->
 -- workspace -> key hierarchy. Resolution merges key -> workspace -> project
 -- -> tenant: the nearest defined value overrides, but may not exceed the
@@ -1379,5 +1492,10 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (27, '027_guardrail_evaluation_evidence')
+ON CONFLICT (version) DO UPDATE
+SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (28, '028_mcp_per_user_oauth_identity')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;

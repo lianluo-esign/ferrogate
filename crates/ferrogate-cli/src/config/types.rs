@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 pub(crate) use ferrogate_core::ApprovalPolicy;
 use ferrogate_guardrails::{all_content_sources, ContentSource};
 pub(crate) use ferrogate_mcp::{
-    McpAuthType, McpHeaderConfig, McpServerConfig, McpTlsConfig, McpTransport,
+    McpAuthType, McpHeaderConfig, McpOauthConfig, McpServerConfig, McpTlsConfig, McpTransport,
 };
 use ferrogate_providers::RoutingStrategy;
 use ferrogate_storage::{PostgresTlsMode, StorageProviderKind};
@@ -554,6 +554,8 @@ pub(crate) struct ApiKey {
     pub(crate) team_id: Option<String>,
     #[serde(default)]
     pub(crate) project_id: Option<String>,
+    #[serde(default)]
+    pub(crate) workspace_id: Option<String>,
     #[serde(default)]
     pub(crate) user_id: Option<String>,
     #[serde(default)]

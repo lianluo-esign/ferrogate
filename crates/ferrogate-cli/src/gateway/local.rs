@@ -74,6 +74,7 @@ const FUNCTION_EGRESS_RESPONSE_BODY_MAX_BYTES: usize = 256 * 1024;
 const SERVICE_NAME: &str = "ferrogate";
 const SKILL_PACKAGE_HEADER: &str = "x-ferrogate-skill-package";
 const SKILL_PACKAGE_VERSION_HEADER: &str = "x-ferrogate-skill-package-version";
+const MCP_ORIGINAL_BEARER_HEADER: &str = "x-ferrogate-mcp-bearer";
 const SELF_HOSTED_TRANSPORT_SECURITY_HEADER: &str = "x-ferrogate-transport-security";
 const SELF_HOSTED_TRANSPORT_SECURITY_MTLS: &str = "mutual_tls";
 const SELF_HOSTED_TRANSPORT_SECURITY_SYMMETRIC_AEAD: &str = "symmetric_aead";
@@ -106,7 +107,7 @@ pub(super) enum ToolExecuteBackend {
 /// tenant-account existence, since bindings are keyed by tenant_id
 /// directly. Returns `Some((code, message))` when the tenant must be
 /// denied, `None` when execution may proceed.
-pub(super) fn tool_execution_entitlement_denial(
+pub(super) async fn tool_execution_entitlement_denial(
     state: &crate::state::AppState,
     auth: &AuthContext,
     backend: ToolExecuteBackend,
@@ -133,14 +134,14 @@ pub(super) fn tool_execution_entitlement_denial(
         ),
     };
     let tenant_id = auth.organization_id.as_deref()?;
-    let tenant_account_exists = state.get_tenant_account(tenant_id).ok().flatten().is_some();
-    let plan_grants_access = state
-        .resolve_tenant_plan(tenant_id)
-        .ok()
-        .flatten()
-        .is_some_and(|plan| plan_enabled(&plan));
-    let role_grants_access = state.tenant_has_permission(tenant_id, permission_key);
-    if tenant_account_exists && !plan_grants_access && !role_grants_access {
+    if state
+        .tenant_tool_entitlement_denied(
+            tenant_id.to_string(),
+            permission_key.to_string(),
+            plan_enabled,
+        )
+        .await
+    {
         Some((error_code, error_message))
     } else {
         None
@@ -155,6 +156,7 @@ pub(super) struct ToolExecutionContext<'a> {
     pub(super) workflow_node_id: Option<&'a str>,
     pub(super) skill_package_id: Option<&'a str>,
     pub(super) skill_package_version: Option<&'a str>,
+    pub(super) mcp_original_bearer: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -2839,8 +2841,18 @@ impl FerroGateway {
             return write_empty_response(session, StatusCode::ACCEPTED, &ctx.request_id).await;
         }
 
-        let response =
-            mcp_rpc::handle_request(&state, ctx, &auth, skill_context.as_ref(), rpc).await;
+        let original_bearer = headers
+            .get(MCP_ORIGINAL_BEARER_HEADER)
+            .and_then(|value| value.to_str().ok());
+        let response = mcp_rpc::handle_request(
+            &state,
+            ctx,
+            &auth,
+            skill_context.as_ref(),
+            original_bearer,
+            rpc,
+        )
+        .await;
         write_json_response(session, StatusCode::OK, &response, &ctx.request_id).await
     }
 
@@ -3065,7 +3077,7 @@ impl FerroGateway {
         // `tool_execution_entitlement_denial`'s doc comment for why this
         // check is centralized rather than reimplemented per call site.
         if let Some((error_code, error_message)) =
-            tool_execution_entitlement_denial(&state, &auth, backend)
+            tool_execution_entitlement_denial(&state, &auth, backend).await
         {
             return write_json_error(
                 session,
@@ -3130,6 +3142,9 @@ impl FerroGateway {
             skill_package_version: skill_context
                 .as_ref()
                 .map(|context| context.version.as_str()),
+            mcp_original_bearer: headers
+                .get(MCP_ORIGINAL_BEARER_HEADER)
+                .and_then(|value| value.to_str().ok()),
             ..ToolExecutionContext::default()
         };
         match self
@@ -3323,11 +3338,65 @@ impl FerroGateway {
                     .await
             }
             ToolExecuteBackend::Mcp => {
+                let server_name = mcp_audit_details
+                    .as_ref()
+                    .map(|(server_name, _)| server_name.as_str())
+                    .ok_or_else(|| ToolExecutionHttpError {
+                        status: StatusCode::NOT_FOUND,
+                        code: "tool_not_found",
+                        message: format!(
+                            "MCP tool {} must use serverName-toolName namespace",
+                            request.name
+                        ),
+                    })?;
+                let identity = match state
+                    .resolve_mcp_identity(auth, server_name, execution.mcp_original_bearer)
+                    .await
+                {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        state.record_mcp_identity_resolution_metric(false);
+                        state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                            ctx,
+                            auth,
+                            execution,
+                            "mcp.identity.resolve",
+                            audit_target.clone(),
+                            "rejected",
+                            format!(
+                                "server={server_name} tool={} decision=deny code={}",
+                                request.name, error.code
+                            ),
+                        ));
+                        return Err(ToolExecutionHttpError {
+                            status: error.status,
+                            code: error.code,
+                            message: error.message,
+                        });
+                    }
+                };
+                state.record_mcp_identity_resolution_metric(true);
+                state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                    ctx,
+                    auth,
+                    execution,
+                    "mcp.identity.resolve",
+                    audit_target.clone(),
+                    "allowed",
+                    format!(
+                        "server={server_name} tool={} source={} subject={} decision=allow",
+                        request.name,
+                        identity.credential_source,
+                        identity.subject.as_deref().unwrap_or("none")
+                    ),
+                ));
                 state
                     .execute_mcp_tool(
                         request.clone(),
                         ctx.request_id.clone(),
+                        ctx.trace_id.clone(),
                         auth.tenant_context(),
+                        identity.headers,
                     )
                     .await
             }
@@ -8682,6 +8751,7 @@ fn admin_api_key(key: &crate::config::ApiKey) -> AdminApiKey {
         organization_id: key.organization_id.clone(),
         team_id: key.team_id.clone(),
         project_id: key.project_id.clone(),
+        workspace_id: key.workspace_id.clone(),
         user_id: key.user_id.clone(),
         monthly_token_budget: key.monthly_token_budget,
         request_limit_per_minute: key.request_limit_per_minute,
@@ -9329,6 +9399,7 @@ fn api_key_from_mutation(
         organization_id: payload.organization_id,
         team_id: payload.team_id,
         project_id: payload.project_id,
+        workspace_id: payload.workspace_id,
         user_id: payload.user_id,
         monthly_token_budget: payload.monthly_token_budget,
         request_limit_per_minute: payload.request_limit_per_minute,

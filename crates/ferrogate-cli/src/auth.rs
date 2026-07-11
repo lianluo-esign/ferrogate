@@ -361,7 +361,7 @@ pub(crate) fn authenticate(
                 organization_id: configured_key.organization_id.clone(),
                 team_id: configured_key.team_id.clone(),
                 project_id: configured_key.project_id.clone(),
-                workspace_id: None,
+                workspace_id: configured_key.workspace_id.clone(),
                 user_id: configured_key.user_id.clone(),
                 log_bodies: configured_key.log_bodies.unwrap_or(false),
                 rbac_subject: None,
@@ -950,6 +950,7 @@ mod tests {
             organization_id: None,
             team_id: None,
             project_id: None,
+            workspace_id: None,
             user_id: None,
             monthly_token_budget: None,
             request_limit_per_minute: None,
@@ -1084,6 +1085,32 @@ mod tests {
         )
         .expect("yaml fallback should authenticate");
         assert_eq!(auth.api_key_id.as_deref(), Some("decoy"));
+    }
+
+    #[test]
+    fn yaml_key_carries_explicit_workspace_and_user_attribution() {
+        let mut key = decoy_yaml_key();
+        key.organization_id = Some("tenant-identity".into());
+        key.project_id = Some("project-identity".into());
+        key.workspace_id = Some("workspace-identity".into());
+        key.user_id = Some("user-identity".into());
+        let state = AppState::new(Config {
+            api_keys: vec![key],
+            ..Config::default()
+        });
+
+        let auth = authenticate(
+            &state,
+            &bearer_headers("decoy-secret"),
+            "chat.completions",
+            "req-identity",
+        )
+        .unwrap();
+
+        assert_eq!(auth.organization_id.as_deref(), Some("tenant-identity"));
+        assert_eq!(auth.project_id.as_deref(), Some("project-identity"));
+        assert_eq!(auth.workspace_id.as_deref(), Some("workspace-identity"));
+        assert_eq!(auth.user_id.as_deref(), Some("user-identity"));
     }
 
     #[test]
@@ -1543,6 +1570,7 @@ mod tests {
             organization_id: None,
             team_id: None,
             project_id: None,
+            workspace_id: None,
             user_id: None,
             monthly_token_budget: None,
             request_limit_per_minute: None,

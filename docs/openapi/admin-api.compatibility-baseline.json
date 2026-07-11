@@ -206,6 +206,195 @@
         }
       }
     },
+    "/v1/mcp/identity/{server}/authorize": {
+      "post": {
+        "operationId": "authorizeMcpIdentity",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Create a subject-bound MCP OAuth authorization-code flow.",
+        "parameters": [
+          {
+            "name": "server",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorization URL and one-time state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpOauthAuthorizeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "tools.execute"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/v1/mcp/identity/{server}": {
+      "parameters": [
+        {
+          "name": "server",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getMcpIdentity",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Get subject-bound MCP identity metadata without token material.",
+        "responses": {
+          "200": {
+            "description": "MCP identity metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpIdentityStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "tools.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "revokeMcpIdentity",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Revoke the current subject's MCP identity locally before optional upstream revocation.",
+        "responses": {
+          "200": {
+            "description": "Revoked MCP identity metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpIdentityStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "bearer",
+            "scope": "tools.execute"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/v1/mcp/identity/callback": {
+      "get": {
+        "operationId": "completeMcpIdentityOauth",
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Consume a one-time OAuth state and persist an encrypted subject-bound credential.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connected MCP identity metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpIdentityStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "public",
+          "auth": {
+            "kind": "anonymous",
+            "scope": null
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/v1/agent-runs": {
       "post": {
         "operationId": "createAgentRun",
@@ -9813,6 +10002,16 @@
           }
         }
       },
+      "ServiceUnavailable": {
+        "description": "Identity provider, credential storage, secret resolution, or encryption key is unavailable.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
       "AdminPromptTemplateMutationOk": {
         "description": "Prompt template mutation response.",
         "content": {
@@ -11431,6 +11630,12 @@
               "null"
             ]
           },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "user_id": {
             "type": [
               "string",
@@ -11518,6 +11723,9 @@
             "type": "string"
           },
           "project_id": {
+            "type": "string"
+          },
+          "workspace_id": {
             "type": "string"
           },
           "user_id": {
@@ -14204,6 +14412,22 @@
               "$ref": "#/components/schemas/McpHeaderConfig"
             }
           },
+          "oauth": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/McpOauthConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "signed_jwt_audience": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "tools_to_execute": {
             "$ref": "#/components/schemas/StringList"
           },
@@ -14249,11 +14473,146 @@
         "type": "string",
         "enum": [
           "none",
-          "headers",
+          "shared_headers",
           "oauth",
           "per_user_oauth",
-          "per_user_headers"
+          "per_user_headers",
+          "original_bearer",
+          "ferrogate_signed_jwt"
         ]
+      },
+      "McpOauthConfig": {
+        "type": "object",
+        "required": [
+          "issuer",
+          "client_id"
+        ],
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "format": "uri"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Secret resolver reference; resolved value is never returned by the API."
+          },
+          "redirect_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri"
+          },
+          "scopes": {
+            "$ref": "#/components/schemas/StringList"
+          },
+          "audience": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "allow_insecure_http": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpOauthAuthorizeResponse": {
+        "type": "object",
+        "required": [
+          "object",
+          "server_name",
+          "authorize_url",
+          "state",
+          "expires_at_unix"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "mcp_oauth_authorization"
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "authorize_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "state": {
+            "type": "string"
+          },
+          "expires_at_unix": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpIdentityStatus": {
+        "type": "object",
+        "required": [
+          "object",
+          "server_name",
+          "auth_type",
+          "connected",
+          "credential_source"
+        ],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "mcp_identity"
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "auth_type": {
+            "$ref": "#/components/schemas/McpAuthType"
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "credential_source": {
+            "type": "string"
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revoked_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_refresh_outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_revocation_outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "McpHeaderConfig": {
         "type": "object",

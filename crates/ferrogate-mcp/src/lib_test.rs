@@ -23,6 +23,8 @@ fn deny_by_default_requires_execute_allowlist() {
         args: Vec::new(),
         auth_type: McpAuthType::None,
         headers: Vec::new(),
+        oauth: None,
+        signed_jwt_audience: None,
         tools_to_execute: Vec::new(),
         tools_to_auto_execute: Vec::new(),
         approval_policy: ApprovalPolicy::Never,
@@ -51,6 +53,8 @@ fn namespaces_and_filters_tools() {
         args: Vec::new(),
         auth_type: McpAuthType::None,
         headers: Vec::new(),
+        oauth: None,
+        signed_jwt_audience: None,
         tools_to_execute: vec!["search".into()],
         tools_to_auto_execute: vec!["search".into()],
         approval_policy: ApprovalPolicy::Never,
@@ -195,6 +199,8 @@ fn test_config(name: &str) -> McpServerConfig {
         args: Vec::new(),
         auth_type: McpAuthType::None,
         headers: Vec::new(),
+        oauth: None,
+        signed_jwt_audience: None,
         tools_to_execute: vec!["search".into()],
         tools_to_auto_execute: Vec::new(),
         approval_policy: ApprovalPolicy::Never,
@@ -341,6 +347,81 @@ fn mcp_server_config_applies_serde_defaults() {
     assert_eq!(config.auth_type, McpAuthType::None);
     assert!(config.tools_to_execute.is_empty());
     assert_eq!(config.transport, McpTransport::Stdio);
+}
+
+#[test]
+fn legacy_headers_auth_parses_but_serializes_as_explicit_shared_credentials() {
+    let config: McpServerConfig = serde_json::from_value(json!({
+        "name": "shared",
+        "transport": "streamable_http",
+        "url": "http://127.0.0.1/mcp",
+        "auth_type": "headers",
+        "headers": [{"name": "Authorization", "value_env": "SHARED_TOKEN"}],
+        "tools_to_execute": ["search"]
+    }))
+    .unwrap();
+    assert_eq!(config.auth_type, McpAuthType::SharedHeaders);
+    assert_eq!(
+        serde_json::to_value(&config).unwrap()["auth_type"],
+        "shared_headers"
+    );
+    validate_mcp_server_config(&config).unwrap();
+}
+
+#[test]
+fn unsupported_identity_modes_fail_config_validation_exactly() {
+    let mut oauth = test_config("oauth");
+    oauth.auth_type = McpAuthType::Oauth;
+    assert_eq!(
+        validate_mcp_server_config(&oauth).unwrap_err().to_string(),
+        "MCP auth_type oauth is not implemented; use per_user_oauth for user-isolated OAuth or shared_headers for shared credentials"
+    );
+
+    let mut headers = test_config("peruser");
+    headers.auth_type = McpAuthType::PerUserHeaders;
+    assert_eq!(
+        validate_mcp_server_config(&headers).unwrap_err().to_string(),
+        "MCP auth_type per_user_headers is not implemented; use per_user_oauth, original_bearer, or ferrogate_signed_jwt"
+    );
+}
+
+#[test]
+fn per_user_oauth_requires_complete_https_authorization_code_config() {
+    let mut config = test_config("identity");
+    config.auth_type = McpAuthType::PerUserOauth;
+    assert!(validate_mcp_server_config(&config)
+        .unwrap_err()
+        .to_string()
+        .contains("requires oauth configuration"));
+
+    config.oauth = Some(McpOauthConfig {
+        issuer: "http://idp.invalid".into(),
+        client_id: "client".into(),
+        client_secret_ref: Some("env://OIDC_SECRET".into()),
+        redirect_uri: Some("https://gateway.example/v1/mcp/identity/callback".into()),
+        scopes: vec!["openid".into()],
+        audience: None,
+        allow_insecure_http: false,
+    });
+    assert!(validate_mcp_server_config(&config)
+        .unwrap_err()
+        .to_string()
+        .contains("must use https"));
+    config.oauth.as_mut().unwrap().allow_insecure_http = true;
+    validate_mcp_server_config(&config).unwrap();
+}
+
+#[test]
+fn dispatch_header_debug_output_redacts_bearer() {
+    let headers = McpDispatchHeaders::bearer("never-print-this-token".into()).unwrap();
+    let debug = format!("{headers:?}");
+    assert!(!debug.contains("never-print-this-token"));
+    assert!(debug.contains("redacted"));
+}
+
+#[test]
+fn dispatch_headers_reject_bearer_header_injection() {
+    assert!(McpDispatchHeaders::bearer("token\r\nx-forged: value".into()).is_err());
 }
 
 #[test]
@@ -500,6 +581,46 @@ fn json_http_response(json_body: &str) -> String {
         json_body.len(),
         json_body
     )
+}
+
+#[test]
+fn post_http_json_preserves_upstream_401_as_identity_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut tcp, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let count = Read::read(&mut tcp, &mut chunk).unwrap();
+            if count == 0 {
+                break;
+            }
+            received.extend_from_slice(&chunk[..count]);
+            if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&received);
+        assert!(request.contains("Authorization: Bearer per-user-token\r\n"));
+        tcp.write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+    });
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"});
+    let error = post_http_json(
+        &format!("http://{addr}/mcp"),
+        Duration::from_secs(2),
+        &[("Authorization".into(), "Bearer per-user-token".into())],
+        &McpTlsConfig::default(),
+        &McpTransport::StreamableHttp,
+        &body,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "mcp_upstream_unauthorized");
+    handle.join().unwrap();
 }
 
 #[test]

@@ -1036,6 +1036,7 @@ dependencies = [
  "base64",
  "blake2",
  "bytes",
+ "chacha20poly1305",
  "clap",
  "ferrogate-auth",
  "ferrogate-billing",
@@ -1053,6 +1054,7 @@ dependencies = [
  "hmac 0.12.1",
  "http",
  "instant-acme",
+ "jsonwebtoken",
  "matchit",
  "pingora",
  "rcgen",
@@ -1211,13 +1213,17 @@ name = "ferrogate-test"
 version = "2026.7.9"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "ferrogate-runtime",
+ "jsonwebtoken",
  "native-tls",
  "postgres",
  "postgres-native-tls",
  "rcgen",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 

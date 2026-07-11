@@ -361,6 +361,10 @@ pub struct GatewayMetricsSnapshot {
     pub billing_report_enqueue_failure_total: u64,
     pub tool_call_total: u64,
     pub tool_latency_ms_total: u64,
+    pub mcp_identity_resolution_total: u64,
+    pub mcp_identity_failure_total: u64,
+    pub mcp_identity_refresh_total: u64,
+    pub mcp_identity_revocation_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
     /// Requests rejected pre-authentication for not matching a configured
@@ -480,6 +484,46 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_mcp_tool_latency_ms_total {}\n",
         snapshot.tool_latency_ms_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_identity_resolutions_total",
+        "Total per-request MCP identity resolution attempts.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_identity_resolutions_total {}\n",
+        snapshot.mcp_identity_resolution_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_identity_failures_total",
+        "Total MCP identity resolution attempts rejected before dispatch.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_identity_failures_total {}\n",
+        snapshot.mcp_identity_failure_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_identity_refreshes_total",
+        "Total successful MCP OAuth credential refreshes.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_identity_refreshes_total {}\n",
+        snapshot.mcp_identity_refresh_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_identity_revocations_total",
+        "Total locally enforced MCP identity revocations.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_identity_revocations_total {}\n",
+        snapshot.mcp_identity_revocation_total
     ));
 
     push_help(
@@ -826,6 +870,30 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "ferrogate.mcp_tool.latency_ms",
             "Total MCP tool execution latency in milliseconds.",
             snapshot.tool_latency_ms_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_identity.resolutions",
+            "Total per-request MCP identity resolution attempts.",
+            snapshot.mcp_identity_resolution_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_identity.failures",
+            "Total MCP identity resolution attempts rejected before dispatch.",
+            snapshot.mcp_identity_failure_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_identity.refreshes",
+            "Total successful MCP OAuth credential refreshes.",
+            snapshot.mcp_identity_refresh_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_identity.revocations",
+            "Total locally enforced MCP identity revocations.",
+            snapshot.mcp_identity_revocation_total as f64,
             vec![],
         ),
         sum_metric_json(
@@ -1273,6 +1341,10 @@ mod tests {
             billing_report_enqueue_failure_total: 1,
             tool_call_total: 2,
             tool_latency_ms_total: 17,
+            mcp_identity_resolution_total: 5,
+            mcp_identity_failure_total: 1,
+            mcp_identity_refresh_total: 2,
+            mcp_identity_revocation_total: 1,
             token_totals: TokenMetricTotals {
                 prompt_tokens: 3,
                 completion_tokens: 5,
@@ -1306,6 +1378,10 @@ mod tests {
         assert!(text.contains("ferrogate_billing_report_enqueue_failures_total 1"));
         assert!(text.contains("ferrogate_mcp_tool_calls_total 2"));
         assert!(text.contains("ferrogate_mcp_tool_latency_ms_total 17"));
+        assert!(text.contains("ferrogate_mcp_identity_resolutions_total 5"));
+        assert!(text.contains("ferrogate_mcp_identity_failures_total 1"));
+        assert!(text.contains("ferrogate_mcp_identity_refreshes_total 2"));
+        assert!(text.contains("ferrogate_mcp_identity_revocations_total 1"));
         assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));
         assert!(text.contains(
             "ferrogate_model_provider_requests_total{logical_model=\"fast-chat\",provider=\"openai\"} 1"

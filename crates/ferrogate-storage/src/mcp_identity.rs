@@ -1,0 +1,1317 @@
+// Token4AI Cloud Attribution
+// Developed by the commercial cloud service company represented by https://token4ai.cloud.
+// Author: jamesduan (X: https://x.com/JamesDuanL)
+// Created: 2026-07-10
+// description: Durable, ciphertext-only per-user MCP OAuth credential repository.
+
+use serde::{Deserialize, Serialize};
+
+use super::{
+    PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
+    RuntimeStorageRepositories, StorageError,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredMcpOauthFlow {
+    pub id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub user_id: String,
+    pub server_name: String,
+    pub pkce_nonce: Vec<u8>,
+    pub pkce_ciphertext: Vec<u8>,
+    pub oidc_nonce: String,
+    pub authorization_generation: u64,
+    pub created_at_unix: i64,
+    pub expires_at_unix: i64,
+    pub consumed_at_unix: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredMcpOauthCredential {
+    pub id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub user_id: String,
+    pub server_name: String,
+    pub issuer: String,
+    pub subject: String,
+    pub token_type: String,
+    pub scopes: Vec<String>,
+    pub access_token_nonce: Vec<u8>,
+    pub access_token_ciphertext: Vec<u8>,
+    pub refresh_token_nonce: Option<Vec<u8>>,
+    pub refresh_token_ciphertext: Option<Vec<u8>>,
+    pub expires_at_unix: i64,
+    pub key_version: u32,
+    pub version: u64,
+    pub authorization_generation: u64,
+    pub refresh_lease_id: Option<String>,
+    pub refresh_lease_expires_at_unix: Option<i64>,
+    pub created_at_unix: i64,
+    pub updated_at_unix: i64,
+    pub revoked_at_unix: Option<i64>,
+    pub last_refresh_outcome: Option<String>,
+    pub last_revocation_outcome: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpIdentityAccessRequest {
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub user_id: String,
+    pub server_name: String,
+    pub permission_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpIdentityAccessOutcome {
+    Allowed(Box<Option<StoredMcpOauthCredential>>),
+    PermissionDenied,
+    UserInactive,
+    MembershipRevoked,
+    WorkspaceInactive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpRefreshClaimRequest {
+    pub tenant_id: String,
+    pub credential_id: String,
+    pub expected_version: u64,
+    pub authorization_generation: u64,
+    pub lease_id: String,
+    pub now_unix: i64,
+    pub lease_expires_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpOauthCallbackCommitOutcome {
+    Committed,
+    AuthorizationChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpRefreshClaimOutcome {
+    Acquired(StoredMcpOauthCredential),
+    Busy { lease_expires_at_unix: i64 },
+    Changed(Option<StoredMcpOauthCredential>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpIdentityRevocationOutcome {
+    pub credential: StoredMcpOauthCredential,
+    pub revoked_at_unix: i64,
+}
+
+pub trait McpCredentialRepository {
+    fn authorize_mcp_identity(
+        &self,
+        request: &McpIdentityAccessRequest,
+    ) -> Result<McpIdentityAccessOutcome, StorageError>;
+    fn begin_mcp_oauth_flow(
+        &self,
+        flow: StoredMcpOauthFlow,
+    ) -> Result<StoredMcpOauthFlow, StorageError>;
+    fn consume_mcp_oauth_flow(
+        &self,
+        id: &str,
+        consumed_at_unix: i64,
+    ) -> Result<Option<StoredMcpOauthFlow>, StorageError>;
+    fn commit_mcp_oauth_callback(
+        &self,
+        flow: &StoredMcpOauthFlow,
+        credential: StoredMcpOauthCredential,
+        permission_key: &str,
+    ) -> Result<McpOauthCallbackCommitOutcome, StorageError>;
+    fn get_mcp_oauth_credential(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        user_id: &str,
+        server_name: &str,
+    ) -> Result<Option<StoredMcpOauthCredential>, StorageError>;
+    fn list_mcp_oauth_credentials(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredMcpOauthCredential>, StorageError>;
+    fn claim_mcp_oauth_refresh(
+        &self,
+        request: &McpRefreshClaimRequest,
+    ) -> Result<McpRefreshClaimOutcome, StorageError>;
+    fn complete_mcp_oauth_refresh(
+        &self,
+        credential: StoredMcpOauthCredential,
+        lease_id: &str,
+    ) -> Result<bool, StorageError>;
+    fn release_mcp_oauth_refresh(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+        lease_id: &str,
+        outcome: &str,
+    ) -> Result<bool, StorageError>;
+    fn revoke_mcp_oauth_identity(
+        &self,
+        request: &McpIdentityAccessRequest,
+        revoked_at_unix: i64,
+        outcome: &str,
+    ) -> Result<Option<McpIdentityRevocationOutcome>, StorageError>;
+    fn update_mcp_oauth_revocation_outcome(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        user_id: &str,
+        server_name: &str,
+        outcome: &str,
+    ) -> Result<bool, StorageError>;
+}
+
+fn oauth_flow_from_row(row: &PostgresRow) -> StoredMcpOauthFlow {
+    StoredMcpOauthFlow {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        user_id: row.get(3),
+        server_name: row.get(4),
+        pkce_nonce: row.get(5),
+        pkce_ciphertext: row.get(6),
+        oidc_nonce: row.get(7),
+        authorization_generation: u64::try_from(row.get::<_, i64>(8)).unwrap_or(u64::MAX),
+        created_at_unix: row.get(9),
+        expires_at_unix: row.get(10),
+        consumed_at_unix: row.get(11),
+    }
+}
+
+fn oauth_credential_from_row(row: &PostgresRow) -> Result<StoredMcpOauthCredential, StorageError> {
+    let scopes = super::deserialize_storage_document(&row.get::<_, String>(8))?;
+    Ok(StoredMcpOauthCredential {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        user_id: row.get(3),
+        server_name: row.get(4),
+        issuer: row.get(5),
+        subject: row.get(6),
+        token_type: row.get(7),
+        scopes,
+        access_token_nonce: row.get(9),
+        access_token_ciphertext: row.get(10),
+        refresh_token_nonce: row.get(11),
+        refresh_token_ciphertext: row.get(12),
+        expires_at_unix: row.get(13),
+        key_version: u32::try_from(row.get::<_, i64>(14)).unwrap_or(u32::MAX),
+        version: u64::try_from(row.get::<_, i64>(15)).unwrap_or(u64::MAX),
+        authorization_generation: u64::try_from(row.get::<_, i64>(16)).unwrap_or(u64::MAX),
+        refresh_lease_id: row.get(17),
+        refresh_lease_expires_at_unix: row.get(18),
+        created_at_unix: row.get(19),
+        updated_at_unix: row.get(20),
+        revoked_at_unix: row.get(21),
+        last_refresh_outcome: row.get(22),
+        last_revocation_outcome: row.get(23),
+    })
+}
+
+const CREDENTIAL_COLUMNS: &str = "id, tenant_id, workspace_id, user_id, server_name, issuer, \
+    subject, token_type, scopes_json::text, access_token_nonce, access_token_ciphertext, \
+    refresh_token_nonce, refresh_token_ciphertext, expires_at_unix, key_version, version, \
+    authorization_generation, refresh_lease_id, refresh_lease_expires_at_unix, created_at_unix, \
+    updated_at_unix, revoked_at_unix, last_refresh_outcome, last_revocation_outcome";
+
+fn set_mcp_rls_context(
+    transaction: &mut postgres::Transaction<'_>,
+    tenant_id: Option<&str>,
+) -> Result<(), StorageError> {
+    let platform_mode = if tenant_id.is_some() { "off" } else { "on" };
+    transaction
+        .query_one(
+            "SELECT set_config('ferrogate.tenant_id', COALESCE($1, ''), TRUE), \
+                    set_config('ferrogate.platform_mode', $2, TRUE)",
+            &[&tenant_id, &platform_mode],
+        )
+        .map_err(super::postgres_error)?;
+    Ok(())
+}
+
+fn postgres_authorize_mcp_actor(
+    transaction: &mut postgres::Transaction<'_>,
+    request: &McpIdentityAccessRequest,
+) -> Result<McpIdentityAccessOutcome, StorageError> {
+    let has_permission = transaction
+        .query_one(
+            "SELECT EXISTS( \
+               SELECT 1 FROM permissions AS permission \
+               JOIN tenant_role_bindings AS binding ON binding.tenant_id=$1 \
+               JOIN roles AS role ON role.id=binding.role_id \
+               WHERE permission.key=$2 \
+                 AND jsonb_exists(role.permission_keys_json, permission.key) \
+             )",
+            &[&request.tenant_id, &request.permission_key],
+        )
+        .map_err(super::postgres_error)?
+        .get::<_, bool>(0);
+    if !has_permission {
+        return Ok(McpIdentityAccessOutcome::PermissionDenied);
+    }
+    let user_active = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM admin_users WHERE id=$1 AND disabled_at_unix IS NULL)",
+            &[&request.user_id],
+        )
+        .map_err(super::postgres_error)?
+        .get::<_, bool>(0);
+    if !user_active {
+        return Ok(McpIdentityAccessOutcome::UserInactive);
+    }
+    let member = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM admin_user_tenant_memberships \
+             WHERE user_id=$1 AND tenant_id=$2)",
+            &[&request.user_id, &request.tenant_id],
+        )
+        .map_err(super::postgres_error)?
+        .get::<_, bool>(0);
+    if !member {
+        return Ok(McpIdentityAccessOutcome::MembershipRevoked);
+    }
+    let workspace_active = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM workspaces \
+             WHERE id=$1 AND tenant_id=$2 AND status='active')",
+            &[&request.workspace_id, &request.tenant_id],
+        )
+        .map_err(super::postgres_error)?
+        .get::<_, bool>(0);
+    if !workspace_active {
+        return Ok(McpIdentityAccessOutcome::WorkspaceInactive);
+    }
+    let query = format!(
+        "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
+         WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4"
+    );
+    let credential = transaction
+        .query_opt(
+            &query,
+            &[
+                &request.tenant_id,
+                &request.workspace_id,
+                &request.user_id,
+                &request.server_name,
+            ],
+        )
+        .map_err(super::postgres_error)?
+        .as_ref()
+        .map(oauth_credential_from_row)
+        .transpose()?;
+    Ok(McpIdentityAccessOutcome::Allowed(Box::new(credential)))
+}
+
+impl PostgresControlPlaneStore {
+    fn authorize_mcp_identity(
+        &self,
+        request: &McpIdentityAccessRequest,
+    ) -> Result<McpIdentityAccessOutcome, StorageError> {
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(&request.tenant_id))?;
+            let outcome = postgres_authorize_mcp_actor(&mut transaction, request)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(outcome)
+        })
+    }
+
+    fn begin_mcp_oauth_flow(
+        &self,
+        flow: &StoredMcpOauthFlow,
+    ) -> Result<StoredMcpOauthFlow, StorageError> {
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(&flow.tenant_id))?;
+            transaction
+                .execute(
+                    "INSERT INTO mcp_oauth_authorization_states \
+                     (tenant_id,workspace_id,user_id,server_name,generation,updated_at_unix) \
+                     VALUES ($1,$2,$3,$4,1,$5) ON CONFLICT DO NOTHING",
+                    &[
+                        &flow.tenant_id,
+                        &flow.workspace_id,
+                        &flow.user_id,
+                        &flow.server_name,
+                        &flow.created_at_unix,
+                    ],
+                )
+                .map_err(super::postgres_error)?;
+            let generation = transaction
+                .query_one(
+                    "SELECT generation FROM mcp_oauth_authorization_states \
+                     WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4",
+                    &[
+                        &flow.tenant_id,
+                        &flow.workspace_id,
+                        &flow.user_id,
+                        &flow.server_name,
+                    ],
+                )
+                .map_err(super::postgres_error)?
+                .get::<_, i64>(0);
+            let mut flow = flow.clone();
+            flow.authorization_generation = u64::try_from(generation).unwrap_or(u64::MAX);
+            transaction
+                .execute(
+                    "INSERT INTO mcp_oauth_flows \
+                     (id,tenant_id,workspace_id,user_id,server_name,pkce_nonce,pkce_ciphertext, \
+                      oidc_nonce,authorization_generation,created_at_unix,expires_at_unix,consumed_at_unix) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                    &[
+                        &flow.id,
+                        &flow.tenant_id,
+                        &flow.workspace_id,
+                        &flow.user_id,
+                        &flow.server_name,
+                        &flow.pkce_nonce,
+                        &flow.pkce_ciphertext,
+                        &flow.oidc_nonce,
+                        &generation,
+                        &flow.created_at_unix,
+                        &flow.expires_at_unix,
+                        &flow.consumed_at_unix,
+                    ],
+                )
+                .map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(flow)
+        })
+    }
+
+    fn consume_mcp_oauth_flow(
+        &self,
+        id: &str,
+        consumed_at_unix: i64,
+    ) -> Result<Option<StoredMcpOauthFlow>, StorageError> {
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, None)?;
+            let row = transaction
+                .query_opt(
+                    "UPDATE mcp_oauth_flows SET consumed_at_unix = $2 \
+                 WHERE id = $1 AND consumed_at_unix IS NULL AND expires_at_unix >= $2 \
+                 RETURNING id, tenant_id, workspace_id, user_id, server_name, pkce_nonce, \
+                 pkce_ciphertext, oidc_nonce, authorization_generation, created_at_unix, \
+                 expires_at_unix, consumed_at_unix",
+                    &[&id, &consumed_at_unix],
+                )
+                .map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(row.as_ref().map(oauth_flow_from_row))
+        })
+    }
+
+    fn commit_mcp_oauth_callback(
+        &self,
+        flow: &StoredMcpOauthFlow,
+        credential: &StoredMcpOauthCredential,
+        permission_key: &str,
+    ) -> Result<McpOauthCallbackCommitOutcome, StorageError> {
+        let scopes = super::serialize_storage_document(&credential.scopes)?;
+        let key_version = i64::from(credential.key_version);
+        let version = super::saturating_i64(credential.version);
+        let generation = super::saturating_i64(flow.authorization_generation);
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(&flow.tenant_id))?;
+            let row = transaction.query_opt(
+                "INSERT INTO mcp_oauth_credentials \
+                 (id,tenant_id,workspace_id,user_id,server_name,issuer,subject,token_type,scopes_json, \
+                  access_token_nonce,access_token_ciphertext,refresh_token_nonce,refresh_token_ciphertext, \
+                  expires_at_unix,key_version,version,authorization_generation,refresh_lease_id, \
+                  refresh_lease_expires_at_unix,created_at_unix,updated_at_unix,revoked_at_unix, \
+                  last_refresh_outcome,last_revocation_outcome) \
+                 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9::text::jsonb,$10,$11,$12,$13,$14,$15,$16,$17, \
+                        NULL,NULL,$18,$19,$20,$21,$22 \
+                 FROM mcp_oauth_authorization_states AS state \
+                 WHERE state.tenant_id=$2 AND state.workspace_id=$3 AND state.user_id=$4 \
+                   AND state.server_name=$5 AND state.generation=$17 \
+                   AND EXISTS (SELECT 1 FROM permissions AS permission \
+                     JOIN tenant_role_bindings AS binding ON binding.tenant_id=$2 \
+                     JOIN roles AS role ON role.id=binding.role_id \
+                     WHERE permission.key=$23 \
+                       AND jsonb_exists(role.permission_keys_json, permission.key)) \
+                   AND EXISTS (SELECT 1 FROM admin_users WHERE id=$4 AND disabled_at_unix IS NULL) \
+                   AND EXISTS (SELECT 1 FROM admin_user_tenant_memberships \
+                               WHERE user_id=$4 AND tenant_id=$2) \
+                   AND EXISTS (SELECT 1 FROM workspaces \
+                               WHERE id=$3 AND tenant_id=$2 AND status='active') \
+                 ON CONFLICT (tenant_id,workspace_id,user_id,server_name) DO UPDATE SET \
+                  id=EXCLUDED.id,issuer=EXCLUDED.issuer,subject=EXCLUDED.subject,token_type=EXCLUDED.token_type, \
+                  scopes_json=EXCLUDED.scopes_json,access_token_nonce=EXCLUDED.access_token_nonce, \
+                  access_token_ciphertext=EXCLUDED.access_token_ciphertext, \
+                  refresh_token_nonce=EXCLUDED.refresh_token_nonce,refresh_token_ciphertext=EXCLUDED.refresh_token_ciphertext, \
+                  expires_at_unix=EXCLUDED.expires_at_unix,key_version=EXCLUDED.key_version, \
+                  version=mcp_oauth_credentials.version+1,updated_at_unix=EXCLUDED.updated_at_unix, \
+                  authorization_generation=EXCLUDED.authorization_generation,refresh_lease_id=NULL, \
+                  refresh_lease_expires_at_unix=NULL,revoked_at_unix=NULL, \
+                  last_refresh_outcome=EXCLUDED.last_refresh_outcome,last_revocation_outcome=NULL \
+                 RETURNING id",
+                &[
+                    &credential.id,&credential.tenant_id,&credential.workspace_id,&credential.user_id,
+                    &credential.server_name,&credential.issuer,&credential.subject,&credential.token_type,
+                    &scopes,&credential.access_token_nonce,&credential.access_token_ciphertext,
+                    &credential.refresh_token_nonce,&credential.refresh_token_ciphertext,
+                    &credential.expires_at_unix,&key_version,&version,&generation,&credential.created_at_unix,
+                    &credential.updated_at_unix,&credential.revoked_at_unix,
+                    &credential.last_refresh_outcome,&credential.last_revocation_outcome,&permission_key,
+                ],
+            ).map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(if row.is_some() {
+                McpOauthCallbackCommitOutcome::Committed
+            } else {
+                McpOauthCallbackCommitOutcome::AuthorizationChanged
+            })
+        })
+    }
+
+    fn get_mcp_oauth_credential(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        user_id: &str,
+        server_name: &str,
+    ) -> Result<Option<StoredMcpOauthCredential>, StorageError> {
+        let query = format!(
+            "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
+             WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4"
+        );
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(tenant_id))?;
+            let row = transaction
+                .query_opt(&query, &[&tenant_id, &workspace_id, &user_id, &server_name])
+                .map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            row.as_ref().map(oauth_credential_from_row).transpose()
+        })
+    }
+
+    fn list_mcp_oauth_credentials(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredMcpOauthCredential>, StorageError> {
+        let query = format!(
+            "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
+             WHERE tenant_id=$1 ORDER BY user_id,workspace_id,server_name"
+        );
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(tenant_id))?;
+            let rows = transaction
+                .query(&query, &[&tenant_id])
+                .map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            rows.iter().map(oauth_credential_from_row).collect()
+        })
+    }
+
+    fn claim_mcp_oauth_refresh(
+        &self,
+        request: &McpRefreshClaimRequest,
+    ) -> Result<McpRefreshClaimOutcome, StorageError> {
+        let expected_version = super::saturating_i64(request.expected_version);
+        let generation = super::saturating_i64(request.authorization_generation);
+        let query = format!(
+            "UPDATE mcp_oauth_credentials SET refresh_lease_id=$5, \
+             refresh_lease_expires_at_unix=$6,last_refresh_outcome='refreshing' \
+             WHERE tenant_id=$1 AND id=$2 AND version=$3 AND authorization_generation=$4 \
+               AND revoked_at_unix IS NULL \
+               AND (refresh_lease_id IS NULL OR refresh_lease_expires_at_unix <= $7) \
+             RETURNING {CREDENTIAL_COLUMNS}"
+        );
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(&request.tenant_id))?;
+            let claimed = transaction
+                .query_opt(
+                    &query,
+                    &[&request.tenant_id,&request.credential_id,&expected_version,&generation,
+                      &request.lease_id,&request.lease_expires_at_unix,&request.now_unix],
+                )
+                .map_err(super::postgres_error)?;
+            let outcome = if let Some(row) = claimed.as_ref() {
+                McpRefreshClaimOutcome::Acquired(oauth_credential_from_row(row)?)
+            } else {
+                let current_query = format!(
+                    "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials WHERE tenant_id=$1 AND id=$2"
+                );
+                let current = transaction
+                    .query_opt(&current_query, &[&request.tenant_id, &request.credential_id])
+                    .map_err(super::postgres_error)?
+                    .as_ref()
+                    .map(oauth_credential_from_row)
+                    .transpose()?;
+                match current {
+                    Some(ref row)
+                        if row.revoked_at_unix.is_none()
+                            && row.version == u64::try_from(expected_version).unwrap_or(u64::MAX)
+                            && row.authorization_generation == request.authorization_generation
+                            && row.refresh_lease_expires_at_unix.is_some_and(|expiry| expiry > request.now_unix) =>
+                    {
+                        McpRefreshClaimOutcome::Busy {
+                            lease_expires_at_unix: row.refresh_lease_expires_at_unix.unwrap_or(request.now_unix),
+                        }
+                    }
+                    _ => McpRefreshClaimOutcome::Changed(current),
+                }
+            };
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(outcome)
+        })
+    }
+
+    fn complete_mcp_oauth_refresh(
+        &self,
+        credential: &StoredMcpOauthCredential,
+        lease_id: &str,
+    ) -> Result<bool, StorageError> {
+        let scopes = super::serialize_storage_document(&credential.scopes)?;
+        let key_version = i64::from(credential.key_version);
+        let expected_version = super::saturating_i64(credential.version);
+        let generation = super::saturating_i64(credential.authorization_generation);
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(&credential.tenant_id))?;
+            let affected = transaction.execute(
+                "UPDATE mcp_oauth_credentials SET issuer=$3,subject=$4,token_type=$5, \
+                 scopes_json=$6::text::jsonb,access_token_nonce=$7,access_token_ciphertext=$8, \
+                 refresh_token_nonce=$9,refresh_token_ciphertext=$10,expires_at_unix=$11,key_version=$12, \
+                 version=version+1,updated_at_unix=$13,refresh_lease_id=NULL, \
+                 refresh_lease_expires_at_unix=NULL,last_refresh_outcome=$14 \
+                 WHERE tenant_id=$1 AND id=$2 AND version=$15 AND authorization_generation=$16 \
+                   AND refresh_lease_id=$17 AND revoked_at_unix IS NULL",
+                &[
+                    &credential.tenant_id,&credential.id,&credential.issuer,&credential.subject,
+                    &credential.token_type,&scopes,&credential.access_token_nonce,
+                    &credential.access_token_ciphertext,&credential.refresh_token_nonce,
+                    &credential.refresh_token_ciphertext,&credential.expires_at_unix,&key_version,
+                    &credential.updated_at_unix,&credential.last_refresh_outcome,&expected_version,
+                    &generation,&lease_id,
+                ],
+            ).map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(affected == 1)
+        })
+    }
+
+    fn release_mcp_oauth_refresh(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+        lease_id: &str,
+        outcome: &str,
+    ) -> Result<bool, StorageError> {
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(tenant_id))?;
+            let affected = transaction
+                .execute(
+                    "UPDATE mcp_oauth_credentials SET refresh_lease_id=NULL, \
+                 refresh_lease_expires_at_unix=NULL,last_refresh_outcome=$4 \
+                 WHERE tenant_id=$1 AND id=$2 AND refresh_lease_id=$3 AND revoked_at_unix IS NULL",
+                    &[&tenant_id, &credential_id, &lease_id, &outcome],
+                )
+                .map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(affected == 1)
+        })
+    }
+
+    fn revoke_mcp_oauth_identity(
+        &self,
+        request: &McpIdentityAccessRequest,
+        revoked_at_unix: i64,
+        outcome: &str,
+    ) -> Result<Option<McpIdentityRevocationOutcome>, StorageError> {
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(&request.tenant_id))?;
+            let query = format!("SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
+                 WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4 \
+                   AND revoked_at_unix IS NULL FOR UPDATE");
+            let Some(row) = transaction.query_opt(
+                &query,
+                &[&request.tenant_id,&request.workspace_id,&request.user_id,&request.server_name],
+            ).map_err(super::postgres_error)? else {
+                transaction.commit().map_err(super::postgres_error)?;
+                return Ok(None);
+            };
+            let credential = oauth_credential_from_row(&row)?;
+            let generation = transaction.query_one(
+                "INSERT INTO mcp_oauth_authorization_states \
+                 (tenant_id,workspace_id,user_id,server_name,generation,updated_at_unix) \
+                 VALUES ($1,$2,$3,$4,2,$5) \
+                 ON CONFLICT (tenant_id,workspace_id,user_id,server_name) DO UPDATE SET \
+                   generation=mcp_oauth_authorization_states.generation+1,updated_at_unix=EXCLUDED.updated_at_unix \
+                 RETURNING generation",
+                &[&request.tenant_id,&request.workspace_id,&request.user_id,&request.server_name,&revoked_at_unix],
+            ).map_err(super::postgres_error)?.get::<_, i64>(0);
+            transaction.execute(
+                "UPDATE mcp_oauth_flows SET consumed_at_unix=$5 \
+                 WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4 \
+                   AND consumed_at_unix IS NULL",
+                &[&request.tenant_id,&request.workspace_id,&request.user_id,&request.server_name,&revoked_at_unix],
+            ).map_err(super::postgres_error)?;
+            transaction.execute(
+                "UPDATE mcp_oauth_credentials SET revoked_at_unix=$5,updated_at_unix=$5, \
+                 version=version+1,authorization_generation=$6,refresh_lease_id=NULL, \
+                 refresh_lease_expires_at_unix=NULL,last_revocation_outcome=$7 \
+                 WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4",
+                &[&request.tenant_id,&request.workspace_id,&request.user_id,&request.server_name,
+                  &revoked_at_unix,&generation,&outcome],
+            ).map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(Some(McpIdentityRevocationOutcome { credential, revoked_at_unix }))
+        })
+    }
+
+    fn update_mcp_oauth_revocation_outcome(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        user_id: &str,
+        server_name: &str,
+        outcome: &str,
+    ) -> Result<bool, StorageError> {
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(tenant_id))?;
+            let affected = transaction.execute(
+                "UPDATE mcp_oauth_credentials SET last_revocation_outcome=$5,version=version+1 \
+                 WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4 \
+                 AND revoked_at_unix IS NOT NULL",
+                &[&tenant_id, &workspace_id, &user_id, &server_name, &outcome],
+            ).map_err(super::postgres_error)?;
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(affected == 1)
+        })
+    }
+}
+
+fn authorization_generation_key(request: &McpIdentityAccessRequest) -> String {
+    format!(
+        "{}\0{}\0{}\0{}",
+        request.tenant_id, request.workspace_id, request.user_id, request.server_name
+    )
+}
+
+fn memory_authorize_mcp_actor(
+    store: &super::RuntimeControlPlaneState,
+    request: &McpIdentityAccessRequest,
+) -> McpIdentityAccessOutcome {
+    let permission_exists = store
+        .permissions
+        .list()
+        .into_iter()
+        .any(|permission| permission.key == request.permission_key);
+    let has_permission = permission_exists
+        && store
+            .tenant_role_bindings
+            .list()
+            .into_iter()
+            .filter(|binding| binding.tenant_id == request.tenant_id)
+            .any(|binding| {
+                store.roles.get(&binding.role_id).is_some_and(|role| {
+                    role.permission_keys
+                        .iter()
+                        .any(|key| key == &request.permission_key)
+                })
+            });
+    if !has_permission {
+        return McpIdentityAccessOutcome::PermissionDenied;
+    }
+    if store
+        .admin_users
+        .get(&request.user_id)
+        .is_none_or(|user| user.disabled_at_unix.is_some())
+    {
+        return McpIdentityAccessOutcome::UserInactive;
+    }
+    if !store
+        .admin_user_memberships
+        .list()
+        .into_iter()
+        .any(|membership| {
+            membership.user_id == request.user_id && membership.tenant_id == request.tenant_id
+        })
+    {
+        return McpIdentityAccessOutcome::MembershipRevoked;
+    }
+    if !store
+        .workspaces
+        .get(&request.workspace_id)
+        .is_some_and(|workspace| {
+            workspace.tenant_id == request.tenant_id && workspace.status == "active"
+        })
+    {
+        return McpIdentityAccessOutcome::WorkspaceInactive;
+    }
+    let credential = store.mcp_oauth_credentials.list().into_iter().find(|row| {
+        row.tenant_id == request.tenant_id
+            && row.workspace_id == request.workspace_id
+            && row.user_id == request.user_id
+            && row.server_name == request.server_name
+    });
+    McpIdentityAccessOutcome::Allowed(Box::new(credential))
+}
+
+impl McpCredentialRepository for RuntimeStorageRepositories {
+    fn authorize_mcp_identity(
+        &self,
+        request: &McpIdentityAccessRequest,
+    ) -> Result<McpIdentityAccessOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP identity control-plane lock poisoned".into())
+                })?;
+                Ok(memory_authorize_mcp_actor(&store, request))
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => store.authorize_mcp_identity(request),
+        }
+    }
+
+    fn begin_mcp_oauth_flow(
+        &self,
+        mut flow: StoredMcpOauthFlow,
+    ) -> Result<StoredMcpOauthFlow, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth flow store lock poisoned".into())
+                })?;
+                if store.mcp_oauth_flows.get(&flow.id).is_some() {
+                    return Err(StorageError::Conflict(format!(
+                        "MCP OAuth flow {} already exists",
+                        flow.id
+                    )));
+                }
+                let request = McpIdentityAccessRequest {
+                    tenant_id: flow.tenant_id.clone(),
+                    workspace_id: flow.workspace_id.clone(),
+                    user_id: flow.user_id.clone(),
+                    server_name: flow.server_name.clone(),
+                    permission_key: String::new(),
+                };
+                let key = authorization_generation_key(&request);
+                let generation = store
+                    .mcp_oauth_authorization_generations
+                    .get(&key)
+                    .unwrap_or(1);
+                store
+                    .mcp_oauth_authorization_generations
+                    .insert(key, generation);
+                flow.authorization_generation = generation;
+                store.mcp_oauth_flows.insert(flow.id.clone(), flow.clone());
+                Ok(flow)
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => store.begin_mcp_oauth_flow(&flow),
+        }
+    }
+
+    fn consume_mcp_oauth_flow(
+        &self,
+        id: &str,
+        consumed_at_unix: i64,
+    ) -> Result<Option<StoredMcpOauthFlow>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth flow store lock poisoned".into())
+                })?;
+                let Some(mut flow) = store.mcp_oauth_flows.get(id) else {
+                    return Ok(None);
+                };
+                if flow.consumed_at_unix.is_some() || flow.expires_at_unix < consumed_at_unix {
+                    return Ok(None);
+                }
+                flow.consumed_at_unix = Some(consumed_at_unix);
+                store.mcp_oauth_flows.insert(flow.id.clone(), flow.clone());
+                Ok(Some(flow))
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.consume_mcp_oauth_flow(id, consumed_at_unix)
+            }
+        }
+    }
+
+    fn commit_mcp_oauth_callback(
+        &self,
+        flow: &StoredMcpOauthFlow,
+        mut credential: StoredMcpOauthCredential,
+        permission_key: &str,
+    ) -> Result<McpOauthCallbackCommitOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?;
+                let request = McpIdentityAccessRequest {
+                    tenant_id: flow.tenant_id.clone(),
+                    workspace_id: flow.workspace_id.clone(),
+                    user_id: flow.user_id.clone(),
+                    server_name: flow.server_name.clone(),
+                    permission_key: permission_key.to_string(),
+                };
+                if !matches!(
+                    memory_authorize_mcp_actor(&store, &request),
+                    McpIdentityAccessOutcome::Allowed(_)
+                ) {
+                    return Ok(McpOauthCallbackCommitOutcome::AuthorizationChanged);
+                }
+                let generation = store
+                    .mcp_oauth_authorization_generations
+                    .get(&authorization_generation_key(&request));
+                if generation != Some(flow.authorization_generation) {
+                    return Ok(McpOauthCallbackCommitOutcome::AuthorizationChanged);
+                }
+                if let Some(current) = store.mcp_oauth_credentials.get(&credential.id) {
+                    credential.version = current.version.saturating_add(1);
+                }
+                credential.authorization_generation = flow.authorization_generation;
+                credential.refresh_lease_id = None;
+                credential.refresh_lease_expires_at_unix = None;
+                credential.revoked_at_unix = None;
+                store
+                    .mcp_oauth_credentials
+                    .insert(credential.id.clone(), credential);
+                Ok(McpOauthCallbackCommitOutcome::Committed)
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.commit_mcp_oauth_callback(flow, &credential, permission_key)
+            }
+        }
+    }
+
+    fn get_mcp_oauth_credential(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        user_id: &str,
+        server_name: &str,
+    ) -> Result<Option<StoredMcpOauthCredential>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => Ok(store
+                .lock()
+                .map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?
+                .mcp_oauth_credentials
+                .list()
+                .into_iter()
+                .find(|row| {
+                    row.tenant_id == tenant_id
+                        && row.workspace_id == workspace_id
+                        && row.user_id == user_id
+                        && row.server_name == server_name
+                })),
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.get_mcp_oauth_credential(tenant_id, workspace_id, user_id, server_name)
+            }
+        }
+    }
+
+    fn list_mcp_oauth_credentials(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<StoredMcpOauthCredential>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => Ok(store
+                .lock()
+                .map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?
+                .mcp_oauth_credentials
+                .list()
+                .into_iter()
+                .filter(|row| row.tenant_id == tenant_id)
+                .collect()),
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.list_mcp_oauth_credentials(tenant_id)
+            }
+        }
+    }
+
+    fn claim_mcp_oauth_refresh(
+        &self,
+        request: &McpRefreshClaimRequest,
+    ) -> Result<McpRefreshClaimOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?;
+                let Some(mut current) = store.mcp_oauth_credentials.get(&request.credential_id)
+                else {
+                    return Ok(McpRefreshClaimOutcome::Changed(None));
+                };
+                if current.tenant_id != request.tenant_id
+                    || current.version != request.expected_version
+                    || current.authorization_generation != request.authorization_generation
+                    || current.revoked_at_unix.is_some()
+                {
+                    return Ok(McpRefreshClaimOutcome::Changed(Some(current)));
+                }
+                if current
+                    .refresh_lease_expires_at_unix
+                    .is_some_and(|expiry| expiry > request.now_unix)
+                    && current.refresh_lease_id.is_some()
+                {
+                    return Ok(McpRefreshClaimOutcome::Busy {
+                        lease_expires_at_unix: current
+                            .refresh_lease_expires_at_unix
+                            .unwrap_or(request.now_unix),
+                    });
+                }
+                current.refresh_lease_id = Some(request.lease_id.clone());
+                current.refresh_lease_expires_at_unix = Some(request.lease_expires_at_unix);
+                current.last_refresh_outcome = Some("refreshing".into());
+                store
+                    .mcp_oauth_credentials
+                    .insert(current.id.clone(), current.clone());
+                Ok(McpRefreshClaimOutcome::Acquired(current))
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => store.claim_mcp_oauth_refresh(request),
+        }
+    }
+
+    fn complete_mcp_oauth_refresh(
+        &self,
+        mut credential: StoredMcpOauthCredential,
+        lease_id: &str,
+    ) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?;
+                let Some(current) = store.mcp_oauth_credentials.get(&credential.id) else {
+                    return Ok(false);
+                };
+                if current.version != credential.version
+                    || current.authorization_generation != credential.authorization_generation
+                    || current.refresh_lease_id.as_deref() != Some(lease_id)
+                    || current.revoked_at_unix.is_some()
+                {
+                    return Ok(false);
+                }
+                credential.version = current.version.saturating_add(1);
+                credential.refresh_lease_id = None;
+                credential.refresh_lease_expires_at_unix = None;
+                store
+                    .mcp_oauth_credentials
+                    .insert(credential.id.clone(), credential);
+                Ok(true)
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.complete_mcp_oauth_refresh(&credential, lease_id)
+            }
+        }
+    }
+
+    fn release_mcp_oauth_refresh(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+        lease_id: &str,
+        outcome: &str,
+    ) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?;
+                let Some(mut credential) = store.mcp_oauth_credentials.get(credential_id) else {
+                    return Ok(false);
+                };
+                if credential.tenant_id != tenant_id
+                    || credential.refresh_lease_id.as_deref() != Some(lease_id)
+                    || credential.revoked_at_unix.is_some()
+                {
+                    return Ok(false);
+                }
+                credential.refresh_lease_id = None;
+                credential.refresh_lease_expires_at_unix = None;
+                credential.last_refresh_outcome = Some(outcome.to_string());
+                store
+                    .mcp_oauth_credentials
+                    .insert(credential.id.clone(), credential);
+                Ok(true)
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.release_mcp_oauth_refresh(tenant_id, credential_id, lease_id, outcome)
+            }
+        }
+    }
+
+    fn revoke_mcp_oauth_identity(
+        &self,
+        request: &McpIdentityAccessRequest,
+        revoked_at_unix: i64,
+        outcome: &str,
+    ) -> Result<Option<McpIdentityRevocationOutcome>, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?;
+                let Some(mut credential) =
+                    store.mcp_oauth_credentials.list().into_iter().find(|row| {
+                        row.tenant_id == request.tenant_id
+                            && row.workspace_id == request.workspace_id
+                            && row.user_id == request.user_id
+                            && row.server_name == request.server_name
+                            && row.revoked_at_unix.is_none()
+                    })
+                else {
+                    return Ok(None);
+                };
+                let key = authorization_generation_key(request);
+                let generation = store
+                    .mcp_oauth_authorization_generations
+                    .get(&key)
+                    .unwrap_or(1)
+                    .saturating_add(1);
+                store
+                    .mcp_oauth_authorization_generations
+                    .insert(key, generation);
+                for mut flow in store.mcp_oauth_flows.list().into_iter().filter(|flow| {
+                    flow.tenant_id == request.tenant_id
+                        && flow.workspace_id == request.workspace_id
+                        && flow.user_id == request.user_id
+                        && flow.server_name == request.server_name
+                        && flow.consumed_at_unix.is_none()
+                }) {
+                    flow.consumed_at_unix = Some(revoked_at_unix);
+                    store.mcp_oauth_flows.insert(flow.id.clone(), flow);
+                }
+                let prior = credential.clone();
+                credential.revoked_at_unix = Some(revoked_at_unix);
+                credential.updated_at_unix = revoked_at_unix;
+                credential.version = credential.version.saturating_add(1);
+                credential.authorization_generation = generation;
+                credential.refresh_lease_id = None;
+                credential.refresh_lease_expires_at_unix = None;
+                credential.last_revocation_outcome = Some(outcome.to_string());
+                store
+                    .mcp_oauth_credentials
+                    .insert(credential.id.clone(), credential);
+                Ok(Some(McpIdentityRevocationOutcome {
+                    credential: prior,
+                    revoked_at_unix,
+                }))
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.revoke_mcp_oauth_identity(request, revoked_at_unix, outcome)
+            }
+        }
+    }
+
+    fn update_mcp_oauth_revocation_outcome(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        user_id: &str,
+        server_name: &str,
+        outcome: &str,
+    ) -> Result<bool, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?;
+                let Some(mut credential) =
+                    store.mcp_oauth_credentials.list().into_iter().find(|row| {
+                        row.tenant_id == tenant_id
+                            && row.workspace_id == workspace_id
+                            && row.user_id == user_id
+                            && row.server_name == server_name
+                            && row.revoked_at_unix.is_some()
+                    })
+                else {
+                    return Ok(false);
+                };
+                credential.last_revocation_outcome = Some(outcome.to_string());
+                credential.version = credential.version.saturating_add(1);
+                store
+                    .mcp_oauth_credentials
+                    .insert(credential.id.clone(), credential);
+                Ok(true)
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => store
+                .update_mcp_oauth_revocation_outcome(
+                    tenant_id,
+                    workspace_id,
+                    user_id,
+                    server_name,
+                    outcome,
+                ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+    use crate::StorageProviderKind;
+
+    fn credential() -> StoredMcpOauthCredential {
+        StoredMcpOauthCredential {
+            id: "credential".into(),
+            tenant_id: "tenant".into(),
+            workspace_id: "workspace".into(),
+            user_id: "user".into(),
+            server_name: "server".into(),
+            issuer: "https://issuer.invalid".into(),
+            subject: "user".into(),
+            token_type: "Bearer".into(),
+            scopes: vec!["openid".into()],
+            access_token_nonce: vec![1],
+            access_token_ciphertext: vec![2],
+            refresh_token_nonce: Some(vec![3]),
+            refresh_token_ciphertext: Some(vec![4]),
+            expires_at_unix: 1,
+            key_version: 1,
+            version: 1,
+            authorization_generation: 1,
+            refresh_lease_id: None,
+            refresh_lease_expires_at_unix: None,
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            revoked_at_unix: None,
+            last_refresh_outcome: None,
+            last_revocation_outcome: None,
+        }
+    }
+
+    fn repositories_with_credential() -> RuntimeStorageRepositories {
+        let repositories =
+            RuntimeStorageRepositories::in_memory(vec![StorageProviderKind::Memory], 16, 16);
+        let RuntimeControlPlaneBackend::Memory(store) = &repositories.control_plane else {
+            panic!("expected memory control plane");
+        };
+        store
+            .lock()
+            .expect("memory control plane lock")
+            .mcp_oauth_credentials
+            .insert("credential", credential());
+        repositories
+    }
+
+    #[test]
+    fn refresh_lease_has_exactly_one_concurrent_winner() {
+        let repositories = Arc::new(repositories_with_credential());
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for lease_id in ["lease-a", "lease-b"] {
+            let repositories = Arc::clone(&repositories);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                repositories
+                    .claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
+                        tenant_id: "tenant".into(),
+                        credential_id: "credential".into(),
+                        expected_version: 1,
+                        authorization_generation: 1,
+                        lease_id: lease_id.into(),
+                        now_unix: 10,
+                        lease_expires_at_unix: 20,
+                    })
+                    .expect("refresh claim")
+            }));
+        }
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("claim thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, McpRefreshClaimOutcome::Acquired(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, McpRefreshClaimOutcome::Busy { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn revoke_supersedes_refresh_lease_and_pending_flow() {
+        let repositories = repositories_with_credential();
+        let request = McpIdentityAccessRequest {
+            tenant_id: "tenant".into(),
+            workspace_id: "workspace".into(),
+            user_id: "user".into(),
+            server_name: "server".into(),
+            permission_key: "mcp.identity.revoke".into(),
+        };
+        let RuntimeControlPlaneBackend::Memory(store) = &repositories.control_plane else {
+            panic!("expected memory control plane");
+        };
+        {
+            let mut store = store.lock().expect("memory control plane lock");
+            store
+                .mcp_oauth_authorization_generations
+                .insert(authorization_generation_key(&request), 1);
+            store.mcp_oauth_flows.insert(
+                "flow",
+                StoredMcpOauthFlow {
+                    id: "flow".into(),
+                    tenant_id: "tenant".into(),
+                    workspace_id: "workspace".into(),
+                    user_id: "user".into(),
+                    server_name: "server".into(),
+                    pkce_nonce: vec![1],
+                    pkce_ciphertext: vec![2],
+                    oidc_nonce: "nonce".into(),
+                    authorization_generation: 1,
+                    created_at_unix: 1,
+                    expires_at_unix: 100,
+                    consumed_at_unix: None,
+                },
+            );
+        }
+        let claim = repositories
+            .claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
+                tenant_id: "tenant".into(),
+                credential_id: "credential".into(),
+                expected_version: 1,
+                authorization_generation: 1,
+                lease_id: "lease".into(),
+                now_unix: 10,
+                lease_expires_at_unix: 20,
+            })
+            .expect("refresh claim");
+        assert!(matches!(claim, McpRefreshClaimOutcome::Acquired(_)));
+        repositories
+            .revoke_mcp_oauth_identity(&request, 11, "local_revoked")
+            .expect("revoke")
+            .expect("active credential");
+        let flow = {
+            let store = store.lock().expect("memory control plane lock");
+            store.mcp_oauth_flows.get("flow").expect("flow")
+        };
+        assert_eq!(flow.consumed_at_unix, Some(11));
+        let mut stale = credential();
+        stale.last_refresh_outcome = Some("refreshed".into());
+        assert!(!repositories
+            .complete_mcp_oauth_refresh(stale, "lease")
+            .expect("late refresh completion"));
+    }
+}

@@ -3193,6 +3193,7 @@ mod tests {
                 organization_id: Some("org_demo".into()),
                 team_id: None,
                 project_id: Some("project_gateway".into()),
+                workspace_id: None,
                 user_id: None,
                 monthly_token_budget: Some(1024),
                 request_limit_per_minute: None,

@@ -22,7 +22,7 @@ use std::{
 
 use anyhow::{bail, Context, Result as AnyResult};
 use ferrogate_core::{ApprovalPolicy, ToolDef};
-use http::Uri;
+use http::{header::HeaderName, HeaderValue, Uri};
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, ServerName, UnixTime},
@@ -52,10 +52,47 @@ pub enum McpTransport {
 pub enum McpAuthType {
     #[default]
     None,
-    Headers,
+    #[serde(alias = "headers")]
+    SharedHeaders,
     Oauth,
     PerUserOauth,
     PerUserHeaders,
+    OriginalBearer,
+    FerrogateSignedJwt,
+}
+
+impl McpAuthType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::SharedHeaders => "shared_headers",
+            Self::Oauth => "oauth",
+            Self::PerUserOauth => "per_user_oauth",
+            Self::PerUserHeaders => "per_user_headers",
+            Self::OriginalBearer => "original_bearer",
+            Self::FerrogateSignedJwt => "ferrogate_signed_jwt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct McpOauthConfig {
+    pub issuer: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret_ref: Option<String>,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+    #[serde(default = "default_oauth_scopes")]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+}
+
+fn default_oauth_scopes() -> Vec<String> {
+    vec!["openid".into(), "profile".into(), "email".into()]
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -72,6 +109,10 @@ pub struct McpServerConfig {
     pub auth_type: McpAuthType,
     #[serde(default)]
     pub headers: Vec<McpHeaderConfig>,
+    #[serde(default)]
+    pub oauth: Option<McpOauthConfig>,
+    #[serde(default)]
+    pub signed_jwt_audience: Option<String>,
     #[serde(default)]
     pub tools_to_execute: Vec<String>,
     #[serde(default)]
@@ -185,6 +226,7 @@ pub enum McpExecutionError {
     Denied(String),
     NotFound(String),
     Unavailable(String),
+    Unauthorized(String),
     Failed(String),
 }
 
@@ -194,6 +236,7 @@ impl McpExecutionError {
             Self::Denied(_) => "tool_denied",
             Self::NotFound(_) => "tool_not_found",
             Self::Unavailable(_) => "mcp_server_unavailable",
+            Self::Unauthorized(_) => "mcp_upstream_unauthorized",
             Self::Failed(_) => "tool_execution_failed",
         }
     }
@@ -203,8 +246,35 @@ impl McpExecutionError {
             Self::Denied(message)
             | Self::NotFound(message)
             | Self::Unavailable(message)
+            | Self::Unauthorized(message)
             | Self::Failed(message) => message,
         }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct McpDispatchHeaders(Vec<(String, String)>);
+
+impl std::fmt::Debug for McpDispatchHeaders {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpDispatchHeaders")
+            .field("count", &self.0.len())
+            .field("values", &"<redacted>")
+            .finish()
+    }
+}
+
+impl McpDispatchHeaders {
+    pub fn bearer(token: String) -> AnyResult<Self> {
+        let value = format!("Bearer {token}");
+        HeaderValue::from_str(&value)
+            .context("MCP bearer token is not a valid HTTP header value")?;
+        Ok(Self(vec![("Authorization".into(), value)]))
+    }
+
+    pub fn empty() -> Self {
+        Self::default()
     }
 }
 
@@ -319,6 +389,14 @@ impl McpManager {
         &self,
         request: McpToolExecutionRequest,
     ) -> Result<McpToolExecutionResult, McpExecutionError> {
+        self.execute_tool_with_headers(request, McpDispatchHeaders::empty())
+    }
+
+    pub fn execute_tool_with_headers(
+        &self,
+        request: McpToolExecutionRequest,
+        identity_headers: McpDispatchHeaders,
+    ) -> Result<McpToolExecutionResult, McpExecutionError> {
         let (server_name, remote_name, session) = {
             let inner = self.inner.lock().map_err(|_| {
                 McpExecutionError::Unavailable("MCP manager lock is unavailable".into())
@@ -343,7 +421,7 @@ impl McpManager {
         let mut session = session.lock().map_err(|_| {
             McpExecutionError::Unavailable(format!("MCP server {server_name} lock is unavailable"))
         })?;
-        session.execute(&remote_name, request.arguments)
+        session.execute(&remote_name, request.arguments, &identity_headers)
     }
 
     pub fn dispatch_cleanup_handle(&self, namespaced_tool: &str) -> Option<McpDispatchCleanup> {
@@ -474,6 +552,7 @@ impl McpSession {
         &mut self,
         remote_name: &str,
         arguments: Value,
+        identity_headers: &McpDispatchHeaders,
     ) -> Result<McpToolExecutionResult, McpExecutionError> {
         if !tool_allowlisted(&self.config.tools_to_execute, remote_name) {
             return Err(McpExecutionError::Denied(format!(
@@ -490,11 +569,19 @@ impl McpSession {
                 self.config.name
             )));
         };
-        client.call_tool(remote_name, arguments).map_err(|error| {
-            self.connected = false;
-            self.last_error = Some(error.clone());
-            McpExecutionError::Failed(error)
-        })
+        client
+            .call_tool(remote_name, arguments, identity_headers)
+            .map_err(|error| {
+                self.connected = false;
+                self.last_error = Some(error.clone());
+                if error == "mcp_upstream_unauthorized" {
+                    McpExecutionError::Unauthorized(
+                        "MCP upstream rejected the resolved user identity".into(),
+                    )
+                } else {
+                    McpExecutionError::Failed(error)
+                }
+            })
     }
 
     fn health_check_and_reconnect(&mut self) {
@@ -563,9 +650,10 @@ impl McpClient {
         &mut self,
         name: &str,
         arguments: Value,
+        identity_headers: &McpDispatchHeaders,
     ) -> Result<McpToolExecutionResult, String> {
         match self {
-            Self::Http(client) => client.call_tool(name, arguments),
+            Self::Http(client) => client.call_tool(name, arguments, identity_headers),
             Self::Stdio(client) => client.call_tool(name, arguments),
         }
     }
@@ -640,6 +728,7 @@ impl HttpMcpClient {
         &mut self,
         name: &str,
         arguments: Value,
+        identity_headers: &McpDispatchHeaders,
     ) -> Result<McpToolExecutionResult, String> {
         let id = self.next_jsonrpc_id();
         let params = call_tool_params(name, arguments).map_err(|error| error.to_string())?;
@@ -649,7 +738,9 @@ impl HttpMcpClient {
             "method": "tools/call",
             "params": params
         });
-        let response = self.post_json(&body).map_err(|error| error.to_string())?;
+        let response = self
+            .post_json_with_headers(&body, identity_headers)
+            .map_err(|error| error.to_string())?;
         parse_call_result(&response).map_err(|error| error.to_string())
     }
 
@@ -661,10 +752,20 @@ impl HttpMcpClient {
     }
 
     fn post_json(&self, body: &Value) -> AnyResult<Value> {
+        self.post_json_with_headers(body, &McpDispatchHeaders::empty())
+    }
+
+    fn post_json_with_headers(
+        &self,
+        body: &Value,
+        identity_headers: &McpDispatchHeaders,
+    ) -> AnyResult<Value> {
+        let mut headers = self.headers.clone();
+        headers.extend(identity_headers.0.iter().cloned());
         post_http_json(
             &self.endpoint,
             self.timeout,
-            &self.headers,
+            &headers,
             &self.tls,
             &self.transport,
             body,
@@ -989,6 +1090,12 @@ fn send_mcp_http_request<S: Read + Write>(
 
     let mut reader = BufReader::new(stream);
     let head = read_http_response_head(&mut reader)?;
+    if head.status == 401 {
+        bail!("mcp_upstream_unauthorized");
+    }
+    if !(200..300).contains(&head.status) {
+        bail!("MCP upstream returned HTTP {}", head.status);
+    }
     if head
         .content_type
         .to_ascii_lowercase()
@@ -1002,6 +1109,7 @@ fn send_mcp_http_request<S: Read + Write>(
 
 /// `Content-Type` and `Content-Length` parsed from a response's headers.
 struct HttpResponseHead {
+    status: u16,
     content_type: String,
     content_length: Option<usize>,
 }
@@ -1013,9 +1121,11 @@ fn read_http_response_head<R: BufRead>(reader: &mut R) -> AnyResult<HttpResponse
     if reader.read_line(&mut status_line)? == 0 {
         bail!("MCP endpoint closed the connection before sending a response");
     }
-    if status_line.split_whitespace().nth(1).is_none() {
-        bail!("invalid MCP HTTP response status line");
-    }
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| anyhow::anyhow!("invalid MCP HTTP response status line"))?;
     let mut content_type = String::new();
     let mut content_length = None;
     loop {
@@ -1034,6 +1144,7 @@ fn read_http_response_head<R: BufRead>(reader: &mut R) -> AnyResult<HttpResponse
         }
     }
     Ok(HttpResponseHead {
+        status,
         content_type,
         content_length,
     })
@@ -1300,6 +1411,38 @@ pub fn validate_mcp_server_config(config: &McpServerConfig) -> AnyResult<()> {
             config.name
         );
     }
+    match config.auth_type {
+        McpAuthType::Oauth => bail!(
+            "MCP auth_type oauth is not implemented; use per_user_oauth for user-isolated OAuth or shared_headers for shared credentials"
+        ),
+        McpAuthType::PerUserHeaders => bail!(
+            "MCP auth_type per_user_headers is not implemented; use per_user_oauth, original_bearer, or ferrogate_signed_jwt"
+        ),
+        McpAuthType::SharedHeaders if config.headers.is_empty() => {
+            bail!("MCP auth_type shared_headers requires at least one static header")
+        }
+        McpAuthType::None if !config.headers.is_empty() => {
+            bail!("MCP static headers require auth_type shared_headers")
+        }
+        McpAuthType::PerUserOauth | McpAuthType::OriginalBearer => {
+            let oauth = config.oauth.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("MCP auth_type {} requires oauth configuration", config.auth_type.as_str())
+            })?;
+            validate_oauth_config(oauth, matches!(config.auth_type, McpAuthType::PerUserOauth))?;
+        }
+        McpAuthType::FerrogateSignedJwt => {
+            if config.signed_jwt_audience.as_deref().is_none_or(str::is_empty) {
+                bail!("MCP auth_type ferrogate_signed_jwt requires signed_jwt_audience");
+            }
+        }
+        McpAuthType::None | McpAuthType::SharedHeaders => {}
+    }
+    for header in &config.headers {
+        validate_static_header(header)?;
+    }
+    if !matches!(config.auth_type, McpAuthType::SharedHeaders) && !config.headers.is_empty() {
+        bail!("per-user MCP identity modes cannot define static headers");
+    }
     match config.transport {
         McpTransport::StreamableHttp | McpTransport::Sse => {
             let url = config.url.as_deref().ok_or_else(|| {
@@ -1314,6 +1457,50 @@ pub fn validate_mcp_server_config(config: &McpServerConfig) -> AnyResult<()> {
                 bail!("MCP stdio server {} requires command", config.name);
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_oauth_config(config: &McpOauthConfig, authorization_code: bool) -> AnyResult<()> {
+    let issuer: Uri = config
+        .issuer
+        .parse()
+        .context("MCP oauth.issuer is invalid")?;
+    if !matches!(issuer.scheme_str(), Some("http" | "https")) || issuer.authority().is_none() {
+        bail!("MCP oauth.issuer must be an http or https URL");
+    }
+    if issuer.scheme_str() == Some("http") && !config.allow_insecure_http {
+        bail!("MCP oauth.issuer must use https unless allow_insecure_http is explicitly enabled");
+    }
+    if config.client_id.trim().is_empty() {
+        bail!("MCP oauth.client_id cannot be empty");
+    }
+    if config.scopes.is_empty() || config.scopes.iter().any(|scope| scope.trim().is_empty()) {
+        bail!("MCP oauth.scopes must contain non-empty values");
+    }
+    if authorization_code {
+        if config
+            .client_secret_ref
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            bail!("MCP per_user_oauth requires oauth.client_secret_ref");
+        }
+        if config.redirect_uri.as_deref().is_none_or(str::is_empty) {
+            bail!("MCP per_user_oauth requires oauth.redirect_uri");
+        }
+    }
+    Ok(())
+}
+
+fn validate_static_header(header: &McpHeaderConfig) -> AnyResult<()> {
+    HeaderName::from_bytes(header.name.as_bytes()).context("MCP static header name is invalid")?;
+    match (&header.value, &header.value_env) {
+        (Some(value), None) => {
+            HeaderValue::from_str(value).context("MCP static header value is invalid")?;
+        }
+        (None, Some(name)) if !name.trim().is_empty() => {}
+        _ => bail!("MCP static header must set exactly one of value or value_env"),
     }
     Ok(())
 }

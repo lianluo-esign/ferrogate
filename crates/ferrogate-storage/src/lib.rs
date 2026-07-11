@@ -30,6 +30,13 @@ use serde::{Deserialize, Serialize};
 mod rbac;
 pub use rbac::{tenant_role_binding_id, StoredPermission, StoredRole, StoredTenantRoleBinding};
 
+mod mcp_identity;
+pub use mcp_identity::{
+    McpCredentialRepository, McpIdentityAccessOutcome, McpIdentityAccessRequest,
+    McpIdentityRevocationOutcome, McpOauthCallbackCommitOutcome, McpRefreshClaimOutcome,
+    McpRefreshClaimRequest, StoredMcpOauthCredential, StoredMcpOauthFlow,
+};
+
 mod budget_alerts;
 pub use budget_alerts::{budget_alert_notification_id, StoredBudgetAlertNotification};
 
@@ -305,8 +312,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 27;
-const POSTGRES_SCHEMA_NAME: &str = "027_guardrail_evaluation_evidence";
+const POSTGRES_SCHEMA_VERSION: u64 = 28;
+const POSTGRES_SCHEMA_NAME: &str = "028_mcp_per_user_oauth_identity";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -840,6 +847,9 @@ pub struct RuntimeControlPlaneState {
     payment_methods: InMemoryRepository<StoredPaymentMethod>,
     guardrail_policy_revisions: InMemoryRepository<StoredGuardrailPolicyRevision>,
     guardrail_policy_bindings: InMemoryRepository<StoredGuardrailPolicyBinding>,
+    mcp_oauth_authorization_generations: InMemoryRepository<u64>,
+    mcp_oauth_flows: InMemoryRepository<StoredMcpOauthFlow>,
+    mcp_oauth_credentials: InMemoryRepository<StoredMcpOauthCredential>,
 }
 
 struct PostgresControlPlaneStore {
@@ -3986,6 +3996,9 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "guardrail_policy_bindings",
         "guardrail_evaluations",
         "guardrail_check_evaluations",
+        "mcp_oauth_authorization_states",
+        "mcp_oauth_flows",
+        "mcp_oauth_credentials",
         "audit_events",
         "billing_metering_events",
         "usage_aggregates",
@@ -4050,6 +4063,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         ("guardrail_policy_bindings", "archived_revisions_json"),
         ("guardrail_evaluations", "evaluation_json"),
         ("guardrail_check_evaluations", "check_json"),
+        ("mcp_oauth_credentials", "scopes_json"),
         ("audit_events", "audit_json"),
         ("api_keys", "scopes_json"),
     ];
@@ -4071,7 +4085,13 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         }
     }
 
-    for table in ["guardrail_evaluations", "guardrail_check_evaluations"] {
+    for table in [
+        "guardrail_evaluations",
+        "guardrail_check_evaluations",
+        "mcp_oauth_authorization_states",
+        "mcp_oauth_flows",
+        "mcp_oauth_credentials",
+    ] {
         let row_level_security = client
             .query_opt(
                 "SELECT class.relrowsecurity FROM pg_class AS class \
@@ -4096,6 +4116,15 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         (
             "guardrail_check_evaluations",
             "guardrail_checks_tenant_scope",
+        ),
+        (
+            "mcp_oauth_authorization_states",
+            "mcp_oauth_authorization_states_tenant_scope",
+        ),
+        ("mcp_oauth_flows", "mcp_oauth_flows_tenant_scope"),
+        (
+            "mcp_oauth_credentials",
+            "mcp_oauth_credentials_tenant_scope",
         ),
     ] {
         let policy_is_complete = client
@@ -4171,6 +4200,10 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_guardrail_checks_evaluation",
         "idx_guardrail_checks_detector_verdict",
         "idx_guardrail_checks_error",
+        "idx_mcp_oauth_flows_expiry",
+        "idx_mcp_oauth_credentials_subject",
+        "idx_mcp_oauth_credentials_expiry",
+        "idx_mcp_oauth_credentials_refresh_lease",
         "idx_audit_events_actor_time",
         "idx_billing_metering_model_provider_time",
         "idx_usage_aggregates_tenant_model_provider",
@@ -5251,6 +5284,9 @@ impl RuntimeControlPlaneState {
             payment_methods: InMemoryRepository::new(),
             guardrail_policy_revisions: InMemoryRepository::new(),
             guardrail_policy_bindings: InMemoryRepository::new(),
+            mcp_oauth_authorization_generations: InMemoryRepository::new(),
+            mcp_oauth_flows: InMemoryRepository::new(),
+            mcp_oauth_credentials: InMemoryRepository::new(),
         }
     }
 

@@ -75,6 +75,7 @@ pub(crate) struct ToolExecutionResponse {
 pub(crate) enum ToolExecutionError {
     Denied(String),
     NotFound(String),
+    UpstreamUnauthorized(String),
     Failed(String),
 }
 
@@ -83,6 +84,7 @@ impl ToolExecutionError {
         match self {
             Self::Denied(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::UpstreamUnauthorized(_) => StatusCode::BAD_GATEWAY,
             Self::Failed(_) => StatusCode::BAD_GATEWAY,
         }
     }
@@ -91,13 +93,17 @@ impl ToolExecutionError {
         match self {
             Self::Denied(_) => "tool_denied",
             Self::NotFound(_) => "tool_not_found",
+            Self::UpstreamUnauthorized(_) => "mcp_upstream_unauthorized",
             Self::Failed(_) => "tool_execution_failed",
         }
     }
 
     pub(crate) fn message(&self) -> &str {
         match self {
-            Self::Denied(message) | Self::NotFound(message) | Self::Failed(message) => message,
+            Self::Denied(message)
+            | Self::NotFound(message)
+            | Self::UpstreamUnauthorized(message)
+            | Self::Failed(message) => message,
         }
     }
 }

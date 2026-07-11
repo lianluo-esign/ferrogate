@@ -21,11 +21,15 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 clap.workspace = true
 ferrogate-runtime = { path = "../../crates/ferrogate-runtime" }
+jsonwebtoken.workspace = true
 native-tls.workspace = true
 postgres.workspace = true
 postgres-native-tls.workspace = true
 rcgen.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true

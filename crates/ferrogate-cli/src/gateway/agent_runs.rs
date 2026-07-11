@@ -901,6 +901,7 @@ fn tool_execution_context<'a>(
         workflow_node_id: workflow_use.map(|workflow| workflow.node_id.as_str()),
         skill_package_id: None,
         skill_package_version: None,
+        mcp_original_bearer: None,
     }
 }
 

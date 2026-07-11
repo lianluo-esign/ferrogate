@@ -77,13 +77,25 @@ pub(super) async fn handle_request(
     ctx: &ProxyContext,
     auth: &AuthContext,
     skill_context: Option<&SkillExecutionContext>,
+    original_bearer: Option<&str>,
     rpc: McpJsonRpcRequest,
 ) -> McpJsonRpcResponse {
     match rpc.method.as_str() {
         "initialize" => result(rpc.id, initialize_result()),
         "ping" => result(rpc.id, json!({})),
         "tools/list" => tools_list(state, ctx, auth, skill_context, rpc.id),
-        "tools/call" => tools_call(state, ctx, auth, skill_context, rpc.id, &rpc.params).await,
+        "tools/call" => {
+            tools_call(
+                state,
+                ctx,
+                auth,
+                skill_context,
+                original_bearer,
+                rpc.id,
+                &rpc.params,
+            )
+            .await
+        }
         _ => error(
             rpc.id,
             -32601,
@@ -179,6 +191,7 @@ async fn tools_call(
     ctx: &ProxyContext,
     auth: &AuthContext,
     skill_context: Option<&SkillExecutionContext>,
+    original_bearer: Option<&str>,
     id: Option<Value>,
     params: &Value,
 ) -> McpJsonRpcResponse {
@@ -189,7 +202,7 @@ async fn tools_call(
     // both enforce. See `tool_execution_entitlement_denial`'s doc
     // comment.
     if let Some((error_code, error_message)) =
-        tool_execution_entitlement_denial(state, auth, ToolExecuteBackend::Mcp)
+        tool_execution_entitlement_denial(state, auth, ToolExecuteBackend::Mcp).await
     {
         return error(id, mcp_error_code(error_code), error_message.to_string());
     }
@@ -348,8 +361,61 @@ async fn tools_call(
             }
         }
     }
+    let Some((server_name, _)) = audit_details.as_ref() else {
+        return error(
+            id,
+            -32602,
+            "MCP tool name must use serverName-toolName namespace",
+        );
+    };
+    let identity = match state
+        .resolve_mcp_identity(auth, server_name, original_bearer)
+        .await
+    {
+        Ok(identity) => identity,
+        Err(identity_error) => {
+            state.record_mcp_identity_resolution_metric(false);
+            state.record_admin_audit_event(audit_event(
+                ctx,
+                auth,
+                skill_context,
+                "mcp.identity.resolve",
+                audit_target,
+                "rejected",
+                format!(
+                    "server={server_name} tool={name} decision=deny code={}",
+                    identity_error.code
+                ),
+            ));
+            return error(
+                id,
+                mcp_error_code(identity_error.code),
+                identity_error.message,
+            );
+        }
+    };
+    state.record_mcp_identity_resolution_metric(true);
+    state.record_admin_audit_event(audit_event(
+        ctx,
+        auth,
+        skill_context,
+        "mcp.identity.resolve",
+        audit_target.clone(),
+        "allowed",
+        format!(
+            "server={server_name} tool={name} source={} subject={} decision=allow",
+            identity.credential_source,
+            identity.subject.as_deref().unwrap_or("none")
+        ),
+    ));
     match state
-        .execute_mcp_tool(request, ctx.request_id.clone(), auth.tenant_context())
+        .execute_mcp_tool(
+            request,
+            ctx.request_id.clone(),
+            ctx.trace_id.clone(),
+            auth.tenant_context(),
+            identity.headers,
+        )
         .await
     {
         Ok(response) => {

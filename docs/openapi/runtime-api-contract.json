@@ -71,6 +71,18 @@
       "group": "tool"
     },
     {
+      "pattern": "/v1/mcp/identity/callback",
+      "group": "tool"
+    },
+    {
+      "pattern": "/v1/mcp/identity/{server}",
+      "group": "tool"
+    },
+    {
+      "pattern": "/v1/mcp/identity/{server}/authorize",
+      "group": "tool"
+    },
+    {
       "pattern": "/v1/agent-runs",
       "group": "agent_run"
     },
@@ -501,6 +513,50 @@
       "auth": {
         "kind": "bearer",
         "scope": "mcp.execute"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/mcp/identity/callback",
+      "method": "get",
+      "operation_id": "completeMcpIdentityOauth",
+      "visibility": "public",
+      "auth": {
+        "kind": "anonymous",
+        "scope": null
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/mcp/identity/{server}/authorize",
+      "method": "post",
+      "operation_id": "authorizeMcpIdentity",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "tools.execute"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/mcp/identity/{server}",
+      "method": "get",
+      "operation_id": "getMcpIdentity",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "tools.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1/mcp/identity/{server}",
+      "method": "delete",
+      "operation_id": "revokeMcpIdentity",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "tools.execute"
       },
       "rbac_action": null
     },

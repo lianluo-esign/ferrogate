@@ -874,6 +874,7 @@ pub(crate) struct AdminApiKey {
     pub(crate) organization_id: Option<String>,
     pub(crate) team_id: Option<String>,
     pub(crate) project_id: Option<String>,
+    pub(crate) workspace_id: Option<String>,
     pub(crate) user_id: Option<String>,
     pub(crate) monthly_token_budget: Option<u64>,
     pub(crate) request_limit_per_minute: Option<u64>,
@@ -910,6 +911,8 @@ pub(crate) struct AdminApiKeyMutation {
     pub(crate) team_id: Option<String>,
     #[serde(default)]
     pub(crate) project_id: Option<String>,
+    #[serde(default)]
+    pub(crate) workspace_id: Option<String>,
     #[serde(default)]
     pub(crate) user_id: Option<String>,
     #[serde(default)]

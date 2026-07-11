@@ -207,6 +207,18 @@ impl FerroGateway {
         ctx: &ProxyContext,
         req: &RequestParts,
     ) -> PingoraResult<bool> {
+        if req.path == "/v1/mcp/identity/callback" || req.path.starts_with("/v1/mcp/identity/") {
+            self.handle_mcp_identity(
+                session,
+                ctx,
+                &req.headers,
+                &req.method,
+                &req.path,
+                req.query.as_deref(),
+            )
+            .await?;
+            return Ok(true);
+        }
         if req.path == "/v1/tools" {
             self.handle_tools(session, ctx, &req.headers, req.query.as_deref())
                 .await?;

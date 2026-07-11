@@ -161,6 +161,7 @@ impl Config {
                     organization_id: None,
                     team_id: None,
                     project_id: None,
+                    workspace_id: None,
                     user_id: None,
                     monthly_token_budget: key.monthly_token_budget,
                     request_limit_per_minute: key.request_limit_per_minute,

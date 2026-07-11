@@ -2486,6 +2486,10 @@ struct GatewayMetricsAccumulator {
     model_provider_totals: BTreeMap<(String, String), ModelProviderMetricTotal>,
     tool_call_total: u64,
     tool_latency_ms_total: u64,
+    mcp_identity_resolution_total: u64,
+    mcp_identity_failure_total: u64,
+    mcp_identity_refresh_total: u64,
+    mcp_identity_revocation_total: u64,
     /// Requests rejected pre-authentication for not matching a configured
     /// `network_access.ip_allowlist` (issue #166).
     network_access_denied_total: u64,
@@ -2807,6 +2811,21 @@ impl GatewayMetricsAccumulator {
         self.tool_latency_ms_total = self.tool_latency_ms_total.saturating_add(latency_ms);
     }
 
+    fn record_mcp_identity_resolution(&mut self, allowed: bool) {
+        self.mcp_identity_resolution_total = self.mcp_identity_resolution_total.saturating_add(1);
+        if !allowed {
+            self.mcp_identity_failure_total = self.mcp_identity_failure_total.saturating_add(1);
+        }
+    }
+
+    fn record_mcp_identity_refresh(&mut self) {
+        self.mcp_identity_refresh_total = self.mcp_identity_refresh_total.saturating_add(1);
+    }
+
+    fn record_mcp_identity_revocation(&mut self) {
+        self.mcp_identity_revocation_total = self.mcp_identity_revocation_total.saturating_add(1);
+    }
+
     fn record_network_access_decision(&mut self, decision: NetworkAccessDecision) {
         match decision {
             NetworkAccessDecision::Allowed => {}
@@ -2850,6 +2869,10 @@ impl GatewayMetricsAccumulator {
             billing_report_enqueue_failure_total: self.billing_report_enqueue_failure_total,
             tool_call_total: self.tool_call_total,
             tool_latency_ms_total: self.tool_latency_ms_total,
+            mcp_identity_resolution_total: self.mcp_identity_resolution_total,
+            mcp_identity_failure_total: self.mcp_identity_failure_total,
+            mcp_identity_refresh_total: self.mcp_identity_refresh_total,
+            mcp_identity_revocation_total: self.mcp_identity_revocation_total,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
             network_access_denied_total: self.network_access_denied_total,
@@ -3595,6 +3618,7 @@ impl AppState {
             apply_control_plane_snapshot_to_config_from_repositories(&repositories, &mut config)?;
         }
         config.materialize_skill_package_resources_with_previous(&previous_skill_packages);
+        state_mcp_identity::validate_mcp_identity_runtime(&config)?;
         let providers = config
             .providers
             .iter()
@@ -5304,6 +5328,9 @@ fn tool_error_from_mcp(error: McpExecutionError) -> ToolExecutionError {
     match error {
         McpExecutionError::Denied(message) => ToolExecutionError::Denied(message),
         McpExecutionError::NotFound(message) => ToolExecutionError::NotFound(message),
+        McpExecutionError::Unauthorized(message) => {
+            ToolExecutionError::UpstreamUnauthorized(message)
+        }
         McpExecutionError::Unavailable(message) | McpExecutionError::Failed(message) => {
             ToolExecutionError::Failed(message)
         }
@@ -5474,6 +5501,9 @@ fn expand_optional_subjects(values: &[String]) -> Vec<Option<String>> {
 #[path = "state_tools.rs"]
 mod state_tools;
 
+#[path = "state_mcp_identity.rs"]
+mod state_mcp_identity;
+
 #[path = "state_assets.rs"]
 mod state_assets;
 
@@ -5561,6 +5591,7 @@ mod tests {
             organization_id: Some("org".into()),
             team_id: None,
             project_id: Some("project".into()),
+            workspace_id: None,
             user_id: None,
             monthly_token_budget: None,
             request_limit_per_minute: None,
@@ -5585,6 +5616,8 @@ mod tests {
                     args: Vec::new(),
                     auth_type: ferrogate_mcp::McpAuthType::None,
                     headers: Vec::new(),
+                    oauth: None,
+                    signed_jwt_audience: None,
                     tools_to_execute: vec!["search".into()],
                     tools_to_auto_execute: Vec::new(),
                     approval_policy: ferrogate_core::ApprovalPolicy::Never,

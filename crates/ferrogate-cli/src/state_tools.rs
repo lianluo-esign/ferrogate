@@ -7,6 +7,7 @@
 // place.
 
 use super::*;
+use ferrogate_mcp::McpDispatchHeaders;
 
 impl AppState {
     pub(crate) fn extension_statuses(&self) -> Vec<ExtensionStatus> {
@@ -298,7 +299,9 @@ impl AppState {
         &self,
         request: ToolExecutionRequest,
         request_id: String,
+        trace_id: Option<String>,
         tenant: ferrogate_core::TenantContext,
+        identity_headers: McpDispatchHeaders,
     ) -> Result<ToolExecutionResponse, ToolExecutionError> {
         let (server_name, _) = request.name.split_once('-').ok_or_else(|| {
             ToolExecutionError::NotFound(format!(
@@ -308,7 +311,7 @@ impl AppState {
         })?;
         let policy_request = RequestContext {
             request_id: request_id.clone(),
-            trace_id: None,
+            trace_id,
             agent_run_id: None,
             workflow_id: None,
             workflow_version: None,
@@ -344,7 +347,7 @@ impl AppState {
             dispatch_timeout,
             tokio::task::spawn_blocking(move || {
                 let _permit = dispatch_permit;
-                mcp_manager.execute_tool(mcp_request)
+                mcp_manager.execute_tool_with_headers(mcp_request, identity_headers)
             }),
         )
         .await

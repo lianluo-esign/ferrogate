@@ -8,6 +8,52 @@
 use super::*;
 
 impl AppState {
+    pub(crate) async fn tenant_tool_entitlement_denied(
+        &self,
+        tenant_id: String,
+        permission_key: String,
+        plan_enabled: fn(&StoredPlan) -> bool,
+    ) -> bool {
+        let repositories = Arc::clone(&self.repositories);
+        tokio::task::spawn_blocking(move || {
+            let account = repositories.get_tenant_account(&tenant_id).ok().flatten();
+            let tenant_account_exists = account.is_some();
+            let plan_grants_access = account
+                .as_ref()
+                .and_then(|account| repositories.get_plan(&account.plan_id).ok().flatten())
+                .is_some_and(|plan| plan_enabled(&plan));
+            let permission_exists =
+                repositories
+                    .list_permissions()
+                    .ok()
+                    .is_some_and(|permissions| {
+                        permissions
+                            .iter()
+                            .any(|permission| permission.key == permission_key)
+                    });
+            let role_grants_access = permission_exists
+                && repositories
+                    .list_tenant_role_bindings(&tenant_id)
+                    .ok()
+                    .is_some_and(|bindings| {
+                        bindings.into_iter().any(|binding| {
+                            repositories
+                                .get_role(&binding.role_id)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|role| {
+                                    role.permission_keys
+                                        .iter()
+                                        .any(|key| key == &permission_key)
+                                })
+                        })
+                    });
+            tenant_account_exists && !plan_grants_access && !role_grants_access
+        })
+        .await
+        .unwrap_or(true)
+    }
+
     pub(crate) fn upsert_permission(&self, permission: StoredPermission) -> anyhow::Result<()> {
         Ok(self.repositories.upsert_permission(permission)?)
     }
