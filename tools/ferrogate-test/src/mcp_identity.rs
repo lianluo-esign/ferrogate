@@ -27,7 +27,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Barrier, Mutex,
+        mpsc, Arc, Barrier, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -51,7 +51,7 @@ const SIGNED_SERVER_NAME: &str = "signed";
 const ORIGINAL_AUDIENCE: &str = "urn:ferrogate:mcp:original:e2e";
 const SIGNED_AUDIENCE: &str = "urn:ferrogate:mcp:signed:e2e";
 const OIDC_SECRET: &[u8] = b"ferrogate-mcp-identity-e2e-signing-secret";
-const SLOW_REFRESH_STAGE_DELAY: Duration = Duration::from_secs(9);
+const SLOW_REFRESH_STAGE_DELAY: Duration = Duration::from_secs(6);
 const IDENTITY_ACTIONS: [&str; 5] = [
     "mcp.execute",
     "mcp.identity.connect",
@@ -196,7 +196,12 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     }
     let (refresh_lease_id, initial_refresh_expiry) =
         evidence.wait_for_refresh_lease_claim(USER_A)?;
-    evidence.wait_for_refresh_lease_extension(USER_A, &refresh_lease_id, initial_refresh_expiry)?;
+    let first_refresh_expiry = evidence.wait_for_refresh_lease_extension(
+        USER_A,
+        &refresh_lease_id,
+        initial_refresh_expiry,
+    )?;
+    evidence.wait_for_refresh_lease_extension(USER_A, &refresh_lease_id, first_refresh_expiry)?;
     for call in refresh_calls {
         let response = call
             .join()
@@ -211,6 +216,50 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
         bail!("concurrent MCP refresh expected one IdP grant, observed {refresh_delta}");
     }
     services.slow_refresh.store(false, Ordering::SeqCst);
+
+    evidence.expire_credential(USER_A)?;
+    let before_revoked_refresh = evidence.credential_snapshot(USER_A)?;
+    let mut refresh_gate = services.arm_next_refresh_response()?;
+    let (refresh_result_tx, refresh_result_rx) = mpsc::channel();
+    let refresh_gateway_addr = gateway_addr.clone();
+    let refresh_caller = thread::spawn(move || {
+        let result = call_tool(&refresh_gateway_addr, USER_A_AUTH, json!({}));
+        let _ = refresh_result_tx.send(result);
+    });
+    refresh_gate.wait_started(Duration::from_secs(60))?;
+    let _ = evidence.wait_for_refresh_lease_claim(USER_A)?;
+    let revoked_during_refresh = http_request_addr(
+        &gateway_addr,
+        "DELETE",
+        &format!("/v1/mcp/identity/{SERVER_NAME}"),
+        &[USER_A_AUTH],
+        "",
+    )?;
+    if revoked_during_refresh.status != 200 {
+        bail!(
+            "MCP identity revoke during blocked refresh failed: {}",
+            revoked_during_refresh.raw
+        );
+    }
+    let revoked_refresh_snapshot =
+        evidence.verify_revoked_refresh_snapshot(USER_A, &before_revoked_refresh)?;
+    let blocked_refresh_response = refresh_result_rx
+        .recv_timeout(Duration::from_secs(15))
+        .context("blocked MCP refresh caller did not observe revocation before IdP release")??;
+    assert_error(&blocked_refresh_response, 401, "mcp_identity_not_connected")?;
+    refresh_caller
+        .join()
+        .map_err(|_| anyhow::anyhow!("blocked MCP refresh caller panicked"))?;
+    refresh_gate.release();
+    refresh_gate.wait_response_completed(Duration::from_secs(15))?;
+    evidence.verify_snapshot_unchanged(USER_A, &revoked_refresh_snapshot)?;
+    assert_error(
+        &call_tool(&gateway_addr, USER_A_AUTH, json!({}))?,
+        401,
+        "mcp_identity_not_connected",
+    )?;
+    authorize(&gateway_addr, USER_A_AUTH, USER_A)?;
+    assert_tool_subject(&call_tool(&gateway_addr, USER_A_AUTH, json!({}))?, USER_A)?;
 
     evidence.expire_credential(USER_A)?;
     services.idp_outage.store(true, Ordering::SeqCst);
@@ -596,12 +645,157 @@ struct SignedIdentityClaims {
     jti: String,
 }
 
+#[derive(Default)]
+struct RefreshResponseGate {
+    state: Mutex<RefreshResponseGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct RefreshResponseGateState {
+    armed: bool,
+    started: bool,
+    released: bool,
+    response_completed: bool,
+}
+
+impl RefreshResponseGate {
+    fn arm(self: &Arc<Self>) -> Result<RefreshResponseGateGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MCP refresh response gate lock poisoned"))?;
+        if state.armed {
+            bail!("MCP refresh response gate is already armed");
+        }
+        *state = RefreshResponseGateState {
+            armed: true,
+            started: false,
+            released: false,
+            response_completed: false,
+        };
+        Ok(RefreshResponseGateGuard {
+            gate: Arc::clone(self),
+            released: false,
+        })
+    }
+
+    fn block_next_refresh_response(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.armed {
+            return false;
+        }
+        state.started = true;
+        self.changed.notify_all();
+        while state.armed && !state.released {
+            let Ok(next) = self.changed.wait(state) else {
+                return false;
+            };
+            state = next;
+        }
+        state.armed = false;
+        self.changed.notify_all();
+        true
+    }
+
+    fn wait_started(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MCP refresh response gate lock poisoned"))?;
+        while !state.started {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                bail!("MCP refresh token POST did not reach the response gate");
+            }
+            let (next, timed_out) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .map_err(|_| anyhow::anyhow!("MCP refresh response gate lock poisoned"))?;
+            state = next;
+            if timed_out.timed_out() && !state.started {
+                bail!("MCP refresh token POST did not reach the response gate");
+            }
+        }
+        Ok(())
+    }
+
+    fn release(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.released = true;
+            self.changed.notify_all();
+        }
+    }
+
+    fn mark_response_completed(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.response_completed = true;
+            self.changed.notify_all();
+        }
+    }
+
+    fn wait_response_completed(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MCP refresh response gate lock poisoned"))?;
+        while !state.response_completed {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                bail!("blocked MCP refresh response handler did not complete");
+            }
+            let (next, timed_out) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .map_err(|_| anyhow::anyhow!("MCP refresh response gate lock poisoned"))?;
+            state = next;
+            if timed_out.timed_out() && !state.response_completed {
+                bail!("blocked MCP refresh response handler did not complete");
+            }
+        }
+        Ok(())
+    }
+}
+
+struct RefreshResponseGateGuard {
+    gate: Arc<RefreshResponseGate>,
+    released: bool,
+}
+
+impl RefreshResponseGateGuard {
+    fn wait_started(&self, timeout: Duration) -> Result<()> {
+        self.gate.wait_started(timeout)
+    }
+
+    fn release(&mut self) {
+        if !self.released {
+            self.gate.release();
+            self.released = true;
+        }
+    }
+
+    fn wait_response_completed(&self, timeout: Duration) -> Result<()> {
+        self.gate.wait_response_completed(timeout)
+    }
+}
+
+impl Drop for RefreshResponseGateGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 struct MockIdentityServices {
     oidc_addr: String,
     mcp_addr: String,
     stop: Arc<AtomicBool>,
     idp_outage: Arc<AtomicBool>,
     slow_refresh: Arc<AtomicBool>,
+    refresh_gate: Arc<RefreshResponseGate>,
     refreshes: Arc<AtomicU64>,
     revocations: Arc<AtomicU64>,
     signed_verifications: Arc<AtomicU64>,
@@ -619,6 +813,7 @@ impl MockIdentityServices {
         let stop = Arc::new(AtomicBool::new(false));
         let idp_outage = Arc::new(AtomicBool::new(false));
         let slow_refresh = Arc::new(AtomicBool::new(false));
+        let refresh_gate = Arc::new(RefreshResponseGate::default());
         let refreshes = Arc::new(AtomicU64::new(0));
         let revocations = Arc::new(AtomicU64::new(0));
         let signed_verifications = Arc::new(AtomicU64::new(0));
@@ -627,6 +822,7 @@ impl MockIdentityServices {
         let oidc_stop = Arc::clone(&stop);
         let outage = Arc::clone(&idp_outage);
         let slow = Arc::clone(&slow_refresh);
+        let gate = Arc::clone(&refresh_gate);
         let refresh_count = Arc::clone(&refreshes);
         let revoke_count = Arc::clone(&revocations);
         let issuer = format!("http://{oidc_addr}");
@@ -637,6 +833,7 @@ impl MockIdentityServices {
                         let issuer = issuer.clone();
                         let outage = Arc::clone(&outage);
                         let slow = Arc::clone(&slow);
+                        let gate = Arc::clone(&gate);
                         let refresh_count = Arc::clone(&refresh_count);
                         let revoke_count = Arc::clone(&revoke_count);
                         thread::spawn(move || {
@@ -646,10 +843,14 @@ impl MockIdentityServices {
                                     &issuer,
                                     outage.load(Ordering::SeqCst),
                                     slow.load(Ordering::SeqCst),
+                                    &gate,
                                     &refresh_count,
                                     &revoke_count,
                                 );
                                 let _ = write_response(&mut stream, response.0, &response.1);
+                                if response.2 {
+                                    gate.mark_response_completed();
+                                }
                             }
                         });
                     }
@@ -696,16 +897,22 @@ impl MockIdentityServices {
             stop,
             idp_outage,
             slow_refresh,
+            refresh_gate,
             refreshes,
             revocations,
             signed_verifications,
             handles: vec![oidc_handle, mcp_handle],
         })
     }
+
+    fn arm_next_refresh_response(&self) -> Result<RefreshResponseGateGuard> {
+        self.refresh_gate.arm()
+    }
 }
 
 impl Drop for MockIdentityServices {
     fn drop(&mut self) {
+        self.refresh_gate.release();
         self.stop.store(true, Ordering::SeqCst);
         for handle in self.handles.drain(..) {
             let _ = handle.join();
@@ -718,9 +925,10 @@ fn oidc_response(
     issuer: &str,
     outage: bool,
     slow_refresh: bool,
+    refresh_gate: &RefreshResponseGate,
     refreshes: &AtomicU64,
     revocations: &AtomicU64,
-) -> (&'static str, String) {
+) -> (&'static str, String, bool) {
     if request.starts_with("GET /.well-known/openid-configuration ") {
         if slow_refresh {
             thread::sleep(SLOW_REFRESH_STAGE_DELAY);
@@ -735,6 +943,7 @@ fn oidc_response(
                 "revocation_endpoint": format!("{issuer}/revoke")
             })
             .to_string(),
+            false,
         );
     }
     if request.starts_with("GET /jwks ") {
@@ -745,17 +954,19 @@ fn oidc_response(
                 "k": URL_SAFE_NO_PAD.encode(OIDC_SECRET)
             }]})
             .to_string(),
+            false,
         );
     }
     if request.starts_with("POST /revoke ") {
         revocations.fetch_add(1, Ordering::SeqCst);
-        return ("200 OK", "{}".into());
+        return ("200 OK", "{}".into(), false);
     }
     if request.starts_with("POST /token ") {
         if outage {
             return (
                 "503 Service Unavailable",
                 json!({"error":"temporarily_unavailable"}).to_string(),
+                false,
             );
         }
         let body = request
@@ -765,6 +976,7 @@ fn oidc_response(
         let form = form_pairs(body);
         if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
             refreshes.fetch_add(1, Ordering::SeqCst);
+            let gated_refresh = refresh_gate.block_next_refresh_response();
             thread::sleep(if slow_refresh {
                 SLOW_REFRESH_STAGE_DELAY
             } else {
@@ -782,6 +994,7 @@ fn oidc_response(
                     "token_type":"Bearer", "expires_in":300, "scope":"openid profile"
                 })
                 .to_string(),
+                gated_refresh,
             );
         }
         let code = form.get("code").cloned().unwrap_or_default();
@@ -814,9 +1027,14 @@ fn oidc_response(
                 "id_token": id_token
             })
             .to_string(),
+            false,
         );
     }
-    ("404 Not Found", json!({"error":"not_found"}).to_string())
+    (
+        "404 Not Found",
+        json!({"error":"not_found"}).to_string(),
+        false,
+    )
 }
 
 fn mcp_response(
@@ -1004,6 +1222,22 @@ impl Drop for GatewayGuard {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CredentialSnapshot {
+    version: i64,
+    authorization_generation: i64,
+    refresh_lease_id: Option<String>,
+    refresh_lease_expires_at_unix: Option<i64>,
+    expires_at_unix: i64,
+    revoked_at_unix: Option<i64>,
+    access_token_nonce: Vec<u8>,
+    access_token_ciphertext: Vec<u8>,
+    refresh_token_nonce: Option<Vec<u8>>,
+    refresh_token_ciphertext: Option<Vec<u8>>,
+    last_refresh_outcome: Option<String>,
+    last_revocation_outcome: Option<String>,
+}
+
 struct SupabaseEvidence {
     client: Client,
     schema: String,
@@ -1127,6 +1361,72 @@ impl SupabaseEvidence {
         Ok(())
     }
 
+    fn credential_snapshot(&mut self, user: &str) -> Result<CredentialSnapshot> {
+        let row = self.client.query_one(
+            &format!(
+                "SELECT version,authorization_generation,refresh_lease_id, \
+                        refresh_lease_expires_at_unix,expires_at_unix,revoked_at_unix, \
+                        access_token_nonce,access_token_ciphertext,refresh_token_nonce, \
+                        refresh_token_ciphertext,last_refresh_outcome,last_revocation_outcome \
+                 FROM \"{}\".mcp_oauth_credentials WHERE user_id=$1 AND server_name=$2",
+                self.schema
+            ),
+            &[&user, &SERVER_NAME],
+        )?;
+        Ok(CredentialSnapshot {
+            version: row.get(0),
+            authorization_generation: row.get(1),
+            refresh_lease_id: row.get(2),
+            refresh_lease_expires_at_unix: row.get(3),
+            expires_at_unix: row.get(4),
+            revoked_at_unix: row.get(5),
+            access_token_nonce: row.get(6),
+            access_token_ciphertext: row.get(7),
+            refresh_token_nonce: row.get(8),
+            refresh_token_ciphertext: row.get(9),
+            last_refresh_outcome: row.get(10),
+            last_revocation_outcome: row.get(11),
+        })
+    }
+
+    fn verify_revoked_refresh_snapshot(
+        &mut self,
+        user: &str,
+        before: &CredentialSnapshot,
+    ) -> Result<CredentialSnapshot> {
+        let revoked = self.credential_snapshot(user)?;
+        if revoked.revoked_at_unix.is_none()
+            || revoked.refresh_lease_id.is_some()
+            || revoked.refresh_lease_expires_at_unix.is_some()
+        {
+            bail!("Supabase did not clear the refresh lease while revoking an in-flight refresh");
+        }
+        if revoked.version <= before.version
+            || revoked.authorization_generation <= before.authorization_generation
+        {
+            bail!("Supabase revocation did not advance credential version and authorization generation");
+        }
+        if revoked.access_token_nonce != before.access_token_nonce
+            || revoked.access_token_ciphertext != before.access_token_ciphertext
+            || revoked.refresh_token_nonce != before.refresh_token_nonce
+            || revoked.refresh_token_ciphertext != before.refresh_token_ciphertext
+        {
+            bail!("Supabase revocation unexpectedly changed encrypted MCP token material");
+        }
+        Ok(revoked)
+    }
+
+    fn verify_snapshot_unchanged(
+        &mut self,
+        user: &str,
+        expected: &CredentialSnapshot,
+    ) -> Result<()> {
+        if self.credential_snapshot(user)? != *expected {
+            bail!("stale IdP refresh response changed the revoked MCP credential snapshot");
+        }
+        Ok(())
+    }
+
     fn wait_for_refresh_lease_claim(&mut self, user: &str) -> Result<(String, i64)> {
         let query = format!(
             "SELECT refresh_lease_id,refresh_lease_expires_at_unix FROM \"{}\".mcp_oauth_credentials \
@@ -1150,7 +1450,7 @@ impl SupabaseEvidence {
         user: &str,
         lease_id: &str,
         initial_expiry: i64,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let query = format!(
             "SELECT refresh_lease_expires_at_unix FROM \"{}\".mcp_oauth_credentials \
              WHERE user_id=$1 AND server_name=$2 AND refresh_lease_id=$3",
@@ -1166,7 +1466,7 @@ impl SupabaseEvidence {
                 let expires_at: i64 = row.get(0);
                 last_expiry = Some(expires_at);
                 if expires_at > initial_expiry {
-                    return Ok(());
+                    return Ok(expires_at);
                 }
             }
             thread::sleep(Duration::from_millis(100));
@@ -1369,7 +1669,7 @@ storage:
   required: true
   provider_order: ["supabase", "postgres"]
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
-  postgres_pool_size: 2
+  postgres_pool_size: 8
   postgres_tls_mode: "{tls_mode}"
 {ca}  postgres_connect_timeout_secs: 10
   postgres_statement_timeout_millis: 30000

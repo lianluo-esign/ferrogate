@@ -1027,15 +1027,10 @@ impl AppState {
             outcome = "completion_conflict",
             "MCP OAuth credential refresh completion lost its fence"
         );
-        self.authorize_mcp_identity_actor(actor, &server.name, "mcp.identity.use")
-            .await?
-            .filter(|row| row.revoked_at_unix.is_none() && row.version > credential.version)
-            .ok_or_else(|| {
-                McpIdentityError::unavailable(
-                    "mcp_identity_refresh_conflict",
-                    "MCP identity changed during refresh",
-                )
-            })
+        let current = self
+            .authorize_mcp_identity_actor(actor, &server.name, "mcp.identity.use")
+            .await?;
+        resolve_mcp_refresh_completion_reread(current, credential.version)
     }
 
     async fn renew_mcp_refresh_lease(
@@ -1264,6 +1259,27 @@ fn refresh_lease_conflict(
         "mcp_identity_refresh_conflict",
         message,
     ))
+}
+
+fn resolve_mcp_refresh_completion_reread(
+    current: Option<StoredMcpOauthCredential>,
+    previous_version: u64,
+) -> Result<StoredMcpOauthCredential, McpIdentityError> {
+    match current {
+        None => Err(McpIdentityError::unauthorized(
+            "mcp_identity_not_connected",
+            "per-user MCP identity was removed during refresh",
+        )),
+        Some(current) if current.revoked_at_unix.is_some() => Err(McpIdentityError::unauthorized(
+            "mcp_identity_not_connected",
+            "per-user MCP identity was revoked during refresh",
+        )),
+        Some(current) if current.version > previous_version => Ok(current),
+        Some(_) => Err(McpIdentityError::unavailable(
+            "mcp_identity_refresh_conflict",
+            "MCP identity changed during refresh",
+        )),
+    }
 }
 
 async fn run_with_refresh_heartbeat<T, Work, Renew, RenewFuture>(

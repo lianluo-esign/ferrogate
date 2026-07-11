@@ -257,3 +257,62 @@ fn refresh_wait_backoff_is_bounded_lease_aware_and_deterministic() {
     let expired = refresh_wait_backoff(100, 100, 7, waiter_remaining, "credential-a");
     assert!(expired <= Duration::from_millis(REFRESH_WAIT_MIN_MILLIS));
 }
+
+fn completion_reread_credential(
+    version: u64,
+    revoked_at_unix: Option<i64>,
+) -> StoredMcpOauthCredential {
+    StoredMcpOauthCredential {
+        id: "credential".into(),
+        tenant_id: "tenant".into(),
+        workspace_id: "workspace".into(),
+        user_id: "user".into(),
+        server_name: "server".into(),
+        issuer: "https://issuer.invalid".into(),
+        subject: "user".into(),
+        token_type: "Bearer".into(),
+        scopes: vec!["openid".into()],
+        access_token_nonce: vec![1],
+        access_token_ciphertext: vec![2],
+        refresh_token_nonce: Some(vec![3]),
+        refresh_token_ciphertext: Some(vec![4]),
+        expires_at_unix: 100,
+        key_version: 1,
+        version,
+        authorization_generation: 1,
+        refresh_lease_id: None,
+        refresh_lease_expires_at_unix: None,
+        created_at_unix: 1,
+        updated_at_unix: 1,
+        revoked_at_unix,
+        last_refresh_outcome: Some("refreshed".into()),
+        last_revocation_outcome: None,
+    }
+}
+
+#[test]
+fn refresh_completion_reread_maps_missing_and_revoked_to_not_connected() {
+    let missing = resolve_mcp_refresh_completion_reread(None, 1).unwrap_err();
+    assert_eq!(missing.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(missing.code, "mcp_identity_not_connected");
+
+    let revoked =
+        resolve_mcp_refresh_completion_reread(Some(completion_reread_credential(2, Some(100))), 1)
+            .unwrap_err();
+    assert_eq!(revoked.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(revoked.code, "mcp_identity_not_connected");
+}
+
+#[test]
+fn refresh_completion_reread_accepts_winner_and_rejects_unadvanced_version() {
+    let winner =
+        resolve_mcp_refresh_completion_reread(Some(completion_reread_credential(2, None)), 1)
+            .unwrap();
+    assert_eq!(winner.version, 2);
+
+    let conflict =
+        resolve_mcp_refresh_completion_reread(Some(completion_reread_credential(1, None)), 1)
+            .unwrap_err();
+    assert_eq!(conflict.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(conflict.code, "mcp_identity_refresh_conflict");
+}
