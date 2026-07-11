@@ -5,6 +5,7 @@
 // description: Live Supabase E2E for subject-bound MCP OAuth identity and DB-driven RBAC.
 
 use crate::{
+    assertions::assert_secret_redacted,
     cli::SupabaseLiveRestartArgs,
     http::{free_addr, http_request_addr, HttpResponse},
     mocks::read_http_request,
@@ -20,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     env, fs,
-    io::Write,
+    io::{Read, Write},
     net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
@@ -50,6 +51,7 @@ const SIGNED_SERVER_NAME: &str = "signed";
 const ORIGINAL_AUDIENCE: &str = "urn:ferrogate:mcp:original:e2e";
 const SIGNED_AUDIENCE: &str = "urn:ferrogate:mcp:signed:e2e";
 const OIDC_SECRET: &[u8] = b"ferrogate-mcp-identity-e2e-signing-secret";
+const SLOW_REFRESH_STAGE_DELAY: Duration = Duration::from_secs(9);
 const IDENTITY_ACTIONS: [&str; 5] = [
     "mcp.execute",
     "mcp.identity.connect",
@@ -179,6 +181,7 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     )?;
     assert_tool_subject(&forged, USER_A)?;
 
+    services.slow_refresh.store(true, Ordering::SeqCst);
     evidence.expire_credential(USER_A)?;
     let refresh_before = services.refreshes.load(Ordering::SeqCst);
     let barrier = Arc::new(Barrier::new(6));
@@ -191,6 +194,9 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
             call_tool(&gateway_addr, USER_A_AUTH, json!({}))
         }));
     }
+    let (refresh_lease_id, initial_refresh_expiry) =
+        evidence.wait_for_refresh_lease_claim(USER_A)?;
+    evidence.wait_for_refresh_lease_extension(USER_A, &refresh_lease_id, initial_refresh_expiry)?;
     for call in refresh_calls {
         let response = call
             .join()
@@ -204,6 +210,7 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     if refresh_delta != 1 {
         bail!("concurrent MCP refresh expected one IdP grant, observed {refresh_delta}");
     }
+    services.slow_refresh.store(false, Ordering::SeqCst);
 
     evidence.expire_credential(USER_A)?;
     services.idp_outage.store(true, Ordering::SeqCst);
@@ -594,6 +601,7 @@ struct MockIdentityServices {
     mcp_addr: String,
     stop: Arc<AtomicBool>,
     idp_outage: Arc<AtomicBool>,
+    slow_refresh: Arc<AtomicBool>,
     refreshes: Arc<AtomicU64>,
     revocations: Arc<AtomicU64>,
     signed_verifications: Arc<AtomicU64>,
@@ -610,6 +618,7 @@ impl MockIdentityServices {
         let mcp_addr = mcp.local_addr()?.to_string();
         let stop = Arc::new(AtomicBool::new(false));
         let idp_outage = Arc::new(AtomicBool::new(false));
+        let slow_refresh = Arc::new(AtomicBool::new(false));
         let refreshes = Arc::new(AtomicU64::new(0));
         let revocations = Arc::new(AtomicU64::new(0));
         let signed_verifications = Arc::new(AtomicU64::new(0));
@@ -617,6 +626,7 @@ impl MockIdentityServices {
 
         let oidc_stop = Arc::clone(&stop);
         let outage = Arc::clone(&idp_outage);
+        let slow = Arc::clone(&slow_refresh);
         let refresh_count = Arc::clone(&refreshes);
         let revoke_count = Arc::clone(&revocations);
         let issuer = format!("http://{oidc_addr}");
@@ -626,6 +636,7 @@ impl MockIdentityServices {
                     Ok((mut stream, _)) => {
                         let issuer = issuer.clone();
                         let outage = Arc::clone(&outage);
+                        let slow = Arc::clone(&slow);
                         let refresh_count = Arc::clone(&refresh_count);
                         let revoke_count = Arc::clone(&revoke_count);
                         thread::spawn(move || {
@@ -634,6 +645,7 @@ impl MockIdentityServices {
                                     &request,
                                     &issuer,
                                     outage.load(Ordering::SeqCst),
+                                    slow.load(Ordering::SeqCst),
                                     &refresh_count,
                                     &revoke_count,
                                 );
@@ -683,6 +695,7 @@ impl MockIdentityServices {
             mcp_addr,
             stop,
             idp_outage,
+            slow_refresh,
             refreshes,
             revocations,
             signed_verifications,
@@ -704,10 +717,14 @@ fn oidc_response(
     request: &str,
     issuer: &str,
     outage: bool,
+    slow_refresh: bool,
     refreshes: &AtomicU64,
     revocations: &AtomicU64,
 ) -> (&'static str, String) {
     if request.starts_with("GET /.well-known/openid-configuration ") {
+        if slow_refresh {
+            thread::sleep(SLOW_REFRESH_STAGE_DELAY);
+        }
         return (
             "200 OK",
             json!({
@@ -748,7 +765,11 @@ fn oidc_response(
         let form = form_pairs(body);
         if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
             refreshes.fetch_add(1, Ordering::SeqCst);
-            thread::sleep(Duration::from_millis(250));
+            thread::sleep(if slow_refresh {
+                SLOW_REFRESH_STAGE_DELAY
+            } else {
+                Duration::from_millis(250)
+            });
             let subject = form
                 .get("refresh_token")
                 .and_then(|token| token.strip_prefix("refresh::"))
@@ -948,7 +969,7 @@ impl GatewayGuard {
                 if env::var("FERROGATE_TEST_DEBUG_STDERR").as_deref() == Ok("1") {
                     Stdio::inherit()
                 } else {
-                    Stdio::null()
+                    Stdio::piped()
                 },
             )
             .spawn()
@@ -958,7 +979,12 @@ impl GatewayGuard {
         let mut last = String::new();
         while started.elapsed() < Duration::from_secs(180) {
             if let Some(status) = guard.child.try_wait()? {
-                bail!("FerroGate exited before MCP identity readiness: {status}");
+                let mut stderr = String::new();
+                if let Some(mut pipe) = guard.child.stderr.take() {
+                    pipe.read_to_string(&mut stderr)?;
+                    assert_secret_redacted(&stderr);
+                }
+                bail!("FerroGate exited before MCP identity readiness: {status}; stderr: {stderr}");
             }
             match http_request_addr(addr, "GET", "/healthz", &[], "") {
                 Ok(response) if response.status == 200 => return Ok(guard),
@@ -1099,6 +1125,55 @@ impl SupabaseEvidence {
             &[&user, &SERVER_NAME],
         )?;
         Ok(())
+    }
+
+    fn wait_for_refresh_lease_claim(&mut self, user: &str) -> Result<(String, i64)> {
+        let query = format!(
+            "SELECT refresh_lease_id,refresh_lease_expires_at_unix FROM \"{}\".mcp_oauth_credentials \
+             WHERE user_id=$1 AND server_name=$2 AND refresh_lease_id IS NOT NULL",
+            self.schema
+        );
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(60) {
+            if let Some(row) = self.client.query_opt(&query, &[&user, &SERVER_NAME])? {
+                let lease_id: String = row.get(0);
+                let expires_at: i64 = row.get(1);
+                return Ok((lease_id, expires_at));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!("Supabase never exposed the active MCP refresh lease")
+    }
+
+    fn wait_for_refresh_lease_extension(
+        &mut self,
+        user: &str,
+        lease_id: &str,
+        initial_expiry: i64,
+    ) -> Result<()> {
+        let query = format!(
+            "SELECT refresh_lease_expires_at_unix FROM \"{}\".mcp_oauth_credentials \
+             WHERE user_id=$1 AND server_name=$2 AND refresh_lease_id=$3",
+            self.schema
+        );
+        let started = Instant::now();
+        let mut last_expiry = None;
+        while started.elapsed() < Duration::from_secs(15) {
+            if let Some(row) = self
+                .client
+                .query_opt(&query, &[&user, &SERVER_NAME, &lease_id])?
+            {
+                let expires_at: i64 = row.get(0);
+                last_expiry = Some(expires_at);
+                if expires_at > initial_expiry {
+                    return Ok(());
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        bail!(
+            "Supabase MCP refresh lease did not advance while IdP refresh was in flight: initial={initial_expiry}, last={last_expiry:?}"
+        )
     }
 
     fn verify_no_active_credential(&mut self, user: &str) -> Result<()> {

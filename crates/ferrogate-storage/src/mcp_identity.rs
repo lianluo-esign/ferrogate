@@ -81,7 +81,18 @@ pub struct McpRefreshClaimRequest {
     pub authorization_generation: u64,
     pub lease_id: String,
     pub now_unix: i64,
-    pub lease_expires_at_unix: i64,
+    pub lease_ttl_secs: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpRefreshRenewRequest {
+    pub tenant_id: String,
+    pub credential_id: String,
+    pub expected_version: u64,
+    pub authorization_generation: u64,
+    pub lease_id: String,
+    pub now_unix: i64,
+    pub lease_ttl_secs: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +106,17 @@ pub enum McpRefreshClaimOutcome {
     Acquired(StoredMcpOauthCredential),
     Busy { lease_expires_at_unix: i64 },
     Changed(Option<StoredMcpOauthCredential>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpRefreshRenewOutcome {
+    Renewed { lease_expires_at_unix: i64 },
+    Missing,
+    Revoked,
+    CredentialChanged,
+    OwnershipChanged,
+    Expired { lease_expires_at_unix: Option<i64> },
+    NotExtended { lease_expires_at_unix: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +160,10 @@ pub trait McpCredentialRepository {
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError>;
+    fn renew_mcp_oauth_refresh(
+        &self,
+        request: &McpRefreshRenewRequest,
+    ) -> Result<McpRefreshRenewOutcome, StorageError>;
     fn complete_mcp_oauth_refresh(
         &self,
         credential: StoredMcpOauthCredential,
@@ -218,6 +244,144 @@ const CREDENTIAL_COLUMNS: &str = "id, tenant_id, workspace_id, user_id, server_n
     refresh_token_nonce, refresh_token_ciphertext, expires_at_unix, key_version, version, \
     authorization_generation, refresh_lease_id, refresh_lease_expires_at_unix, created_at_unix, \
     updated_at_unix, revoked_at_unix, last_refresh_outcome, last_revocation_outcome";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpRefreshLeaseState {
+    tenant_matches: bool,
+    version: u64,
+    authorization_generation: u64,
+    refresh_lease_id: Option<String>,
+    refresh_lease_expires_at_unix: Option<i64>,
+    revoked: bool,
+}
+
+impl McpRefreshLeaseState {
+    fn from_credential(credential: &StoredMcpOauthCredential, tenant_id: &str) -> Self {
+        Self {
+            tenant_matches: credential.tenant_id == tenant_id,
+            version: credential.version,
+            authorization_generation: credential.authorization_generation,
+            refresh_lease_id: credential.refresh_lease_id.clone(),
+            refresh_lease_expires_at_unix: credential.refresh_lease_expires_at_unix,
+            revoked: credential.revoked_at_unix.is_some(),
+        }
+    }
+
+    fn from_postgres_row(row: &PostgresRow) -> Self {
+        Self {
+            tenant_matches: true,
+            version: u64::try_from(row.get::<_, i64>(0)).unwrap_or(u64::MAX),
+            authorization_generation: u64::try_from(row.get::<_, i64>(1)).unwrap_or(u64::MAX),
+            refresh_lease_id: row.get(2),
+            refresh_lease_expires_at_unix: row.get(3),
+            revoked: row.get::<_, Option<i64>>(4).is_some(),
+        }
+    }
+}
+
+fn mcp_refresh_renewal_rejection(
+    current: Option<&McpRefreshLeaseState>,
+    request: &McpRefreshRenewRequest,
+    operation_now_unix: i64,
+    lease_expires_at_unix: Option<i64>,
+) -> Option<McpRefreshRenewOutcome> {
+    let Some(current) = current else {
+        return Some(McpRefreshRenewOutcome::Missing);
+    };
+    if !current.tenant_matches {
+        return Some(McpRefreshRenewOutcome::Missing);
+    }
+    if current.revoked {
+        return Some(McpRefreshRenewOutcome::Revoked);
+    }
+    if current.version != request.expected_version
+        || current.authorization_generation != request.authorization_generation
+    {
+        return Some(McpRefreshRenewOutcome::CredentialChanged);
+    }
+    if current.refresh_lease_id.as_deref() != Some(request.lease_id.as_str()) {
+        return Some(McpRefreshRenewOutcome::OwnershipChanged);
+    }
+    let Some(current_expiry) = current.refresh_lease_expires_at_unix else {
+        return Some(McpRefreshRenewOutcome::Expired {
+            lease_expires_at_unix: None,
+        });
+    };
+    if current_expiry <= operation_now_unix {
+        return Some(McpRefreshRenewOutcome::Expired {
+            lease_expires_at_unix: Some(current_expiry),
+        });
+    }
+    if lease_expires_at_unix.is_none_or(|expiry| expiry <= current_expiry) {
+        return Some(McpRefreshRenewOutcome::NotExtended {
+            lease_expires_at_unix: current_expiry,
+        });
+    }
+    None
+}
+
+fn derive_refresh_lease_expiry(operation_now_unix: i64, lease_ttl_secs: i64) -> Option<i64> {
+    (lease_ttl_secs > 0).then(|| operation_now_unix.saturating_add(lease_ttl_secs))
+}
+
+fn derive_refresh_lease_renewal_expiry(
+    operation_now_unix: i64,
+    lease_ttl_secs: i64,
+    current_expiry: Option<i64>,
+) -> Option<i64> {
+    let ttl_expiry = derive_refresh_lease_expiry(operation_now_unix, lease_ttl_secs)?;
+    Some(
+        current_expiry
+            .map(|expiry| expiry.saturating_add(1))
+            .unwrap_or(ttl_expiry)
+            .max(ttl_expiry),
+    )
+}
+
+fn require_refresh_lease_expiry(
+    operation_now_unix: i64,
+    lease_ttl_secs: i64,
+) -> Result<i64, StorageError> {
+    derive_refresh_lease_expiry(operation_now_unix, lease_ttl_secs).ok_or_else(|| {
+        StorageError::Runtime("MCP refresh lease TTL must be greater than zero".into())
+    })
+}
+
+enum McpRefreshClaimClassification {
+    Acquirable(StoredMcpOauthCredential),
+    Outcome(McpRefreshClaimOutcome),
+}
+
+fn classify_mcp_refresh_claim(
+    current: Option<StoredMcpOauthCredential>,
+    request: &McpRefreshClaimRequest,
+    operation_now_unix: i64,
+) -> McpRefreshClaimClassification {
+    let Some(current) = current else {
+        return McpRefreshClaimClassification::Outcome(McpRefreshClaimOutcome::Changed(None));
+    };
+    if current.tenant_id != request.tenant_id
+        || current.version != request.expected_version
+        || current.authorization_generation != request.authorization_generation
+        || current.revoked_at_unix.is_some()
+    {
+        return McpRefreshClaimClassification::Outcome(McpRefreshClaimOutcome::Changed(Some(
+            current,
+        )));
+    }
+    if current
+        .refresh_lease_expires_at_unix
+        .is_some_and(|expiry| expiry > operation_now_unix)
+        && current.refresh_lease_id.is_some()
+    {
+        return McpRefreshClaimClassification::Outcome(McpRefreshClaimOutcome::Busy {
+            lease_expires_at_unix: current
+                .refresh_lease_expires_at_unix
+                .unwrap_or(operation_now_unix),
+        });
+    }
+    McpRefreshClaimClassification::Acquirable(current)
+}
 
 fn set_mcp_rls_context(
     transaction: &mut postgres::Transaction<'_>,
@@ -520,51 +684,146 @@ impl PostgresControlPlaneStore {
         let expected_version = super::saturating_i64(request.expected_version);
         let generation = super::saturating_i64(request.authorization_generation);
         let query = format!(
-            "UPDATE mcp_oauth_credentials SET refresh_lease_id=$5, \
-             refresh_lease_expires_at_unix=$6,last_refresh_outcome='refreshing' \
-             WHERE tenant_id=$1 AND id=$2 AND version=$3 AND authorization_generation=$4 \
-               AND revoked_at_unix IS NULL \
-               AND (refresh_lease_id IS NULL OR refresh_lease_expires_at_unix <= $7) \
-             RETURNING {CREDENTIAL_COLUMNS}"
+            "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
+             WHERE tenant_id=$1 AND id=$2 FOR UPDATE"
         );
         self.with_client_storage(|client| {
             let mut transaction = client.transaction().map_err(super::postgres_error)?;
             set_mcp_rls_context(&mut transaction, Some(&request.tenant_id))?;
-            let claimed = transaction
-                .query_opt(
-                    &query,
-                    &[&request.tenant_id,&request.credential_id,&expected_version,&generation,
-                      &request.lease_id,&request.lease_expires_at_unix,&request.now_unix],
+            let current = transaction
+                .query_opt(&query, &[&request.tenant_id, &request.credential_id])
+                .map_err(super::postgres_error)?
+                .as_ref()
+                .map(oauth_credential_from_row)
+                .transpose()?;
+            let operation_now_unix = transaction
+                .query_one(
+                    "SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::BIGINT",
+                    &[],
                 )
-                .map_err(super::postgres_error)?;
-            let outcome = if let Some(row) = claimed.as_ref() {
-                McpRefreshClaimOutcome::Acquired(oauth_credential_from_row(row)?)
-            } else {
-                let current_query = format!(
-                    "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials WHERE tenant_id=$1 AND id=$2"
-                );
-                let current = transaction
-                    .query_opt(&current_query, &[&request.tenant_id, &request.credential_id])
-                    .map_err(super::postgres_error)?
-                    .as_ref()
-                    .map(oauth_credential_from_row)
-                    .transpose()?;
-                match current {
-                    Some(ref row)
-                        if row.revoked_at_unix.is_none()
-                            && row.version == u64::try_from(expected_version).unwrap_or(u64::MAX)
-                            && row.authorization_generation == request.authorization_generation
-                            && row.refresh_lease_expires_at_unix.is_some_and(|expiry| expiry > request.now_unix) =>
-                    {
-                        McpRefreshClaimOutcome::Busy {
-                            lease_expires_at_unix: row.refresh_lease_expires_at_unix.unwrap_or(request.now_unix),
-                        }
-                    }
-                    _ => McpRefreshClaimOutcome::Changed(current),
+                .map_err(super::postgres_error)?
+                .get::<_, i64>(0);
+            let lease_expires_at_unix =
+                require_refresh_lease_expiry(operation_now_unix, request.lease_ttl_secs)?;
+            let current = match classify_mcp_refresh_claim(current, request, operation_now_unix) {
+                McpRefreshClaimClassification::Acquirable(current) => current,
+                McpRefreshClaimClassification::Outcome(outcome) => {
+                    transaction.commit().map_err(super::postgres_error)?;
+                    return Ok(outcome);
                 }
             };
+            let claimed = transaction
+                .query_opt(
+                    &format!(
+                        "UPDATE mcp_oauth_credentials SET refresh_lease_id=$5, \
+                         refresh_lease_expires_at_unix=$6,last_refresh_outcome='refreshing' \
+                         WHERE tenant_id=$1 AND id=$2 AND version=$3 \
+                           AND authorization_generation=$4 AND revoked_at_unix IS NULL \
+                           AND (refresh_lease_id IS NULL OR refresh_lease_expires_at_unix <= $7) \
+                         RETURNING {CREDENTIAL_COLUMNS}"
+                    ),
+                    &[
+                        &request.tenant_id,
+                        &request.credential_id,
+                        &expected_version,
+                        &generation,
+                        &request.lease_id,
+                        &lease_expires_at_unix,
+                        &operation_now_unix,
+                    ],
+                )
+                .map_err(super::postgres_error)?;
+            let Some(claimed) = claimed.as_ref() else {
+                return Err(StorageError::Conflict(format!(
+                    "MCP refresh credential {} changed while claiming the locked lease",
+                    current.id
+                )));
+            };
+            let outcome = McpRefreshClaimOutcome::Acquired(oauth_credential_from_row(claimed)?);
             transaction.commit().map_err(super::postgres_error)?;
             Ok(outcome)
+        })
+    }
+
+    fn renew_mcp_oauth_refresh(
+        &self,
+        request: &McpRefreshRenewRequest,
+    ) -> Result<McpRefreshRenewOutcome, StorageError> {
+        let expected_version = super::saturating_i64(request.expected_version);
+        let generation = super::saturating_i64(request.authorization_generation);
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(super::postgres_error)?;
+            set_mcp_rls_context(&mut transaction, Some(&request.tenant_id))?;
+            let current = transaction
+                .query_opt(
+                    "SELECT version, authorization_generation, refresh_lease_id, \
+                            refresh_lease_expires_at_unix, revoked_at_unix \
+                     FROM mcp_oauth_credentials \
+                     WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                    &[&request.tenant_id, &request.credential_id],
+                )
+                .map_err(super::postgres_error)?
+                .as_ref()
+                .map(McpRefreshLeaseState::from_postgres_row);
+            if current.is_none() {
+                transaction.commit().map_err(super::postgres_error)?;
+                return Ok(McpRefreshRenewOutcome::Missing);
+            }
+            let operation_now_unix = transaction
+                .query_one(
+                    "SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::BIGINT",
+                    &[],
+                )
+                .map_err(super::postgres_error)?
+                .get::<_, i64>(0);
+            let lease_expires_at_unix = derive_refresh_lease_renewal_expiry(
+                operation_now_unix,
+                request.lease_ttl_secs,
+                current
+                    .as_ref()
+                    .and_then(|state| state.refresh_lease_expires_at_unix),
+            );
+            if let Some(outcome) = mcp_refresh_renewal_rejection(
+                current.as_ref(),
+                request,
+                operation_now_unix,
+                lease_expires_at_unix,
+            ) {
+                transaction.commit().map_err(super::postgres_error)?;
+                return Ok(outcome);
+            }
+            let lease_expires_at_unix = lease_expires_at_unix.ok_or_else(|| {
+                StorageError::Runtime("MCP refresh renewal accepted a nonpositive lease TTL".into())
+            })?;
+            let affected = transaction
+                .execute(
+                    "UPDATE mcp_oauth_credentials SET refresh_lease_expires_at_unix=$7 \
+                     WHERE tenant_id=$1 AND id=$2 AND version=$3 \
+                       AND authorization_generation=$4 AND refresh_lease_id=$5 \
+                       AND revoked_at_unix IS NULL \
+                       AND refresh_lease_expires_at_unix > $6 \
+                       AND $7 > refresh_lease_expires_at_unix",
+                    &[
+                        &request.tenant_id,
+                        &request.credential_id,
+                        &expected_version,
+                        &generation,
+                        &request.lease_id,
+                        &operation_now_unix,
+                        &lease_expires_at_unix,
+                    ],
+                )
+                .map_err(super::postgres_error)?;
+            if affected != 1 {
+                return Err(StorageError::Conflict(format!(
+                    "MCP refresh lease {} changed while renewing",
+                    request.lease_id
+                )));
+            }
+            transaction.commit().map_err(super::postgres_error)?;
+            Ok(McpRefreshRenewOutcome::Renewed {
+                lease_expires_at_unix,
+            })
         })
     }
 
@@ -944,35 +1203,21 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError> {
+        let lease_expires_at_unix =
+            require_refresh_lease_expiry(request.now_unix, request.lease_ttl_secs)?;
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(store) => {
                 let mut store = store.lock().map_err(|_| {
                     StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
                 })?;
-                let Some(mut current) = store.mcp_oauth_credentials.get(&request.credential_id)
-                else {
-                    return Ok(McpRefreshClaimOutcome::Changed(None));
-                };
-                if current.tenant_id != request.tenant_id
-                    || current.version != request.expected_version
-                    || current.authorization_generation != request.authorization_generation
-                    || current.revoked_at_unix.is_some()
-                {
-                    return Ok(McpRefreshClaimOutcome::Changed(Some(current)));
-                }
-                if current
-                    .refresh_lease_expires_at_unix
-                    .is_some_and(|expiry| expiry > request.now_unix)
-                    && current.refresh_lease_id.is_some()
-                {
-                    return Ok(McpRefreshClaimOutcome::Busy {
-                        lease_expires_at_unix: current
-                            .refresh_lease_expires_at_unix
-                            .unwrap_or(request.now_unix),
-                    });
-                }
+                let current = store.mcp_oauth_credentials.get(&request.credential_id);
+                let mut current =
+                    match classify_mcp_refresh_claim(current, request, request.now_unix) {
+                        McpRefreshClaimClassification::Acquirable(current) => current,
+                        McpRefreshClaimClassification::Outcome(outcome) => return Ok(outcome),
+                    };
                 current.refresh_lease_id = Some(request.lease_id.clone());
-                current.refresh_lease_expires_at_unix = Some(request.lease_expires_at_unix);
+                current.refresh_lease_expires_at_unix = Some(lease_expires_at_unix);
                 current.last_refresh_outcome = Some("refreshing".into());
                 store
                     .mcp_oauth_credentials
@@ -980,6 +1225,54 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 Ok(McpRefreshClaimOutcome::Acquired(current))
             }
             RuntimeControlPlaneBackend::Postgres(store) => store.claim_mcp_oauth_refresh(request),
+        }
+    }
+
+    fn renew_mcp_oauth_refresh(
+        &self,
+        request: &McpRefreshRenewRequest,
+    ) -> Result<McpRefreshRenewOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(store) => {
+                let mut store = store.lock().map_err(|_| {
+                    StorageError::Runtime("MCP OAuth credential store lock poisoned".into())
+                })?;
+                let current = store.mcp_oauth_credentials.get(&request.credential_id);
+                let lease_state = current.as_ref().map(|credential| {
+                    McpRefreshLeaseState::from_credential(credential, &request.tenant_id)
+                });
+                let lease_expires_at_unix = derive_refresh_lease_renewal_expiry(
+                    request.now_unix,
+                    request.lease_ttl_secs,
+                    lease_state
+                        .as_ref()
+                        .and_then(|state| state.refresh_lease_expires_at_unix),
+                );
+                if let Some(outcome) = mcp_refresh_renewal_rejection(
+                    lease_state.as_ref(),
+                    request,
+                    request.now_unix,
+                    lease_expires_at_unix,
+                ) {
+                    return Ok(outcome);
+                }
+                let Some(mut current) = current else {
+                    return Ok(McpRefreshRenewOutcome::Missing);
+                };
+                let lease_expires_at_unix = lease_expires_at_unix.ok_or_else(|| {
+                    StorageError::Runtime(
+                        "MCP refresh renewal accepted a nonpositive lease TTL".into(),
+                    )
+                })?;
+                current.refresh_lease_expires_at_unix = Some(lease_expires_at_unix);
+                store
+                    .mcp_oauth_credentials
+                    .insert(current.id.clone(), current);
+                Ok(McpRefreshRenewOutcome::Renewed {
+                    lease_expires_at_unix,
+                })
+            }
+            RuntimeControlPlaneBackend::Postgres(store) => store.renew_mcp_oauth_refresh(request),
         }
     }
 

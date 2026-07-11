@@ -15,23 +15,38 @@ use ferrogate_mcp::{McpAuthType, McpDispatchHeaders, McpOauthConfig};
 use ferrogate_storage::{
     McpCredentialRepository, McpIdentityAccessOutcome, McpIdentityAccessRequest,
     McpOauthCallbackCommitOutcome, McpRefreshClaimOutcome, McpRefreshClaimRequest,
-    StoredMcpOauthCredential, StoredMcpOauthFlow,
+    McpRefreshRenewOutcome, McpRefreshRenewRequest, StoredMcpOauthCredential, StoredMcpOauthFlow,
 };
+use futures_util::future::{select, Either};
 use http::StatusCode;
 use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::future::Future;
 
 const MCP_IDENTITY_KEY_ENV: &str = "FERROGATE_MCP_IDENTITY_KEY";
 const OAUTH_FLOW_TTL_SECS: i64 = 600;
 const SIGNED_IDENTITY_TTL_SECS: i64 = 60;
 const TOKEN_REFRESH_SKEW_SECS: i64 = 30;
-const REFRESH_LEASE_SECS: i64 = 10;
-const REFRESH_WAIT_TIMEOUT_SECS: u64 = 12;
-const REFRESH_POLL_MILLIS: u64 = 50;
+const REFRESH_LEASE_SECS: i64 = 18;
+const REFRESH_HEARTBEAT_SECS: u64 = 3;
+const REFRESH_RENEWAL_TIMEOUT_SECS: u64 = 6;
+const REFRESH_OWNER_TIMEOUT_SECS: u64 = 30;
+const REFRESH_WAIT_TIMEOUT_SECS: u64 = 25;
+const REFRESH_WAIT_MIN_MILLIS: u64 = 50;
+const REFRESH_WAIT_MAX_MILLIS: u64 = 750;
+const REFRESH_WAIT_JITTER_MILLIS: u64 = 50;
 const MAX_OIDC_RESPONSE_BYTES: usize = 1024 * 1024;
+
+const _: () = {
+    assert!(
+        REFRESH_LEASE_SECS as u64 > REFRESH_HEARTBEAT_SECS + (2 * REFRESH_RENEWAL_TIMEOUT_SECS) + 1
+    );
+    assert!(REFRESH_WAIT_TIMEOUT_SECS > REFRESH_LEASE_SECS as u64);
+    assert!(REFRESH_OWNER_TIMEOUT_SECS > REFRESH_WAIT_TIMEOUT_SECS);
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct McpOauthAuthorizeView {
@@ -759,6 +774,8 @@ impl AppState {
     ) -> Result<StoredMcpOauthCredential, McpIdentityError> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(REFRESH_WAIT_TIMEOUT_SECS);
         let mut candidate = credential;
+        let mut busy_logged = false;
+        let mut busy_attempt = 0_u32;
         loop {
             if candidate.revoked_at_unix.is_some() {
                 return Err(McpIdentityError::unauthorized(
@@ -786,24 +803,83 @@ impl AppState {
                         authorization_generation: generation,
                         lease_id: claim_lease_id,
                         now_unix: now,
-                        lease_expires_at_unix: now.saturating_add(REFRESH_LEASE_SECS),
+                        lease_ttl_secs: REFRESH_LEASE_SECS,
                     })
                 })
                 .await?;
             match claim {
                 McpRefreshClaimOutcome::Acquired(claimed) => {
-                    return self
-                        .refresh_claimed_mcp_credential(actor, server, claimed, lease_id)
-                        .await;
+                    let claim_outcome = if candidate.refresh_lease_id.is_some() {
+                        "takeover"
+                    } else {
+                        "acquired"
+                    };
+                    let tenant_id = claimed.tenant_id.clone();
+                    let credential_id = claimed.id.clone();
+                    let expected_version = claimed.version;
+                    let authorization_generation = claimed.authorization_generation;
+                    tracing::info!(
+                        credential_id,
+                        outcome = claim_outcome,
+                        "claimed MCP OAuth refresh lease"
+                    );
+                    let refresh = self.refresh_claimed_mcp_credential(
+                        actor,
+                        server,
+                        claimed,
+                        lease_id.clone(),
+                    );
+                    return run_with_refresh_heartbeat(
+                        refresh,
+                        Duration::from_secs(REFRESH_HEARTBEAT_SECS),
+                        Duration::from_secs(REFRESH_RENEWAL_TIMEOUT_SECS),
+                        Duration::from_secs(REFRESH_OWNER_TIMEOUT_SECS),
+                        || {
+                            self.renew_mcp_refresh_lease(
+                                &tenant_id,
+                                &credential_id,
+                                expected_version,
+                                authorization_generation,
+                                &lease_id,
+                            )
+                        },
+                    )
+                    .await;
                 }
-                McpRefreshClaimOutcome::Busy { .. } => {
+                McpRefreshClaimOutcome::Busy {
+                    lease_expires_at_unix,
+                } => {
                     if tokio::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            credential_id = candidate.id,
+                            lease_expires_at_unix,
+                            outcome = "waiter_timeout",
+                            "timed out waiting for MCP OAuth refresh lease"
+                        );
                         return Err(McpIdentityError::unavailable(
                             "mcp_identity_refresh_timeout",
                             "timed out waiting for the active MCP refresh lease",
                         ));
                     }
-                    tokio::time::sleep(Duration::from_millis(REFRESH_POLL_MILLIS)).await;
+                    if !busy_logged {
+                        tracing::debug!(
+                            credential_id = candidate.id,
+                            lease_expires_at_unix,
+                            outcome = "busy",
+                            "MCP OAuth refresh lease is owned by another request"
+                        );
+                        busy_logged = true;
+                    }
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let delay = refresh_wait_backoff(
+                        lease_expires_at_unix,
+                        now_i64(),
+                        busy_attempt,
+                        remaining,
+                        &lease_id,
+                    );
+                    busy_attempt = busy_attempt.saturating_add(1);
+                    tokio::time::sleep(delay).await;
                     candidate = self
                         .authorize_mcp_identity_actor(actor, &server.name, "mcp.identity.use")
                         .await?
@@ -816,9 +892,20 @@ impl AppState {
                         })?;
                 }
                 McpRefreshClaimOutcome::Changed(Some(current)) => {
+                    tracing::debug!(
+                        credential_id = candidate.id,
+                        outcome = "credential_changed",
+                        "MCP OAuth credential changed while claiming refresh lease"
+                    );
                     candidate = current;
+                    busy_attempt = 0;
                 }
                 McpRefreshClaimOutcome::Changed(None) => {
+                    tracing::warn!(
+                        credential_id = candidate.id,
+                        outcome = "missing",
+                        "MCP OAuth credential disappeared while claiming refresh lease"
+                    );
                     return Err(McpIdentityError::unauthorized(
                         "mcp_identity_not_connected",
                         "per-user MCP identity changed before refresh",
@@ -928,8 +1015,18 @@ impl AppState {
             if let Ok(mut metrics) = self.metrics.lock() {
                 metrics.record_mcp_identity_refresh();
             }
+            tracing::info!(
+                credential_id = next.id,
+                outcome = "completed",
+                "completed MCP OAuth credential refresh"
+            );
             return Ok(next);
         }
+        tracing::warn!(
+            credential_id = credential.id,
+            outcome = "completion_conflict",
+            "MCP OAuth credential refresh completion lost its fence"
+        );
         self.authorize_mcp_identity_actor(actor, &server.name, "mcp.identity.use")
             .await?
             .filter(|row| row.revoked_at_unix.is_none() && row.version > credential.version)
@@ -939,6 +1036,105 @@ impl AppState {
                     "MCP identity changed during refresh",
                 )
             })
+    }
+
+    async fn renew_mcp_refresh_lease(
+        &self,
+        tenant_id: &str,
+        credential_id: &str,
+        expected_version: u64,
+        authorization_generation: u64,
+        lease_id: &str,
+    ) -> Result<(), McpIdentityError> {
+        let now = now_i64();
+        let repositories = Arc::clone(&self.repositories);
+        let request = McpRefreshRenewRequest {
+            tenant_id: tenant_id.to_string(),
+            credential_id: credential_id.to_string(),
+            expected_version,
+            authorization_generation,
+            lease_id: lease_id.to_string(),
+            now_unix: now,
+            lease_ttl_secs: REFRESH_LEASE_SECS,
+        };
+        let outcome = self
+            .run_mcp_identity_storage("renew MCP refresh lease", move || {
+                repositories.renew_mcp_oauth_refresh(&request)
+            })
+            .await?;
+        match outcome {
+            McpRefreshRenewOutcome::Renewed {
+                lease_expires_at_unix,
+            } => {
+                tracing::debug!(
+                    credential_id,
+                    lease_expires_at_unix,
+                    outcome = "renewed",
+                    "renewed MCP OAuth refresh lease"
+                );
+                Ok(())
+            }
+            McpRefreshRenewOutcome::Missing => {
+                tracing::warn!(
+                    credential_id,
+                    outcome = "missing",
+                    "lost MCP OAuth refresh lease"
+                );
+                Err(McpIdentityError::unauthorized(
+                    "mcp_identity_not_connected",
+                    "per-user MCP identity was removed during refresh",
+                ))
+            }
+            McpRefreshRenewOutcome::Revoked => {
+                tracing::warn!(
+                    credential_id,
+                    outcome = "revoked",
+                    "lost MCP OAuth refresh lease"
+                );
+                Err(McpIdentityError::unauthorized(
+                    "mcp_identity_not_connected",
+                    "per-user MCP identity was revoked during refresh",
+                ))
+            }
+            McpRefreshRenewOutcome::CredentialChanged => refresh_lease_conflict(
+                credential_id,
+                "credential_changed",
+                "MCP identity changed during refresh",
+            ),
+            McpRefreshRenewOutcome::OwnershipChanged => refresh_lease_conflict(
+                credential_id,
+                "ownership_changed",
+                "MCP refresh ownership changed during refresh",
+            ),
+            McpRefreshRenewOutcome::Expired {
+                lease_expires_at_unix,
+            } => {
+                tracing::warn!(
+                    credential_id,
+                    ?lease_expires_at_unix,
+                    outcome = "expired",
+                    "lost MCP OAuth refresh lease"
+                );
+                Err(McpIdentityError::unavailable(
+                    "mcp_identity_refresh_conflict",
+                    "MCP refresh lease expired before renewal",
+                ))
+            }
+            McpRefreshRenewOutcome::NotExtended {
+                lease_expires_at_unix,
+            } => {
+                tracing::warn!(
+                    credential_id,
+                    lease_expires_at_unix,
+                    outcome = "not_extended",
+                    "MCP OAuth refresh lease was not extended"
+                );
+                Err(McpIdentityError::unavailable(
+                    "mcp_identity_refresh_conflict",
+                    "MCP refresh lease renewal did not extend ownership",
+                ))
+            }
+        }
     }
 
     async fn load_mcp_identity_access(
@@ -1027,6 +1223,106 @@ impl AppState {
             metrics.record_mcp_identity_resolution(allowed);
         }
     }
+}
+
+fn refresh_wait_backoff(
+    lease_expires_at_unix: i64,
+    now_unix: i64,
+    attempt: u32,
+    waiter_remaining: Duration,
+    jitter_key: &str,
+) -> Duration {
+    if waiter_remaining.is_zero() {
+        return Duration::ZERO;
+    }
+    let exponent = attempt.min(4);
+    let base = REFRESH_WAIT_MIN_MILLIS
+        .saturating_mul(1_u64 << exponent)
+        .min(REFRESH_WAIT_MAX_MILLIS);
+    let seed = jitter_key.bytes().fold(0_u64, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+    });
+    let jitter =
+        seed.wrapping_add(u64::from(attempt).wrapping_mul(17)) % REFRESH_WAIT_JITTER_MILLIS;
+    let candidate = Duration::from_millis(base.saturating_add(jitter).min(REFRESH_WAIT_MAX_MILLIS));
+    let until_expiry = lease_expires_at_unix.saturating_sub(now_unix);
+    let lease_cap = if until_expiry > 0 {
+        Duration::from_secs(u64::try_from(until_expiry).unwrap_or(u64::MAX))
+    } else {
+        Duration::from_millis(REFRESH_WAIT_MIN_MILLIS)
+    };
+    candidate.min(lease_cap).min(waiter_remaining)
+}
+
+fn refresh_lease_conflict(
+    credential_id: &str,
+    outcome: &'static str,
+    message: &'static str,
+) -> Result<(), McpIdentityError> {
+    tracing::warn!(credential_id, outcome, "lost MCP OAuth refresh lease");
+    Err(McpIdentityError::unavailable(
+        "mcp_identity_refresh_conflict",
+        message,
+    ))
+}
+
+async fn run_with_refresh_heartbeat<T, Work, Renew, RenewFuture>(
+    work: Work,
+    heartbeat_interval: Duration,
+    renewal_timeout: Duration,
+    owner_timeout: Duration,
+    mut renew: Renew,
+) -> Result<T, McpIdentityError>
+where
+    Work: Future<Output = Result<T, McpIdentityError>>,
+    Renew: FnMut() -> RenewFuture,
+    RenewFuture: Future<Output = Result<(), McpIdentityError>>,
+{
+    match tokio::time::timeout(renewal_timeout, renew()).await {
+        Ok(result) => result?,
+        Err(_) => return Err(refresh_renewal_timeout()),
+    }
+    let heartbeat = async {
+        loop {
+            tokio::time::sleep(heartbeat_interval).await;
+            match tokio::time::timeout(renewal_timeout, renew()).await {
+                Ok(result) => result?,
+                Err(_) => return Err(refresh_renewal_timeout()),
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), McpIdentityError>(())
+    };
+    match tokio::time::timeout(owner_timeout, select(Box::pin(work), Box::pin(heartbeat))).await {
+        Ok(Either::Left((result, _heartbeat))) => result,
+        Ok(Either::Right((result, _work))) => match result {
+            Err(error) => Err(error),
+            Ok(()) => Err(refresh_renewal_timeout()),
+        },
+        Err(_) => Err(refresh_owner_timeout()),
+    }
+}
+
+fn refresh_owner_timeout() -> McpIdentityError {
+    tracing::warn!(
+        outcome = "owner_response_timeout",
+        "stopped waiting for MCP OAuth refresh owner at the response deadline"
+    );
+    McpIdentityError::unavailable(
+        "mcp_identity_refresh_owner_timeout",
+        "MCP refresh exceeded its bounded response deadline",
+    )
+}
+
+fn refresh_renewal_timeout() -> McpIdentityError {
+    tracing::warn!(
+        outcome = "renewal_response_timeout",
+        "stopped waiting for MCP OAuth refresh lease renewal at the response deadline"
+    );
+    McpIdentityError::unavailable(
+        "mcp_identity_refresh_renewal_timeout",
+        "MCP refresh lease renewal exceeded its bounded response deadline",
+    )
 }
 
 pub(super) fn validate_mcp_identity_runtime(config: &Config) -> anyhow::Result<()> {

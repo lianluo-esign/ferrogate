@@ -34,7 +34,8 @@ mod mcp_identity;
 pub use mcp_identity::{
     McpCredentialRepository, McpIdentityAccessOutcome, McpIdentityAccessRequest,
     McpIdentityRevocationOutcome, McpOauthCallbackCommitOutcome, McpRefreshClaimOutcome,
-    McpRefreshClaimRequest, StoredMcpOauthCredential, StoredMcpOauthFlow,
+    McpRefreshClaimRequest, McpRefreshRenewOutcome, McpRefreshRenewRequest,
+    StoredMcpOauthCredential, StoredMcpOauthFlow,
 };
 
 mod budget_alerts;
