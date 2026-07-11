@@ -195,6 +195,7 @@
               "field": "method",
               "map": {
                 "initialize": "tools.read",
+                "notifications/initialized": "tools.read",
                 "ping": "tools.read",
                 "tools/list": "tools.read",
                 "tools/call": "tools.execute"

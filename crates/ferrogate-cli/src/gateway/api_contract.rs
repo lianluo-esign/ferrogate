@@ -237,6 +237,13 @@ mod tests {
             Some("tools.read")
         );
         assert_eq!(
+            discriminator
+                .map
+                .get("notifications/initialized")
+                .map(String::as_str),
+            Some("tools.read")
+        );
+        assert_eq!(
             discriminator.map.get("ping").map(String::as_str),
             Some("tools.read")
         );

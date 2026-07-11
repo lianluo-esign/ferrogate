@@ -11,6 +11,7 @@ import copy
 import unittest
 
 from openapi_contract import (
+    CONTRACT_PATH,
     OPENAPI_PATH,
     load_json,
     validate_bidirectional_drift,
@@ -144,6 +145,19 @@ class ContractTests(unittest.TestCase):
         }
         failures = validate_runtime_contract(__file__, invalid)
         self.assertTrue(any("scope_discriminator map" in failure for failure in failures))
+
+    def test_repository_mcp_scope_map_covers_supported_notifications(self) -> None:
+        runtime, failures = load_json(CONTRACT_PATH)
+        self.assertEqual(failures, [])
+        assert runtime is not None
+        operation = next(
+            operation
+            for operation in runtime["operations"]
+            if operation["operation_id"] == "mcpJsonRpc"
+        )
+        scope_map = operation["auth"]["scope_discriminator"]["map"]
+        self.assertEqual(scope_map["notifications/initialized"], "tools.read")
+        self.assertNotIn("notifications/cancelled", scope_map)
 
     def test_operation_must_belong_to_a_route_pattern(self) -> None:
         invalid = contract()
