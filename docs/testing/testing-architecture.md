@@ -132,6 +132,9 @@ through the admin API but the runtime only ever read the tenant scope.
 - **Answers:** does it work against real external services, not local doubles?
 - **Required for:** changes to the live Supabase/provider integration surface,
   run before release rather than on every PR.
+- **Load boundary:** keep every live scenario bounded and low-volume. Live
+  Supabase is not a performance target; do not run load, stress, throughput, or
+  high-concurrency benchmarks through these commands.
 
 ### 10. Performance
 
@@ -142,6 +145,9 @@ through the admin API but the runtime only ever read the tenant scope.
 - **Rule:** performance is a *separate* line from correctness. It must never
   become a silent PR gate — a perf number moving is a signal to investigate, not
   an automatic red X on an unrelated change.
+- **Storage boundary:** use in-memory storage or a dedicated local Postgres
+  instance. Never point the Performance layer at Supabase or another shared
+  managed database.
 
 ### 11. Coverage
 

@@ -13,6 +13,12 @@ gateway validation. The regular CI job keeps fast smoke coverage; this workflow
 is for dedicated load-test hosts because 10k connections and 20k-100k RPS can
 exhaust developer laptops or shared CI runners.
 
+Performance targets must use in-memory storage or a dedicated local Postgres
+instance. Never route these tests through Supabase or another shared managed
+database: the generated load can trigger provider abuse controls and consume
+capacity needed by functional validation. Live Supabase credentials must not be
+present in the load-test process environment.
+
 ## What It Measures
 
 The report workflow covers the scenarios that matter for gateway capacity
@@ -104,7 +110,9 @@ scripts/perf-gateway-report.sh \
 ```
 
 Use a local provider stub for this test. Do not point this profile at paid
-external model providers unless the budget impact is intentional.
+external model providers unless the budget impact is intentional. Keep the
+gateway storage backend local as well; do not set `FERROGATE_SUPABASE_DSN` for a
+performance run.
 
 ## Report Artifacts
 

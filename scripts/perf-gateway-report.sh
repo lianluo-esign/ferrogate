@@ -71,6 +71,20 @@ sanitize_label() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
+sanitize_header() {
+  local header="$1"
+  local name="${header%%:*}"
+  local normalized="${name,,}"
+  case "$normalized" in
+    *authorization*|*cookie*|*token*|*key*|*secret*|apikey)
+      printf '%s: [redacted]' "$name"
+      ;;
+    *)
+      printf '%s' "$header"
+      ;;
+  esac
+}
+
 url=""
 method="GET"
 rates="20000,50000,100000"
@@ -157,6 +171,11 @@ done
 [[ -n "$url" ]] || die "--url is required"
 [[ "$url" == http://* ]] || die "only local/plain HTTP targets are supported by this report script: $url"
 [[ -z "$body_file" || -f "$body_file" ]] || die "body file does not exist: $body_file"
+target_host="$(sed -E 's#^http://([^/:]+).*$#\1#' <<<"$url")"
+normalized_target_host="${target_host,,}"
+while [[ "$normalized_target_host" == *. ]]; do
+  normalized_target_host="${normalized_target_host%.}"
+done
 
 IFS=',' read -r -a rate_list <<<"$rates"
 [[ "${#rate_list[@]}" -gt 0 ]] || die "--rates must include at least one value"
@@ -174,10 +193,19 @@ if [[ "$dry_run" == "1" ]]; then
   echo "  net device: ${net_device:-auto}"
   echo "  body file: ${body_file:-not set}"
   for header in "${headers[@]}"; do
-    echo "  header: $header"
+    echo "  header: $(sanitize_header "$header")"
   done
   exit 0
 fi
+
+if compgen -e | grep -Fqi 'SUPABASE'; then
+  die "refusing to run load with Supabase credentials in the process environment; use in-memory storage or a dedicated local Postgres instance"
+fi
+case "$normalized_target_host" in
+  supabase.co|*.supabase.co|supabase.com|*.supabase.com)
+    die "refusing to run load against a Supabase endpoint"
+    ;;
+esac
 
 need_cmd vegeta
 need_cmd jq
@@ -185,7 +213,6 @@ need_cmd awk
 need_cmd ps
 need_cmd date
 
-target_host="$(sed -E 's#^http://([^/:]+).*$#\1#' <<<"$url")"
 detect_net_device() {
   if [[ -n "$net_device" ]]; then
     echo "$net_device"

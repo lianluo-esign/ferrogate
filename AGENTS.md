@@ -315,7 +315,7 @@ table is the binding taxonomy.
 | Durability | `ferrogate-test postgres-restart`, `postgres-tls-restart`, `supabase-restart` | Does persisted state survive restart/crash? |
 | E2E harness | `ferrogate-test ci` / `run-all` against a real local FerroGate image | Does the operator-visible behavior close end-to-end? |
 | Live (opt-in) | `ferrogate-test supabase-live-*`, `component-compliance-supabase`, `supabase-live-token4ai-provider` | Does it work against real external services, not just local doubles? |
-| Performance | `cargo test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf`; `--test parser_perf`; `docs/performance-testing.md` | Did latency/throughput regress? (separate from correctness; never a silent PR gate) |
+| Performance | `cargo test -p ferrogate-cli --test runtime_perf --test ai_proxy_perf`; `--test parser_perf`; `docs/performance-testing.md` | Did latency/throughput regress? (local isolated storage only; separate from correctness; never a silent PR gate) |
 | Coverage | `cargo llvm-cov`; `docs/testing/coverage-baseline-*.md` (epic #112) | Which code paths are unexercised? |
 
 Rules that make the layers binding:
@@ -382,6 +382,12 @@ exact schema and verify it is absent; early errors use the same RAII cleanup.
 Retaining state is an explicit debugging action through
 `--keep-supabase-schema`, never the default. Do not use prefix-wide cleanup that
 can delete another concurrently running scenario.
+
+Live Supabase is for bounded functional, contract, migration, and durability
+proof only. Never run performance, load, stress, sustained-throughput, or
+high-concurrency benchmarks against Supabase. Performance tests must use
+in-memory storage or a dedicated local Postgres instance so they cannot trigger
+managed-service abuse controls or consume shared service capacity.
 
 Known gap — do not present the whole provider matrix as done. The component
 compliance executor now covers tenant/project/workspace/key quota scopes, the

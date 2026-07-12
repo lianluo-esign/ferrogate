@@ -89,8 +89,24 @@ jobs:
     needs: rust-ci
     uses: ./.github/workflows/ci-image.yml
     permissions:
+      actions: read
       contents: write
       packages: write
       id-token: write
       attestations: write
+    secrets: inherit
+
+  package:
+    name: publish-release-tags
+    needs: image
+    uses: ./.github/workflows/package.yml
+    with:
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+      release-tag: ${{ github.event.release.tag_name }}
+      source-digest: ${{ github.sha }}
+      workflow-ref: ${{ github.ref }}
+    permissions:
+      contents: read
+      packages: write
     secrets: inherit

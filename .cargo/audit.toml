@@ -10,17 +10,8 @@
 # for metrics exposition. Remove this ignore once Pingora can use prometheus 0.14+ or another
 # metrics path that no longer pulls protobuf 2.x.
 #
-# The rustls-webpki 0.102.8 advisories below are pulled in through
-# libsql 0.10.0-pre.4 -> hyper-rustls 0.25 -> rustls 0.22. FerroGate keeps
-# libsql's `tls` feature enabled because remote Turso/libSQL storage depends
-# on it. Remove these ignores when libsql publishes a remote TLS stack based
-# on rustls-webpki >=0.103.13.
 ignore = [
     "RUSTSEC-2024-0437",
-    "RUSTSEC-2026-0049",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
 ]
 informational_warnings = ["unmaintained"]
 severity_threshold = "low"

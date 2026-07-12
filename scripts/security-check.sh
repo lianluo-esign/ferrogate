@@ -25,21 +25,21 @@ scan_file="$(mktemp)"
 trap 'rm -f "$scan_file"' EXIT
 
 rg_common=(
-  --hidden
   --line-number
   --no-heading
-  --glob '!target/**'
-  --glob '!.git/**'
-  --glob '!.jcode/**'
-  --glob '!.references/**'
-  --glob '!Cargo.lock'
 )
+
+mapfile -d '' tracked_secret_scan_files < <(git ls-files -z -- ':!:Cargo.lock')
+if [[ "${#tracked_secret_scan_files[@]}" -eq 0 ]]; then
+  echo "secret scan found no tracked files" >&2
+  exit 1
+fi
 
 scan_secret_pattern() {
   local label="$1"
   local pattern="$2"
   set +e
-  rg "${rg_common[@]}" -- "$pattern" . >>"$scan_file"
+  rg "${rg_common[@]}" -- "$pattern" "${tracked_secret_scan_files[@]}" >>"$scan_file"
   local status=$?
   set -e
 
@@ -69,6 +69,12 @@ if [[ "$scan_failed" -ne 0 ]]; then
   sed -n '1,120p' "$scan_file" >&2
   exit 1
 fi
+
+echo "==> cargo-audit exception policy"
+python3 scripts/check-audit-exceptions.py
+
+echo "==> immutable GitHub Actions references"
+python3 scripts/check-workflow-action-pins.py
 
 if cargo deny --version >/dev/null 2>&1; then
   echo "==> cargo deny"

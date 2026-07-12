@@ -3,15 +3,16 @@
 # Author: jamesduan (X: https://x.com/JamesDuanL)
 # Created: 2026-07-09
 # description: Shared FerroGate image supply-chain steps (issue #189) — SBOM
-# generation, keyless cosign signing, and GitHub build provenance attestation
-# for a published container image digest. Used by ci-image.yml and
-# package.yml so the two publish paths do not duplicate this logic.
+# generation, keyless cosign signing, signed SBOM/build-input predicates, and
+# GitHub build provenance attestation for a published container image digest.
+# Used by ci-image.yml before package.yml verifies and promotes the resulting
+# immutable digest.
 
 name: Image supply chain
 description: >
-  Generates an SBOM, signs the image digest with cosign using keyless GitHub
-  Actions OIDC signing, and attests build provenance for a published
-  FerroGate container image digest.
+  Generates and attests an SBOM, signs the image digest with keyless GitHub
+  Actions OIDC, records signed source/build inputs, and attests GitHub build
+  provenance for a published FerroGate container image digest.
 
 inputs:
   image:
@@ -23,27 +24,81 @@ inputs:
   sbom-artifact-name:
     description: "Name for the uploaded SBOM workflow artifact"
     required: true
+  signer-workflow-ref:
+    description: "Exact repository workflow path and git ref used by the signing job"
+    required: true
 
 runs:
   using: composite
   steps:
+    - name: Validate immutable image subject
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ ! "${{ inputs.digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "::error::image digest must be an immutable sha256 subject"
+          exit 1
+        fi
+        expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/ci-image.yml@${GITHUB_REF}"
+        if [[ "${{ inputs.signer-workflow-ref }}" != "$expected_workflow_ref" ]]; then
+          echo "::error::signer workflow ref does not match the immutable ci-image trust root"
+          exit 1
+        fi
+
     - name: Generate SBOM
-      uses: anchore/sbom-action@v0.24.0
+      uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
       with:
         image: ${{ inputs.image }}@${{ inputs.digest }}
         format: spdx-json
         artifact-name: ${{ inputs.sbom-artifact-name }}
-        upload-release-assets: false
+        output-file: ${{ runner.temp }}/ferrogate-image.spdx.json
+        upload-release-assets: true
 
     - name: Install cosign
-      uses: sigstore/cosign-installer@v4.1.2
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: Record immutable build inputs
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        DIGEST: ${{ inputs.digest }}
+      run: |
+        set -euo pipefail
+        cargo_lock_sha="$(sha256sum Cargo.lock | awk '{print $1}')"
+        dockerfile_sha="$(sha256sum Dockerfile | awk '{print $1}')"
+        jq -n \
+          --arg repository "${GITHUB_REPOSITORY}" \
+          --arg workflow_ref "${{ inputs.signer-workflow-ref }}" \
+          --arg commit_sha "${GITHUB_SHA}" \
+          --arg image "${IMAGE}" \
+          --arg digest "${DIGEST}" \
+          --arg cargo_lock_sha256 "${cargo_lock_sha}" \
+          --arg dockerfile_sha256 "${dockerfile_sha}" \
+          '{repository:$repository,workflow_ref:$workflow_ref,commit_sha:$commit_sha,image:$image,digest:$digest,cargo_lock_sha256:$cargo_lock_sha256,dockerfile_sha256:$dockerfile_sha256}' \
+          >"${RUNNER_TEMP}/ferrogate-build-inputs.json"
 
     - name: Sign image digest (keyless OIDC)
       shell: bash
       run: cosign sign --yes "${{ inputs.image }}@${{ inputs.digest }}"
 
+    - name: Attest image SBOM (keyless OIDC)
+      shell: bash
+      run: |
+        cosign attest --yes \
+          --predicate "${RUNNER_TEMP}/ferrogate-image.spdx.json" \
+          --type spdxjson \
+          "${{ inputs.image }}@${{ inputs.digest }}"
+
+    - name: Attest source and build inputs (keyless OIDC)
+      shell: bash
+      run: |
+        cosign attest --yes \
+          --predicate "${RUNNER_TEMP}/ferrogate-build-inputs.json" \
+          --type "https://token4ai.cloud/ferrogate/build-inputs/v1" \
+          "${{ inputs.image }}@${{ inputs.digest }}"
+
     - name: Attest build provenance
-      uses: actions/attest-build-provenance@v3
+      uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
       with:
         subject-name: ${{ inputs.image }}
         subject-digest: ${{ inputs.digest }}

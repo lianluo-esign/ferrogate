@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install Rust toolchain
         run: |
@@ -40,6 +40,12 @@ jobs:
           FERROGATE_SECURITY_REQUIRE_TOOLS: "1"
         run: ./scripts/security-check.sh
 
+      - name: Test image supply-chain verifier policy
+        run: |
+          ./scripts/test-verify-image-supply-chain.sh
+          ./scripts/test-perf-gateway-report.sh
+          python3 -m unittest scripts/test_audit_exceptions.py scripts/test_workflow_action_pins.py
+
       - name: Run config validation tests
         run: |
           cargo test -p ferrogate-cli --all-features config::tests
@@ -51,7 +57,7 @@ jobs:
           python3 scripts/check-openapi.py
 
       - name: Install Node.js for generated client smoke
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
