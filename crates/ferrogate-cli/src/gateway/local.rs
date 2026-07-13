@@ -3357,7 +3357,7 @@ impl FerroGateway {
                     Ok(identity) => identity,
                     Err(error) => {
                         state.record_mcp_identity_resolution_metric(false);
-                        state.record_admin_audit_event(tool_audit_event_draft_for_target(
+                        let audit = tool_audit_event_draft_for_target(
                             ctx,
                             auth,
                             execution,
@@ -3368,7 +3368,8 @@ impl FerroGateway {
                                 "server={server_name} tool={} decision=deny code={}",
                                 request.name, error.code
                             ),
-                        ));
+                        );
+                        let error = state.record_mcp_identity_error_audit(audit, error).await;
                         return Err(ToolExecutionHttpError {
                             status: error.status,
                             code: error.code,

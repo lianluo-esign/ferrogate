@@ -389,6 +389,22 @@ high-concurrency benchmarks against Supabase. Performance tests must use
 in-memory storage or a dedicated local Postgres instance so they cannot trigger
 managed-service abuse controls or consume shared service capacity.
 
+Supabase coordination never waits. Keep the database layer to simple indexed
+CRUD/CAS, and make each coordination mutation one short conditional CAS
+statement that returns immediately. Rust async owns business orchestration,
+wait, retry, and backoff. Do not use long transactions, lock waits, `pg_sleep`,
+database retry loops, or external work inside a Supabase/Postgres transaction;
+use a transaction only for the smallest irreducible atomic invariant that
+cannot be expressed as one conditional DML/CTE.
+
+Before a database mutation crosses an async timeout, define and test its result
+truth table, including `CommitInFlight` and `OutcomeUnknown`. A stale reread
+while the original mutation is unresolved never proves failure. Only definitive
+pre-commit cancellation increments cancellation metrics; otherwise preserve
+the operation-specific lease/version/generation token through the generic
+scheduler and report unknown until durable success is proven. Concurrency tests
+for these transitions use barriers or channels, not timing sleeps.
+
 Provider matrix status: the component compliance executor covers
 tenant/project/workspace/key quota scopes, Guardrail allow/block evidence, and
 every canonical provider adapter family. Runtime and test harness share the

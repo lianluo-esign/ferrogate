@@ -121,14 +121,15 @@ impl FerroGateway {
                     write_json_response(session, StatusCode::OK, &view, &ctx.request_id).await
                 }
                 Err(error) => {
-                    state.record_admin_audit_event(admin_audit_event_draft_for_target(
+                    let audit = admin_audit_event_draft_for_target(
                         ctx,
                         &auth,
                         "mcp.identity.authorize",
                         target,
                         "rejected",
                         format!("server={server_name} decision=deny code={}", error.code),
-                    ));
+                    );
+                    let error = state.record_mcp_identity_error_audit(audit, error).await;
                     write_json_error(
                         session,
                         error.status,

@@ -1513,6 +1513,21 @@ BEGIN
 END
 $$;
 
+-- Issue #217: revoke consumes every pending flow for one tenant/workspace/user/server
+-- identity. Keep that bounded lookup index partial so completed flows do not bloat it.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (31, '031_mcp_pending_flow_lookup_index')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        CREATE INDEX IF NOT EXISTS idx_mcp_oauth_flows_pending_subject
+            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)
+            WHERE consumed_at_unix IS NULL;
+    END IF;
+END
+$$;
+
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (1, '001_init_postgres')
 ON CONFLICT (version) DO UPDATE
@@ -1660,4 +1675,8 @@ SET name = EXCLUDED.name;
 
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (30, '030_provider_attempt_settlement_identity')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (31, '031_mcp_pending_flow_lookup_index')
 ON CONFLICT (version) DO NOTHING;

@@ -996,6 +996,8 @@ impl SharedAppState {
     }
 }
 
+const MCP_IDENTITY_ERROR_AUDIT_MAX_IN_FLIGHT: usize = 8;
+
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
@@ -1025,6 +1027,7 @@ pub(crate) struct AppState {
     self_hosted_dispatch: Arc<Mutex<SelfHostedWorkerDispatchRuntime>>,
     mcp_manager: Arc<McpManager>,
     mcp_dispatch_permits: Arc<Semaphore>,
+    mcp_identity_error_audit_permits: Arc<Semaphore>,
     approvals: ApprovalRegistry,
     access_log_error_limiter: Arc<AccessLogRateLimiter>,
     policy_engine: Arc<BasicPolicyEngine>,
@@ -2490,6 +2493,11 @@ struct GatewayMetricsAccumulator {
     mcp_identity_failure_total: u64,
     mcp_identity_refresh_total: u64,
     mcp_identity_revocation_total: u64,
+    mcp_refresh_response_deadline_total: u64,
+    mcp_refresh_storage_cancellation_total: u64,
+    mcp_refresh_storage_outcome_unknown_total: u64,
+    mcp_refresh_late_reconciliation_total: u64,
+    mcp_identity_error_audit_deadline_total: u64,
     /// Requests rejected pre-authentication for not matching a configured
     /// `network_access.ip_allowlist` (issue #166).
     network_access_denied_total: u64,
@@ -2826,6 +2834,34 @@ impl GatewayMetricsAccumulator {
         self.mcp_identity_revocation_total = self.mcp_identity_revocation_total.saturating_add(1);
     }
 
+    fn record_mcp_refresh_response_deadline(&mut self) {
+        self.mcp_refresh_response_deadline_total =
+            self.mcp_refresh_response_deadline_total.saturating_add(1);
+    }
+
+    fn record_mcp_refresh_storage_cancellation(&mut self) {
+        self.mcp_refresh_storage_cancellation_total = self
+            .mcp_refresh_storage_cancellation_total
+            .saturating_add(1);
+    }
+
+    fn record_mcp_refresh_storage_outcome_unknown(&mut self) {
+        self.mcp_refresh_storage_outcome_unknown_total = self
+            .mcp_refresh_storage_outcome_unknown_total
+            .saturating_add(1);
+    }
+
+    fn record_mcp_refresh_late_reconciliation(&mut self) {
+        self.mcp_refresh_late_reconciliation_total =
+            self.mcp_refresh_late_reconciliation_total.saturating_add(1);
+    }
+
+    fn record_mcp_identity_error_audit_deadline(&mut self) {
+        self.mcp_identity_error_audit_deadline_total = self
+            .mcp_identity_error_audit_deadline_total
+            .saturating_add(1);
+    }
+
     fn record_network_access_decision(&mut self, decision: NetworkAccessDecision) {
         match decision {
             NetworkAccessDecision::Allowed => {}
@@ -2873,6 +2909,12 @@ impl GatewayMetricsAccumulator {
             mcp_identity_failure_total: self.mcp_identity_failure_total,
             mcp_identity_refresh_total: self.mcp_identity_refresh_total,
             mcp_identity_revocation_total: self.mcp_identity_revocation_total,
+            mcp_refresh_response_deadline_total: self.mcp_refresh_response_deadline_total,
+            mcp_refresh_storage_cancellation_total: self.mcp_refresh_storage_cancellation_total,
+            mcp_refresh_storage_outcome_unknown_total: self
+                .mcp_refresh_storage_outcome_unknown_total,
+            mcp_refresh_late_reconciliation_total: self.mcp_refresh_late_reconciliation_total,
+            mcp_identity_error_audit_deadline_total: self.mcp_identity_error_audit_deadline_total,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
             network_access_denied_total: self.network_access_denied_total,
@@ -3819,6 +3861,9 @@ impl AppState {
             mcp_manager: Arc::new(McpManager::from_configs(&mcp_servers)),
             mcp_dispatch_permits: Arc::new(Semaphore::new(
                 config.reliability.mcp_dispatch_max_concurrency,
+            )),
+            mcp_identity_error_audit_permits: Arc::new(Semaphore::new(
+                MCP_IDENTITY_ERROR_AUDIT_MAX_IN_FLIGHT,
             )),
             approvals: ApprovalRegistry::new(),
             access_log_error_limiter: Arc::new(AccessLogRateLimiter::default()),

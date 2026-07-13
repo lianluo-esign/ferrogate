@@ -375,7 +375,7 @@ async fn tools_call(
         Ok(identity) => identity,
         Err(identity_error) => {
             state.record_mcp_identity_resolution_metric(false);
-            state.record_admin_audit_event(audit_event(
+            let audit = audit_event(
                 ctx,
                 auth,
                 skill_context,
@@ -386,7 +386,10 @@ async fn tools_call(
                     "server={server_name} tool={name} decision=deny code={}",
                     identity_error.code
                 ),
-            ));
+            );
+            let identity_error = state
+                .record_mcp_identity_error_audit(audit, identity_error)
+                .await;
             return error(
                 id,
                 mcp_error_code(identity_error.code),

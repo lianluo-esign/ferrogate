@@ -4,7 +4,11 @@
 // Created: 2026-07-11
 // description: Focused schema-contract query regression coverage for issue #213.
 
-use super::PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY;
+use super::{
+    existing_postgres_session_sql, postgres_transport_config, PostgresStorageConfig,
+    PostgresTlsMode, POSTGRES_SCHEMA_NAME, POSTGRES_SCHEMA_SQL, POSTGRES_SCHEMA_VERSION,
+    PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY,
+};
 
 #[test]
 fn provider_attempt_foreign_key_query_uses_the_declared_constraint_alias() {
@@ -19,4 +23,56 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
         .contains("JOIN pg_namespace AS target_namespace"));
     assert!(PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY
         .contains("target_namespace.nspname = current_schema()"));
+}
+
+#[test]
+fn authoritative_reread_session_uses_existing_schema_without_ddl() {
+    let sql = existing_postgres_session_sql(
+        &PostgresStorageConfig {
+            dsn: "postgresql://example.invalid/db".into(),
+            pool_size: 1,
+            tls_mode: PostgresTlsMode::Require,
+            tls_ca_cert_path: None,
+            connect_timeout_secs: 10,
+            statement_timeout_millis: 30_000,
+            schema: Some("tenant schema".into()),
+            search_path: vec!["public".into()],
+        },
+        std::time::Duration::from_secs(3),
+    );
+
+    assert!(sql.contains("SET statement_timeout = 3000"));
+    assert!(sql.contains("SET search_path TO \"tenant schema\", \"public\""));
+    assert!(!sql.contains("CREATE"));
+    assert!(!sql.contains("ALTER"));
+    assert!(!sql.contains("DROP"));
+}
+
+#[test]
+fn authoritative_reread_transport_caps_connect_and_tcp_user_timeouts() {
+    let config = PostgresStorageConfig {
+        dsn: "postgresql://example.invalid/db".into(),
+        pool_size: 1,
+        tls_mode: PostgresTlsMode::Require,
+        tls_ca_cert_path: None,
+        connect_timeout_secs: 10,
+        statement_timeout_millis: 30_000,
+        schema: Some("tenant".into()),
+        search_path: vec!["public".into()],
+    };
+    let timeout = std::time::Duration::from_secs(3);
+    let transport = postgres_transport_config(&config, timeout, Some(timeout)).unwrap();
+
+    assert_eq!(transport.get_connect_timeout(), Some(&timeout));
+    assert_eq!(transport.get_tcp_user_timeout(), Some(&timeout));
+}
+
+#[test]
+fn schema_contract_includes_pending_mcp_flow_lookup_index_migration() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 31);
+    assert_eq!(POSTGRES_SCHEMA_NAME, "031_mcp_pending_flow_lookup_index");
+    assert!(POSTGRES_SCHEMA_SQL.contains("VALUES (31, '031_mcp_pending_flow_lookup_index')"));
+    assert!(POSTGRES_SCHEMA_SQL.contains(
+        "idx_mcp_oauth_flows_pending_subject\n            ON mcp_oauth_flows(tenant_id, workspace_id, user_id, server_name)\n            WHERE consumed_at_unix IS NULL"
+    ));
 }

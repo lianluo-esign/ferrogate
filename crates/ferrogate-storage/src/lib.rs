@@ -13,8 +13,11 @@
 use std::{
     collections::{HashMap, VecDeque},
     str::FromStr,
-    sync::{Arc, Condvar, Mutex},
-    time::Duration,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    time::{Duration, Instant},
 };
 
 use ferrogate_billing::{BillingEvent, TokenUsage};
@@ -37,6 +40,181 @@ pub use mcp_identity::{
     McpRefreshClaimRequest, McpRefreshRenewOutcome, McpRefreshRenewRequest,
     StoredMcpOauthCredential, StoredMcpOauthFlow,
 };
+
+const STORAGE_OPERATION_ACTIVE: u8 = 0;
+const STORAGE_OPERATION_CANCELLED: u8 = 1;
+const STORAGE_OPERATION_COMMITTING: u8 = 2;
+const STORAGE_OPERATION_FINISHED: u8 = 3;
+
+#[derive(Debug)]
+struct StorageOperationInner {
+    name: &'static str,
+    deadline: Instant,
+    commit_deadline_policy: StorageCommitDeadlinePolicy,
+    state: AtomicU8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageCommitDeadlinePolicy {
+    Cancel,
+    Reconcile { commit_timeout: Duration },
+}
+
+/// A deadline and commit fence shared by an async caller and blocking storage work.
+///
+/// Cancellation wins directly while the operation is active. Once the blocking
+/// side acquires the commit fence, ordinary operations request PostgreSQL commit
+/// cancellation and report only the authoritative result or explicit pending
+/// reconciliation. Completion operations opt into late-result reconciliation.
+#[derive(Debug, Clone)]
+pub struct StorageOperation {
+    inner: Arc<StorageOperationInner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageOperationCancelOutcome {
+    Cancelled,
+    AlreadyCancelled,
+    CommitStarted,
+    Finished,
+}
+
+impl StorageOperation {
+    pub fn new(name: &'static str, timeout: Duration) -> Self {
+        Self::with_commit_deadline_policy(name, timeout, StorageCommitDeadlinePolicy::Cancel)
+    }
+
+    pub fn new_reconcilable_commit(
+        name: &'static str,
+        timeout: Duration,
+        commit_timeout: Duration,
+    ) -> Self {
+        Self::with_commit_deadline_policy(
+            name,
+            timeout,
+            StorageCommitDeadlinePolicy::Reconcile { commit_timeout },
+        )
+    }
+
+    fn with_commit_deadline_policy(
+        name: &'static str,
+        timeout: Duration,
+        commit_deadline_policy: StorageCommitDeadlinePolicy,
+    ) -> Self {
+        Self {
+            inner: Arc::new(StorageOperationInner {
+                name,
+                deadline: Instant::now()
+                    .checked_add(timeout)
+                    .unwrap_or_else(Instant::now),
+                commit_deadline_policy,
+                state: AtomicU8::new(STORAGE_OPERATION_ACTIVE),
+            }),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.inner.name
+    }
+
+    pub fn reconciles_commit_after_deadline(&self) -> bool {
+        matches!(
+            self.inner.commit_deadline_policy,
+            StorageCommitDeadlinePolicy::Reconcile { .. }
+        )
+    }
+
+    pub fn reconciliation_commit_timeout(&self) -> Option<Duration> {
+        match self.inner.commit_deadline_policy {
+            StorageCommitDeadlinePolicy::Cancel => None,
+            StorageCommitDeadlinePolicy::Reconcile { commit_timeout } => Some(commit_timeout),
+        }
+    }
+
+    pub fn cancel(&self) -> StorageOperationCancelOutcome {
+        match self.inner.state.compare_exchange(
+            STORAGE_OPERATION_ACTIVE,
+            STORAGE_OPERATION_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => StorageOperationCancelOutcome::Cancelled,
+            Err(STORAGE_OPERATION_CANCELLED) => StorageOperationCancelOutcome::AlreadyCancelled,
+            Err(STORAGE_OPERATION_COMMITTING) => StorageOperationCancelOutcome::CommitStarted,
+            Err(STORAGE_OPERATION_FINISHED) => StorageOperationCancelOutcome::Finished,
+            Err(_) => StorageOperationCancelOutcome::AlreadyCancelled,
+        }
+    }
+
+    pub fn remaining(&self, stage: &'static str) -> Result<Duration, StorageError> {
+        match self.inner.state.load(Ordering::Acquire) {
+            STORAGE_OPERATION_ACTIVE => {}
+            STORAGE_OPERATION_CANCELLED => {
+                return Err(StorageError::OperationCancelled {
+                    operation: self.name(),
+                    stage,
+                });
+            }
+            STORAGE_OPERATION_COMMITTING | STORAGE_OPERATION_FINISHED => {
+                return Err(StorageError::Runtime(format!(
+                    "storage operation {} was reused after its commit fence",
+                    self.name()
+                )));
+            }
+            _ => unreachable!("invalid storage operation state"),
+        }
+        let Some(remaining) = self.inner.deadline.checked_duration_since(Instant::now()) else {
+            let _ = self.cancel();
+            return Err(StorageError::OperationDeadlineExceeded {
+                operation: self.name(),
+                stage,
+                commit_started: false,
+            });
+        };
+        if remaining.is_zero() {
+            let _ = self.cancel();
+            return Err(StorageError::OperationDeadlineExceeded {
+                operation: self.name(),
+                stage,
+                commit_started: false,
+            });
+        }
+        Ok(remaining)
+    }
+
+    pub fn check_active(&self, stage: &'static str) -> Result<(), StorageError> {
+        self.remaining(stage).map(|_| ())
+    }
+
+    pub fn begin_commit(&self, stage: &'static str) -> Result<(), StorageError> {
+        self.check_active(stage)?;
+        match self.inner.state.compare_exchange(
+            STORAGE_OPERATION_ACTIVE,
+            STORAGE_OPERATION_COMMITTING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(STORAGE_OPERATION_CANCELLED) => Err(StorageError::OperationCancelled {
+                operation: self.name(),
+                stage,
+            }),
+            Err(_) => Err(StorageError::Runtime(format!(
+                "storage operation {} attempted to acquire its commit fence twice",
+                self.name()
+            ))),
+        }
+    }
+
+    pub fn finish_commit(&self) {
+        let _ = self.inner.state.compare_exchange(
+            STORAGE_OPERATION_COMMITTING,
+            STORAGE_OPERATION_FINISHED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
+    }
+}
 
 mod budget_alerts;
 pub use budget_alerts::{budget_alert_notification_id, StoredBudgetAlertNotification};
@@ -316,8 +494,8 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 30;
-const POSTGRES_SCHEMA_NAME: &str = "030_provider_attempt_settlement_identity";
+const POSTGRES_SCHEMA_VERSION: u64 = 31;
+const POSTGRES_SCHEMA_NAME: &str = "031_mcp_pending_flow_lookup_index";
 const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
 const PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY: &str =
     "SELECT source_attribute.attname, target_namespace.nspname = current_schema(), \
@@ -419,6 +597,19 @@ pub enum StorageError {
     Serialization(String),
     Conflict(String),
     NotFound(String),
+    OperationDeadlineExceeded {
+        operation: &'static str,
+        stage: &'static str,
+        commit_started: bool,
+    },
+    OperationCancelled {
+        operation: &'static str,
+        stage: &'static str,
+    },
+    OperationCommitOutcomeUnknown {
+        operation: &'static str,
+        stage: &'static str,
+    },
 }
 
 impl std::fmt::Display for StorageError {
@@ -438,6 +629,20 @@ impl std::fmt::Display for StorageError {
             }
             StorageError::Conflict(error) => write!(formatter, "storage conflict: {error}"),
             StorageError::NotFound(error) => write!(formatter, "storage record not found: {error}"),
+            StorageError::OperationDeadlineExceeded {
+                operation, stage, ..
+            } => write!(
+                formatter,
+                "storage operation {operation} exceeded its deadline during {stage}"
+            ),
+            StorageError::OperationCancelled { operation, stage } => write!(
+                formatter,
+                "storage operation {operation} was cancelled during {stage}"
+            ),
+            StorageError::OperationCommitOutcomeUnknown { operation, stage } => write!(
+                formatter,
+                "storage operation {operation} has an unknown commit outcome after {stage}"
+            ),
         }
     }
 }
@@ -887,6 +1092,7 @@ struct PostgresControlPlaneStore {
 struct PostgresClientPool {
     clients: Mutex<Vec<PostgresClient>>,
     available: Condvar,
+    config: PostgresStorageConfig,
 }
 
 impl std::fmt::Debug for PostgresControlPlaneStore {
@@ -915,6 +1121,7 @@ impl PostgresControlPlaneStore {
             pool: Arc::new(PostgresClientPool {
                 clients: Mutex::new(clients),
                 available: Condvar::new(),
+                config,
             }),
             schema: StorageSchemaEvidence::postgres_expected(),
         };
@@ -951,6 +1158,7 @@ impl PostgresControlPlaneStore {
             pool: Arc::new(PostgresClientPool {
                 clients: Mutex::new(clients),
                 available: Condvar::new(),
+                config,
             }),
             schema: StorageSchemaEvidence::postgres_expected(),
         };
@@ -3955,19 +4163,70 @@ impl PostgresClientPool {
             self.available.notify_one();
         }
     }
+
+    fn acquire_until(&self, operation: &StorageOperation) -> Result<PostgresClient, StorageError> {
+        let mut clients = self.clients.lock().map_err(|_| {
+            StorageError::Postgres("postgres control-plane client pool mutex is poisoned".into())
+        })?;
+        tracing::debug!(
+            operation = operation.name(),
+            phase = "pool_acquire_enter",
+            available_clients = clients.len(),
+            "entered deadline-aware PostgreSQL pool acquisition"
+        );
+        loop {
+            operation.check_active("pool acquisition")?;
+            if let Some(client) = clients.pop() {
+                tracing::debug!(
+                    operation = operation.name(),
+                    phase = "pool_acquire_exit",
+                    outcome = "acquired",
+                    available_clients = clients.len(),
+                    "acquired PostgreSQL client before operation deadline"
+                );
+                return Ok(client);
+            }
+            let remaining = operation.remaining("pool acquisition")?;
+            tracing::debug!(
+                operation = operation.name(),
+                phase = "pool_acquire_wait",
+                ?remaining,
+                "waiting for PostgreSQL client until operation deadline"
+            );
+            let (next, wait) = self
+                .available
+                .wait_timeout(clients, remaining)
+                .map_err(|_| {
+                    StorageError::Postgres(
+                        "postgres control-plane client pool mutex is poisoned".into(),
+                    )
+                })?;
+            clients = next;
+            if wait.timed_out() && clients.is_empty() {
+                let _ = operation.cancel();
+                tracing::warn!(
+                    operation = operation.name(),
+                    phase = "pool_acquire_exit",
+                    outcome = "deadline",
+                    "PostgreSQL pool acquisition reached the operation deadline"
+                );
+                return Err(StorageError::OperationDeadlineExceeded {
+                    operation: operation.name(),
+                    stage: "pool acquisition",
+                    commit_started: false,
+                });
+            }
+        }
+    }
 }
 
-fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {
-    let mut pg_config = postgres::Config::from_str(&config.dsn).map_err(postgres_error)?;
-    pg_config.connect_timeout(Duration::from_secs(config.connect_timeout_secs));
-    pg_config.ssl_mode(match config.tls_mode {
-        PostgresTlsMode::Disable => PostgresSslMode::Disable,
-        PostgresTlsMode::Prefer => PostgresSslMode::Prefer,
-        PostgresTlsMode::Require => PostgresSslMode::Require,
-        PostgresTlsMode::VerifyCa | PostgresTlsMode::VerifyFull => PostgresSslMode::Require,
-    });
-
-    let mut client = match config.tls_mode {
+fn connect_postgres_transport(
+    config: &PostgresStorageConfig,
+    connect_timeout: Duration,
+    tcp_user_timeout: Option<Duration>,
+) -> Result<PostgresClient, StorageError> {
+    let pg_config = postgres_transport_config(config, connect_timeout, tcp_user_timeout)?;
+    let client = match config.tls_mode {
         PostgresTlsMode::Disable => pg_config
             .connect(NoTls)
             .map_err(postgres_connection_error)?,
@@ -3981,8 +4240,76 @@ fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresCli
                 .map_err(postgres_connection_error)?
         }
     };
+    Ok(client)
+}
+
+fn postgres_transport_config(
+    config: &PostgresStorageConfig,
+    connect_timeout: Duration,
+    tcp_user_timeout: Option<Duration>,
+) -> Result<postgres::Config, StorageError> {
+    let mut pg_config = postgres::Config::from_str(&config.dsn).map_err(postgres_error)?;
+    pg_config.connect_timeout(connect_timeout);
+    if let Some(tcp_user_timeout) = tcp_user_timeout {
+        pg_config.tcp_user_timeout(tcp_user_timeout);
+    }
+    pg_config.ssl_mode(match config.tls_mode {
+        PostgresTlsMode::Disable => PostgresSslMode::Disable,
+        PostgresTlsMode::Prefer => PostgresSslMode::Prefer,
+        PostgresTlsMode::Require => PostgresSslMode::Require,
+        PostgresTlsMode::VerifyCa | PostgresTlsMode::VerifyFull => PostgresSslMode::Require,
+    });
+    Ok(pg_config)
+}
+
+fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresClient, StorageError> {
+    let mut client = connect_postgres_transport(
+        config,
+        Duration::from_secs(config.connect_timeout_secs),
+        None,
+    )?;
     initialize_postgres_session(&mut client, config)?;
     Ok(client)
+}
+
+fn connect_existing_postgres_client(
+    config: &PostgresStorageConfig,
+    deadline: Instant,
+) -> Result<PostgresClient, StorageError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| {
+            StorageError::Runtime("authoritative PostgreSQL reread deadline elapsed".into())
+        })?;
+    let mut client = connect_postgres_transport(config, remaining, Some(remaining))?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| {
+            StorageError::Runtime("authoritative PostgreSQL reread deadline elapsed".into())
+        })?;
+    client
+        .batch_execute(&existing_postgres_session_sql(config, remaining))
+        .map_err(postgres_error)?;
+    Ok(client)
+}
+
+fn existing_postgres_session_sql(config: &PostgresStorageConfig, remaining: Duration) -> String {
+    let fractional_millis = u128::from(remaining.subsec_nanos() % 1_000_000 != 0);
+    let timeout_millis = remaining
+        .as_millis()
+        .saturating_add(fractional_millis)
+        .clamp(1, i32::MAX as u128);
+    let mut statements = vec![
+        format!("SET statement_timeout = {timeout_millis}"),
+        "SET lock_timeout = '1ms'".into(),
+    ];
+    if config.schema.is_some() || !config.search_path.is_empty() {
+        statements.push(format!(
+            "SET search_path TO {}",
+            postgres_search_path_sql(config)
+        ));
+    }
+    statements.join("; ")
 }
 
 fn build_postgres_tls_connector(
@@ -4397,6 +4724,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_guardrail_checks_detector_verdict",
         "idx_guardrail_checks_error",
         "idx_mcp_oauth_flows_expiry",
+        "idx_mcp_oauth_flows_pending_subject",
         "idx_mcp_oauth_credentials_subject",
         "idx_mcp_oauth_credentials_expiry",
         "idx_mcp_oauth_credentials_refresh_lease",
@@ -4437,6 +4765,27 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
                 "required schema index {index} is missing"
             )));
         }
+    }
+
+    let pending_flow_index = client
+        .query_opt(
+            "SELECT indexdef FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+               AND tablename = 'mcp_oauth_flows' \
+               AND indexname = 'idx_mcp_oauth_flows_pending_subject'",
+            &[],
+        )
+        .map_err(postgres_error)?
+        .map(|row| row.get::<_, String>(0));
+    if pending_flow_index.as_deref().is_none_or(|definition| {
+        !definition.contains("(tenant_id, workspace_id, user_id, server_name)")
+            || !definition.contains("WHERE (consumed_at_unix IS NULL)")
+    }) {
+        return Err(StorageError::Postgres(
+            "required partial index idx_mcp_oauth_flows_pending_subject must cover \
+             (tenant_id, workspace_id, user_id, server_name) WHERE consumed_at_unix IS NULL"
+                .into(),
+        ));
     }
 
     let row = client
@@ -9369,11 +9718,28 @@ impl GuardrailPolicyRepository for RuntimeStorageRepositories {
 }
 
 fn postgres_error(error: postgres::Error) -> StorageError {
-    StorageError::Postgres(error.to_string())
+    StorageError::Postgres(sanitize_storage_error(&postgres_error_message(&error)))
 }
 
 fn postgres_connection_error(error: postgres::Error) -> StorageError {
-    StorageError::Postgres(sanitize_storage_error(&error.to_string()))
+    StorageError::Postgres(sanitize_storage_error(&postgres_error_message(&error)))
+}
+
+fn postgres_error_message(error: &postgres::Error) -> String {
+    error.as_db_error().map_or_else(
+        || error.to_string(),
+        |database_error| {
+            postgres_database_error_message(
+                database_error.message(),
+                database_error.code().code(),
+                database_error.detail(),
+            )
+        },
+    )
+}
+
+fn postgres_database_error_message(message: &str, sqlstate: &str, _detail: Option<&str>) -> String {
+    format!("{message} (SQLSTATE {sqlstate})")
 }
 
 fn sanitize_storage_error(error: &str) -> String {
@@ -9453,6 +9819,10 @@ mod schema_validation_test;
 #[cfg(test)]
 #[path = "storage_ledger_sink_test.rs"]
 mod storage_ledger_sink_test;
+
+#[cfg(test)]
+#[path = "postgres_error_test.rs"]
+mod postgres_error_test;
 
 #[cfg(test)]
 mod tests {

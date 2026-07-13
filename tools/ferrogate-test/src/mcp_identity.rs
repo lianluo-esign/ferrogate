@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     env, fs,
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
@@ -52,6 +52,8 @@ const ORIGINAL_AUDIENCE: &str = "urn:ferrogate:mcp:original:e2e";
 const SIGNED_AUDIENCE: &str = "urn:ferrogate:mcp:signed:e2e";
 const OIDC_SECRET: &[u8] = b"ferrogate-mcp-identity-e2e-signing-secret";
 const SLOW_REFRESH_STAGE_DELAY: Duration = Duration::from_secs(6);
+// Live Supabase proves the owner/waiter contract only; concurrency scale is local-test territory.
+const LIVE_REFRESH_CONTENTION_CALLERS: usize = 2;
 const IDENTITY_ACTIONS: [&str; 5] = [
     "mcp.execute",
     "mcp.identity.connect",
@@ -185,9 +187,9 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     services.slow_refresh.store(true, Ordering::SeqCst);
     evidence.expire_credential(USER_A)?;
     let refresh_before = services.refreshes.load(Ordering::SeqCst);
-    let barrier = Arc::new(Barrier::new(6));
+    let barrier = Arc::new(Barrier::new(LIVE_REFRESH_CONTENTION_CALLERS));
     let mut refresh_calls = Vec::new();
-    for _ in 0..6 {
+    for _ in 0..LIVE_REFRESH_CONTENTION_CALLERS {
         let gateway_addr = gateway_addr.clone();
         let barrier = Arc::clone(&barrier);
         refresh_calls.push(thread::spawn(move || {
@@ -197,17 +199,43 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     }
     let (refresh_lease_id, initial_refresh_expiry) =
         evidence.wait_for_refresh_lease_claim(USER_A)?;
-    let first_refresh_expiry = evidence.wait_for_refresh_lease_extension(
+    trace_mcp_boundary("concurrent_refresh_lease_claimed");
+    let first_refresh_expiry = match evidence.wait_for_refresh_lease_extension(
         USER_A,
         &refresh_lease_id,
         initial_refresh_expiry,
-    )?;
-    evidence.wait_for_refresh_lease_extension(USER_A, &refresh_lease_id, first_refresh_expiry)?;
+    ) {
+        Ok(expiry) => expiry,
+        Err(error) => {
+            let output = gateway.read_process_log()?;
+            bail!(
+                "{error:#}; concurrent refresh gateway output tail: {}",
+                text_tail(&output, 64 * 1024)
+            );
+        }
+    };
+    trace_mcp_boundary("concurrent_refresh_lease_extended_once");
+    if let Err(error) =
+        evidence.wait_for_refresh_lease_extension(USER_A, &refresh_lease_id, first_refresh_expiry)
+    {
+        let output = gateway.read_process_log()?;
+        bail!(
+            "{error:#}; concurrent refresh gateway output tail: {}",
+            text_tail(&output, 64 * 1024)
+        );
+    }
+    trace_mcp_boundary("concurrent_refresh_lease_extended_twice");
     for call in refresh_calls {
         let response = call
             .join()
             .map_err(|_| anyhow::anyhow!("concurrent refresh caller panicked"))??;
-        assert_tool_subject(&response, USER_A).context("concurrent refresh caller failed")?;
+        if let Err(error) = assert_tool_subject(&response, USER_A) {
+            let output = gateway.read_process_log()?;
+            bail!(
+                "concurrent refresh caller failed: {error:#}; {}",
+                concurrent_refresh_failure_diagnostic(&response, &output)
+            );
+        }
     }
     let refresh_delta = services
         .refreshes
@@ -496,6 +524,91 @@ pub(crate) fn run_mcp_identity_supabase(args: &SupabaseLiveRestartArgs) -> Resul
     Ok(())
 }
 
+#[cfg(test)]
+fn assert_lock_conflict_busy_log(process_log: &str, operation: &str) -> Result<()> {
+    let operation = format!("operation=\"{operation}\"");
+    if has_lock_conflict_busy_log(process_log, &operation) {
+        return Ok(());
+    }
+    bail!(
+        "gateway log did not contain optimistic claim lock-conflict Busy evidence for \
+         {operation}; tail: {}",
+        text_tail(process_log, 16 * 1024)
+    )
+}
+
+#[cfg(test)]
+fn has_lock_conflict_busy_log(process_log: &str, operation: &str) -> bool {
+    process_log.lines().any(|line| {
+        line.contains(operation)
+            && line.contains("storage_stage=\"refresh claim CAS\"")
+            && line.contains("outcome=\"lock_conflict_busy\"")
+    })
+}
+
+#[cfg(test)]
+fn assert_storage_cancellation_evidence(
+    process_log: &str,
+    operation: &str,
+    storage_stage: &str,
+    watchdog_outcome: &str,
+) -> Result<()> {
+    let operation = format!("operation=\"{operation}\"");
+    let storage_stage = format!("storage_stage=\"{storage_stage}\"");
+    let watchdog_outcome = format!("outcome=\"{watchdog_outcome}\"");
+    let synchronous = process_log.lines().any(|line| {
+        line.contains(&operation)
+            && line.contains(&storage_stage)
+            && line.contains("outcome=\"storage_cancelled\"")
+    });
+    let commit_watchdog = watchdog_outcome.contains("commit");
+    let response_deadline = process_log.lines().any(|line| {
+        line.contains(&operation)
+            && line.contains("outcome=\"response_deadline\"")
+            && (line.contains("cancel_outcome=Cancelled")
+                || line.contains("cancel_outcome=AlreadyCancelled")
+                || (commit_watchdog && line.contains("cancel_outcome=CommitStarted")))
+    });
+    let watchdog = process_log.lines().any(|line| {
+        line.contains(&operation)
+            && line.contains(&storage_stage)
+            && line.contains(&watchdog_outcome)
+    });
+    let complete_alternatives =
+        usize::from(synchronous) + usize::from(response_deadline && watchdog);
+    if complete_alternatives == 1 {
+        return Ok(());
+    }
+    bail!(
+        "gateway log contained {complete_alternatives} complete MCP storage cancellation \
+         evidence alternatives for {operation}; expected exactly one synchronous cancellation \
+         or one response-deadline plus watchdog pair; tail: {}",
+        text_tail(process_log, 16 * 1024)
+    )
+}
+
+fn text_tail(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut start = value.len() - max_bytes;
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
+
+fn trace_mcp_boundary(boundary: &str) {
+    if env::var("FERROGATE_TEST_BOUNDARY_TRACE").as_deref() != Ok("1") {
+        return;
+    }
+    let elapsed_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    eprintln!("mcp_identity_boundary unix_ms={elapsed_millis} boundary={boundary}");
+}
+
 fn verify_admin_rejects_unsupported_mode(gateway_addr: &str, mcp_addr: &str) -> Result<()> {
     let response = http_request_addr(
         gateway_addr,
@@ -660,7 +773,57 @@ fn assert_error(response: &HttpResponse, status: u16, code: &str) -> Result<()> 
     Ok(())
 }
 
+fn response_request_id(response: &HttpResponse) -> Result<String> {
+    let body: Value = serde_json::from_str(&response.body)?;
+    if let Some(request_id) = body["request_id"]
+        .as_str()
+        .filter(|request_id| !request_id.is_empty())
+    {
+        return Ok(request_id.to_string());
+    }
+    response
+        .raw
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| {
+            name.eq_ignore_ascii_case("x-request-id")
+                .then(|| value.trim())
+                .filter(|request_id| !request_id.is_empty())
+        })
+        .map(str::to_string)
+        .context("HTTP response did not contain request_id")
+}
+
+fn early_refresh_response_summary(response: &HttpResponse) -> String {
+    let code = serde_json::from_str::<Value>(&response.body)
+        .ok()
+        .and_then(|body| body["error"]["code"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".into());
+    let request_id = response_request_id(response).unwrap_or_else(|_| "unknown".into());
+    format!(
+        "http_status={} error_code={} request_id={}",
+        response.status, code, request_id
+    )
+}
+
+fn concurrent_refresh_failure_diagnostic(response: &HttpResponse, process_log: &str) -> String {
+    format!(
+        "{}; gateway output tail: {}",
+        early_refresh_response_summary(response),
+        text_tail(process_log, 32 * 1024)
+    )
+}
+
 fn assert_metric_nonzero(response: &HttpResponse, name: &str) -> Result<()> {
+    let count = metric_count(response, name)?;
+    if count == 0 {
+        bail!("metric {name} was missing or zero: {}", response.body);
+    }
+    Ok(())
+}
+
+fn metric_count(response: &HttpResponse, name: &str) -> Result<u64> {
     if response.status != 200 {
         bail!("metrics endpoint failed: {}", response.raw);
     }
@@ -670,10 +833,7 @@ fn assert_metric_nonzero(response: &HttpResponse, name: &str) -> Result<()> {
         .find_map(|line| line.strip_prefix(&format!("{name} ")))
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or_default();
-    if count == 0 {
-        bail!("metric {name} was missing or zero: {}", response.body);
-    }
-    Ok(())
+    Ok(count)
 }
 
 fn mint_oidc_token(issuer: &str, subject: &str, audience: &str) -> Result<String> {
@@ -1323,10 +1483,29 @@ fn write_response(stream: &mut impl Write, status: &str, body: &str) -> std::io:
 
 struct GatewayGuard {
     child: Child,
+    process_log: Option<tempfile::NamedTempFile>,
+}
+
+fn gateway_process_log(debug_output: bool) -> Result<Option<tempfile::NamedTempFile>> {
+    if debug_output {
+        Ok(None)
+    } else {
+        Ok(Some(tempfile::NamedTempFile::new()?))
+    }
 }
 
 impl GatewayGuard {
     fn start(binary: &Path, config: &Path, addr: &str, dsn: &str) -> Result<Self> {
+        let debug_output = env::var("FERROGATE_TEST_DEBUG_STDERR").as_deref() == Ok("1");
+        let process_log = gateway_process_log(debug_output)?;
+        let stdout = match process_log.as_ref() {
+            Some(log) => Stdio::from(log.reopen()?),
+            None => Stdio::inherit(),
+        };
+        let stderr = match process_log.as_ref() {
+            Some(log) => Stdio::from(log.reopen()?),
+            None => Stdio::inherit(),
+        };
         let child = Command::new(binary)
             .args(["run", "--config"])
             .arg(config)
@@ -1335,27 +1514,17 @@ impl GatewayGuard {
             .env("FERROGATE_TEST_MCP_OIDC_SECRET", "mcp-e2e-client-secret")
             .env("FERROGATE_MCP_IDENTITY_KEY", "42".repeat(32))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(
-                if env::var("FERROGATE_TEST_DEBUG_STDERR").as_deref() == Ok("1") {
-                    Stdio::inherit()
-                } else {
-                    Stdio::piped()
-                },
-            )
+            .stdout(stdout)
+            .stderr(stderr)
             .spawn()
             .with_context(|| format!("failed to start {}", binary.display()))?;
-        let mut guard = Self { child };
+        let mut guard = Self { child, process_log };
         let started = Instant::now();
         let mut last = String::new();
         while started.elapsed() < Duration::from_secs(180) {
             if let Some(status) = guard.child.try_wait()? {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = guard.child.stderr.take() {
-                    pipe.read_to_string(&mut stderr)?;
-                    assert_secret_redacted(&stderr);
-                }
-                bail!("FerroGate exited before MCP identity readiness: {status}; stderr: {stderr}");
+                let output = guard.read_process_log()?;
+                bail!("FerroGate exited before MCP identity readiness: {status}; output: {output}");
             }
             match http_request_addr(addr, "GET", "/healthz", &[], "") {
                 Ok(response) if response.status == 200 => return Ok(guard),
@@ -1366,6 +1535,17 @@ impl GatewayGuard {
         }
         bail!("FerroGate MCP identity readiness timed out: {last}")
     }
+
+    fn read_process_log(&mut self) -> Result<String> {
+        let Some(log) = self.process_log.as_mut() else {
+            return Ok(String::new());
+        };
+        let mut output = String::new();
+        log.as_file_mut().rewind()?;
+        log.as_file_mut().read_to_string(&mut output)?;
+        assert_secret_redacted(&output);
+        Ok(output)
+    }
 }
 
 impl Drop for GatewayGuard {
@@ -1374,6 +1554,10 @@ impl Drop for GatewayGuard {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_identity_test.rs"]
+mod mcp_identity_test;
 
 #[derive(Clone, PartialEq, Eq)]
 struct CredentialSnapshot {
@@ -1395,6 +1579,28 @@ struct RefreshLeaseClockSnapshot {
     db_now: i64,
     lease_id: Option<String>,
     expires_at_unix: Option<i64>,
+}
+
+#[cfg(test)]
+fn verify_refresh_completion_persisted(
+    before: &CredentialSnapshot,
+    after: &CredentialSnapshot,
+) -> Result<()> {
+    if after.version != before.version.saturating_add(1)
+        || after.authorization_generation != before.authorization_generation
+        || after.expires_at_unix <= before.expires_at_unix
+        || after.access_token_nonce == before.access_token_nonce
+        || after.access_token_ciphertext == before.access_token_ciphertext
+        || after.refresh_token_nonce == before.refresh_token_nonce
+        || after.refresh_token_ciphertext == before.refresh_token_ciphertext
+        || after.refresh_lease_id.is_some()
+        || after.refresh_lease_expires_at_unix.is_some()
+        || after.revoked_at_unix != before.revoked_at_unix
+        || after.last_refresh_outcome.as_deref() != Some("refreshed")
+    {
+        bail!("late MCP refresh completion did not persist authoritative refreshed material");
+    }
+    Ok(())
 }
 
 struct RefreshLeaseTakeover {

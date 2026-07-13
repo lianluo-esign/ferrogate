@@ -365,6 +365,11 @@ pub struct GatewayMetricsSnapshot {
     pub mcp_identity_failure_total: u64,
     pub mcp_identity_refresh_total: u64,
     pub mcp_identity_revocation_total: u64,
+    pub mcp_refresh_response_deadline_total: u64,
+    pub mcp_refresh_storage_cancellation_total: u64,
+    pub mcp_refresh_storage_outcome_unknown_total: u64,
+    pub mcp_refresh_late_reconciliation_total: u64,
+    pub mcp_identity_error_audit_deadline_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
     /// Requests rejected pre-authentication for not matching a configured
@@ -524,6 +529,56 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_mcp_identity_revocations_total {}\n",
         snapshot.mcp_identity_revocation_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_refresh_response_deadlines_total",
+        "Total MCP refresh storage operations that crossed the caller response deadline.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_refresh_response_deadlines_total {}\n",
+        snapshot.mcp_refresh_response_deadline_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_refresh_storage_cancellations_total",
+        "Total MCP refresh storage operations fenced before commit.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_refresh_storage_cancellations_total {}\n",
+        snapshot.mcp_refresh_storage_cancellation_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_refresh_storage_outcome_unknown_total",
+        "Total MCP refresh storage operations whose final outcome could not be proven in time.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_refresh_storage_outcome_unknown_total {}\n",
+        snapshot.mcp_refresh_storage_outcome_unknown_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_refresh_late_reconciliations_total",
+        "Total MCP refresh storage outcomes reconciled after the response deadline.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_refresh_late_reconciliations_total {}\n",
+        snapshot.mcp_refresh_late_reconciliation_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_mcp_identity_error_audit_deadlines_total",
+        "Total MCP identity error audits fenced before they could delay the original response.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_mcp_identity_error_audit_deadlines_total {}\n",
+        snapshot.mcp_identity_error_audit_deadline_total
     ));
 
     push_help(
@@ -894,6 +949,36 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "ferrogate.mcp_identity.revocations",
             "Total locally enforced MCP identity revocations.",
             snapshot.mcp_identity_revocation_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_refresh.response_deadlines",
+            "Total MCP refresh storage operations that crossed the caller response deadline.",
+            snapshot.mcp_refresh_response_deadline_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_refresh.storage_cancellations",
+            "Total MCP refresh storage operations fenced before commit.",
+            snapshot.mcp_refresh_storage_cancellation_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_refresh.storage_outcome_unknown",
+            "Total MCP refresh storage operations whose final outcome could not be proven in time.",
+            snapshot.mcp_refresh_storage_outcome_unknown_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_refresh.late_reconciliations",
+            "Total MCP refresh storage outcomes reconciled after the response deadline.",
+            snapshot.mcp_refresh_late_reconciliation_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.mcp_identity.error_audit_deadlines",
+            "Total MCP identity error audits fenced before they could delay the original response.",
+            snapshot.mcp_identity_error_audit_deadline_total as f64,
             vec![],
         ),
         sum_metric_json(

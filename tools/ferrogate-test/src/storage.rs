@@ -1229,6 +1229,7 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_metering_event_routes_model_provider",
         "idx_usage_rollups_tenant_model_provider",
         "idx_billing_ledger_request_attempt",
+        "idx_mcp_oauth_flows_pending_subject",
     ];
     for index in expected_indexes {
         let count = postgres_scalar(&format!(
@@ -1244,10 +1245,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 30",
+         FROM {}.storage_schema_migrations WHERE version = 31",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "30:030_provider_attempt_settlement_identity" {
+    if migration_version.trim() != "31:031_mcp_pending_flow_lookup_index" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
@@ -1878,10 +1879,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 30);
+                assert_eq!(body["storage"]["schema"]["version"], 31);
                 assert_eq!(
                     body["storage"]["schema"]["name"],
-                    "030_provider_attempt_settlement_identity"
+                    "031_mcp_pending_flow_lookup_index"
                 );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]

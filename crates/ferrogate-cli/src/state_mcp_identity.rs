@@ -15,9 +15,9 @@ use ferrogate_mcp::{McpAuthType, McpDispatchHeaders, McpOauthConfig};
 use ferrogate_storage::{
     McpCredentialRepository, McpIdentityAccessOutcome, McpIdentityAccessRequest,
     McpOauthCallbackCommitOutcome, McpRefreshClaimOutcome, McpRefreshClaimRequest,
-    McpRefreshRenewOutcome, McpRefreshRenewRequest, StoredMcpOauthCredential, StoredMcpOauthFlow,
+    McpRefreshRenewOutcome, McpRefreshRenewRequest, StorageOperation,
+    StorageOperationCancelOutcome, StoredMcpOauthCredential, StoredMcpOauthFlow,
 };
-use futures_util::future::{select, Either};
 use http::StatusCode;
 use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
@@ -25,27 +25,61 @@ use jsonwebtoken::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::future::Future;
+use tracing::Instrument;
 
 const MCP_IDENTITY_KEY_ENV: &str = "FERROGATE_MCP_IDENTITY_KEY";
 const OAUTH_FLOW_TTL_SECS: i64 = 600;
 const SIGNED_IDENTITY_TTL_SECS: i64 = 60;
 const TOKEN_REFRESH_SKEW_SECS: i64 = 30;
-const REFRESH_LEASE_SECS: i64 = 18;
+const REFRESH_LEASE_SECS: i64 = 30;
 const REFRESH_HEARTBEAT_SECS: u64 = 3;
-const REFRESH_RENEWAL_TIMEOUT_SECS: u64 = 6;
-const REFRESH_OWNER_TIMEOUT_SECS: u64 = 30;
-const REFRESH_WAIT_TIMEOUT_SECS: u64 = 25;
+const REFRESH_RENEWAL_TIMEOUT_SECS: u64 = 11;
+const REFRESH_OWNER_TIMEOUT_SECS: u64 = 60;
+const REFRESH_WAIT_TIMEOUT_SECS: u64 = 45;
 const REFRESH_WAIT_MIN_MILLIS: u64 = 50;
 const REFRESH_WAIT_MAX_MILLIS: u64 = 750;
 const REFRESH_WAIT_JITTER_MILLIS: u64 = 50;
+const REFRESH_STORAGE_OPERATION_TIMEOUT_SECS: u64 = 4;
+const REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS: u64 = 5;
+const REFRESH_STORAGE_RECONCILABLE_COMMIT_TIMEOUT_SECS: u64 = 10;
+// Claim is a short optimistic CAS. Keep its deadline separate so the waiter state
+// machine cannot turn ordinary contention into a long database lock wait.
+const REFRESH_CLAIM_OPERATION_TIMEOUT_SECS: u64 = 4;
+const REFRESH_CLAIM_RESPONSE_TIMEOUT_SECS: u64 = 5;
+const REFRESH_AUTH_READ_OPERATION_TIMEOUT_SECS: u64 = 8;
+const REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS: u64 = 10;
+const REFRESH_STORAGE_RECONCILE_TIMEOUT_SECS: u64 = 1;
+const REFRESH_STORAGE_AUTHORITATIVE_CANCEL_GRACE_SECS: u64 = 1;
+const REFRESH_STORAGE_AUTHORITATIVE_REREAD_TIMEOUT_SECS: u64 = 3;
+const MCP_IDENTITY_ERROR_AUDIT_TIMEOUT: Duration = Duration::from_secs(1);
+const MCP_IDENTITY_ERROR_AUDIT_JOIN_GRACE: Duration = Duration::from_millis(250);
 const MAX_OIDC_RESPONSE_BYTES: usize = 1024 * 1024;
 
 const _: () = {
     assert!(
         REFRESH_LEASE_SECS as u64 > REFRESH_HEARTBEAT_SECS + (2 * REFRESH_RENEWAL_TIMEOUT_SECS) + 1
     );
-    assert!(REFRESH_WAIT_TIMEOUT_SECS > REFRESH_LEASE_SECS as u64);
+    assert!(
+        REFRESH_WAIT_TIMEOUT_SECS
+            >= REFRESH_LEASE_SECS as u64 + REFRESH_CLAIM_RESPONSE_TIMEOUT_SECS + 5
+    );
     assert!(REFRESH_OWNER_TIMEOUT_SECS > REFRESH_WAIT_TIMEOUT_SECS);
+    assert!(REFRESH_RENEWAL_TIMEOUT_SECS > REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS);
+    assert!(
+        REFRESH_RENEWAL_TIMEOUT_SECS
+            > REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS
+                + REFRESH_STORAGE_AUTHORITATIVE_CANCEL_GRACE_SECS
+                + REFRESH_STORAGE_AUTHORITATIVE_REREAD_TIMEOUT_SECS
+                + 1
+    );
+    assert!(REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS > REFRESH_STORAGE_OPERATION_TIMEOUT_SECS);
+    assert!(
+        REFRESH_STORAGE_RECONCILABLE_COMMIT_TIMEOUT_SECS
+            > REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS + REFRESH_STORAGE_RECONCILE_TIMEOUT_SECS
+    );
+    assert!(REFRESH_CLAIM_RESPONSE_TIMEOUT_SECS > REFRESH_CLAIM_OPERATION_TIMEOUT_SECS);
+    assert!(REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS > REFRESH_AUTH_READ_OPERATION_TIMEOUT_SECS);
+    assert!(REFRESH_WAIT_TIMEOUT_SECS > REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS);
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -772,6 +806,11 @@ impl AppState {
         server: &ferrogate_mcp::McpServerConfig,
         credential: StoredMcpOauthCredential,
     ) -> Result<StoredMcpOauthCredential, McpIdentityError> {
+        tracing::debug!(
+            credential_id = %credential.id,
+            phase = "refresh_orchestration_enter",
+            "entered MCP credential refresh orchestration"
+        );
         let deadline = tokio::time::Instant::now() + Duration::from_secs(REFRESH_WAIT_TIMEOUT_SECS);
         let mut candidate = credential;
         let mut busy_logged = false;
@@ -792,21 +831,59 @@ impl AppState {
             let credential_id = candidate.id.clone();
             let version = candidate.version;
             let generation = candidate.authorization_generation;
-            let claim_lease_id = lease_id.clone();
             let repositories = Arc::clone(&self.repositories);
-            let claim = self
-                .run_mcp_identity_storage("claim MCP refresh lease", move || {
-                    repositories.claim_mcp_oauth_refresh(&McpRefreshClaimRequest {
-                        tenant_id,
-                        credential_id,
-                        expected_version: version,
-                        authorization_generation: generation,
-                        lease_id: claim_lease_id,
-                        now_unix: now,
-                        lease_ttl_secs: REFRESH_LEASE_SECS,
-                    })
-                })
-                .await?;
+            let Some((claim_operation_budget, claim_response_budget)) =
+                refresh_claim_storage_budgets(deadline)
+            else {
+                return Err(McpIdentityError::unavailable(
+                    "mcp_identity_refresh_timeout",
+                    "timed out while claiming the MCP refresh lease",
+                ));
+            };
+            let request = McpRefreshClaimRequest {
+                tenant_id,
+                credential_id,
+                expected_version: version,
+                authorization_generation: generation,
+                lease_id: lease_id.clone(),
+                now_unix: now,
+                lease_ttl_secs: REFRESH_LEASE_SECS,
+            };
+            let primary_request = request.clone();
+            let primary = self
+                .run_mcp_refresh_storage_with_budgets(
+                    "claim MCP refresh lease",
+                    claim_operation_budget,
+                    claim_response_budget,
+                    move |operation| {
+                        repositories
+                            .claim_mcp_oauth_refresh_with_operation(&primary_request, &operation)
+                    },
+                )
+                .await;
+            let (claim, reconciled) = match primary {
+                Ok(outcome) => (outcome, false),
+                Err(error) if error.code == "mcp_identity_storage_reconcile_required" => {
+                    (self.reconcile_mcp_refresh_claim(request).await?, true)
+                }
+                Err(error) => return Err(error),
+            };
+            let claim = if reconciled {
+                match resolve_reconciled_mcp_refresh_claim(claim) {
+                    Ok(claim) => {
+                        if let Ok(mut metrics) = self.metrics.lock() {
+                            metrics.record_mcp_refresh_late_reconciliation();
+                        }
+                        claim
+                    }
+                    Err(error) => {
+                        self.record_mcp_refresh_storage_outcome_unknown();
+                        return Err(error);
+                    }
+                }
+            } else {
+                claim
+            };
             match claim {
                 McpRefreshClaimOutcome::Acquired(claimed) => {
                     let claim_outcome = if candidate.refresh_lease_id.is_some() {
@@ -818,33 +895,47 @@ impl AppState {
                     let credential_id = claimed.id.clone();
                     let expected_version = claimed.version;
                     let authorization_generation = claimed.authorization_generation;
+                    let lease_expiry_state = Arc::new(std::sync::atomic::AtomicI64::new(
+                        claimed.refresh_lease_expires_at_unix.unwrap_or(now),
+                    ));
                     tracing::info!(
                         credential_id,
                         outcome = claim_outcome,
                         "claimed MCP OAuth refresh lease"
                     );
-                    let refresh = self.refresh_claimed_mcp_credential(
-                        actor,
-                        server,
-                        claimed,
-                        lease_id.clone(),
-                    );
-                    return run_with_refresh_heartbeat(
+                    let refresh = self.prepare_refreshed_mcp_credential(actor, server, &claimed);
+                    let provider_outcome = run_with_refresh_heartbeat_tagged(
                         refresh,
                         Duration::from_secs(REFRESH_HEARTBEAT_SECS),
                         Duration::from_secs(REFRESH_RENEWAL_TIMEOUT_SECS),
                         Duration::from_secs(REFRESH_OWNER_TIMEOUT_SECS),
                         || {
+                            let lease_expiry_state = Arc::clone(&lease_expiry_state);
                             self.renew_mcp_refresh_lease(
                                 &tenant_id,
                                 &credential_id,
                                 expected_version,
                                 authorization_generation,
                                 &lease_id,
+                                lease_expiry_state,
                             )
                         },
                     )
                     .await;
+                    return match provider_outcome {
+                        RefreshHeartbeatOutcome::Work(Ok(next)) => {
+                            self.complete_claimed_mcp_credential(
+                                actor, server, claimed, lease_id, next,
+                            )
+                            .await
+                        }
+                        RefreshHeartbeatOutcome::Work(Err(error)) => {
+                            self.release_failed_mcp_refresh(&claimed, &lease_id).await;
+                            Err(error)
+                        }
+                        RefreshHeartbeatOutcome::HeartbeatFailed(error)
+                        | RefreshHeartbeatOutcome::OwnerTimedOut(error) => Err(error),
+                    };
                 }
                 McpRefreshClaimOutcome::Busy {
                     lease_expires_at_unix,
@@ -881,7 +972,12 @@ impl AppState {
                     busy_attempt = busy_attempt.saturating_add(1);
                     tokio::time::sleep(delay).await;
                     candidate = self
-                        .authorize_mcp_identity_actor(actor, &server.name, "mcp.identity.use")
+                        .authorize_mcp_identity_actor_for_refresh(
+                            actor,
+                            &server.name,
+                            "mcp.identity.use",
+                            deadline,
+                        )
                         .await?
                         .filter(|row| row.revoked_at_unix.is_none())
                         .ok_or_else(|| {
@@ -915,99 +1011,136 @@ impl AppState {
         }
     }
 
-    async fn refresh_claimed_mcp_credential(
+    async fn prepare_refreshed_mcp_credential(
         &self,
         actor: &McpIdentityActor,
         server: &ferrogate_mcp::McpServerConfig,
-        credential: StoredMcpOauthCredential,
-        lease_id: String,
+        credential: &StoredMcpOauthCredential,
     ) -> Result<StoredMcpOauthCredential, McpIdentityError> {
         let oauth = server
             .oauth
             .as_ref()
             .expect("validated per_user_oauth config");
-        let refresh_result = async {
-            let discovery = fetch_discovery(oauth).await?;
-            let cipher = IdentityCipher::from_env()?;
-            let aad = credential_aad(&credential.id, actor, &server.name);
-            let refresh = credential
-                .refresh_token_nonce
-                .as_deref()
-                .zip(credential.refresh_token_ciphertext.as_deref())
-                .ok_or_else(|| {
-                    McpIdentityError::unauthorized(
-                        "mcp_refresh_token_missing",
-                        "MCP identity expired and has no refresh token",
-                    )
-                })?;
-            let refresh_plaintext = cipher.decrypt(refresh.0, refresh.1, aad.as_bytes())?;
-            let refresh_plaintext = String::from_utf8(refresh_plaintext).map_err(|_| {
-                McpIdentityError::unavailable(
-                    "mcp_identity_decrypt_failed",
-                    "MCP refresh token is invalid",
+        let discovery = fetch_discovery(oauth).await?;
+        let cipher = IdentityCipher::from_env()?;
+        let aad = credential_aad(&credential.id, actor, &server.name);
+        let refresh = credential
+            .refresh_token_nonce
+            .as_deref()
+            .zip(credential.refresh_token_ciphertext.as_deref())
+            .ok_or_else(|| {
+                McpIdentityError::unauthorized(
+                    "mcp_refresh_token_missing",
+                    "MCP identity expired and has no refresh token",
                 )
             })?;
-            let client_secret = resolve_client_secret(oauth).await?;
-            let form = vec![
-                ("grant_type", "refresh_token".into()),
-                ("refresh_token", refresh_plaintext.clone()),
-                ("client_id", oauth.client_id.clone()),
-                ("client_secret", client_secret),
-            ];
-            let token = post_token_form(&discovery.token_endpoint, &form).await?;
-            if !token.token_type.eq_ignore_ascii_case("bearer")
-                || token.access_token.trim().is_empty()
-            {
-                return Err(McpIdentityError::unavailable(
-                    "mcp_identity_provider_invalid",
-                    "refresh response did not contain a usable bearer token",
-                ));
-            }
-            let now = now_i64();
-            let (access_token_nonce, access_token_ciphertext) =
-                cipher.encrypt(token.access_token.as_bytes(), aad.as_bytes())?;
-            let refresh_value = token.refresh_token.as_deref().unwrap_or(&refresh_plaintext);
-            let (refresh_token_nonce, refresh_token_ciphertext) =
-                cipher.encrypt(refresh_value.as_bytes(), aad.as_bytes())?;
-            let mut next = credential.clone();
-            next.access_token_nonce = access_token_nonce;
-            next.access_token_ciphertext = access_token_ciphertext;
-            next.refresh_token_nonce = Some(refresh_token_nonce);
-            next.refresh_token_ciphertext = Some(refresh_token_ciphertext);
-            next.expires_at_unix = now
-                .saturating_add(i64::try_from(token.expires_in.unwrap_or(300)).unwrap_or(i64::MAX));
-            next.updated_at_unix = now;
-            next.last_refresh_outcome = Some("refreshed".into());
-            Ok(next)
+        let refresh_plaintext = cipher.decrypt(refresh.0, refresh.1, aad.as_bytes())?;
+        let refresh_plaintext = String::from_utf8(refresh_plaintext).map_err(|_| {
+            McpIdentityError::unavailable(
+                "mcp_identity_decrypt_failed",
+                "MCP refresh token is invalid",
+            )
+        })?;
+        let client_secret = resolve_client_secret(oauth).await?;
+        let form = vec![
+            ("grant_type", "refresh_token".into()),
+            ("refresh_token", refresh_plaintext.clone()),
+            ("client_id", oauth.client_id.clone()),
+            ("client_secret", client_secret),
+        ];
+        let token = post_token_form(&discovery.token_endpoint, &form).await?;
+        if !token.token_type.eq_ignore_ascii_case("bearer") || token.access_token.trim().is_empty()
+        {
+            return Err(McpIdentityError::unavailable(
+                "mcp_identity_provider_invalid",
+                "refresh response did not contain a usable bearer token",
+            ));
         }
-        .await;
-        let mut next = match refresh_result {
-            Ok(next) => next,
-            Err(error) => {
-                let repositories = Arc::clone(&self.repositories);
-                let tenant_id = credential.tenant_id.clone();
-                let credential_id = credential.id.clone();
-                let release_lease_id = lease_id.clone();
-                let _ = self
-                    .run_mcp_identity_storage("release failed MCP refresh lease", move || {
-                        repositories.release_mcp_oauth_refresh(
-                            &tenant_id,
-                            &credential_id,
-                            &release_lease_id,
-                            "refresh_failed",
-                        )
-                    })
-                    .await;
-                return Err(error);
-            }
-        };
+        let now = now_i64();
+        let (access_token_nonce, access_token_ciphertext) =
+            cipher.encrypt(token.access_token.as_bytes(), aad.as_bytes())?;
+        let refresh_value = token.refresh_token.as_deref().unwrap_or(&refresh_plaintext);
+        let (refresh_token_nonce, refresh_token_ciphertext) =
+            cipher.encrypt(refresh_value.as_bytes(), aad.as_bytes())?;
+        let mut next = credential.clone();
+        next.access_token_nonce = access_token_nonce;
+        next.access_token_ciphertext = access_token_ciphertext;
+        next.refresh_token_nonce = Some(refresh_token_nonce);
+        next.refresh_token_ciphertext = Some(refresh_token_ciphertext);
+        next.expires_at_unix =
+            now.saturating_add(i64::try_from(token.expires_in.unwrap_or(300)).unwrap_or(i64::MAX));
+        next.updated_at_unix = now;
+        next.last_refresh_outcome = Some("refreshed".into());
+        Ok(next)
+    }
+
+    async fn release_failed_mcp_refresh(
+        &self,
+        credential: &StoredMcpOauthCredential,
+        lease_id: &str,
+    ) {
+        let repositories = Arc::clone(&self.repositories);
+        let tenant_id = credential.tenant_id.clone();
+        let credential_id = credential.id.clone();
+        let release_lease_id = lease_id.to_string();
+        let _ = self
+            .run_mcp_refresh_storage("release failed MCP refresh lease", move |operation| {
+                repositories.release_mcp_oauth_refresh_with_operation(
+                    &tenant_id,
+                    &credential_id,
+                    &release_lease_id,
+                    "refresh_failed",
+                    &operation,
+                )
+            })
+            .await;
+    }
+
+    async fn complete_claimed_mcp_credential(
+        &self,
+        actor: &McpIdentityActor,
+        server: &ferrogate_mcp::McpServerConfig,
+        credential: StoredMcpOauthCredential,
+        lease_id: String,
+        mut next: StoredMcpOauthCredential,
+    ) -> Result<StoredMcpOauthCredential, McpIdentityError> {
         let repositories = Arc::clone(&self.repositories);
         let persisted = next.clone();
-        let completed = self
-            .run_mcp_identity_storage("complete MCP refresh lease", move || {
-                repositories.complete_mcp_oauth_refresh(persisted, &lease_id)
+        let completion = self
+            .run_mcp_refresh_completion_storage("complete MCP refresh lease", move |operation| {
+                repositories
+                    .complete_mcp_oauth_refresh_with_operation(persisted, &lease_id, &operation)
             })
-            .await?;
+            .await;
+        let completed = match completion {
+            Ok(completed) => completed,
+            Err(error) if error.code == "mcp_identity_storage_reconcile_required" => {
+                let current = self
+                    .authorize_mcp_identity_actor(actor, &server.name, "mcp.identity.use")
+                    .await?;
+                let resolved =
+                    resolve_ambiguous_mcp_refresh_completion_reread(current, credential.version);
+                match &resolved {
+                    Ok(_) => {
+                        if let Ok(mut metrics) = self.metrics.lock() {
+                            metrics.record_mcp_refresh_late_reconciliation();
+                            metrics.record_mcp_identity_refresh();
+                        }
+                        tracing::warn!(
+                            credential_id = credential.id,
+                            outcome = "authoritative_reread_resolved",
+                            "resolved an ambiguous MCP refresh completion from durable state"
+                        );
+                    }
+                    Err(error) if error.code == "mcp_identity_storage_outcome_unknown" => {
+                        self.record_mcp_refresh_storage_outcome_unknown();
+                    }
+                    Err(_) => {}
+                }
+                return resolved;
+            }
+            Err(error) => return Err(error),
+        };
         if completed {
             next.version = next.version.saturating_add(1);
             next.refresh_lease_id = None;
@@ -1040,8 +1173,11 @@ impl AppState {
         expected_version: u64,
         authorization_generation: u64,
         lease_id: &str,
+        lease_expiry_state: Arc<std::sync::atomic::AtomicI64>,
     ) -> Result<(), McpIdentityError> {
         let now = now_i64();
+        let expected_lease_expires_at_unix =
+            lease_expiry_state.load(std::sync::atomic::Ordering::Acquire);
         let repositories = Arc::clone(&self.repositories);
         let request = McpRefreshRenewRequest {
             tenant_id: tenant_id.to_string(),
@@ -1049,18 +1185,45 @@ impl AppState {
             expected_version,
             authorization_generation,
             lease_id: lease_id.to_string(),
+            expected_lease_expires_at_unix,
             now_unix: now,
             lease_ttl_secs: REFRESH_LEASE_SECS,
         };
-        let outcome = self
-            .run_mcp_identity_storage("renew MCP refresh lease", move || {
-                repositories.renew_mcp_oauth_refresh(&request)
+        let primary_request = request.clone();
+        let primary = self
+            .run_mcp_refresh_storage("renew MCP refresh lease", move |operation| {
+                repositories.renew_mcp_oauth_refresh_with_operation(&primary_request, &operation)
             })
-            .await?;
+            .await;
+        let (outcome, reconciled) = match primary {
+            Ok(outcome) => (outcome, false),
+            Err(error) if error.code == "mcp_identity_storage_reconcile_required" => {
+                (self.reconcile_mcp_refresh_renewal(request).await?, true)
+            }
+            Err(error) => return Err(error),
+        };
+        let outcome = if reconciled {
+            match resolve_reconciled_mcp_refresh_renewal(outcome, expected_lease_expires_at_unix) {
+                Ok(outcome) => {
+                    if let Ok(mut metrics) = self.metrics.lock() {
+                        metrics.record_mcp_refresh_late_reconciliation();
+                    }
+                    outcome
+                }
+                Err(error) => {
+                    self.record_mcp_refresh_storage_outcome_unknown();
+                    return Err(error);
+                }
+            }
+        } else {
+            outcome
+        };
         match outcome {
             McpRefreshRenewOutcome::Renewed {
                 lease_expires_at_unix,
             } => {
+                lease_expiry_state
+                    .store(lease_expires_at_unix, std::sync::atomic::Ordering::Release);
                 tracing::debug!(
                     credential_id,
                     lease_expires_at_unix,
@@ -1132,6 +1295,42 @@ impl AppState {
         }
     }
 
+    async fn reconcile_mcp_refresh_renewal(
+        &self,
+        request: McpRefreshRenewRequest,
+    ) -> Result<McpRefreshRenewOutcome, McpIdentityError> {
+        let repositories = Arc::clone(&self.repositories);
+        let task = tokio::task::spawn_blocking(move || {
+            repositories.reconcile_mcp_oauth_refresh_renewal(&request)
+        });
+        await_mcp_authoritative_reread(
+            Arc::clone(&self.metrics),
+            "renew MCP refresh lease",
+            task,
+            Duration::from_secs(REFRESH_STORAGE_AUTHORITATIVE_REREAD_TIMEOUT_SECS),
+            tracing::Span::current(),
+        )
+        .await
+    }
+
+    async fn reconcile_mcp_refresh_claim(
+        &self,
+        request: McpRefreshClaimRequest,
+    ) -> Result<McpRefreshClaimOutcome, McpIdentityError> {
+        let repositories = Arc::clone(&self.repositories);
+        let task = tokio::task::spawn_blocking(move || {
+            repositories.reconcile_mcp_oauth_refresh_claim(&request)
+        });
+        await_mcp_authoritative_reread(
+            Arc::clone(&self.metrics),
+            "claim MCP refresh lease",
+            task,
+            Duration::from_secs(REFRESH_STORAGE_AUTHORITATIVE_REREAD_TIMEOUT_SECS),
+            tracing::Span::current(),
+        )
+        .await
+    }
+
     async fn load_mcp_identity_access(
         &self,
         auth: &AuthContext,
@@ -1143,6 +1342,35 @@ impl AppState {
             .authorize_mcp_identity_actor(&actor, server_name, action)
             .await?;
         Ok((actor, credential))
+    }
+
+    async fn authorize_mcp_identity_actor_for_refresh(
+        &self,
+        actor: &McpIdentityActor,
+        server_name: &str,
+        action: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<StoredMcpOauthCredential>, McpIdentityError> {
+        let (operation_budget, response_budget) = refresh_authorization_read_budgets(deadline)
+            .ok_or_else(|| {
+                McpIdentityError::unavailable(
+                    "mcp_identity_refresh_timeout",
+                    "timed out while reloading MCP refresh authorization",
+                )
+            })?;
+        let request = actor.access_request(server_name, action);
+        let repositories = Arc::clone(&self.repositories);
+        let outcome = self
+            .run_mcp_refresh_storage_with_budgets(
+                "authorize MCP refresh identity actor",
+                operation_budget,
+                response_budget,
+                move |operation| {
+                    repositories.authorize_mcp_identity_with_operation(&request, &operation)
+                },
+            )
+            .await?;
+        authorize_mcp_identity_outcome(outcome, action)
     }
 
     async fn authorize_mcp_identity_actor(
@@ -1158,25 +1386,7 @@ impl AppState {
                 repositories.authorize_mcp_identity(&request)
             })
             .await?;
-        match outcome {
-            McpIdentityAccessOutcome::Allowed(credential) => Ok(*credential),
-            McpIdentityAccessOutcome::PermissionDenied => Err(McpIdentityError::forbidden(
-                "mcp_identity_rbac_denied",
-                format!("tenant roles do not grant required action {action}"),
-            )),
-            McpIdentityAccessOutcome::UserInactive => Err(McpIdentityError::forbidden(
-                "mcp_identity_user_inactive",
-                "MCP identity user is missing or disabled",
-            )),
-            McpIdentityAccessOutcome::MembershipRevoked => Err(McpIdentityError::forbidden(
-                "mcp_identity_membership_revoked",
-                "MCP identity user is no longer a tenant member",
-            )),
-            McpIdentityAccessOutcome::WorkspaceInactive => Err(McpIdentityError::forbidden(
-                "mcp_identity_workspace_inactive",
-                "MCP identity workspace is missing, inactive, or belongs to another tenant",
-            )),
-        }
+        authorize_mcp_identity_outcome(outcome, action)
     }
 
     async fn run_mcp_identity_storage<T, F>(
@@ -1199,6 +1409,188 @@ impl AppState {
             .map_err(storage_identity_error)
     }
 
+    async fn run_mcp_refresh_storage<T, F>(
+        &self,
+        operation_name: &'static str,
+        action: F,
+    ) -> Result<T, McpIdentityError>
+    where
+        T: Send + 'static,
+        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
+    {
+        self.run_mcp_refresh_storage_with_options(
+            operation_name,
+            Duration::from_secs(REFRESH_STORAGE_OPERATION_TIMEOUT_SECS),
+            Duration::from_secs(REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS),
+            false,
+            action,
+        )
+        .await
+    }
+
+    async fn run_mcp_refresh_storage_with_budgets<T, F>(
+        &self,
+        operation_name: &'static str,
+        operation_timeout: Duration,
+        response_timeout: Duration,
+        action: F,
+    ) -> Result<T, McpIdentityError>
+    where
+        T: Send + 'static,
+        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
+    {
+        self.run_mcp_refresh_storage_with_options(
+            operation_name,
+            operation_timeout,
+            response_timeout,
+            false,
+            action,
+        )
+        .await
+    }
+
+    async fn run_mcp_refresh_completion_storage<T, F>(
+        &self,
+        operation_name: &'static str,
+        action: F,
+    ) -> Result<T, McpIdentityError>
+    where
+        T: Send + 'static,
+        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
+    {
+        self.run_mcp_refresh_storage_with_options(
+            operation_name,
+            Duration::from_secs(REFRESH_STORAGE_OPERATION_TIMEOUT_SECS),
+            Duration::from_secs(REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS),
+            true,
+            action,
+        )
+        .await
+    }
+
+    async fn run_mcp_refresh_storage_with_options<T, F>(
+        &self,
+        operation_name: &'static str,
+        operation_timeout: Duration,
+        response_timeout: Duration,
+        reconcile_commit: bool,
+        action: F,
+    ) -> Result<T, McpIdentityError>
+    where
+        T: Send + 'static,
+        F: FnOnce(StorageOperation) -> Result<T, StorageError> + Send + 'static,
+    {
+        let operation = if reconcile_commit {
+            StorageOperation::new_reconcilable_commit(
+                operation_name,
+                operation_timeout,
+                Duration::from_secs(REFRESH_STORAGE_RECONCILABLE_COMMIT_TIMEOUT_SECS),
+            )
+        } else {
+            StorageOperation::new(operation_name, operation_timeout)
+        };
+        let blocking_operation = operation.clone();
+        let operation_span = tracing::Span::current();
+        let blocking_span = operation_span.clone();
+        tracing::debug!(
+            operation = operation_name,
+            phase = "spawn_blocking_scheduled",
+            "scheduled MCP refresh storage operation"
+        );
+        let mut task = tokio::task::spawn_blocking(move || {
+            blocking_span.in_scope(|| {
+                tracing::debug!(
+                    operation = operation_name,
+                    phase = "spawn_blocking_enter",
+                    "entered MCP refresh blocking storage operation"
+                );
+                let result = action(blocking_operation);
+                tracing::debug!(
+                    operation = operation_name,
+                    phase = "spawn_blocking_exit",
+                    storage_result = match &result {
+                        Ok(_) => "success",
+                        Err(error) => mcp_storage_error_kind(error),
+                    },
+                    "exited MCP refresh blocking storage operation"
+                );
+                result
+            })
+        });
+        match tokio::time::timeout(response_timeout, &mut task).await {
+            Ok(joined) => {
+                let result = joined.map_err(|error| {
+                    McpIdentityError::unavailable(
+                        "mcp_identity_storage_unavailable",
+                        format!("failed to {operation_name}: blocking task failed: {error}"),
+                    )
+                })?;
+                if matches!(
+                    &result,
+                    Err(StorageError::OperationDeadlineExceeded { .. }
+                        | StorageError::OperationCancelled { .. })
+                ) {
+                    self.record_mcp_refresh_storage_cancellation();
+                    let storage_stage = result
+                        .as_ref()
+                        .err()
+                        .and_then(mcp_storage_error_stage)
+                        .unwrap_or("unknown");
+                    tracing::warn!(
+                        operation = operation_name,
+                        storage_stage,
+                        outcome = "storage_cancelled",
+                        "cancelled MCP refresh storage operation before commit"
+                    );
+                }
+                result.map_err(storage_identity_error)
+            }
+            Err(_) => {
+                reconcile_mcp_refresh_storage_after_deadline(
+                    Arc::clone(&self.metrics),
+                    operation_name,
+                    operation,
+                    task,
+                    Duration::from_secs(REFRESH_STORAGE_RECONCILE_TIMEOUT_SECS),
+                    Duration::from_secs(REFRESH_STORAGE_AUTHORITATIVE_CANCEL_GRACE_SECS),
+                    operation_span,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(crate) async fn record_mcp_identity_error_audit(
+        &self,
+        event: AdminAuditEventDraft,
+        original_error: McpIdentityError,
+    ) -> McpIdentityError {
+        let event = self.prepare_admin_audit_event(event);
+        let repositories = Arc::clone(&self.repositories);
+        preserve_mcp_identity_error_after_bounded_audit(
+            Arc::clone(&self.metrics),
+            Arc::clone(&self.mcp_identity_error_audit_permits),
+            original_error,
+            MCP_IDENTITY_ERROR_AUDIT_TIMEOUT,
+            move |operation| {
+                repositories.append_mcp_identity_audit_event_with_operation(event, &operation)
+            },
+        )
+        .await
+    }
+
+    fn record_mcp_refresh_storage_cancellation(&self) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_mcp_refresh_storage_cancellation();
+        }
+    }
+
+    fn record_mcp_refresh_storage_outcome_unknown(&self) {
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.record_mcp_refresh_storage_outcome_unknown();
+        }
+    }
+
     fn mcp_identity_server(
         &self,
         server_name: &str,
@@ -1217,6 +1609,115 @@ impl AppState {
         if let Ok(mut metrics) = self.metrics.lock() {
             metrics.record_mcp_identity_resolution(allowed);
         }
+    }
+}
+
+fn authorize_mcp_identity_outcome(
+    outcome: McpIdentityAccessOutcome,
+    action: &str,
+) -> Result<Option<StoredMcpOauthCredential>, McpIdentityError> {
+    match outcome {
+        McpIdentityAccessOutcome::Allowed(credential) => Ok(*credential),
+        McpIdentityAccessOutcome::PermissionDenied => Err(McpIdentityError::forbidden(
+            "mcp_identity_rbac_denied",
+            format!("tenant roles do not grant required action {action}"),
+        )),
+        McpIdentityAccessOutcome::UserInactive => Err(McpIdentityError::forbidden(
+            "mcp_identity_user_inactive",
+            "MCP identity user is missing or disabled",
+        )),
+        McpIdentityAccessOutcome::MembershipRevoked => Err(McpIdentityError::forbidden(
+            "mcp_identity_membership_revoked",
+            "MCP identity user is no longer a tenant member",
+        )),
+        McpIdentityAccessOutcome::WorkspaceInactive => Err(McpIdentityError::forbidden(
+            "mcp_identity_workspace_inactive",
+            "MCP identity workspace is missing, inactive, or belongs to another tenant",
+        )),
+    }
+}
+
+async fn preserve_mcp_identity_error_after_bounded_audit<F>(
+    metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
+    permits: Arc<tokio::sync::Semaphore>,
+    original_error: McpIdentityError,
+    timeout: Duration,
+    action: F,
+) -> McpIdentityError
+where
+    F: FnOnce(StorageOperation) -> Result<(), StorageError> + Send + 'static,
+{
+    let original_error_code = original_error.code;
+    let permit = match permits.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            record_mcp_identity_error_audit_deadline(&metrics);
+            tracing::warn!(
+                original_error_code,
+                audit_outcome = "capacity_rejected",
+                original_error_preserved = true,
+                "skipped MCP identity error audit because bounded audit capacity was exhausted"
+            );
+            return original_error;
+        }
+    };
+    let operation = StorageOperation::new("record MCP identity error audit", timeout);
+    let blocking_operation = operation.clone();
+    let operation_span = tracing::Span::current();
+    let mut task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation_span.in_scope(|| action(blocking_operation))
+    });
+    let response_wait = timeout.saturating_add(MCP_IDENTITY_ERROR_AUDIT_JOIN_GRACE);
+
+    match tokio::time::timeout(response_wait, &mut task).await {
+        Ok(Ok(Ok(()))) => tracing::debug!(
+            original_error_code,
+            audit_outcome = "persisted",
+            original_error_preserved = true,
+            "persisted MCP identity error audit within its response budget"
+        ),
+        Ok(Ok(Err(error))) => {
+            if matches!(
+                error,
+                StorageError::OperationDeadlineExceeded { .. }
+                    | StorageError::OperationCancelled { .. }
+            ) {
+                record_mcp_identity_error_audit_deadline(&metrics);
+            }
+            tracing::warn!(
+                original_error_code,
+                audit_outcome = mcp_storage_error_kind(&error),
+                audit_error = %sanitize_mcp_storage_error(&error),
+                original_error_preserved = true,
+                "MCP identity error audit failed without replacing the original response"
+            );
+        }
+        Ok(Err(error)) => tracing::warn!(
+            original_error_code,
+            audit_outcome = "task_error",
+            audit_error = %sanitize_mcp_reconciliation_text(&error.to_string()),
+            original_error_preserved = true,
+            "MCP identity error audit task failed without replacing the original response"
+        ),
+        Err(_) => {
+            let cancel_outcome = operation.cancel();
+            record_mcp_identity_error_audit_deadline(&metrics);
+            tracing::warn!(
+                original_error_code,
+                ?cancel_outcome,
+                audit_outcome = "response_deadline",
+                original_error_preserved = true,
+                "MCP identity error audit exceeded its bounded response budget"
+            );
+        }
+    }
+    original_error
+}
+
+fn record_mcp_identity_error_audit_deadline(metrics: &Arc<Mutex<GatewayMetricsAccumulator>>) {
+    if let Ok(mut metrics) = metrics.lock() {
+        metrics.record_mcp_identity_error_audit_deadline();
     }
 }
 
@@ -1247,6 +1748,386 @@ fn refresh_wait_backoff(
         Duration::from_millis(REFRESH_WAIT_MIN_MILLIS)
     };
     candidate.min(lease_cap).min(waiter_remaining)
+}
+
+fn resolve_reconciled_mcp_refresh_claim(
+    outcome: McpRefreshClaimOutcome,
+) -> Result<McpRefreshClaimOutcome, McpIdentityError> {
+    if matches!(outcome, McpRefreshClaimOutcome::Acquired(_)) {
+        return Ok(outcome);
+    }
+    Err(McpIdentityError::unavailable(
+        "mcp_identity_storage_outcome_unknown",
+        "MCP refresh claim remained unchanged while its commit outcome was unresolved",
+    ))
+}
+
+fn resolve_reconciled_mcp_refresh_renewal(
+    outcome: McpRefreshRenewOutcome,
+    expected_lease_expires_at_unix: i64,
+) -> Result<McpRefreshRenewOutcome, McpIdentityError> {
+    if matches!(
+        outcome,
+        McpRefreshRenewOutcome::NotExtended {
+            lease_expires_at_unix
+        } if lease_expires_at_unix == expected_lease_expires_at_unix
+    ) {
+        return Err(McpIdentityError::unavailable(
+            "mcp_identity_storage_outcome_unknown",
+            "MCP refresh renewal remained unchanged while its commit outcome was unresolved",
+        ));
+    }
+    Ok(outcome)
+}
+
+fn refresh_claim_storage_budgets(deadline: tokio::time::Instant) -> Option<(Duration, Duration)> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let cancellation_grace = Duration::from_secs(
+        REFRESH_CLAIM_RESPONSE_TIMEOUT_SECS - REFRESH_CLAIM_OPERATION_TIMEOUT_SECS,
+    );
+    let operation_timeout = remaining
+        .checked_sub(cancellation_grace)?
+        .min(Duration::from_secs(REFRESH_CLAIM_OPERATION_TIMEOUT_SECS));
+    (!operation_timeout.is_zero()).then(|| {
+        (
+            operation_timeout,
+            remaining.min(Duration::from_secs(REFRESH_CLAIM_RESPONSE_TIMEOUT_SECS)),
+        )
+    })
+}
+
+fn refresh_authorization_read_budgets(
+    deadline: tokio::time::Instant,
+) -> Option<(Duration, Duration)> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let cancellation_grace = Duration::from_secs(
+        REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS - REFRESH_AUTH_READ_OPERATION_TIMEOUT_SECS,
+    );
+    let operation_timeout = remaining
+        .checked_sub(cancellation_grace)?
+        .min(Duration::from_secs(
+            REFRESH_AUTH_READ_OPERATION_TIMEOUT_SECS,
+        ));
+    (!operation_timeout.is_zero()).then(|| {
+        (
+            operation_timeout,
+            remaining.min(Duration::from_secs(REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS)),
+        )
+    })
+}
+
+async fn await_mcp_authoritative_reread<T: Send + 'static>(
+    metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
+    operation_name: &'static str,
+    mut task: tokio::task::JoinHandle<Result<T, StorageError>>,
+    timeout: Duration,
+    operation_span: tracing::Span,
+) -> Result<T, McpIdentityError> {
+    match tokio::time::timeout(timeout, &mut task).await {
+        Ok(Ok(Ok(outcome))) => {
+            tracing::warn!(
+                operation = operation_name,
+                outcome = "authoritative_reread_observed",
+                "observed durable state for an ambiguous MCP refresh mutation"
+            );
+            Ok(outcome)
+        }
+        Ok(Ok(Err(error))) => {
+            if let Ok(mut metrics) = metrics.lock() {
+                metrics.record_mcp_refresh_storage_outcome_unknown();
+            }
+            tracing::error!(
+                operation = operation_name,
+                error_detail = %sanitize_mcp_storage_error(&error),
+                outcome = "storage_outcome_unknown",
+                "failed to observe durable state for an ambiguous MCP refresh mutation"
+            );
+            Err(McpIdentityError::unavailable(
+                "mcp_identity_storage_outcome_unknown",
+                format!("{operation_name} outcome could not be proven from durable storage"),
+            ))
+        }
+        Ok(Err(error)) => {
+            if let Ok(mut metrics) = metrics.lock() {
+                metrics.record_mcp_refresh_storage_outcome_unknown();
+            }
+            tracing::error!(
+                operation = operation_name,
+                error_detail = %sanitize_mcp_reconciliation_text(&error.to_string()),
+                outcome = "storage_outcome_unknown",
+                "authoritative MCP refresh reread task failed"
+            );
+            Err(McpIdentityError::unavailable(
+                "mcp_identity_storage_outcome_unknown",
+                format!("{operation_name} outcome reread task failed"),
+            ))
+        }
+        Err(_) => {
+            if let Ok(mut metrics) = metrics.lock() {
+                metrics.record_mcp_refresh_storage_outcome_unknown();
+            }
+            tracing::error!(
+                operation = operation_name,
+                outcome = "storage_outcome_unknown",
+                "authoritative MCP refresh reread exceeded its caller deadline"
+            );
+            observe_mcp_refresh_storage_task(
+                operation_name,
+                task,
+                operation_span,
+                "late_authoritative_reread_observed",
+            );
+            Err(McpIdentityError::unavailable(
+                "mcp_identity_storage_outcome_unknown",
+                format!("{operation_name} outcome reread exceeded its caller deadline"),
+            ))
+        }
+    }
+}
+
+async fn reconcile_mcp_refresh_storage_after_deadline<T: Send + 'static>(
+    metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
+    operation_name: &'static str,
+    operation: StorageOperation,
+    mut task: tokio::task::JoinHandle<Result<T, StorageError>>,
+    reconcile_timeout: Duration,
+    authoritative_cancel_grace: Duration,
+    operation_span: tracing::Span,
+) -> Result<T, McpIdentityError> {
+    if let Ok(mut metrics) = metrics.lock() {
+        metrics.record_mcp_refresh_response_deadline();
+    }
+    let cancel_outcome = operation.cancel();
+    tracing::warn!(
+        operation = operation_name,
+        ?cancel_outcome,
+        outcome = "response_deadline",
+        "MCP refresh storage operation exceeded its response deadline"
+    );
+    match cancel_outcome {
+        StorageOperationCancelOutcome::Cancelled
+        | StorageOperationCancelOutcome::AlreadyCancelled => {
+            if let Ok(mut metrics) = metrics.lock() {
+                metrics.record_mcp_refresh_storage_cancellation();
+            }
+            observe_mcp_refresh_storage_task(
+                operation_name,
+                task,
+                operation_span,
+                "late_cancel_policy_observed",
+            );
+            Err(McpIdentityError::unavailable(
+                "mcp_identity_storage_deadline",
+                format!(
+                    "MCP refresh storage operation {operation_name} was cancelled before commit"
+                ),
+            ))
+        }
+        StorageOperationCancelOutcome::CommitStarted | StorageOperationCancelOutcome::Finished
+            if !operation.reconciles_commit_after_deadline() =>
+        {
+            match tokio::time::timeout(authoritative_cancel_grace, &mut task).await {
+                Ok(joined) => {
+                    if matches!(
+                        &joined,
+                        Ok(Err(StorageError::OperationDeadlineExceeded { .. }
+                            | StorageError::OperationCancelled { .. }))
+                    ) {
+                        if let Ok(mut metrics) = metrics.lock() {
+                            metrics.record_mcp_refresh_storage_cancellation();
+                        }
+                    }
+                    trace_mcp_refresh_reconciliation_result(
+                        operation_name,
+                        &joined,
+                        "late_cancel_policy_observed",
+                    );
+                    joined
+                        .map_err(|error| {
+                            McpIdentityError::unavailable(
+                                "mcp_identity_storage_unavailable",
+                                format!(
+                                    "failed to observe cancelled {operation_name}: blocking task failed: {error}"
+                                ),
+                            )
+                        })?
+                        .map_err(storage_identity_error)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        operation = operation_name,
+                        outcome = "authoritative_reread_required",
+                        "MCP refresh storage result requires a bounded authoritative reread"
+                    );
+                    observe_mcp_refresh_storage_task(
+                        operation_name,
+                        task,
+                        operation_span,
+                        "late_outcome_unknown_observed",
+                    );
+                    Err(McpIdentityError::unavailable(
+                        "mcp_identity_storage_reconcile_required",
+                        format!(
+                            "MCP refresh storage operation {operation_name} requires authoritative reread"
+                        ),
+                    ))
+                }
+            }
+        }
+        StorageOperationCancelOutcome::CommitStarted | StorageOperationCancelOutcome::Finished => {
+            match tokio::time::timeout(reconcile_timeout, &mut task).await {
+                Ok(joined) => {
+                    if let Ok(mut metrics) = metrics.lock() {
+                        metrics.record_mcp_refresh_late_reconciliation();
+                    }
+                    trace_mcp_refresh_reconciliation_result(
+                        operation_name,
+                        &joined,
+                        "late_completion_reconciled",
+                    );
+                    joined
+                        .map_err(|error| {
+                            McpIdentityError::unavailable(
+                                "mcp_identity_storage_unavailable",
+                                format!(
+                                    "failed to reconcile {operation_name}: blocking task failed: {error}"
+                                ),
+                            )
+                        })?
+                        .map_err(storage_identity_error)
+                }
+                Err(_) => {
+                    tokio::spawn(
+                        async move {
+                            let result = task.await;
+                            if let Ok(mut metrics) = metrics.lock() {
+                                metrics.record_mcp_refresh_late_reconciliation();
+                            }
+                            trace_mcp_refresh_reconciliation_result(
+                                operation_name,
+                                &result,
+                                "late_completion_reconciled",
+                            );
+                        }
+                        .instrument(operation_span),
+                    );
+                    Err(McpIdentityError::unavailable(
+                        "mcp_identity_storage_reconciliation_pending",
+                        format!(
+                            "MCP refresh storage operation {operation_name} crossed its commit fence; final outcome is being reconciled"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn observe_mcp_refresh_storage_task<T: Send + 'static>(
+    operation_name: &'static str,
+    task: tokio::task::JoinHandle<Result<T, StorageError>>,
+    operation_span: tracing::Span,
+    outcome: &'static str,
+) {
+    tokio::spawn(
+        async move {
+            let result = task.await;
+            trace_mcp_refresh_reconciliation_result(operation_name, &result, outcome);
+        }
+        .instrument(operation_span),
+    );
+}
+
+fn trace_mcp_refresh_reconciliation_result<T>(
+    operation_name: &'static str,
+    result: &Result<Result<T, StorageError>, tokio::task::JoinError>,
+    outcome: &'static str,
+) {
+    match result {
+        Ok(Ok(_)) => tracing::warn!(
+            operation = operation_name,
+            storage_result = "success",
+            outcome,
+            "reconciled MCP refresh storage result after response deadline"
+        ),
+        Ok(Err(error)) => tracing::warn!(
+            operation = operation_name,
+            storage_result = "storage_error",
+            error_kind = mcp_storage_error_kind(error),
+            error_detail = %sanitize_mcp_storage_error(error),
+            outcome,
+            "reconciled MCP refresh storage error after response deadline"
+        ),
+        Err(error) => tracing::warn!(
+            operation = operation_name,
+            storage_result = "task_error",
+            error_detail = %sanitize_mcp_reconciliation_text(&error.to_string()),
+            outcome,
+            "reconciled MCP refresh blocking task error after response deadline"
+        ),
+    }
+}
+
+fn mcp_storage_error_kind(error: &StorageError) -> &'static str {
+    match error {
+        StorageError::UnsupportedProvider { .. } => "unsupported_provider",
+        StorageError::Postgres(_) => "postgres",
+        StorageError::Runtime(_) => "runtime",
+        StorageError::Serialization(_) => "serialization",
+        StorageError::Conflict(_) => "conflict",
+        StorageError::NotFound(_) => "not_found",
+        StorageError::OperationDeadlineExceeded { .. } => "deadline_exceeded",
+        StorageError::OperationCancelled { .. } => "cancelled",
+        StorageError::OperationCommitOutcomeUnknown { .. } => "commit_outcome_unknown",
+    }
+}
+
+fn mcp_storage_error_stage(error: &StorageError) -> Option<&'static str> {
+    match error {
+        StorageError::OperationDeadlineExceeded { stage, .. }
+        | StorageError::OperationCancelled { stage, .. }
+        | StorageError::OperationCommitOutcomeUnknown { stage, .. } => Some(stage),
+        _ => None,
+    }
+}
+
+fn sanitize_mcp_storage_error(error: &StorageError) -> String {
+    sanitize_mcp_reconciliation_text(&error.to_string())
+}
+
+fn sanitize_mcp_reconciliation_text(input: &str) -> String {
+    let mut sanitized = input.to_string();
+    for marker in ["password=", "passfile=", "sslpassword="] {
+        sanitized = redact_mcp_marker_values(&sanitized, marker);
+    }
+    if let Some(scheme) = sanitized.find("://") {
+        let authority_start = scheme + 3;
+        if let Some(at_offset) = sanitized[authority_start..].find('@') {
+            let at = authority_start + at_offset;
+            if let Some(colon_offset) = sanitized[authority_start..at].find(':') {
+                let password_start = authority_start + colon_offset + 1;
+                sanitized.replace_range(password_start..at, "[redacted]");
+            }
+        }
+    }
+    sanitized.truncate(512);
+    sanitized
+}
+
+fn redact_mcp_marker_values(input: &str, marker: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find(marker) {
+        output.push_str(&rest[..start + marker.len()]);
+        output.push_str("[redacted]");
+        let value_rest = &rest[start + marker.len()..];
+        let value_end = value_rest
+            .find(char::is_whitespace)
+            .unwrap_or(value_rest.len());
+        rest = &value_rest[value_end..];
+    }
+    output.push_str(rest);
+    output
 }
 
 fn refresh_lease_conflict(
@@ -1282,40 +2163,81 @@ fn resolve_mcp_refresh_completion_reread(
     }
 }
 
-async fn run_with_refresh_heartbeat<T, Work, Renew, RenewFuture>(
+fn resolve_ambiguous_mcp_refresh_completion_reread(
+    current: Option<StoredMcpOauthCredential>,
+    previous_version: u64,
+) -> Result<StoredMcpOauthCredential, McpIdentityError> {
+    match current {
+        None => Err(McpIdentityError::unauthorized(
+            "mcp_identity_not_connected",
+            "per-user MCP identity was removed during refresh",
+        )),
+        Some(current) if current.revoked_at_unix.is_some() => Err(McpIdentityError::unauthorized(
+            "mcp_identity_not_connected",
+            "per-user MCP identity was revoked during refresh",
+        )),
+        Some(current) if current.version > previous_version => Ok(current),
+        Some(_) => Err(McpIdentityError::unavailable(
+            "mcp_identity_storage_outcome_unknown",
+            "MCP refresh completion commit outcome could not be proven from durable storage",
+        )),
+    }
+}
+
+enum RefreshHeartbeatOutcome<T> {
+    Work(Result<T, McpIdentityError>),
+    HeartbeatFailed(McpIdentityError),
+    OwnerTimedOut(McpIdentityError),
+}
+
+async fn run_with_refresh_heartbeat_tagged<T, Work, Renew, RenewFuture>(
     work: Work,
     heartbeat_interval: Duration,
     renewal_timeout: Duration,
     owner_timeout: Duration,
     mut renew: Renew,
-) -> Result<T, McpIdentityError>
+) -> RefreshHeartbeatOutcome<T>
 where
     Work: Future<Output = Result<T, McpIdentityError>>,
     Renew: FnMut() -> RenewFuture,
     RenewFuture: Future<Output = Result<(), McpIdentityError>>,
 {
-    match tokio::time::timeout(renewal_timeout, renew()).await {
-        Ok(result) => result?,
-        Err(_) => return Err(refresh_renewal_timeout()),
-    }
-    let heartbeat = async {
-        loop {
-            tokio::time::sleep(heartbeat_interval).await;
-            match tokio::time::timeout(renewal_timeout, renew()).await {
-                Ok(result) => result?,
-                Err(_) => return Err(refresh_renewal_timeout()),
+    let owner_deadline = tokio::time::Instant::now() + owner_timeout;
+    tokio::pin!(work);
+    loop {
+        let tick = tokio::time::sleep(heartbeat_interval);
+        tokio::pin!(tick);
+        tokio::select! {
+            result = &mut work => return RefreshHeartbeatOutcome::Work(result),
+            _ = tokio::time::sleep_until(owner_deadline) => {
+                return RefreshHeartbeatOutcome::OwnerTimedOut(refresh_owner_timeout());
             }
+            _ = &mut tick => {}
         }
-        #[allow(unreachable_code)]
-        Ok::<(), McpIdentityError>(())
-    };
-    match tokio::time::timeout(owner_timeout, select(Box::pin(work), Box::pin(heartbeat))).await {
-        Ok(Either::Left((result, _heartbeat))) => result,
-        Ok(Either::Right((result, _work))) => match result {
-            Err(error) => Err(error),
-            Ok(()) => Err(refresh_renewal_timeout()),
-        },
-        Err(_) => Err(refresh_owner_timeout()),
+
+        let renewal = tokio::time::timeout(renewal_timeout, renew());
+        tokio::pin!(renewal);
+        let pending = tokio::select! {
+            result = &mut renewal => {
+                match result {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(error)) => return RefreshHeartbeatOutcome::HeartbeatFailed(error),
+                    Err(_) => {
+                        return RefreshHeartbeatOutcome::HeartbeatFailed(refresh_renewal_timeout());
+                    }
+                }
+            }
+            result = &mut work => RefreshHeartbeatOutcome::Work(result),
+            _ = tokio::time::sleep_until(owner_deadline) => {
+                RefreshHeartbeatOutcome::OwnerTimedOut(refresh_owner_timeout())
+            }
+        };
+
+        return match renewal.await {
+            Ok(Ok(())) => pending,
+            Ok(Err(error)) => RefreshHeartbeatOutcome::HeartbeatFailed(error),
+            Err(_) => RefreshHeartbeatOutcome::HeartbeatFailed(refresh_renewal_timeout()),
+        };
     }
 }
 
@@ -1424,8 +2346,16 @@ fn credential_aad(id: &str, actor: &McpIdentityActor, server_name: &str) -> Stri
 }
 
 fn storage_identity_error(error: StorageError) -> McpIdentityError {
+    let code = match &error {
+        StorageError::OperationDeadlineExceeded { .. }
+        | StorageError::OperationCancelled { .. } => "mcp_identity_storage_deadline",
+        StorageError::OperationCommitOutcomeUnknown { .. } => {
+            "mcp_identity_storage_reconcile_required"
+        }
+        _ => "mcp_identity_storage_unavailable",
+    };
     McpIdentityError::unavailable(
-        "mcp_identity_storage_unavailable",
+        code,
         format!("MCP identity storage is unavailable: {error}"),
     )
 }

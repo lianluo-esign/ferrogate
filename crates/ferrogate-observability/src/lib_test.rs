@@ -140,6 +140,11 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         mcp_identity_failure_total: 1,
         mcp_identity_refresh_total: 2,
         mcp_identity_revocation_total: 1,
+        mcp_refresh_response_deadline_total: 3,
+        mcp_refresh_storage_cancellation_total: 2,
+        mcp_refresh_storage_outcome_unknown_total: 4,
+        mcp_refresh_late_reconciliation_total: 1,
+        mcp_identity_error_audit_deadline_total: 4,
         token_totals: TokenMetricTotals {
             prompt_tokens: 3,
             completion_tokens: 5,
@@ -177,6 +182,11 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains("ferrogate_mcp_identity_failures_total 1"));
     assert!(text.contains("ferrogate_mcp_identity_refreshes_total 2"));
     assert!(text.contains("ferrogate_mcp_identity_revocations_total 1"));
+    assert!(text.contains("ferrogate_mcp_refresh_response_deadlines_total 3"));
+    assert!(text.contains("ferrogate_mcp_refresh_storage_cancellations_total 2"));
+    assert!(text.contains("ferrogate_mcp_refresh_storage_outcome_unknown_total 4"));
+    assert!(text.contains("ferrogate_mcp_refresh_late_reconciliations_total 1"));
+    assert!(text.contains("ferrogate_mcp_identity_error_audit_deadlines_total 4"));
     assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));
     assert!(text.contains(
         "ferrogate_model_provider_requests_total{logical_model=\"fast-chat\",provider=\"openai\"} 1"
