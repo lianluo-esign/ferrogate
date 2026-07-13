@@ -67,12 +67,12 @@ bends to.
   do not skip the layer or downgrade the claim to fit the current tool.
 - A missing tool never silently shrinks coverage. A layer you cannot yet automate
   is still owed a manual proof at the affected surface plus a filed tooling issue.
-- Current known shortfall: quota, OpenAI-compatible provider settlement, and
-  Guardrail allow/block evidence use the reusable `ComponentContract` executor;
-  quota and Guardrail also have live-Supabase proof. The provider matrix is not
-  yet mechanically exhaustive across every canonical adapter family. That gap
-  is tracked in #214, and multi-attempt settlement identity in #213. Do not
-  describe non-OpenAI adapters as compliance-proven until #214 closes.
+- Quota, canonical provider settlement, and Guardrail allow/block evidence use
+  the reusable `ComponentContract` executor; quota and Guardrail also have
+  live-Supabase proof. Runtime and the harness share one canonical provider
+  adapter-family registry, and exact matrix equality fails closed before E2E.
+  #214 completed that matrix and #213 completed distinct, idempotent settlement
+  identities for multiple billable attempts in one logical request.
 - Live Supabase proof is isolated per scenario: one unique schema is reused for
   that scenario's restarts and removed through exact-name RAII cleanup. Use
   `--keep-supabase-schema` only when retained state is deliberately required for

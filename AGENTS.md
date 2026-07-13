@@ -310,7 +310,7 @@ table is the binding taxonomy.
 | Unit | dedicated sibling `*_test.rs` modules (or `crates/*/tests/*.rs`); `cargo +1.88.0 test --workspace --all-features` | Is the isolated logic correct? |
 | Property | `proptest` (currently `ferrogate-billing`, `ferrogate-policy`; extend to any state-machine/invariant surface) | Do invariants hold across generated inputs, not just hand-picked cases? |
 | Crate integration | `crates/*/tests/*.rs` (`ferrogate-cli/tests/*_e2e.rs`, `rbac_*`, `assets_*`, `*_provider_e2e`, …) | Do wired-together modules behave correctly at a real in-process boundary? |
-| Contract / compliance | `ferrogate-test api-contract`, `component-compliance`, `component-compliance-supabase`; the per-component contract every provider/guardrail/policy/quota surface must pass (see gap below) | Does the runtime actually obey the cross-cutting contract it claims — routes, telemetry, audit evidence, scope? |
+| Contract / compliance | `ferrogate-test api-contract`, `component-compliance`, `component-compliance-supabase`; the per-component contract every provider/guardrail/policy/quota surface must pass | Does the runtime actually obey the cross-cutting contract it claims — routes, telemetry, audit evidence, scope? |
 | Cross-component chain | `ferrogate-test gateway-billing-chain`, `guardrail-supabase` | Does a full request produce the correct downstream effect (usage→ledger, block→durable evidence)? |
 | Durability | `ferrogate-test postgres-restart`, `postgres-tls-restart`, `supabase-restart` | Does persisted state survive restart/crash? |
 | E2E harness | `ferrogate-test ci` / `run-all` against a real local FerroGate image | Does the operator-visible behavior close end-to-end? |

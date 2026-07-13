@@ -76,17 +76,17 @@ through the admin API but the runtime only ever read the tenant scope.
 - **Mechanism today:** `ferrogate-test api-contract` proves the runtime's fixed
   routes and methods are the ones the OpenAPI contract declares.
   `ferrogate-test component-compliance` provides the reusable component
-  lifecycle and applies it to quota scopes plus OpenAI-compatible provider
-  settlement. `guardrail-supabase` runs Guardrail policy write/read plus
-  allow/block evidence through the same lifecycle. The live-Supabase paths
-  prove quota and Guardrail behavior through durable storage.
+  lifecycle and applies it to quota scopes plus every canonical provider
+  adapter family's settlement. `guardrail-supabase` runs Guardrail policy
+  write/read plus allow/block evidence through the same lifecycle. The
+  live-Supabase paths prove quota and Guardrail behavior through durable storage.
 - **Answers:** does the runtime actually obey the cross-cutting contract it
   claims — routes, telemetry, audit evidence, and **scope**?
 - **This is the layer that catches `#188`.** A quota/scope/telemetry claim is
   only proven here when the test asserts that *what a component writes is what
   the runtime reads*, and that the component emits the audit/telemetry evidence
-  it advertises. See "Open work" below for the provider adapter matrix that is
-  not yet mechanically complete.
+  it advertises. The provider adapter registry and compliance matrix are checked
+  for exact set equality before runtime E2E starts.
 
 ### 6. Cross-component chain
 
@@ -248,9 +248,10 @@ Dynamic Workflow (work is pulled from the issue queue) and Commit Requirements
 - Do not mark a test-surfaced issue done from a green unit run alone when it
   touches a cross-cutting or runtime-wiring surface (same rule as the layers).
 
-## Open work: the reusable component-compliance layer
+## Implemented component-compliance layer
 
-Tracked in **#210**.
+Implemented through **#210**, with the canonical provider matrix completed by
+**#214**.
 
 **Current status:** `tools/ferrogate-test` has a reusable
 `ComponentContract` runner. It owns the lifecycle instead of trusting a
