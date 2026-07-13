@@ -27,10 +27,11 @@ pub mod pricing;
 pub mod service;
 
 pub use ledger::{
-    charge, CostSource, InMemoryLedgerSink, LedgerEntry, LedgerListFilter, LedgerSink, LedgerTotals,
+    charge, same_provider_attempt_settlement, CostSource, InMemoryLedgerSink, LedgerEntry,
+    LedgerListFilter, LedgerSink, LedgerTotals,
 };
 pub use pricing::{PriceBook, PriceEntry, DEFAULT_CREDITS_PER_USD};
-pub use service::{serve, BillingServiceConfig};
+pub use service::{billing_error_http_status, serve, BillingServiceConfig};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
@@ -131,10 +132,37 @@ impl BillingUsageSource {
     }
 }
 
+/// Stable identity for one concrete provider dispatch within a logical AI
+/// request. The logical [`BillingEvent::request_id`] remains the correlation
+/// key across the gateway; this identity distinguishes retries and fallback
+/// dispatches that can each report billable usage.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderAttempt {
+    #[serde(default)]
+    pub provider_attempt_id: String,
+    #[serde(default)]
+    pub provider_attempt_index: u32,
+}
+
+impl ProviderAttempt {
+    pub fn for_request(request_id: &str, provider_attempt_index: u32) -> Self {
+        Self {
+            provider_attempt_id: format!("{request_id}:provider-attempt:{provider_attempt_index}"),
+            provider_attempt_index,
+        }
+    }
+
+    pub fn is_legacy(&self) -> bool {
+        self.provider_attempt_id.trim().is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BillingEvent {
     pub request_id: String,
     pub trace_id: Option<String>,
+    #[serde(default, flatten)]
+    pub provider_attempt: ProviderAttempt,
     #[serde(default)]
     pub agent_run_id: Option<String>,
     #[serde(default)]

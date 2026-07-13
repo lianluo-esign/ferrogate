@@ -1175,6 +1175,20 @@ CREATE TABLE IF NOT EXISTS wallets (
     updated_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
 );
 
+-- One durable row per provider-attempt wallet settlement. Claiming this id
+-- and changing the balance happen in one transaction, so replay and
+-- concurrent delivery return the first outcome instead of debiting twice.
+CREATE TABLE IF NOT EXISTS wallet_settlements (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    delta_credits BIGINT NOT NULL,
+    balance_after_credits BIGINT,
+    created_at_unix BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_settlements_tenant_time
+    ON wallet_settlements(tenant_id, created_at_unix DESC);
+
 -- payment_methods: opaque references to payment-provider-side payment
 -- methods (issue #169), e.g. a Stripe payment_method/customer id pair.
 -- Never stores raw card data -- that stays entirely on the payment
@@ -1376,6 +1390,129 @@ CREATE TABLE IF NOT EXISTS storage_schema_migrations (
 ALTER TABLE storage_schema_migrations
     ADD COLUMN IF NOT EXISTS checksum TEXT NOT NULL DEFAULT '';
 
+-- Issue #213: one logical request can produce multiple billable provider
+-- attempts through retry/fallback. Run the PK/FK rewrite exactly once; normal
+-- startup schema validation must not repeatedly take destructive DDL locks.
+DO $$
+BEGIN
+    INSERT INTO storage_schema_migrations (version, name)
+    VALUES (30, '030_provider_attempt_settlement_identity')
+    ON CONFLICT (version) DO NOTHING;
+    IF FOUND THEN
+        ALTER TABLE metering_events
+            ADD COLUMN IF NOT EXISTS billing_event_id TEXT;
+        ALTER TABLE metering_events
+            ADD COLUMN IF NOT EXISTS provider_attempt_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE metering_events
+            ADD COLUMN IF NOT EXISTS provider_attempt_index INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE metering_events
+            ADD COLUMN IF NOT EXISTS event_json JSONB;
+        UPDATE metering_events
+        SET billing_event_id = request_id
+        WHERE billing_event_id IS NULL;
+        ALTER TABLE metering_events
+            ALTER COLUMN billing_event_id SET NOT NULL;
+
+        ALTER TABLE metering_event_routes
+            ADD COLUMN IF NOT EXISTS billing_event_id TEXT;
+        UPDATE metering_event_routes
+        SET billing_event_id = request_id
+        WHERE billing_event_id IS NULL;
+        ALTER TABLE metering_event_routes
+            ALTER COLUMN billing_event_id SET NOT NULL;
+
+        ALTER TABLE metering_event_usage
+            ADD COLUMN IF NOT EXISTS billing_event_id TEXT;
+        UPDATE metering_event_usage
+        SET billing_event_id = request_id
+        WHERE billing_event_id IS NULL;
+        ALTER TABLE metering_event_usage
+            ALTER COLUMN billing_event_id SET NOT NULL;
+
+        -- Persist the complete immutable settlement payload. Idempotency is
+        -- exact: the same provider_attempt_id may only replay byte-equivalent
+        -- domain data, never rewrite correlation, timing, usage, or money.
+        UPDATE metering_events AS e
+        SET event_json = jsonb_build_object(
+            'request_id', e.request_id,
+            'trace_id', e.trace_id,
+            'provider_attempt_id', e.provider_attempt_id,
+            'provider_attempt_index', e.provider_attempt_index,
+            'agent_run_id', e.agent_run_id,
+            'workflow_id', e.workflow_id,
+            'workflow_version', e.workflow_version,
+            'workflow_node_id', e.workflow_node_id,
+            'cluster_id', e.cluster_id,
+            'node_id', e.node_id,
+            'tenant', jsonb_build_object(
+                'organization_id', t.organization_id,
+                'team_id', t.team_id,
+                'project_id', t.project_id,
+                'workspace_id', t.workspace_id,
+                'user_id', t.user_id,
+                'api_key_id', t.api_key_id
+            ),
+            'logical_model', r.logical_model,
+            'provider', r.provider,
+            'provider_model', COALESCE(r.provider_model, ''),
+            'usage', jsonb_build_object(
+                'prompt_tokens', u.prompt_tokens,
+                'completion_tokens', u.completion_tokens,
+                'total_tokens', u.total_tokens
+            ),
+            'usage_source', u.usage_source,
+            'status_code', e.status_code,
+            'occurred_at_unix', e.occurred_at_unix,
+            'cost_usd', e.cost_usd,
+            'latency_ms', e.latency_ms,
+            'metadata', e.metadata_json
+        )
+        FROM tenant_contexts AS t,
+             metering_event_routes AS r,
+             metering_event_usage AS u
+        WHERE e.tenant_context_id = t.id
+          AND r.request_id = e.request_id
+          AND u.request_id = e.request_id
+          AND e.event_json IS NULL;
+        ALTER TABLE metering_events
+            ALTER COLUMN event_json SET NOT NULL;
+
+        ALTER TABLE metering_event_routes
+            DROP CONSTRAINT IF EXISTS metering_event_routes_request_id_fkey,
+            DROP CONSTRAINT IF EXISTS metering_event_routes_billing_event_id_fkey,
+            DROP CONSTRAINT IF EXISTS metering_event_routes_pkey;
+        ALTER TABLE metering_event_usage
+            DROP CONSTRAINT IF EXISTS metering_event_usage_request_id_fkey,
+            DROP CONSTRAINT IF EXISTS metering_event_usage_billing_event_id_fkey,
+            DROP CONSTRAINT IF EXISTS metering_event_usage_pkey;
+        ALTER TABLE metering_events
+            DROP CONSTRAINT IF EXISTS metering_events_pkey;
+        ALTER TABLE metering_events
+            ADD CONSTRAINT metering_events_pkey PRIMARY KEY (billing_event_id);
+        ALTER TABLE metering_event_routes
+            ADD CONSTRAINT metering_event_routes_pkey PRIMARY KEY (billing_event_id),
+            ADD CONSTRAINT metering_event_routes_billing_event_id_fkey
+                FOREIGN KEY (billing_event_id)
+                REFERENCES metering_events(billing_event_id) ON DELETE CASCADE;
+        ALTER TABLE metering_event_usage
+            ADD CONSTRAINT metering_event_usage_pkey PRIMARY KEY (billing_event_id),
+            ADD CONSTRAINT metering_event_usage_billing_event_id_fkey
+                FOREIGN KEY (billing_event_id)
+                REFERENCES metering_events(billing_event_id) ON DELETE CASCADE;
+
+        ALTER TABLE billing_ledger
+            ADD COLUMN IF NOT EXISTS provider_attempt_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE billing_ledger
+            ADD COLUMN IF NOT EXISTS provider_attempt_index INTEGER NOT NULL DEFAULT 0;
+
+        CREATE INDEX IF NOT EXISTS idx_metering_events_request
+            ON metering_events(request_id, provider_attempt_index);
+        CREATE INDEX IF NOT EXISTS idx_billing_ledger_request_attempt
+            ON billing_ledger(request_id, provider_attempt_index);
+    END IF;
+END
+$$;
+
 INSERT INTO storage_schema_migrations (version, name)
 VALUES (1, '001_init_postgres')
 ON CONFLICT (version) DO UPDATE
@@ -1520,3 +1657,7 @@ INSERT INTO storage_schema_migrations (version, name)
 VALUES (29, '029_tenant_only_asset_storage_quota')
 ON CONFLICT (version) DO UPDATE
 SET name = EXCLUDED.name;
+
+INSERT INTO storage_schema_migrations (version, name)
+VALUES (30, '030_provider_attempt_settlement_identity')
+ON CONFLICT (version) DO NOTHING;

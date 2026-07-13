@@ -139,6 +139,45 @@ pub(crate) struct BillingHarness {
 
 impl BillingHarness {
     pub(crate) fn start(ferrogate_bin: &Path) -> Result<Self> {
+        Self::start_inner(ferrogate_bin, None)
+    }
+
+    pub(crate) fn start_supabase(
+        ferrogate_bin: &Path,
+        dsn: &str,
+        schema: &str,
+        tls_mode: &str,
+    ) -> Result<Self> {
+        Self::start_inner(ferrogate_bin, Some((dsn, schema, tls_mode)))
+    }
+
+    pub(crate) fn start_supabase_concurrent_pair(
+        ferrogate_bin: &Path,
+        dsn: &str,
+        schema: &str,
+        tls_mode: &str,
+    ) -> Result<(Self, Self)> {
+        // This is a bounded two-process correctness race for migration locking,
+        // never a Supabase throughput or pressure test. Do not scale the pair
+        // into a fan-out loop: live performance traffic belongs on local
+        // infrastructure, not the shared external service.
+        let (mut first, timeout) = Self::spawn_inner(ferrogate_bin, Some((dsn, schema, tls_mode)))?;
+        let (mut second, _) = Self::spawn_inner(ferrogate_bin, Some((dsn, schema, tls_mode)))?;
+        first.wait_for_billing(timeout)?;
+        second.wait_for_billing(timeout)?;
+        Ok((first, second))
+    }
+
+    fn start_inner(ferrogate_bin: &Path, supabase: Option<(&str, &str, &str)>) -> Result<Self> {
+        let (mut harness, readiness_timeout) = Self::spawn_inner(ferrogate_bin, supabase)?;
+        harness.wait_for_billing(readiness_timeout)?;
+        Ok(harness)
+    }
+
+    fn spawn_inner(
+        ferrogate_bin: &Path,
+        supabase: Option<(&str, &str, &str)>,
+    ) -> Result<(Self, Duration)> {
         if !ferrogate_bin.exists() {
             bail!(
                 "ferrogate binary does not exist at {}; run `cargo build -p ferrogate-cli` first or pass --ferrogate-bin",
@@ -147,7 +186,13 @@ impl BillingHarness {
         }
 
         let billing_addr = free_addr()?;
-        let billing = Command::new(ferrogate_bin)
+        let readiness_timeout = if supabase.is_some() {
+            Duration::from_secs(180)
+        } else {
+            Duration::from_secs(20)
+        };
+        let mut command = Command::new(ferrogate_bin);
+        command
             .args(["billing", "serve", "--listen"])
             .arg(&billing_addr)
             // Exercise the authenticated path (issue #136): the gateway config
@@ -161,24 +206,34 @@ impl BillingHarness {
                 } else {
                     Stdio::null()
                 },
-            )
-            .spawn()
-            .with_context(|| {
-                format!("failed to start {} billing serve", ferrogate_bin.display())
-            })?;
+            );
+        if let Some((dsn, schema, tls_mode)) = supabase {
+            // Keep the DSN out of argv/process listings. The live scenario owns
+            // this unique schema and drops it after both billing and gateway
+            // processes stop.
+            command
+                .env("FERROGATE_BILLING_SUPABASE_DSN", dsn)
+                .env("FERROGATE_BILLING_SUPABASE_SCHEMA", schema)
+                .env("FERROGATE_BILLING_SUPABASE_TLS_MODE", tls_mode)
+                .env("FERROGATE_BILLING_SUPABASE_INIT_SCHEMA", "true");
+        }
+        let billing = command.spawn().with_context(|| {
+            format!("failed to start {} billing serve", ferrogate_bin.display())
+        })?;
 
-        let mut harness = Self {
-            billing_addr,
-            billing,
-        };
-        harness.wait_for_billing()?;
-        Ok(harness)
+        Ok((
+            Self {
+                billing_addr,
+                billing,
+            },
+            readiness_timeout,
+        ))
     }
 
-    fn wait_for_billing(&mut self) -> Result<()> {
+    fn wait_for_billing(&mut self, readiness_timeout: Duration) -> Result<()> {
         let started = Instant::now();
         let mut last = String::new();
-        while started.elapsed() < Duration::from_secs(20) {
+        while started.elapsed() < readiness_timeout {
             if let Some(status) = self.billing.try_wait()? {
                 bail!("ferrogate-billing process exited before readiness check: {status}");
             }

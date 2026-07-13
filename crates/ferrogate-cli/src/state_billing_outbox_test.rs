@@ -29,6 +29,7 @@ fn sample_billing_event(request_id: &str) -> BillingEvent {
     BillingEvent {
         request_id: request_id.into(),
         trace_id: Some(format!("trace-{request_id}")),
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request(request_id, 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,

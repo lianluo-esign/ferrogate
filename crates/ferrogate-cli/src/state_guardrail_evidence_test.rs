@@ -104,6 +104,7 @@ fn investigation_dtos_omit_raw_bodies_tool_arguments_and_billing_metadata() {
     let billing = sanitize_investigation_billing(BillingEvent {
         request_id: "request-1".into(),
         trace_id: None,
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request("request-1", 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,

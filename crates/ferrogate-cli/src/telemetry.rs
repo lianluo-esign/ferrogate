@@ -530,10 +530,7 @@ impl AnalyticsRecord {
             event.tenant.project_id.as_deref(),
             event.tenant.api_key_id.as_deref(),
         );
-        let idempotency_key = format!(
-            "{}:{}:{}",
-            event.request_id, event.logical_model, event.provider
-        );
+        let idempotency_key = ferrogate_billing::ledger::ledger_entry_id(event);
         Self {
             event_kind: "billing_metering_event",
             event_time_unix: event_time,
@@ -1151,6 +1148,14 @@ fn billing_event_attributes(event: &BillingEvent) -> Vec<OtlpAttribute> {
     let mut attributes = vec![
         OtlpAttribute::new("event_family", "billing_event_observed"),
         OtlpAttribute::new("request_id", event.request_id.as_str()),
+        OtlpAttribute::new(
+            "provider_attempt_id",
+            event.provider_attempt.provider_attempt_id.as_str(),
+        ),
+        OtlpAttribute::new(
+            "provider_attempt_index",
+            event.provider_attempt.provider_attempt_index.to_string(),
+        ),
         OtlpAttribute::new("status_code", event.status_code.to_string()),
         OtlpAttribute::new("logical_model", event.logical_model.as_str()),
         OtlpAttribute::new("provider", event.provider.as_str()),

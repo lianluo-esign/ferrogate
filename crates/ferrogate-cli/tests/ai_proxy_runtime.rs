@@ -4691,6 +4691,8 @@ allowed_models = ["fast-chat"]
     assert!(chat.contains("200 OK"));
     assert!(chat.contains("\"id\":\"chatcmpl_retry\""));
     assert!(!chat.contains("client-secret"));
+    let request_id =
+        response_header(&chat, "x-request-id").expect("retry response should include x-request-id");
 
     gateway.kill().unwrap();
     gateway.wait().unwrap();
@@ -4699,6 +4701,14 @@ allowed_models = ["fast-chat"]
     assert!(provider_requests
         .iter()
         .all(|request| request.contains(r#""model":"gpt-4o-mini""#)));
+    assert!(provider_requests[0].contains(&format!(
+        "x-ferrogate-provider-attempt-id: {request_id}:provider-attempt:0"
+    )));
+    assert!(provider_requests[0].contains("x-ferrogate-provider-attempt-index: 0"));
+    assert!(provider_requests[1].contains(&format!(
+        "x-ferrogate-provider-attempt-id: {request_id}:provider-attempt:1"
+    )));
+    assert!(provider_requests[1].contains("x-ferrogate-provider-attempt-index: 1"));
 }
 
 #[test]

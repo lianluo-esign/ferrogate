@@ -39,7 +39,7 @@ use crate::network_access::{resolve_client_ip, IpCidr, UnauthenticatedIpRateLimi
 use crate::routing::parse_upstream_endpoint;
 use ferrogate_billing::{
     BillingEvent, BillingEventSink, BillingUsageSource, InMemoryBillingEventSink, ModelPrice,
-    TokenUsage as BillingTokenUsage,
+    ProviderAttempt, TokenUsage as BillingTokenUsage,
 };
 use ferrogate_core::{RequestContext, WorkspaceScope};
 use ferrogate_guardrails::{

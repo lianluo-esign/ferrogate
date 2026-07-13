@@ -46,7 +46,10 @@ use metadata_rollups::increment_usage_metadata_rollups;
 pub use metadata_rollups::{usage_metadata_rollup_id, StoredUsageMetadataRollup};
 
 mod wallet;
-pub use wallet::{payment_method_id, StoredPaymentMethod, StoredWallet};
+pub use wallet::{
+    payment_method_id, StoredPaymentMethod, StoredWallet, StoredWalletSettlement,
+    WalletSettlementOutcome,
+};
 
 mod guardrail_evidence;
 use guardrail_evidence::StoredGuardrailEvidence;
@@ -313,8 +316,29 @@ impl StorageSchemaEvidence {
 }
 
 const POSTGRES_SCHEMA_SQL: &str = include_str!("../../../sql/001_init_postgres.sql");
-const POSTGRES_SCHEMA_VERSION: u64 = 29;
-const POSTGRES_SCHEMA_NAME: &str = "029_tenant_only_asset_storage_quota";
+const POSTGRES_SCHEMA_VERSION: u64 = 30;
+const POSTGRES_SCHEMA_NAME: &str = "030_provider_attempt_settlement_identity";
+const POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS: u64 = 120_000;
+const PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY: &str =
+    "SELECT source_attribute.attname, target_namespace.nspname = current_schema(), \
+            target_relation.relname, \
+            target_attribute.attname, con.confdeltype::text \
+     FROM pg_constraint AS con \
+     JOIN pg_class AS source_relation ON source_relation.oid = con.conrelid \
+     JOIN pg_namespace AS namespace ON namespace.oid = source_relation.relnamespace \
+     JOIN pg_class AS target_relation ON target_relation.oid = con.confrelid \
+     JOIN pg_namespace AS target_namespace ON target_namespace.oid = target_relation.relnamespace \
+     JOIN unnest(con.conkey, con.confkey) \
+          AS key(source_attnum, target_attnum) ON TRUE \
+     JOIN pg_attribute AS source_attribute \
+       ON source_attribute.attrelid = source_relation.oid \
+      AND source_attribute.attnum = key.source_attnum \
+     JOIN pg_attribute AS target_attribute \
+       ON target_attribute.attrelid = target_relation.oid \
+      AND target_attribute.attnum = key.target_attnum \
+     WHERE namespace.nspname = current_schema() \
+       AND source_relation.relname = $1 \
+       AND con.conname = $2 AND con.contype = 'f'";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStorageBackend {
@@ -844,7 +868,9 @@ pub struct RuntimeControlPlaneState {
     billing_report_outbox: InMemoryRepository<StoredBillingReportOutboxEntry>,
     budget_alert_notifications: InMemoryRepository<StoredBudgetAlertNotification>,
     usage_metadata_rollups: InMemoryRepository<StoredUsageMetadataRollup>,
+    billing_event_ids: InMemoryRepository<BillingEvent>,
     wallets: InMemoryRepository<StoredWallet>,
+    wallet_settlements: InMemoryRepository<StoredWalletSettlement>,
     payment_methods: InMemoryRepository<StoredPaymentMethod>,
     guardrail_policy_revisions: InMemoryRepository<StoredGuardrailPolicyRevision>,
     guardrail_policy_bindings: InMemoryRepository<StoredGuardrailPolicyBinding>,
@@ -878,6 +904,9 @@ impl PostgresControlPlaneStore {
         bootstrap: ControlPlaneDocuments,
         initialize_schema: bool,
     ) -> Result<Self, StorageError> {
+        let schema_timeout_millis = config
+            .statement_timeout_millis
+            .max(POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS);
         let mut clients = Vec::with_capacity(config.pool_size);
         for _ in 0..config.pool_size {
             clients.push(connect_postgres_client(&config)?);
@@ -890,7 +919,7 @@ impl PostgresControlPlaneStore {
             schema: StorageSchemaEvidence::postgres_expected(),
         };
         if initialize_schema {
-            store.initialize_schema()?;
+            store.initialize_schema(schema_timeout_millis)?;
         }
         store.validate_schema()?;
         store.seed_missing_resources("api_key", bootstrap.api_keys)?;
@@ -911,6 +940,9 @@ impl PostgresControlPlaneStore {
         initialize_schema: bool,
         validate_schema: bool,
     ) -> Result<Self, StorageError> {
+        let schema_timeout_millis = config
+            .statement_timeout_millis
+            .max(POSTGRES_SCHEMA_INITIALIZATION_TIMEOUT_MILLIS);
         let mut clients = Vec::with_capacity(config.pool_size);
         for _ in 0..config.pool_size {
             clients.push(connect_postgres_client(&config)?);
@@ -923,7 +955,7 @@ impl PostgresControlPlaneStore {
             schema: StorageSchemaEvidence::postgres_expected(),
         };
         if initialize_schema {
-            store.initialize_schema()?;
+            store.initialize_schema(schema_timeout_millis)?;
         }
         if validate_schema {
             store.validate_schema()?;
@@ -931,8 +963,23 @@ impl PostgresControlPlaneStore {
         Ok(store)
     }
 
-    fn initialize_schema(&self) -> Result<(), StorageError> {
-        self.with_client(|client| client.batch_execute(POSTGRES_SCHEMA_SQL))?;
+    fn initialize_schema(&self, statement_timeout_millis: u64) -> Result<(), StorageError> {
+        let statement_timeout = format!("{statement_timeout_millis}ms");
+        self.with_client(|client| {
+            let mut transaction = client.transaction()?;
+            transaction.query_one(
+                "SELECT set_config('statement_timeout', $1, true)",
+                &[&statement_timeout],
+            )?;
+            transaction.query_one(
+                "SELECT pg_advisory_xact_lock(\
+                    hashtextextended(current_database() || ':' || current_schema(), 0)\
+                 )",
+                &[],
+            )?;
+            transaction.batch_execute(POSTGRES_SCHEMA_SQL)?;
+            transaction.commit()
+        })?;
         Ok(())
     }
 
@@ -2170,18 +2217,20 @@ impl PostgresControlPlaneStore {
         let inserted = self.with_client(|client| {
             client.execute(
                 "INSERT INTO billing_ledger \
-                 (id, request_id, trace_id, organization_id, project_id, workspace_id, \
-                  api_key_id, logical_model, provider, provider_model, prompt_tokens, \
-                  completion_tokens, total_tokens, usage_source, status_code, input_cost, \
-                  output_cost, total_cost, currency, credits, entry_json, occurred_at_unix, \
-                  created_at_unix) \
+                 (id, request_id, trace_id, provider_attempt_id, provider_attempt_index, \
+                  organization_id, project_id, workspace_id, api_key_id, logical_model, provider, \
+                  provider_model, prompt_tokens, completion_tokens, total_tokens, usage_source, \
+                  status_code, input_cost, output_cost, total_cost, currency, credits, entry_json, \
+                  occurred_at_unix, created_at_unix) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
-                  $16, $17, $18, $19, $20, $21::text::jsonb, $22, $23) \
+                  $16, $17, $18, $19, $20, $21, $22, $23::text::jsonb, $24, $25) \
                  ON CONFLICT (id) DO NOTHING",
                 &[
                     &entry.id,
                     &entry.request_id,
                     &entry.trace_id,
+                    &entry.provider_attempt.provider_attempt_id,
+                    &(entry.provider_attempt.provider_attempt_index as i32),
                     &entry.tenant.organization_id,
                     &entry.tenant.project_id,
                     &entry.tenant.workspace_id,
@@ -2205,7 +2254,23 @@ impl PostgresControlPlaneStore {
                 ],
             )
         })?;
-        Ok(inserted > 0)
+        if inserted > 0 {
+            return Ok(true);
+        }
+        let existing = self.get_billing_ledger_entry(&entry.id)?.ok_or_else(|| {
+            StorageError::Runtime(format!(
+                "billing ledger id {} conflicted but could not be reloaded",
+                entry.id
+            ))
+        })?;
+        if ferrogate_billing::same_provider_attempt_settlement(&existing, entry) {
+            Ok(false)
+        } else {
+            Err(StorageError::Conflict(format!(
+                "billing ledger id {} was replayed with different provider-attempt settlement data",
+                entry.id
+            )))
+        }
     }
 
     /// Issue #149: the tenant filter is pushed into the WHERE clause itself
@@ -2388,19 +2453,26 @@ impl PostgresControlPlaneStore {
             .is_some()
             .then(|| serialize_storage_document(event))
             .transpose()?;
+        let event_json = serialize_storage_document(event)?;
         let metadata_json = serialize_storage_document(&event.metadata)?;
-        self.with_client(|client| {
+        let billing_event_id = ferrogate_billing::ledger::ledger_entry_id(event);
+        let inserted = self.with_client(|client| {
             let mut transaction = client.transaction()?;
             upsert_tenant_context(&mut transaction, &tenant_context_id, &event.tenant)?;
             let inserted = transaction.execute(
                 "INSERT INTO metering_events \
-                 (request_id, tenant_context_id, trace_id, agent_run_id, workflow_id, \
-                  workflow_version, workflow_node_id, cluster_id, node_id, status_code, \
-                  occurred_at_unix, cost_usd, latency_ms, metadata_json) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::text::jsonb) \
-                 ON CONFLICT (request_id) DO NOTHING",
+                 (billing_event_id, request_id, provider_attempt_id, provider_attempt_index, \
+                  tenant_context_id, trace_id, agent_run_id, workflow_id, workflow_version, \
+                  workflow_node_id, cluster_id, node_id, status_code, occurred_at_unix, cost_usd, \
+                  latency_ms, metadata_json, event_json) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
+                         $16, $17::text::jsonb, $18::text::jsonb) \
+                 ON CONFLICT (billing_event_id) DO NOTHING",
                 &[
+                    &billing_event_id,
                     &event.request_id,
+                    &event.provider_attempt.provider_attempt_id,
+                    &(event.provider_attempt.provider_attempt_index as i32),
                     &tenant_context_id,
                     &event.trace_id,
                     &event.agent_run_id,
@@ -2414,14 +2486,16 @@ impl PostgresControlPlaneStore {
                     &event.cost_usd,
                     &latency_ms,
                     &metadata_json,
+                    &event_json,
                 ],
             )?;
             if inserted == 1 {
                 transaction.execute(
                     "INSERT INTO metering_event_routes \
-                     (request_id, logical_model, provider, provider_model) \
-                     VALUES ($1, $2, $3, $4)",
+                     (billing_event_id, request_id, logical_model, provider, provider_model) \
+                     VALUES ($1, $2, $3, $4, $5)",
                     &[
+                        &billing_event_id,
                         &event.request_id,
                         &event.logical_model,
                         &event.provider,
@@ -2430,9 +2504,11 @@ impl PostgresControlPlaneStore {
                 )?;
                 transaction.execute(
                     "INSERT INTO metering_event_usage \
-                     (request_id, prompt_tokens, completion_tokens, total_tokens, usage_source) \
-                     VALUES ($1, $2, $3, $4, $5)",
+                     (billing_event_id, request_id, prompt_tokens, completion_tokens, total_tokens, \
+                      usage_source) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
                     &[
+                        &billing_event_id,
                         &event.request_id,
                         &prompt_tokens,
                         &completion_tokens,
@@ -2482,9 +2558,45 @@ impl PostgresControlPlaneStore {
                     )?;
                 }
             }
-            transaction.commit()?;
+            if inserted == 1 {
+                transaction.commit()?;
+            } else {
+                // A conflicting attempt may carry a different tenant payload. Do not
+                // commit its tenant-context upsert before exact replay is established.
+                transaction.rollback()?;
+            }
             Ok(inserted == 1)
-        })
+        })?;
+        if inserted {
+            return Ok(true);
+        }
+        if self.billing_event_settlement_matches(&billing_event_id, event)? {
+            Ok(false)
+        } else {
+            Err(StorageError::Conflict(format!(
+                "billing event id {billing_event_id} was replayed with different provider-attempt settlement data"
+            )))
+        }
+    }
+
+    fn billing_event_settlement_matches(
+        &self,
+        billing_event_id: &str,
+        event: &BillingEvent,
+    ) -> Result<bool, StorageError> {
+        let row = self.with_client(|client| {
+            client.query_opt(
+                "SELECT event_json::text FROM metering_events WHERE billing_event_id = $1",
+                &[&billing_event_id],
+            )
+        })?;
+        let Some(row) = row else {
+            return Err(StorageError::Runtime(format!(
+                "billing event id {billing_event_id} conflicted but could not be reloaded"
+            )));
+        };
+        let existing: BillingEvent = deserialize_storage_document(&row.get::<_, String>(0))?;
+        Ok(same_billing_event_settlement(&existing, event))
     }
 
     fn append_request_log(&self, log: &StoredRequestLog) -> Result<(), StorageError> {
@@ -3686,30 +3798,20 @@ impl PostgresControlPlaneStore {
         self.with_client_storage(|client| {
             let rows = client
                 .query(
-                    "SELECT e.request_id, e.trace_id, e.agent_run_id, e.workflow_id, \
-                        e.workflow_version, e.workflow_node_id, e.cluster_id, e.node_id, \
-                        e.status_code, e.occurred_at_unix, \
-                        t.organization_id, t.team_id, t.project_id, t.user_id, t.api_key_id, \
-                        r.logical_model, r.provider, r.provider_model, \
-                        u.prompt_tokens, u.completion_tokens, u.total_tokens, u.usage_source, \
-                        t.workspace_id, e.cost_usd, e.latency_ms, e.metadata_json::text, \
-                        count(*) OVER() \
+                    "SELECT e.event_json::text, count(*) OVER() \
                  FROM metering_events e \
-                 JOIN tenant_contexts t ON t.id = e.tenant_context_id \
-                 JOIN metering_event_routes r ON r.request_id = e.request_id \
-                 JOIN metering_event_usage u ON u.request_id = e.request_id \
-                 ORDER BY e.occurred_at_unix ASC, e.request_id ASC \
+                 ORDER BY e.occurred_at_unix ASC, e.request_id ASC, e.provider_attempt_index ASC \
                  OFFSET $1 LIMIT $2",
                     &[&offset, &limit],
                 )
                 .map_err(postgres_error)?;
             let total = rows
                 .first()
-                .map(|row| row.get::<_, i64>(26))
+                .map(|row| row.get::<_, i64>(1))
                 .unwrap_or_default();
             let data = rows
                 .into_iter()
-                .map(billing_event_from_row)
+                .map(|row| deserialize_billing_event_document(&row.get::<_, String>(0)))
                 .collect::<Result<Vec<_>, StorageError>>()?;
             Ok(StoragePage {
                 data,
@@ -3724,22 +3826,15 @@ impl PostgresControlPlaneStore {
         self.with_client_storage(|client| {
             let rows = client
                 .query(
-                    "SELECT e.request_id, e.trace_id, e.agent_run_id, e.workflow_id, \
-                        e.workflow_version, e.workflow_node_id, e.cluster_id, e.node_id, \
-                        e.status_code, e.occurred_at_unix, \
-                        t.organization_id, t.team_id, t.project_id, t.user_id, t.api_key_id, \
-                        r.logical_model, r.provider, r.provider_model, \
-                        u.prompt_tokens, u.completion_tokens, u.total_tokens, u.usage_source, \
-                        t.workspace_id, e.cost_usd, e.latency_ms, e.metadata_json::text \
+                    "SELECT e.event_json::text \
                  FROM metering_events e \
-                 JOIN tenant_contexts t ON t.id = e.tenant_context_id \
-                 JOIN metering_event_routes r ON r.request_id = e.request_id \
-                 JOIN metering_event_usage u ON u.request_id = e.request_id \
-                 ORDER BY e.occurred_at_unix ASC, e.request_id ASC",
+                 ORDER BY e.occurred_at_unix ASC, e.request_id ASC, e.provider_attempt_index ASC",
                     &[],
                 )
                 .map_err(postgres_error)?;
-            rows.into_iter().map(billing_event_from_row).collect()
+            rows.into_iter()
+                .map(|row| deserialize_billing_event_document(&row.get::<_, String>(0)))
+                .collect()
         })
     }
 
@@ -4028,6 +4123,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "budget_alert_notifications",
         "usage_metadata_rollups",
         "wallets",
+        "wallet_settlements",
         "payment_methods",
     ];
     for table in TABLES {
@@ -4082,6 +4178,105 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         if data_type.as_deref() != Some("jsonb") {
             return Err(StorageError::Postgres(format!(
                 "required schema column {table}.{column} must be jsonb"
+            )));
+        }
+    }
+
+    const PROVIDER_ATTEMPT_COLUMNS: &[(&str, &str, &str, &str)] = &[
+        ("metering_events", "billing_event_id", "text", "NO"),
+        ("metering_events", "provider_attempt_id", "text", "NO"),
+        ("metering_events", "provider_attempt_index", "integer", "NO"),
+        ("metering_events", "event_json", "jsonb", "NO"),
+        ("metering_event_routes", "billing_event_id", "text", "NO"),
+        ("metering_event_usage", "billing_event_id", "text", "NO"),
+        ("billing_ledger", "provider_attempt_id", "text", "NO"),
+        ("billing_ledger", "provider_attempt_index", "integer", "NO"),
+    ];
+    for (table, column, expected_type, expected_nullable) in PROVIDER_ATTEMPT_COLUMNS {
+        let definition = client
+            .query_opt(
+                "SELECT data_type, is_nullable FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = $1 AND column_name = $2",
+                &[table, column],
+            )
+            .map_err(postgres_error)?
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)));
+        if definition.as_ref().map(|(value, _)| value.as_str()) != Some(*expected_type)
+            || definition.as_ref().map(|(_, value)| value.as_str()) != Some(*expected_nullable)
+        {
+            return Err(StorageError::Postgres(format!(
+                "required provider-attempt column {table}.{column} must be {expected_type} NOT NULL"
+            )));
+        }
+    }
+
+    for (table, expected_column) in [
+        ("metering_events", "billing_event_id"),
+        ("metering_event_routes", "billing_event_id"),
+        ("metering_event_usage", "billing_event_id"),
+    ] {
+        let columns = client
+            .query(
+                "SELECT attribute.attname \
+                 FROM pg_constraint AS con \
+                 JOIN pg_class AS relation ON relation.oid = con.conrelid \
+                 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace \
+                 JOIN unnest(con.conkey) WITH ORDINALITY AS key(attnum, position) ON TRUE \
+                 JOIN pg_attribute AS attribute \
+                   ON attribute.attrelid = relation.oid AND attribute.attnum = key.attnum \
+                 WHERE namespace.nspname = current_schema() AND relation.relname = $1 \
+                   AND con.contype = 'p' \
+                 ORDER BY key.position",
+                &[&table],
+            )
+            .map_err(postgres_error)?
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>();
+        if columns != [expected_column] {
+            return Err(StorageError::Postgres(format!(
+                "required provider-attempt primary key on {table} must be exactly ({expected_column}), got {columns:?}"
+            )));
+        }
+    }
+
+    for (table, constraint_name) in [
+        (
+            "metering_event_routes",
+            "metering_event_routes_billing_event_id_fkey",
+        ),
+        (
+            "metering_event_usage",
+            "metering_event_usage_billing_event_id_fkey",
+        ),
+    ] {
+        let foreign_key = client
+            .query_opt(
+                PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY,
+                &[&table, &constraint_name],
+            )
+            .map_err(postgres_error)?
+            .map(|row| {
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, bool>(1),
+                    row.get::<_, String>(2),
+                    row.get::<_, String>(3),
+                    row.get::<_, String>(4),
+                )
+            });
+        if foreign_key
+            != Some((
+                "billing_event_id".into(),
+                true,
+                "metering_events".into(),
+                "billing_event_id".into(),
+                "c".into(),
+            ))
+        {
+            return Err(StorageError::Postgres(format!(
+                "required provider-attempt foreign key {constraint_name} on {table} must map billing_event_id to metering_events.billing_event_id ON DELETE CASCADE, got {foreign_key:?}"
             )));
         }
     }
@@ -4210,6 +4405,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_usage_aggregates_tenant_model_provider",
         "idx_tenant_contexts_api_key",
         "idx_metering_events_tenant_time",
+        "idx_metering_events_request",
         "idx_metering_event_routes_model_provider",
         "idx_usage_rollups_tenant_model_provider",
         "idx_api_keys_workspace",
@@ -4219,6 +4415,7 @@ fn validate_postgres_schema(client: &mut PostgresClient) -> Result<(), StorageEr
         "idx_usage_monthly_rollups_period",
         "idx_billing_ledger_tenant_time",
         "idx_billing_ledger_model_provider",
+        "idx_billing_ledger_request_attempt",
         "idx_billing_report_outbox_due",
         "idx_billing_report_outbox_dead_lettered",
         "idx_admin_user_tenant_memberships_user",
@@ -4281,6 +4478,10 @@ fn saturating_i32(value: u64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+fn same_billing_event_settlement(left: &BillingEvent, right: &BillingEvent) -> bool {
+    left == right
+}
+
 fn nonnegative_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
 }
@@ -4297,6 +4498,10 @@ fn deserialize_storage_document<T: for<'de> Deserialize<'de>>(
     value: &str,
 ) -> Result<T, StorageError> {
     serde_json::from_str(value).map_err(|error| StorageError::Serialization(error.to_string()))
+}
+
+fn deserialize_billing_event_document(value: &str) -> Result<BillingEvent, StorageError> {
+    deserialize_storage_document(value)
 }
 
 fn tenant_account_from_row(row: &PostgresRow) -> StoredTenantAccount {
@@ -4549,7 +4754,15 @@ impl std::fmt::Debug for StorageLedgerSink {
 }
 
 fn ledger_storage_error(error: StorageError) -> ferrogate_billing::BillingError {
-    ferrogate_billing::BillingError::new("billing_ledger_storage_error", error.to_string())
+    match error {
+        StorageError::Conflict(message) => ferrogate_billing::BillingError::new(
+            "billing_idempotency_conflict",
+            format!("storage conflict: {message}"),
+        ),
+        other => {
+            ferrogate_billing::BillingError::new("billing_ledger_storage_error", other.to_string())
+        }
+    }
 }
 
 impl ferrogate_billing::LedgerSink for StorageLedgerSink {
@@ -4874,53 +5087,6 @@ fn usage_monthly_rollup_from_row(
     })
 }
 
-fn billing_event_from_row(row: PostgresRow) -> Result<BillingEvent, StorageError> {
-    let metadata = deserialize_storage_document(&row.get::<_, String>(25))?;
-    // metering_events has no wallet_delta_credits/wallet_balance_after_credits
-    // columns -- unlike the billing_report_outbox row and the standalone
-    // billing service's billing_ledger table (both store their payload as
-    // a JSON blob column, `deserialize_storage_document`d back into the
-    // full struct wallet fields included, see `ledger_entry_from_row`),
-    // this table backs the gateway's own internal metering/billing-events
-    // admin view, not GET /v1/billing/ledger (issue #169's actual
-    // acceptance target), so it was never a candidate for carrying this
-    // data and reading it back here as None is correct, not a gap.
-    Ok(BillingEvent {
-        request_id: row.get(0),
-        trace_id: row.get(1),
-        agent_run_id: row.get(2),
-        workflow_id: row.get(3),
-        workflow_version: row.get::<_, Option<i32>>(4).map(|value| value as u32),
-        workflow_node_id: row.get(5),
-        cluster_id: row.get(6),
-        node_id: row.get(7),
-        status_code: row.get::<_, i32>(8).clamp(0, i32::from(u16::MAX)) as u16,
-        occurred_at_unix: Some(nonnegative_u64(row.get(9))),
-        tenant: TenantContext {
-            workspace_id: row.get(22),
-            organization_id: row.get(10),
-            team_id: row.get(11),
-            project_id: row.get(12),
-            user_id: row.get(13),
-            api_key_id: row.get(14),
-        },
-        logical_model: row.get(15),
-        provider: row.get(16),
-        provider_model: row.get(17),
-        usage: TokenUsage {
-            prompt_tokens: nonnegative_u64(row.get(18)),
-            completion_tokens: nonnegative_u64(row.get(19)),
-            total_tokens: nonnegative_u64(row.get(20)),
-        },
-        usage_source: billing_usage_source_from_str(row.get::<_, String>(21).as_str()),
-        cost_usd: row.get(23),
-        latency_ms: row.get::<_, Option<i64>>(24).map(nonnegative_u64),
-        metadata,
-        wallet_delta_credits: None,
-        wallet_balance_after_credits: None,
-    })
-}
-
 fn usage_aggregate_from_row(row: PostgresRow) -> StoredUsageAggregate {
     StoredUsageAggregate {
         id: row.get(0),
@@ -5234,13 +5400,6 @@ fn tenant_from_storage_key(value: Option<&str>) -> TenantContext {
     tenant
 }
 
-fn billing_usage_source_from_str(value: &str) -> ferrogate_billing::BillingUsageSource {
-    match value {
-        "gateway_estimate" => ferrogate_billing::BillingUsageSource::GatewayEstimate,
-        _ => ferrogate_billing::BillingUsageSource::ProviderUsage,
-    }
-}
-
 #[derive(Debug)]
 enum RuntimeControlPlaneBackend {
     Memory(Box<Mutex<RuntimeControlPlaneState>>),
@@ -5281,7 +5440,9 @@ impl RuntimeControlPlaneState {
             billing_report_outbox: InMemoryRepository::new(),
             budget_alert_notifications: InMemoryRepository::new(),
             usage_metadata_rollups: InMemoryRepository::new(),
+            billing_event_ids: InMemoryRepository::new(),
             wallets: InMemoryRepository::new(),
+            wallet_settlements: InMemoryRepository::new(),
             payment_methods: InMemoryRepository::new(),
             guardrail_policy_revisions: InMemoryRepository::new(),
             guardrail_policy_bindings: InMemoryRepository::new(),
@@ -8310,29 +8471,43 @@ impl RuntimeStorageRepositories {
                 control_plane.append_billing_event(&event)
             }
             RuntimeControlPlaneBackend::Memory(control_plane) => {
-                self.upsert_in_memory_usage_aggregate(&event);
-                if let Ok(mut control_plane) = control_plane.lock() {
-                    let period_month = period_month_from_unix(saturating_i64(
-                        event.occurred_at_unix.unwrap_or_else(now_unix_seconds),
-                    ));
-                    let usage_delta = UsageMonthlyDelta {
-                        prompt_tokens: event.usage.prompt_tokens,
-                        completion_tokens: event.usage.completion_tokens,
-                        total_tokens: event.usage.total_tokens,
-                        cost_usd: event.cost_usd.unwrap_or(0.0),
-                        is_error: event.status_code >= 400,
-                    };
-                    control_plane.increment_usage_monthly_rollups(
-                        &event.tenant,
-                        &period_month,
-                        &usage_delta,
-                    );
-                    control_plane.increment_usage_metadata_rollups(
-                        &event.metadata,
-                        &period_month,
-                        &usage_delta,
-                    );
+                let billing_event_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+                let mut control_plane = control_plane.lock().map_err(|_| {
+                    StorageError::Runtime("memory control-plane lock poisoned".into())
+                })?;
+                if let Some(existing) = control_plane.billing_event_ids.get(&billing_event_id) {
+                    if same_billing_event_settlement(&existing, &event) {
+                        return Ok(false);
+                    }
+                    return Err(StorageError::Conflict(format!(
+                        "billing event id {billing_event_id} was replayed with different provider-attempt settlement data"
+                    )));
                 }
+                control_plane
+                    .billing_event_ids
+                    .insert(billing_event_id, event.clone());
+                let period_month = period_month_from_unix(saturating_i64(
+                    event.occurred_at_unix.unwrap_or_else(now_unix_seconds),
+                ));
+                let usage_delta = UsageMonthlyDelta {
+                    prompt_tokens: event.usage.prompt_tokens,
+                    completion_tokens: event.usage.completion_tokens,
+                    total_tokens: event.usage.total_tokens,
+                    cost_usd: event.cost_usd.unwrap_or(0.0),
+                    is_error: event.status_code >= 400,
+                };
+                control_plane.increment_usage_monthly_rollups(
+                    &event.tenant,
+                    &period_month,
+                    &usage_delta,
+                );
+                control_plane.increment_usage_metadata_rollups(
+                    &event.metadata,
+                    &period_month,
+                    &usage_delta,
+                );
+                drop(control_plane);
+                self.upsert_in_memory_usage_aggregate(&event);
                 Ok(true)
             }
         }
@@ -9270,6 +9445,14 @@ impl<T> StoragePage<T> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "schema_validation_test.rs"]
+mod schema_validation_test;
+
+#[cfg(test)]
+#[path = "storage_ledger_sink_test.rs"]
+mod storage_ledger_sink_test;
 
 #[cfg(test)]
 mod tests {
@@ -10653,6 +10836,7 @@ mod tests {
             .append_billing_event(BillingEvent {
                 request_id: "req-1".into(),
                 trace_id: None,
+                provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-1", 0),
                 agent_run_id: None,
                 workflow_id: None,
                 workflow_version: None,
@@ -10678,6 +10862,7 @@ mod tests {
             .append_billing_event(BillingEvent {
                 request_id: "req-2".into(),
                 trace_id: None,
+                provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-2", 0),
                 agent_run_id: None,
                 workflow_id: None,
                 workflow_version: None,
@@ -10743,6 +10928,7 @@ mod tests {
             |request_id: &str, customer_id: &str, prompt_tokens: u64, cost_usd: f64| BillingEvent {
                 request_id: request_id.into(),
                 trace_id: None,
+                provider_attempt: ferrogate_billing::ProviderAttempt::for_request(request_id, 0),
                 agent_run_id: None,
                 workflow_id: None,
                 workflow_version: None,

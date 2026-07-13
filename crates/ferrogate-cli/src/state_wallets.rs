@@ -11,7 +11,7 @@ use super::*;
 /// (issue #169): threaded into the `BillingEvent` the caller is about to
 /// build so it can be mirrored, not recomputed, in the standalone billing
 /// service's ledger.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WalletDebitOutcome {
     pub(crate) delta_credits: i64,
     pub(crate) balance_after_credits: i64,
@@ -161,6 +161,7 @@ impl AppState {
         &self,
         tenant: &ferrogate_core::TenantContext,
         cost_usd: f64,
+        settlement_id: &str,
     ) -> Option<WalletDebitOutcome> {
         if cost_usd <= 0.0 {
             return None;
@@ -174,29 +175,40 @@ impl AppState {
         let now = now_unix_seconds().unwrap_or_default() as i64;
         match self
             .repositories
-            .adjust_wallet_balance(tenant_id, delta_credits, now)
+            .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now)
         {
-            Ok(None) => None, // no wallet for this tenant; nothing to do
-            Ok(Some(wallet)) => {
-                self.record_wallet_ledger_event(
-                    tenant_id,
-                    "wallet.settle",
-                    "debited",
-                    format!(
-                        "settled request cost ${cost_usd:.6} debited {} credits; balance now {}",
-                        -delta_credits, wallet.balance_credits
-                    ),
-                );
+            Ok(outcome) => {
+                let balance_after_credits = outcome.settlement.balance_after_credits?;
+                if outcome.newly_applied {
+                    self.record_wallet_ledger_event(
+                        tenant_id,
+                        "wallet.settle",
+                        "debited",
+                        format!(
+                            "settled request cost ${cost_usd:.6} debited {} credits; balance now {}",
+                            -delta_credits, balance_after_credits
+                        ),
+                    );
+                    match self.repositories.get_wallet(tenant_id) {
+                        Ok(Some(wallet)) => self.maybe_trigger_auto_recharge(wallet),
+                        Ok(None) => {}
+                        Err(error) => warn!(
+                            tenant_id = %tenant_id,
+                            error = %error,
+                            "failed to reload wallet after settlement"
+                        ),
+                    }
+                }
                 let outcome = WalletDebitOutcome {
                     delta_credits,
-                    balance_after_credits: wallet.balance_credits,
+                    balance_after_credits,
                 };
-                self.maybe_trigger_auto_recharge(wallet);
                 Some(outcome)
             }
             Err(error) => {
                 warn!(
                     tenant_id = %tenant_id,
+                    settlement_id = %settlement_id,
                     error = %error,
                     "failed to debit tenant wallet for settled request cost"
                 );
@@ -557,6 +569,10 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "state_wallet_settlement_test.rs"]
+mod settlement_tests;
 
 #[cfg(test)]
 mod tests {

@@ -34,7 +34,7 @@ struct ProviderCase {
     expected_upstream_models: &'static [&'static str],
 }
 
-const PROVIDER_CASES: [ProviderCase; 5] = [
+const PROVIDER_CASES: [ProviderCase; 4] = [
     ProviderCase {
         name: "primary-success",
         logical_model: "fast-chat",
@@ -95,25 +95,10 @@ const PROVIDER_CASES: [ProviderCase; 5] = [
         expected_cost_picousd: 7_000_000,
         expected_upstream_models: &["gpt-4o-mini"],
     },
-    // Keep fallback last: its primary 503 deliberately opens the shared
-    // provider circuit, which would prevent later cases from reaching the
-    // upstream behavior they are intended to verify.
-    ProviderCase {
-        name: "fallback-success",
-        logical_model: "fallback-chat",
-        content: "provider compliance fallback success",
-        stream: false,
-        expected_status: 200,
-        expected_error_code: None,
-        provider: "backup-openai",
-        provider_model: "gpt-4o-mini-fallback",
-        prompt_tokens: 4,
-        completion_tokens: 6,
-        total_tokens: 10,
-        expected_cost_picousd: 16_000_000,
-        expected_upstream_models: &["gpt-4o-mini-failover-primary", "gpt-4o-mini-fallback"],
-    },
 ];
+
+const MULTI_ATTEMPT_CONTENT: &str = "provider compliance multi attempt settlement";
+const MULTI_ATTEMPT_AGENT_RUN_ID: &str = "provider-compliance-multi-attempt";
 
 #[derive(Clone, Copy, Debug)]
 struct ProviderNoSettlementCase {
@@ -141,6 +126,8 @@ const PROVIDER_NO_SETTLEMENT_CASES: [ProviderNoSettlementCase; 2] = [
 #[derive(Clone, Debug, PartialEq)]
 struct ProviderSettlementProjection {
     request_id: String,
+    provider_attempt_id: String,
+    provider_attempt_index: u64,
     logical_model: String,
     provider: String,
     provider_model: String,
@@ -322,29 +309,231 @@ impl ComponentContract for ProviderSettlementContract<'_> {
 pub(crate) fn run_provider_compliance(args: &LocalArgs) -> Result<()> {
     let billing = BillingHarness::start(&args.ferrogate_bin)?;
     assert_billing_auth(&billing.billing_addr)?;
-    let expected_requests = PROVIDER_CASES
-        .iter()
-        .map(|case| case.expected_upstream_models.len())
-        .sum::<usize>()
-        + PROVIDER_NO_SETTLEMENT_CASES.len();
+    let expected_requests = expected_provider_requests();
     let mut gateway = LocalHarness::start_with_billing_service(
         &args.ferrogate_bin,
         expected_requests,
         &billing.billing_addr,
     )?;
-    // Run non-billable errors before the fallback case opens the shared
-    // primary provider circuit.
-    assert_no_settlement_cases(&gateway.gateway_addr, &billing)?;
-    let contract = ProviderSettlementContract::new(&billing);
-    assert_component_contract(&gateway.gateway_addr, &contract)?;
+    run_provider_compliance_at(&gateway.gateway_addr, &billing)?;
     let requests = gateway.take_provider_requests()?;
     assert_upstream_attempts(&requests)?;
     println!("provider-component-compliance scenario passed");
     Ok(())
 }
 
+pub(crate) fn expected_provider_requests() -> usize {
+    PROVIDER_CASES
+        .iter()
+        .map(|case| case.expected_upstream_models.len())
+        .sum::<usize>()
+        + PROVIDER_NO_SETTLEMENT_CASES.len()
+        + 2
+}
+
+pub(crate) fn run_provider_compliance_at(
+    gateway_addr: &str,
+    billing: &BillingHarness,
+) -> Result<()> {
+    assert_billing_auth(&billing.billing_addr)?;
+    // The multi-attempt case is deliberately last because its primary 503
+    // opens the shared provider circuit.
+    assert_no_settlement_cases(gateway_addr, billing)?;
+    let contract = ProviderSettlementContract::new(billing);
+    assert_component_contract(gateway_addr, &contract)?;
+    assert_multi_attempt_settlement(gateway_addr, billing)
+}
+
+fn assert_multi_attempt_settlement(gateway_addr: &str, billing: &BillingHarness) -> Result<()> {
+    let body = serde_json::json!({
+        "model": "fallback-chat",
+        "messages": [{"role": "user", "content": ""}],
+        "user": MULTI_ATTEMPT_CONTENT,
+        "max_tokens": 5,
+        "stream": true
+    })
+    .to_string();
+    let agent_header = format!("x-ferrogate-agent-run-id: {MULTI_ATTEMPT_AGENT_RUN_ID}");
+    let response = http_request_addr(
+        gateway_addr,
+        "POST",
+        "/v1/chat/completions",
+        &[CLIENT_AUTH, JSON_CONTENT, &agent_header],
+        &body,
+    )?;
+    if response.status != 200 {
+        bail!(
+            "multi-attempt provider case expected status 200, got {}; raw: {}",
+            response.status,
+            response.raw
+        );
+    }
+    let request_id = response_header(&response, "x-request-id")
+        .context("multi-attempt provider case omitted x-request-id")?;
+
+    let mut gateway_events = wait_for_gateway_billing_events(gateway_addr, &request_id, 2)?;
+    let mut ledger_entries = wait_for_billing_ledger_entries(billing, &request_id, 2)?;
+    sort_by_provider_attempt(&mut gateway_events, "gateway event")?;
+    sort_by_provider_attempt(&mut ledger_entries, "ledger entry")?;
+
+    assert_multi_attempt_evidence(&gateway_events, false)?;
+    assert_multi_attempt_evidence(&ledger_entries, true)?;
+
+    let gateway_ids = provider_attempt_ids(&gateway_events)?;
+    let ledger_ids = provider_attempt_ids(&ledger_entries)?;
+    if gateway_ids != ledger_ids || gateway_ids[0] == gateway_ids[1] {
+        bail!(
+            "provider attempt identity diverged or collided: gateway={gateway_ids:?}, ledger={ledger_ids:?}"
+        );
+    }
+    let ledger_charge_ids = ledger_entries
+        .iter()
+        .map(|entry| required_string(&entry["id"], "ledger.id"))
+        .collect::<Result<Vec<_>>>()?;
+    if ledger_charge_ids[0] == ledger_charge_ids[1] {
+        bail!("multi-attempt ledger charge ids collided");
+    }
+
+    // Replay the exact same two attempt events. Billing must return success but
+    // keep exactly two ledger rows because each attempt identity is its own
+    // idempotency key.
+    for event in &gateway_events {
+        let replay = http_request_addr(
+            &billing.billing_addr,
+            "POST",
+            "/v1/billing/charge",
+            &[BILLING_AUTH, JSON_CONTENT],
+            &serde_json::to_string(event)?,
+        )?;
+        if replay.status != 200 {
+            bail!("provider attempt replay failed: {}", replay.raw);
+        }
+    }
+    let mut collision = gateway_events[0].clone();
+    collision["request_id"] = Value::String(format!("{request_id}-collision"));
+    let rejected = http_request_addr(
+        &billing.billing_addr,
+        "POST",
+        "/v1/billing/charge",
+        &[BILLING_AUTH, JSON_CONTENT],
+        &serde_json::to_string(&collision)?,
+    )?;
+    if rejected.status != 409 {
+        bail!(
+            "provider attempt payload collision was not rejected with 409: {}",
+            rejected.raw
+        );
+    }
+    let replayed = wait_for_billing_ledger_entries(billing, &request_id, 2)?;
+    if replayed.len() != 2 {
+        bail!(
+            "provider attempt replay double-charged logical request {request_id}: {} rows",
+            replayed.len()
+        );
+    }
+
+    let total_tokens = ledger_entries.iter().try_fold(0_u64, |total, entry| {
+        Ok::<_, anyhow::Error>(total.saturating_add(required_u64(
+            &entry["usage"]["total_tokens"],
+            "ledger.total_tokens",
+        )?))
+    })?;
+    let total_cost_picousd = ledger_entries.iter().try_fold(0_u64, |total, entry| {
+        Ok::<_, anyhow::Error>(total.saturating_add(cost_picousd(
+            &entry["cost"]["total_cost"],
+            "ledger.total_cost",
+        )?))
+    })?;
+    if total_tokens != 13 || total_cost_picousd != 20_000_000 {
+        bail!(
+            "multi-attempt rollup mismatch: tokens={total_tokens}, cost_picousd={total_cost_picousd}"
+        );
+    }
+    Ok(())
+}
+
+fn assert_multi_attempt_evidence(entries: &[Value], ledger: bool) -> Result<()> {
+    let expected = [
+        (
+            0_u64,
+            "openai",
+            "gpt-4o-mini-failover-primary",
+            503_u64,
+            2_u64,
+            1_u64,
+            3_u64,
+            4_000_000_u64,
+            "provider_usage",
+        ),
+        (
+            1_u64,
+            "backup-openai",
+            "gpt-4o-mini-fallback",
+            200_u64,
+            4_u64,
+            6_u64,
+            10_u64,
+            16_000_000_u64,
+            "provider_usage",
+        ),
+    ];
+    for (entry, expected) in entries.iter().zip(expected) {
+        let cost = if ledger {
+            &entry["cost"]["total_cost"]
+        } else {
+            &entry["cost_usd"]
+        };
+        let actual = (
+            required_u64(&entry["provider_attempt_index"], "provider_attempt_index")?,
+            required_string(&entry["provider"], "provider")?,
+            required_string(&entry["provider_model"], "provider_model")?,
+            required_u64(&entry["status_code"], "status_code")?,
+            required_u64(&entry["usage"]["prompt_tokens"], "prompt_tokens")?,
+            required_u64(&entry["usage"]["completion_tokens"], "completion_tokens")?,
+            required_u64(&entry["usage"]["total_tokens"], "total_tokens")?,
+            cost_picousd(cost, "cost")?,
+            required_string(&entry["usage_source"], "usage_source")?,
+        );
+        let expected = (
+            expected.0,
+            expected.1.to_string(),
+            expected.2.to_string(),
+            expected.3,
+            expected.4,
+            expected.5,
+            expected.6,
+            expected.7,
+            expected.8.to_string(),
+        );
+        if actual != expected {
+            bail!("multi-attempt evidence mismatch: expected {expected:?}, got {actual:?}");
+        }
+        if entry["agent_run_id"] != MULTI_ATTEMPT_AGENT_RUN_ID && !ledger {
+            bail!("multi-attempt gateway evidence lost agent_run_id: {entry}");
+        }
+    }
+    Ok(())
+}
+
+fn provider_attempt_ids(entries: &[Value]) -> Result<Vec<String>> {
+    entries
+        .iter()
+        .map(|entry| required_string(&entry["provider_attempt_id"], "provider_attempt_id"))
+        .collect()
+}
+
+fn sort_by_provider_attempt(entries: &mut [Value], kind: &str) -> Result<()> {
+    for entry in entries.iter() {
+        required_u64(&entry["provider_attempt_index"], kind)?;
+    }
+    entries.sort_by_key(|entry| entry["provider_attempt_index"].as_u64().unwrap_or(u64::MAX));
+    Ok(())
+}
+
 fn expected_projection(case: &ProviderCase, request_id: String) -> ProviderSettlementProjection {
     ProviderSettlementProjection {
+        provider_attempt_id: format!("{request_id}:provider-attempt:0"),
+        provider_attempt_index: 0,
         request_id,
         logical_model: case.logical_model.to_string(),
         provider: case.provider.to_string(),
@@ -366,6 +555,14 @@ fn expected_projection(case: &ProviderCase, request_id: String) -> ProviderSettl
 fn ledger_projection(entry: &Value) -> Result<ProviderSettlementProjection> {
     Ok(ProviderSettlementProjection {
         request_id: required_string(&entry["request_id"], "ledger.request_id")?,
+        provider_attempt_id: required_string(
+            &entry["provider_attempt_id"],
+            "ledger.provider_attempt_id",
+        )?,
+        provider_attempt_index: required_u64(
+            &entry["provider_attempt_index"],
+            "ledger.provider_attempt_index",
+        )?,
         logical_model: required_string(&entry["logical_model"], "ledger.logical_model")?,
         provider: required_string(&entry["provider"], "ledger.provider")?,
         provider_model: required_string(&entry["provider_model"], "ledger.provider_model")?,
@@ -392,6 +589,14 @@ fn ledger_projection(entry: &Value) -> Result<ProviderSettlementProjection> {
 fn billing_event_projection(event: &Value) -> Result<ProviderSettlementProjection> {
     Ok(ProviderSettlementProjection {
         request_id: required_string(&event["request_id"], "billing_event.request_id")?,
+        provider_attempt_id: required_string(
+            &event["provider_attempt_id"],
+            "billing_event.provider_attempt_id",
+        )?,
+        provider_attempt_index: required_u64(
+            &event["provider_attempt_index"],
+            "billing_event.provider_attempt_index",
+        )?,
         logical_model: required_string(&event["logical_model"], "billing_event.logical_model")?,
         provider: required_string(&event["provider"], "billing_event.provider")?,
         provider_model: required_string(&event["provider_model"], "billing_event.provider_model")?,
@@ -448,6 +653,64 @@ fn wait_for_gateway_billing_event(gateway_addr: &str, request_id: &str) -> Resul
     bail!("timed out waiting for gateway billing event {request_id}; last response: {last}")
 }
 
+fn wait_for_gateway_billing_events(
+    gateway_addr: &str,
+    request_id: &str,
+    expected: usize,
+) -> Result<Vec<Value>> {
+    let mut last = String::new();
+    for _ in 0..100 {
+        let response = http_request_addr(
+            gateway_addr,
+            "GET",
+            "/admin/v1/billing-events?limit=200",
+            &[ADMIN_AUTH],
+            "",
+        )?;
+        if response.status != 200 {
+            bail!("billing event query failed: {}", response.raw);
+        }
+        let body: Value = serde_json::from_str(&response.body)?;
+        let events = body["data"]
+            .as_array()
+            .context("gateway billing event response omitted data")?
+            .iter()
+            .filter(|event| event["request_id"] == request_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if events.len() >= expected {
+            return Ok(events);
+        }
+        last = response.body;
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "timed out waiting for {expected} gateway billing events for {request_id}; last response: {last}"
+    )
+}
+
+fn wait_for_billing_ledger_entries(
+    billing: &BillingHarness,
+    request_id: &str,
+    expected: usize,
+) -> Result<Vec<Value>> {
+    let mut last = Vec::new();
+    for _ in 0..100 {
+        let entries = billing_ledger_entries(&billing.billing_addr)?
+            .into_iter()
+            .filter(|entry| entry["request_id"] == request_id)
+            .collect::<Vec<_>>();
+        if entries.len() >= expected {
+            return Ok(entries);
+        }
+        last = entries;
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "timed out waiting for {expected} billing ledger entries for {request_id}; last entries: {last:?}"
+    )
+}
+
 fn billing_ledger_entries(billing_addr: &str) -> Result<Vec<Value>> {
     let response = http_request_addr(
         billing_addr,
@@ -487,7 +750,7 @@ fn assert_billing_auth(billing_addr: &str) -> Result<()> {
     Ok(())
 }
 
-fn assert_upstream_attempts(requests: &[String]) -> Result<()> {
+pub(crate) fn assert_upstream_attempts(requests: &[String]) -> Result<()> {
     for case in PROVIDER_CASES {
         for model in case.expected_upstream_models {
             let count = requests
@@ -518,6 +781,20 @@ fn assert_upstream_attempts(requests: &[String]) -> Result<()> {
                 "provider case {} expected one upstream attempt for {}, got {count}: {requests:#?}",
                 case.name,
                 case.expected_upstream_model
+            );
+        }
+    }
+    for model in ["gpt-4o-mini-failover-primary", "gpt-4o-mini-fallback"] {
+        let count = requests
+            .iter()
+            .filter(|request| {
+                request.contains(MULTI_ATTEMPT_CONTENT)
+                    && request.contains(&format!(r#""model":"{model}""#))
+            })
+            .count();
+        if count != 1 {
+            bail!(
+                "multi-attempt provider case expected one upstream dispatch for {model}, got {count}: {requests:#?}"
             );
         }
     }

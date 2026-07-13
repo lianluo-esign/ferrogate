@@ -614,6 +614,7 @@ fn usage_cost_accounting_round_trips_through_real_supabase() {
         .append_billing_event(BillingEvent {
             request_id: "req-cost-rt-1".into(),
             trace_id: None,
+            provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-cost-rt-1", 0),
             agent_run_id: None,
             workflow_id: None,
             workflow_version: None,
@@ -699,6 +700,7 @@ fn billing_ledger_round_trips_through_real_supabase() {
     let event = ferrogate_billing::BillingEvent {
         request_id: "req-ledger-rt".into(),
         trace_id: Some("trace-ledger-rt".into()),
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-ledger-rt", 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,
@@ -781,6 +783,10 @@ fn billing_ledger_tenant_filter_is_pushed_into_the_query_through_real_supabase()
         let event = ferrogate_billing::BillingEvent {
             request_id: format!("req-{org}"),
             trace_id: Some(format!("trace-{org}")),
+            provider_attempt: ferrogate_billing::ProviderAttempt::for_request(
+                &format!("req-{org}"),
+                0,
+            ),
             agent_run_id: None,
             workflow_id: None,
             workflow_version: None,
@@ -845,6 +851,7 @@ fn billing_report_outbox_round_trips_through_real_supabase() {
     let event = ferrogate_billing::BillingEvent {
         request_id: "req-outbox-rt".into(),
         trace_id: Some("trace-outbox-rt".into()),
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-outbox-rt", 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,
@@ -919,6 +926,7 @@ fn billing_report_dead_letter_round_trips_through_real_supabase() {
     let event = ferrogate_billing::BillingEvent {
         request_id: "req-dead-letter-rt".into(),
         trace_id: Some("trace-dead-letter-rt".into()),
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-dead-letter-rt", 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,
@@ -982,6 +990,7 @@ fn append_billing_event_with_outbox_enqueue_commits_both_writes_atomically() {
     let event = ferrogate_billing::BillingEvent {
         request_id: "req-combined-rt".into(),
         trace_id: Some("trace-combined-rt".into()),
+        provider_attempt: ferrogate_billing::ProviderAttempt::for_request("req-combined-rt", 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,

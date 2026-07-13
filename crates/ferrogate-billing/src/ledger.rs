@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     pricing::PriceBook, BillingError, BillingEvent, BillingUsageSource, CostEstimate, ModelPrice,
-    TokenUsage,
+    ProviderAttempt, TokenUsage,
 };
 use ferrogate_core::TenantContext;
 
@@ -56,11 +56,14 @@ impl CostSource {
 /// the `POST /v1/billing/charge` endpoint and the row shape of the ledger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LedgerEntry {
-    /// Idempotency key for the charge, derived from the request/trace id.
+    /// Idempotency key for the charge, derived from the request/trace and
+    /// provider-attempt identity.
     pub id: String,
     pub request_id: String,
     #[serde(default)]
     pub trace_id: Option<String>,
+    #[serde(default, flatten)]
+    pub provider_attempt: ProviderAttempt,
     pub tenant: TenantContext,
     pub logical_model: String,
     pub provider: String,
@@ -92,9 +95,24 @@ pub struct LedgerEntry {
     pub wallet_balance_after_credits: Option<i64>,
 }
 
-/// Deterministic idempotency key for a usage event, matching the metering
-/// exporter's convention (`ferrogate:{trace}:{request}` or `ferrogate:{request}`).
+/// Returns whether two entries are an exact replay of one immutable
+/// provider-attempt settlement. The attempt id is an idempotency key, not
+/// permission to rewrite correlation or timing evidence after the first write.
+pub fn same_provider_attempt_settlement(left: &LedgerEntry, right: &LedgerEntry) -> bool {
+    left == right
+}
+
+/// Deterministic idempotency key for a usage event. New provider-dispatch
+/// events include the stable attempt identity; legacy serialized events that
+/// predate issue #213 preserve the old request/trace-only key.
 pub fn ledger_entry_id(event: &BillingEvent) -> String {
+    if !event.provider_attempt.is_legacy() {
+        return format!(
+            "ferrogate:provider-attempt:{}",
+            event.provider_attempt.provider_attempt_id
+        );
+    }
+
     event
         .trace_id
         .as_deref()
@@ -170,6 +188,7 @@ pub fn charge(book: &PriceBook, event: &BillingEvent) -> Result<LedgerEntry, Bil
         id: ledger_entry_id(event),
         request_id: event.request_id.clone(),
         trace_id: event.trace_id.clone(),
+        provider_attempt: event.provider_attempt.clone(),
         tenant: event.tenant.clone(),
         logical_model: event.logical_model.clone(),
         provider: event.provider.clone(),
@@ -377,8 +396,21 @@ fn poisoned() -> BillingError {
 impl LedgerSink for InMemoryLedgerSink {
     fn record(&self, entry: &LedgerEntry) -> Result<bool, BillingError> {
         let mut state = self.inner.lock().map_err(|_| poisoned())?;
-        if state.entries.iter().any(|existing| existing.id == entry.id) {
-            return Ok(false);
+        if let Some(existing) = state
+            .entries
+            .iter()
+            .find(|existing| existing.id == entry.id)
+        {
+            if same_provider_attempt_settlement(existing, entry) {
+                return Ok(false);
+            }
+            return Err(BillingError::new(
+                "billing_idempotency_conflict",
+                format!(
+                    "ledger id {} was replayed with different provider-attempt settlement data",
+                    entry.id
+                ),
+            ));
         }
         state.entries.push_back(entry.clone());
         state.recorded_total = state.recorded_total.saturating_add(1);

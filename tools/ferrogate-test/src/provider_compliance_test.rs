@@ -7,15 +7,8 @@
 use super::*;
 
 #[test]
-fn provider_contract_cases_cover_success_fallback_and_reported_usage_error() {
-    assert_eq!(PROVIDER_CASES.len(), 5);
-    let fallback = PROVIDER_CASES
-        .iter()
-        .find(|case| case.name == "fallback-success")
-        .unwrap();
-    assert_eq!(fallback.expected_upstream_models.len(), 2);
-    assert_eq!(fallback.name, PROVIDER_CASES.last().unwrap().name);
-
+fn provider_contract_cases_cover_success_and_reported_usage_error() {
+    assert_eq!(PROVIDER_CASES.len(), 4);
     for name in [
         "terminal-error-with-usage",
         "terminal-stream-error-with-usage",
@@ -36,6 +29,19 @@ fn provider_contract_cases_cover_success_fallback_and_reported_usage_error() {
             .unwrap()
             .stream
     );
+}
+
+#[test]
+fn provider_contract_reserves_two_dispatches_for_multi_attempt_settlement() {
+    let single_attempts = PROVIDER_CASES
+        .iter()
+        .map(|case| case.expected_upstream_models.len())
+        .sum::<usize>();
+    assert_eq!(
+        expected_provider_requests(),
+        single_attempts + PROVIDER_NO_SETTLEMENT_CASES.len() + 2
+    );
+    assert!(MULTI_ATTEMPT_CONTENT.contains("multi attempt"));
 }
 
 #[test]

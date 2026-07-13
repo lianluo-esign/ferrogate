@@ -14,6 +14,7 @@ fn event(request_id: &str, provider: &str, model: &str) -> BillingEvent {
     BillingEvent {
         request_id: request_id.into(),
         trace_id: Some(format!("trace-{request_id}")),
+        provider_attempt: ProviderAttempt::for_request(request_id, 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,
@@ -59,13 +60,122 @@ fn charge_prices_usage_and_credits() {
     assert!((entry.credits - 35_000.0).abs() < 1e-3);
     // total was 0 -> derived to 3000
     assert_eq!(entry.usage.total_tokens, 3_000);
-    assert_eq!(entry.id, "ferrogate:trace-req-1:req-1");
+    assert_eq!(
+        entry.id,
+        "ferrogate:provider-attempt:req-1:provider-attempt:0"
+    );
+}
+
+#[test]
+fn provider_attempt_key_ignores_mutable_trace_and_request_context() {
+    let original = event("req-original", "openai", "gpt-5.5");
+    let mut replay = original.clone();
+    replay.request_id = "req-replayed".into();
+    replay.trace_id = None;
+
+    assert_eq!(ledger_entry_id(&original), ledger_entry_id(&replay));
+    assert_eq!(
+        ledger_entry_id(&replay),
+        "ferrogate:provider-attempt:req-original:provider-attempt:0"
+    );
 }
 
 #[test]
 fn charge_fails_closed_on_missing_price() {
     let error = charge(&book(), &event("req-2", "anthropic", "claude")).unwrap_err();
     assert_eq!(error.code, "price_not_found");
+}
+
+#[test]
+fn provider_attempts_settle_distinctly_and_replay_idempotently() {
+    let mut primary = event("req-multi", "openai", "gpt-5.5");
+    primary.provider_attempt = ProviderAttempt::for_request("req-multi", 0);
+    primary.status_code = 503;
+    primary.usage = TokenUsage::new(1_000, 500, 1_500);
+
+    let mut fallback = event("req-multi", "openai", "gpt-5.5");
+    fallback.provider_attempt = ProviderAttempt::for_request("req-multi", 1);
+    fallback.usage = TokenUsage::new(2_000, 1_000, 3_000);
+
+    let primary_entry = charge(&book(), &primary).unwrap();
+    let fallback_entry = charge(&book(), &fallback).unwrap();
+    assert_ne!(primary_entry.id, fallback_entry.id);
+    assert_eq!(primary_entry.provider_attempt.provider_attempt_index, 0);
+    assert_eq!(fallback_entry.provider_attempt.provider_attempt_index, 1);
+
+    let sink = InMemoryLedgerSink::default();
+    assert!(sink.record(&primary_entry).unwrap());
+    assert!(sink.record(&fallback_entry).unwrap());
+    assert!(!sink.record(&primary_entry).unwrap());
+    assert!(!sink.record(&fallback_entry).unwrap());
+
+    let totals = sink.totals();
+    assert_eq!(totals.entries, 2);
+    assert_eq!(totals.total_tokens, 4_500);
+    assert!((totals.total_cost_usd - 0.0375).abs() < 1e-9);
+}
+
+#[test]
+fn provider_attempt_key_collision_fails_closed_for_settlement_mutations() {
+    let original = charge(&book(), &event("req-collision", "openai", "gpt-5.5")).unwrap();
+    let sink = InMemoryLedgerSink::default();
+    assert!(sink.record(&original).unwrap());
+
+    let mut mutations = Vec::new();
+    let mut tenant = original.clone();
+    tenant.tenant.organization_id = Some("other-tenant".into());
+    mutations.push(tenant);
+    let mut provider = original.clone();
+    provider.provider = "other-provider".into();
+    mutations.push(provider);
+    let mut usage = original.clone();
+    usage.usage.total_tokens += 1;
+    mutations.push(usage);
+    let mut cost = original.clone();
+    cost.cost.total_cost += 1.0;
+    mutations.push(cost);
+    let mut index = original.clone();
+    index.provider_attempt.provider_attempt_index += 1;
+    mutations.push(index);
+
+    for collision in mutations {
+        let error = sink.record(&collision).unwrap_err();
+        assert_eq!(error.code, "billing_idempotency_conflict");
+    }
+    assert_eq!(sink.len(), 1);
+    assert_eq!(sink.get(&original.id).unwrap(), Some(original));
+}
+
+#[test]
+fn provider_attempt_replay_requires_the_entire_entry_to_match() {
+    let original = charge(&book(), &event("req-replay", "openai", "gpt-5.5")).unwrap();
+    let sink = InMemoryLedgerSink::default();
+    assert!(sink.record(&original).unwrap());
+    assert!(!sink.record(&original).unwrap());
+
+    let mut replay = original.clone();
+    replay.request_id = "reconstructed-request".into();
+    replay.trace_id = None;
+    replay.occurred_at_unix = Some(99);
+
+    let error = sink.record(&replay).unwrap_err();
+    assert_eq!(error.code, "billing_idempotency_conflict");
+    assert_eq!(sink.get(&original.id).unwrap(), Some(original));
+}
+
+#[test]
+fn legacy_event_without_attempt_fields_preserves_request_idempotency_key() {
+    let mut serialized = serde_json::to_value(event("req-legacy", "openai", "gpt-5.5")).unwrap();
+    let object = serialized.as_object_mut().unwrap();
+    object.remove("provider_attempt_id");
+    object.remove("provider_attempt_index");
+    let legacy: BillingEvent = serde_json::from_value(serialized).unwrap();
+
+    assert!(legacy.provider_attempt.is_legacy());
+    assert_eq!(
+        ledger_entry_id(&legacy),
+        "ferrogate:trace-req-legacy:req-legacy"
+    );
 }
 
 #[test]

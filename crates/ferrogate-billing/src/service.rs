@@ -236,17 +236,22 @@ fn ledger_totals(entries: &[LedgerEntry]) -> LedgerTotals {
 }
 
 fn billing_error_response(error: &BillingError) -> HttpResponse {
-    // Missing rate-card price is a client/config problem the caller must fix;
-    // surface it as 422 (fail-closed, never bill zero). Everything else is 500.
-    let status = if error.code == "price_not_found" {
-        422
-    } else {
-        500
-    };
     HttpResponse::json(
-        status,
+        billing_error_http_status(error),
         json!({ "error": { "code": error.code, "message": error.message } }),
     )
+}
+
+/// Stable HTTP classification for billing-domain failures.
+///
+/// Storage adapters use this contract in cross-crate tests so a typed durable
+/// idempotency conflict cannot silently regress into an internal-server error.
+pub fn billing_error_http_status(error: &BillingError) -> u16 {
+    match error.code.as_str() {
+        "price_not_found" => 422,
+        "billing_idempotency_conflict" => 409,
+        _ => 500,
+    }
 }
 
 fn bad_request(message: &str) -> HttpResponse {

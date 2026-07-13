@@ -417,6 +417,11 @@ FERROGATE_SUPABASE_DSN="postgresql://..." \
 ./target/debug/ferrogate-test supabase-live-smoke
 ```
 
+Pass database DSNs and provider API keys only through their documented
+environment variables. `ferrogate-test` rejects secret command-line flags
+because command arguments are readable through operating-system process
+listings.
+
 For live model-provider billing coverage, the harness can route a real
 OpenAI-compatible chat completion through Token4AI AI Gateway and verify that
 provider-reported token usage is persisted to Supabase metering and usage

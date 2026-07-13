@@ -14,7 +14,7 @@
 // for the pattern this mirrors.
 
 use super::{
-    PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
+    postgres_error, PostgresControlPlaneStore, PostgresRow, Repository, RuntimeControlPlaneBackend,
     RuntimeControlPlaneState, RuntimeStorageRepositories, StorageError,
 };
 
@@ -66,6 +66,22 @@ pub struct StoredPaymentMethod {
     pub created_at_unix: i64,
 }
 
+/// Durable result of applying one provider-attempt debit to a wallet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredWalletSettlement {
+    pub id: String,
+    pub tenant_id: String,
+    pub delta_credits: i64,
+    pub balance_after_credits: Option<i64>,
+    pub created_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSettlementOutcome {
+    pub settlement: StoredWalletSettlement,
+    pub newly_applied: bool,
+}
+
 /// Deterministic id for a payment method row, mirroring
 /// `tenant_role_binding_id`: idempotent re-attachment of the same
 /// provider-side payment method is a no-op rather than a duplicate row.
@@ -102,7 +118,85 @@ fn payment_method_from_row(row: &PostgresRow) -> StoredPaymentMethod {
     }
 }
 
+fn wallet_settlement_from_row(row: &PostgresRow) -> StoredWalletSettlement {
+    StoredWalletSettlement {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        delta_credits: row.get(2),
+        balance_after_credits: row.get(3),
+        created_at_unix: row.get(4),
+    }
+}
+
 impl PostgresControlPlaneStore {
+    pub(super) fn settle_wallet_balance(
+        &self,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        self.with_client_storage(|client| {
+            let mut transaction = client.transaction().map_err(postgres_error)?;
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO wallet_settlements \
+                     (id, tenant_id, delta_credits, balance_after_credits, created_at_unix) \
+                     VALUES ($1, $2, $3, NULL, $4) ON CONFLICT (id) DO NOTHING",
+                    &[&settlement_id, &tenant_id, &delta_credits, &now_unix],
+                )
+                .map_err(postgres_error)?;
+
+            if inserted == 0 {
+                let row = transaction
+                    .query_one(
+                        "SELECT id, tenant_id, delta_credits, balance_after_credits, \
+                         created_at_unix FROM wallet_settlements WHERE id = $1",
+                        &[&settlement_id],
+                    )
+                    .map_err(postgres_error)?;
+                let settlement = wallet_settlement_from_row(&row);
+                if settlement.tenant_id != tenant_id || settlement.delta_credits != delta_credits {
+                    return Err(StorageError::Conflict(format!(
+                        "wallet settlement {settlement_id} replay changed tenant or amount"
+                    )));
+                }
+                transaction.commit().map_err(postgres_error)?;
+                return Ok(WalletSettlementOutcome {
+                    settlement,
+                    newly_applied: false,
+                });
+            }
+
+            let balance_after_credits = transaction
+                .query_opt(
+                    "UPDATE wallets SET balance_credits = balance_credits + $1, \
+                     updated_at_unix = $2 WHERE tenant_id = $3 RETURNING balance_credits",
+                    &[&delta_credits, &now_unix, &tenant_id],
+                )
+                .map_err(postgres_error)?
+                .map(|row| row.get(0));
+            transaction
+                .execute(
+                    "UPDATE wallet_settlements SET balance_after_credits = $2 WHERE id = $1",
+                    &[&settlement_id, &balance_after_credits],
+                )
+                .map_err(postgres_error)?;
+            let settlement = StoredWalletSettlement {
+                id: settlement_id.to_string(),
+                tenant_id: tenant_id.to_string(),
+                delta_credits,
+                balance_after_credits,
+                created_at_unix: now_unix,
+            };
+            transaction.commit().map_err(postgres_error)?;
+            Ok(WalletSettlementOutcome {
+                settlement,
+                newly_applied: true,
+            })
+        })
+    }
+
     pub(super) fn upsert_wallet(&self, wallet: &StoredWallet) -> Result<(), StorageError> {
         self.with_client(|client| {
             client.execute(
@@ -263,6 +357,43 @@ impl PostgresControlPlaneStore {
 }
 
 impl RuntimeControlPlaneState {
+    pub fn settle_wallet_balance(
+        &mut self,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        if let Some(settlement) = self.wallet_settlements.get(settlement_id) {
+            if settlement.tenant_id != tenant_id || settlement.delta_credits != delta_credits {
+                return Err(StorageError::Conflict(format!(
+                    "wallet settlement {settlement_id} replay changed tenant or amount"
+                )));
+            }
+            return Ok(WalletSettlementOutcome {
+                settlement,
+                newly_applied: false,
+            });
+        }
+
+        let balance_after_credits = self
+            .adjust_wallet_balance(tenant_id, delta_credits, now_unix)
+            .map(|wallet| wallet.balance_credits);
+        let settlement = StoredWalletSettlement {
+            id: settlement_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            delta_credits,
+            balance_after_credits,
+            created_at_unix: now_unix,
+        };
+        self.wallet_settlements
+            .insert(settlement.id.clone(), settlement.clone());
+        Ok(WalletSettlementOutcome {
+            settlement,
+            newly_applied: true,
+        })
+    }
+
     pub fn upsert_wallet(&mut self, wallet: StoredWallet) {
         self.wallets.insert(wallet.id.clone(), wallet);
     }
@@ -319,6 +450,25 @@ impl RuntimeControlPlaneState {
 }
 
 impl RuntimeStorageRepositories {
+    /// Applies `delta_credits` at most once for `settlement_id`, returning the
+    /// first transaction's durable outcome on every replay.
+    pub fn settle_wallet_balance(
+        &self,
+        settlement_id: &str,
+        tenant_id: &str,
+        delta_credits: i64,
+        now_unix: i64,
+    ) -> Result<WalletSettlementOutcome, StorageError> {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(control_plane) => control_plane
+                .lock()
+                .map_err(|_| StorageError::Runtime("memory control-plane lock poisoned".into()))?
+                .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => control_plane
+                .settle_wallet_balance(settlement_id, tenant_id, delta_credits, now_unix),
+        }
+    }
+
     /// Creates or replaces a wallet's configuration (issue #169). Use
     /// [`Self::adjust_wallet_balance`] for balance changes instead of
     /// read-modify-write through this method -- it's the atomic,

@@ -12,6 +12,7 @@ fn test_event(request_id: &str) -> BillingEvent {
     BillingEvent {
         request_id: request_id.into(),
         trace_id: None,
+        provider_attempt: ProviderAttempt::for_request(request_id, 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,
@@ -32,6 +33,20 @@ fn test_event(request_id: &str) -> BillingEvent {
         wallet_delta_credits: None,
         wallet_balance_after_credits: None,
     }
+}
+
+#[test]
+fn provider_attempt_identity_is_stable_and_request_scoped() {
+    let first = ProviderAttempt::for_request("req-123", 0);
+    let replay = ProviderAttempt::for_request("req-123", 0);
+    let retry = ProviderAttempt::for_request("req-123", 1);
+
+    assert_eq!(first, replay);
+    assert_eq!(first.provider_attempt_id, "req-123:provider-attempt:0");
+    assert_eq!(retry.provider_attempt_index, 1);
+    assert_ne!(first.provider_attempt_id, retry.provider_attempt_id);
+    assert!(!first.is_legacy());
+    assert!(ProviderAttempt::default().is_legacy());
 }
 
 fn poison_sink(sink: InMemoryBillingEventSink) {
@@ -61,6 +76,7 @@ fn in_memory_sink_records_billing_events() {
     sink.record(BillingEvent {
         request_id: "fg-test".into(),
         trace_id: Some("trace-test".into()),
+        provider_attempt: ProviderAttempt::for_request("fg-test", 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,
@@ -103,6 +119,7 @@ fn in_memory_sink_enforces_retention_limit() {
         sink.record(BillingEvent {
             request_id: request_id.into(),
             trace_id: None,
+            provider_attempt: ProviderAttempt::for_request(request_id, 0),
             agent_run_id: None,
             workflow_id: None,
             workflow_version: None,

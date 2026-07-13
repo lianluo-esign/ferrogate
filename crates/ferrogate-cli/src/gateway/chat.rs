@@ -8,10 +8,11 @@ use http::{HeaderMap, StatusCode};
 use pingora::{proxy::Session, Result as PingoraResult};
 use serde::Deserialize;
 use std::{
+    collections::VecDeque,
     fmt,
     io::{Cursor, Error as IoError, Read},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info, warn};
 
@@ -29,7 +30,7 @@ use crate::{
         GuardrailEvaluationContext, ToolInjectionContext,
     },
 };
-use ferrogate_billing::TokenUsage as BillingTokenUsage;
+use ferrogate_billing::{ProviderAttempt, TokenUsage as BillingTokenUsage};
 use ferrogate_core::{RequestContext, TenantContext};
 use ferrogate_guardrails::{
     normalize_request as normalize_guardrail_request,
@@ -38,7 +39,7 @@ use ferrogate_guardrails::{
 };
 use ferrogate_policy::PolicyDecision;
 use ferrogate_providers::{
-    ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest, SecretValue,
+    ModelRegistryError, ModelRoute, ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
 };
 use ferrogate_storage::StoredRequestLog;
 
@@ -230,10 +231,6 @@ impl FerroGateway {
             guardrail_envelope,
         } = request_plan;
         let request_started_at_unix = now_unix_seconds();
-        // Monotonic timer for P1-4 latency_ms; `request_started_at_unix` above
-        // is second-granularity (used for StoredRequestLog timestamps) and too
-        // coarse for a field named `latency_ms`.
-        let request_started_at = std::time::Instant::now();
         let workflow_provider_constraint = match enforce_ai_workflow_policy(
             &state,
             AiWorkflowRequestContext {
@@ -301,6 +298,7 @@ impl FerroGateway {
         let mut token_reservation = None;
         let mut tpm_checked = false;
 
+        let mut provider_attempt_sequence = ProviderAttemptSequence::default();
         'routes: for (candidate_index, model_route) in routes.iter().enumerate() {
             let Some(provider) = state.providers.get(&model_route.provider) else {
                 self.record_ai_error_log(
@@ -763,7 +761,12 @@ impl FerroGateway {
             if request.stream {
                 let mut attempt = 0;
                 loop {
-                    match dispatch_provider_streaming_request(prepared.clone(), dispatch_timeout)
+                    let provider_attempt = provider_attempt_sequence.next(&ctx.request_id);
+                    attempt_plan.log_dispatch_attempt(&provider_attempt, attempt);
+                    let attempt_started_at = Instant::now();
+                    let attempt_request =
+                        provider_request_for_attempt(&prepared, &provider_attempt);
+                    match dispatch_provider_streaming_request(attempt_request, dispatch_timeout)
                         .await
                     {
                         Ok(response) => {
@@ -831,6 +834,38 @@ impl FerroGateway {
                                         return Ok(());
                                     }
                                 };
+                                // A provider error can report real usage even when this
+                                // dispatch will be retried or followed by a fallback. Settle
+                                // the concrete attempt before making that routing decision.
+                                if let Ok(Some(usage)) =
+                                    state.extract_provider_usage(&provider.kind, &body)
+                                {
+                                    if let Err(error) = state.record_provider_attempt_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: response.status.as_u16(),
+                                            latency_ms: Some(
+                                                attempt_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: request.metadata.as_ref(),
+                                        },
+                                        &provider_attempt,
+                                        &usage,
+                                    ) {
+                                        write_json_error(
+                                            session,
+                                            StatusCode::BAD_GATEWAY,
+                                            error.code,
+                                            error.message,
+                                            &ctx.request_id,
+                                        )
+                                        .await?;
+                                        return Ok(());
+                                    }
+                                }
                                 let retryable_status = state
                                     .is_provider_status_retryable(
                                         &provider.kind,
@@ -873,38 +908,6 @@ impl FerroGateway {
                                     }
                                     ProviderAttemptDecision::ReturnError => {}
                                 }
-                                // The initial HTTP response of a streaming request can be an
-                                // ordinary JSON provider error carrying real usage. Settle that
-                                // reported usage exactly; do not charge an estimate when the
-                                // body has no usage or when the stream transport itself fails.
-                                if let Ok(Some(usage)) =
-                                    state.extract_provider_usage(&provider.kind, &body)
-                                {
-                                    if let Err(error) = state.record_billing_event(
-                                        BillingEventDraft {
-                                            request: &policy_request,
-                                            logical_model: &request.model,
-                                            provider: &provider.name,
-                                            provider_model: &model_route.provider_model,
-                                            status_code: response.status.as_u16(),
-                                            latency_ms: Some(
-                                                request_started_at.elapsed().as_millis() as u64,
-                                            ),
-                                            metadata: request.metadata.as_ref(),
-                                        },
-                                        &usage,
-                                    ) {
-                                        write_json_error(
-                                            session,
-                                            StatusCode::BAD_GATEWAY,
-                                            error.code,
-                                            error.message,
-                                            &ctx.request_id,
-                                        )
-                                        .await?;
-                                        return Ok(());
-                                    }
-                                }
                                 let normalized = match state.normalize_provider_error(
                                     &provider.kind,
                                     response.status.as_u16(),
@@ -940,28 +943,56 @@ impl FerroGateway {
                             }
                             let record_bodies =
                                 auth.can_record_bodies(state.config.telemetry.log_bodies);
-                            let record_stream_usage = || {
-                                if let Err(error) = state.record_estimated_billing_event(
-                                    BillingEventDraft {
-                                        request: &policy_request,
-                                        logical_model: &request.model,
-                                        provider: &provider.name,
-                                        provider_model: &model_route.provider_model,
-                                        status_code: response.status.as_u16(),
-                                        latency_ms: Some(
-                                            request_started_at.elapsed().as_millis() as u64
-                                        ),
-                                        metadata: request.metadata.as_ref(),
-                                    },
-                                    &estimated_usage,
-                                ) {
+                            let record_stream_usage = |stream_body: Option<&[u8]>| {
+                                let reported_usage = stream_body.and_then(|body| {
+                                    extract_last_provider_stream_usage(body, |payload| {
+                                        state
+                                            .extract_provider_usage(&provider.kind, payload)
+                                            .ok()
+                                            .flatten()
+                                    })
+                                });
+                                let result = if let Some(usage) = reported_usage {
+                                    state.record_provider_attempt_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: response.status.as_u16(),
+                                            latency_ms: Some(
+                                                attempt_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: request.metadata.as_ref(),
+                                        },
+                                        &provider_attempt,
+                                        &usage,
+                                    )
+                                } else {
+                                    state.record_estimated_provider_attempt_billing_event(
+                                        BillingEventDraft {
+                                            request: &policy_request,
+                                            logical_model: &request.model,
+                                            provider: &provider.name,
+                                            provider_model: &model_route.provider_model,
+                                            status_code: response.status.as_u16(),
+                                            latency_ms: Some(
+                                                attempt_started_at.elapsed().as_millis() as u64,
+                                            ),
+                                            metadata: request.metadata.as_ref(),
+                                        },
+                                        &provider_attempt,
+                                        &estimated_usage,
+                                    )
+                                };
+                                if let Err(error) = result {
                                     warn!(
                                         request_id = %ctx.request_id,
                                         logical_model = %request.model,
                                         provider = %provider.name,
                                         provider_model = %model_route.provider_model,
                                         error_code = %error.code,
-                                        "estimated streaming billing event write failed"
+                                        "streaming billing event write failed"
                                     );
                                 }
                             };
@@ -984,7 +1015,6 @@ impl FerroGateway {
                             if streaming_guardrail_plan
                                 == crate::state::StreamingGuardrailPlan::BufferAndEnforce
                             {
-                                record_stream_usage();
                                 let response_status = response.status;
                                 let response_content_type = response.content_type;
                                 let (buffer_initial, buffer_reader, client_content_type): (
@@ -1023,6 +1053,7 @@ impl FerroGateway {
                                 {
                                     Ok(body) => body,
                                     Err(error) => {
+                                        record_stream_usage(None);
                                         let (status, code) = error.status_and_code();
                                         let empty_envelope = normalize_guardrail_response(
                                             endpoint.guardrail_protocol(),
@@ -1085,6 +1116,7 @@ impl FerroGateway {
                                         return Ok(());
                                     }
                                 };
+                                record_stream_usage(Some(&final_body));
                                 let mut final_status = response_status;
                                 let mut final_content_type = client_content_type;
                                 let mut final_error_code = None;
@@ -1229,8 +1261,8 @@ impl FerroGateway {
                                 )
                                 .await;
                             }
-                            let record_pass_through_completion = || {
-                                record_stream_usage();
+                            let record_pass_through_completion = |stream_body: Option<&[u8]>| {
+                                record_stream_usage(stream_body);
                                 state.record_request_log(StoredRequestLog {
                                     request_id: ctx.request_id.clone(),
                                     trace_id: ctx.trace_id.clone(),
@@ -1265,59 +1297,70 @@ impl FerroGateway {
                             if streaming_guardrail_plan
                                 == crate::state::StreamingGuardrailPlan::ShadowAfterComplete
                             {
-                                let (stream_result, capture) = if endpoint == AiEndpoint::Responses
-                                {
-                                    let provider_kind =
-                                        responses_stream_provider_kind(&provider.kind);
-                                    let raw =
-                                        Cursor::new(response.initial_body).chain(response.body);
-                                    let normalized = ResponsesStreamNormalizer::new(
-                                        raw,
-                                        provider_kind,
-                                        ctx.request_id.clone(),
-                                        response.content_type.clone(),
-                                    );
-                                    let (capturing, capture) = CapturingReader::new(
-                                        normalized,
-                                        &[],
-                                        provider_response_body_max_bytes,
-                                    );
-                                    let result = write_streaming_response(
-                                        session,
-                                        response.status,
-                                        "text/event-stream",
-                                        Vec::new(),
-                                        capturing,
-                                        &ctx.request_id,
-                                    )
-                                    .await;
-                                    (result, capture)
-                                } else {
-                                    let (capturing, capture) = CapturingReader::new(
-                                        response.body,
-                                        &response.initial_body,
-                                        provider_response_body_max_bytes,
-                                    );
-                                    let result = write_streaming_response(
-                                        session,
-                                        response.status,
-                                        &response.content_type,
-                                        response.initial_body,
-                                        capturing,
-                                        &ctx.request_id,
-                                    )
-                                    .await;
-                                    (result, capture)
-                                };
-                                record_pass_through_completion();
+                                let (stream_result, capture, usage_capture) =
+                                    if endpoint == AiEndpoint::Responses {
+                                        let provider_kind =
+                                            responses_stream_provider_kind(&provider.kind);
+                                        let raw =
+                                            Cursor::new(response.initial_body).chain(response.body);
+                                        let normalized = ResponsesStreamNormalizer::new(
+                                            raw,
+                                            provider_kind,
+                                            ctx.request_id.clone(),
+                                            response.content_type.clone(),
+                                        );
+                                        let (usage_capturing, usage_capture) =
+                                            StreamingUsageCapturingReader::new(normalized, &[]);
+                                        let (capturing, capture) = CapturingReader::new(
+                                            usage_capturing,
+                                            &[],
+                                            provider_response_body_max_bytes,
+                                        );
+                                        let result = write_streaming_response(
+                                            session,
+                                            response.status,
+                                            "text/event-stream",
+                                            Vec::new(),
+                                            capturing,
+                                            &ctx.request_id,
+                                        )
+                                        .await;
+                                        (result, capture, usage_capture)
+                                    } else {
+                                        let (usage_capturing, usage_capture) =
+                                            StreamingUsageCapturingReader::new(
+                                                response.body,
+                                                &response.initial_body,
+                                            );
+                                        let (capturing, capture) = CapturingReader::new(
+                                            usage_capturing,
+                                            &response.initial_body,
+                                            provider_response_body_max_bytes,
+                                        );
+                                        let result = write_streaming_response(
+                                            session,
+                                            response.status,
+                                            &response.content_type,
+                                            response.initial_body,
+                                            capturing,
+                                            &ctx.request_id,
+                                        )
+                                        .await;
+                                        (result, capture, usage_capture)
+                                    };
+                                let usage_body = usage_capture
+                                    .lock()
+                                    .map(|capture| capture.body())
+                                    .unwrap_or_default();
+                                let captured = capture
+                                    .lock()
+                                    .map(|capture| capture.clone())
+                                    .unwrap_or(StreamingCapture {
+                                        body: Vec::new(),
+                                        truncated: true,
+                                    });
+                                record_pass_through_completion(Some(&usage_body));
                                 if stream_result.is_ok() {
-                                    let captured = capture
-                                        .lock()
-                                        .map(|capture| capture.clone())
-                                        .unwrap_or(StreamingCapture {
-                                            body: Vec::new(),
-                                            truncated: true,
-                                        });
                                     let guardrail_envelope = normalize_guardrail_response(
                                         endpoint.guardrail_protocol(),
                                         &captured.body,
@@ -1358,7 +1401,9 @@ impl FerroGateway {
                                 }
                                 return stream_result;
                             }
-                            let stream_result = if endpoint == AiEndpoint::Responses {
+                            let (stream_result, usage_capture) = if endpoint
+                                == AiEndpoint::Responses
+                            {
                                 let provider_kind = responses_stream_provider_kind(&provider.kind);
                                 let normalized = ResponsesStreamNormalizer::new(
                                     response.body,
@@ -1366,27 +1411,41 @@ impl FerroGateway {
                                     ctx.request_id.clone(),
                                     response.content_type.clone(),
                                 );
-                                write_streaming_response(
+                                let (capturing, usage_capture) = StreamingUsageCapturingReader::new(
+                                    normalized,
+                                    &response.initial_body,
+                                );
+                                let result = write_streaming_response(
                                     session,
                                     response.status,
                                     "text/event-stream",
                                     response.initial_body,
-                                    normalized,
+                                    capturing,
                                     &ctx.request_id,
                                 )
-                                .await
+                                .await;
+                                (result, usage_capture)
                             } else {
-                                write_streaming_response(
+                                let (capturing, usage_capture) = StreamingUsageCapturingReader::new(
+                                    response.body,
+                                    &response.initial_body,
+                                );
+                                let result = write_streaming_response(
                                     session,
                                     response.status,
                                     &response.content_type,
                                     response.initial_body,
-                                    response.body,
+                                    capturing,
                                     &ctx.request_id,
                                 )
-                                .await
+                                .await;
+                                (result, usage_capture)
                             };
-                            record_pass_through_completion();
+                            let captured = usage_capture
+                                .lock()
+                                .map(|capture| capture.body())
+                                .unwrap_or_default();
+                            record_pass_through_completion(Some(&captured));
                             return stream_result;
                         }
                         Err(error) => {
@@ -1439,8 +1498,12 @@ impl FerroGateway {
 
             let mut attempt = 0;
             loop {
+                let provider_attempt = provider_attempt_sequence.next(&ctx.request_id);
+                attempt_plan.log_dispatch_attempt(&provider_attempt, attempt);
+                let attempt_started_at = Instant::now();
+                let attempt_request = provider_request_for_attempt(&prepared, &provider_attempt);
                 match dispatch_provider_request(
-                    prepared.clone(),
+                    attempt_request,
                     dispatch_timeout,
                     provider_response_body_max_bytes,
                 )
@@ -1448,6 +1511,37 @@ impl FerroGateway {
                 {
                     Ok(response) => {
                         if response.status.is_client_error() || response.status.is_server_error() {
+                            // Reported usage belongs to this concrete dispatch even when
+                            // routing continues to a retry or fallback.
+                            if let Ok(Some(usage)) =
+                                state.extract_provider_usage(&provider.kind, &response.body)
+                            {
+                                if let Err(error) = state.record_provider_attempt_billing_event(
+                                    BillingEventDraft {
+                                        request: &policy_request,
+                                        logical_model: &request.model,
+                                        provider: &provider.name,
+                                        provider_model: &model_route.provider_model,
+                                        status_code: response.status.as_u16(),
+                                        latency_ms: Some(
+                                            attempt_started_at.elapsed().as_millis() as u64
+                                        ),
+                                        metadata: request.metadata.as_ref(),
+                                    },
+                                    &provider_attempt,
+                                    &usage,
+                                ) {
+                                    write_json_error(
+                                        session,
+                                        StatusCode::BAD_GATEWAY,
+                                        error.code,
+                                        error.message,
+                                        &ctx.request_id,
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                            }
                             let retryable_status = state
                                 .is_provider_status_retryable(
                                     &provider.kind,
@@ -1489,39 +1583,6 @@ impl FerroGateway {
                                     continue 'routes;
                                 }
                                 ProviderAttemptDecision::ReturnError => {}
-                            }
-                            // A terminal provider error may still report real usage. Settle only
-                            // that reported usage before normalizing the error response; never
-                            // estimate usage for transport failures or error bodies without usage.
-                            // Retry/fallback attempts need per-attempt billing identities before
-                            // they can be settled independently (tracked separately from #210).
-                            if let Ok(Some(usage)) =
-                                state.extract_provider_usage(&provider.kind, &response.body)
-                            {
-                                if let Err(error) = state.record_billing_event(
-                                    BillingEventDraft {
-                                        request: &policy_request,
-                                        logical_model: &request.model,
-                                        provider: &provider.name,
-                                        provider_model: &model_route.provider_model,
-                                        status_code: response.status.as_u16(),
-                                        latency_ms: Some(
-                                            request_started_at.elapsed().as_millis() as u64
-                                        ),
-                                        metadata: request.metadata.as_ref(),
-                                    },
-                                    &usage,
-                                ) {
-                                    write_json_error(
-                                        session,
-                                        StatusCode::BAD_GATEWAY,
-                                        error.code,
-                                        error.message,
-                                        &ctx.request_id,
-                                    )
-                                    .await?;
-                                    return Ok(());
-                                }
                             }
                             let normalized = match state.normalize_provider_error(
                                 &provider.kind,
@@ -1566,7 +1627,7 @@ impl FerroGateway {
                                 total_tokens = ?usage.total_tokens,
                                 "provider usage extracted"
                             );
-                            if let Err(error) = state.record_billing_event(
+                            if let Err(error) = state.record_provider_attempt_billing_event(
                                 BillingEventDraft {
                                     request: &policy_request,
                                     logical_model: &request.model,
@@ -1574,10 +1635,11 @@ impl FerroGateway {
                                     provider_model: &model_route.provider_model,
                                     status_code: response.status.as_u16(),
                                     latency_ms: Some(
-                                        request_started_at.elapsed().as_millis() as u64
+                                        attempt_started_at.elapsed().as_millis() as u64
                                     ),
                                     metadata: request.metadata.as_ref(),
                                 },
+                                &provider_attempt,
                                 &usage,
                             ) {
                                 warn!(
@@ -1598,18 +1660,23 @@ impl FerroGateway {
                                 .await?;
                                 return Ok(());
                             }
-                        } else if let Err(error) = state.record_estimated_billing_event(
-                            BillingEventDraft {
-                                request: &policy_request,
-                                logical_model: &request.model,
-                                provider: &provider.name,
-                                provider_model: &model_route.provider_model,
-                                status_code: response.status.as_u16(),
-                                latency_ms: Some(request_started_at.elapsed().as_millis() as u64),
-                                metadata: request.metadata.as_ref(),
-                            },
-                            &estimated_usage,
-                        ) {
+                        } else if let Err(error) = state
+                            .record_estimated_provider_attempt_billing_event(
+                                BillingEventDraft {
+                                    request: &policy_request,
+                                    logical_model: &request.model,
+                                    provider: &provider.name,
+                                    provider_model: &model_route.provider_model,
+                                    status_code: response.status.as_u16(),
+                                    latency_ms: Some(
+                                        attempt_started_at.elapsed().as_millis() as u64
+                                    ),
+                                    metadata: request.metadata.as_ref(),
+                                },
+                                &provider_attempt,
+                                &estimated_usage,
+                            )
+                        {
                             warn!(
                                 request_id = %ctx.request_id,
                                 logical_model = %request.model,
@@ -2045,6 +2112,105 @@ impl fmt::Display for StreamingBodyReadError {
 
 impl std::error::Error for StreamingBodyReadError {}
 
+fn extract_last_provider_stream_usage(
+    body: &[u8],
+    mut extract: impl FnMut(&[u8]) -> Option<ProviderUsage>,
+) -> Option<ProviderUsage> {
+    let mut event_data = Vec::new();
+    let mut last_usage = None;
+
+    let mut finish_event = |event_data: &mut Vec<u8>| {
+        if !event_data.is_empty() && event_data.as_slice() != b"[DONE]" {
+            if let Some(usage) = extract(event_data) {
+                last_usage = Some(usage);
+            }
+        }
+        event_data.clear();
+    };
+
+    for raw_line in body.split(|byte| *byte == b'\n') {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if line.is_empty() {
+            finish_event(&mut event_data);
+            continue;
+        }
+        let Some(data) = line.strip_prefix(b"data:") else {
+            continue;
+        };
+        let data = data.strip_prefix(b" ").unwrap_or(data);
+        if !event_data.is_empty() {
+            event_data.push(b'\n');
+        }
+        event_data.extend_from_slice(data);
+    }
+    finish_event(&mut event_data);
+    last_usage
+}
+
+const STREAMING_USAGE_CAPTURE_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Default)]
+struct StreamingUsageCapture {
+    body: VecDeque<u8>,
+}
+
+impl StreamingUsageCapture {
+    fn append(&mut self, bytes: &[u8]) {
+        if bytes.len() >= STREAMING_USAGE_CAPTURE_MAX_BYTES {
+            self.body.clear();
+            self.body.extend(
+                bytes[bytes.len() - STREAMING_USAGE_CAPTURE_MAX_BYTES..]
+                    .iter()
+                    .copied(),
+            );
+            return;
+        }
+        let overflow = self
+            .body
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(STREAMING_USAGE_CAPTURE_MAX_BYTES);
+        self.body.drain(..overflow);
+        self.body.extend(bytes.iter().copied());
+    }
+
+    fn body(&self) -> Vec<u8> {
+        self.body.iter().copied().collect()
+    }
+}
+
+struct StreamingUsageCapturingReader<R> {
+    reader: R,
+    capture: Arc<Mutex<StreamingUsageCapture>>,
+}
+
+impl<R> StreamingUsageCapturingReader<R> {
+    fn new(reader: R, initial_body: &[u8]) -> (Self, Arc<Mutex<StreamingUsageCapture>>) {
+        let mut state = StreamingUsageCapture::default();
+        state.append(initial_body);
+        let capture = Arc::new(Mutex::new(state));
+        (
+            Self {
+                reader,
+                capture: Arc::clone(&capture),
+            },
+            capture,
+        )
+    }
+}
+
+impl<R: Read> Read for StreamingUsageCapturingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.reader.read(buffer)?;
+        if read > 0 {
+            if let Ok(mut capture) = self.capture.lock() {
+                capture.append(&buffer[..read]);
+            }
+        }
+        Ok(read)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct StreamingCapture {
     body: Vec<u8>,
@@ -2433,6 +2599,19 @@ struct AiProviderAttemptPlan<'a> {
     stream: bool,
 }
 
+#[derive(Debug, Default)]
+struct ProviderAttemptSequence {
+    next_index: u32,
+}
+
+impl ProviderAttemptSequence {
+    fn next(&mut self, request_id: &str) -> ProviderAttempt {
+        let index = self.next_index;
+        self.next_index = self.next_index.saturating_add(1);
+        ProviderAttempt::for_request(request_id, index)
+    }
+}
+
 impl AiProviderAttemptPlan<'_> {
     fn fallback_count(&self) -> usize {
         self.route_count.saturating_sub(1)
@@ -2440,6 +2619,21 @@ impl AiProviderAttemptPlan<'_> {
 
     fn has_next_candidate(&self) -> bool {
         has_next_candidate(self.candidate_index, self.route_count)
+    }
+
+    fn log_dispatch_attempt(&self, provider_attempt: &ProviderAttempt, route_attempt: u32) {
+        info!(
+            request_id = %self.request_id,
+            provider_attempt_id = %provider_attempt.provider_attempt_id,
+            provider_attempt_index = provider_attempt.provider_attempt_index,
+            route_attempt,
+            candidate_index = self.candidate_index,
+            logical_model = %self.logical_model,
+            provider = %self.provider,
+            provider_model = %self.provider_model,
+            stream = self.stream,
+            "provider dispatch attempt started"
+        );
     }
 
     fn log_planned_route(&self) {
@@ -2982,6 +3176,34 @@ fn push_provider_header_if_absent(request: &mut ProviderHttpRequest, name: &str,
     });
 }
 
+fn provider_request_for_attempt(
+    prepared: &ProviderHttpRequest,
+    provider_attempt: &ProviderAttempt,
+) -> ProviderHttpRequest {
+    let mut request = prepared.clone();
+    set_canonical_provider_header(
+        &mut request,
+        "x-ferrogate-provider-attempt-id",
+        &provider_attempt.provider_attempt_id,
+    );
+    set_canonical_provider_header(
+        &mut request,
+        "x-ferrogate-provider-attempt-index",
+        &provider_attempt.provider_attempt_index.to_string(),
+    );
+    request
+}
+
+fn set_canonical_provider_header(request: &mut ProviderHttpRequest, name: &str, value: &str) {
+    request
+        .headers
+        .retain(|header| !header.name.eq_ignore_ascii_case(name));
+    request.headers.push(ProviderHeader {
+        name: name.to_string(),
+        value: SecretValue::new(value),
+    });
+}
+
 fn estimate_chat_completion_usage(body: &serde_json::Value) -> BillingTokenUsage {
     let prompt_tokens = estimate_prompt_tokens(body);
     let completion_tokens = requested_completion_tokens(body)
@@ -3055,6 +3277,10 @@ fn requested_choice_count(body: &serde_json::Value) -> u64 {
         .filter(|count| *count > 0)
         .unwrap_or(1)
 }
+
+#[cfg(test)]
+#[path = "chat_provider_attempt_test.rs"]
+mod provider_attempt_tests;
 
 #[cfg(test)]
 mod tests {

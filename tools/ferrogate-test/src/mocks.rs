@@ -59,6 +59,14 @@ pub(crate) fn spawn_local_provider_upstream(
     expected_requests: usize,
     stop: Arc<AtomicBool>,
 ) -> Result<(String, JoinHandle<Vec<String>>)> {
+    spawn_local_provider_upstream_with_timeout(expected_requests, stop, Duration::from_secs(90))
+}
+
+pub(crate) fn spawn_local_provider_upstream_with_timeout(
+    expected_requests: usize,
+    stop: Arc<AtomicBool>,
+    max_lifetime: Duration,
+) -> Result<(String, JoinHandle<Vec<String>>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?.to_string();
@@ -70,7 +78,7 @@ pub(crate) fn spawn_local_provider_upstream(
         // longer stalls `Drop` for up to 90s before the real failure surfaces
         // (issue #142).
         while requests.len() < expected_requests
-            && started.elapsed() < Duration::from_secs(90)
+            && started.elapsed() < max_lifetime
             && !stop.load(Ordering::Relaxed)
         {
             match listener.accept() {
@@ -116,6 +124,13 @@ fn provider_response_for_request(request: &str) -> ProviderMockResponse {
         };
     }
     if request.contains(r#""model":"gpt-4o-mini-failover-primary""#) {
+        if request.contains("provider compliance multi attempt settlement") {
+            return ProviderMockResponse {
+                status: "503 Service Unavailable",
+                content_type: "application/json",
+                body: r#"{"error":{"message":"primary provider overloaded after consuming tokens","type":"server_error","code":"primary_overloaded"},"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
+            };
+        }
         return ProviderMockResponse {
             status: "503 Service Unavailable",
             content_type: "application/json",
@@ -123,6 +138,13 @@ fn provider_response_for_request(request: &str) -> ProviderMockResponse {
         };
     }
     if request.contains(r#""model":"gpt-4o-mini-fallback""#) {
+        if request.contains(r#""stream":true"#) {
+            return ProviderMockResponse {
+                status: "200 OK",
+                content_type: "text/event-stream",
+                body: "data: {\"id\":\"chatcmpl_ferrogate_fallback\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"fallback ok\"}}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10}}\n\ndata: [DONE]\n\n",
+            };
+        }
         return ProviderMockResponse {
             status: "200 OK",
             content_type: "application/json",

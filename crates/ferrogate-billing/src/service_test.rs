@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::pricing::PriceEntry;
-use crate::{BillingUsageSource, ModelPrice, TokenUsage};
+use crate::{BillingUsageSource, ModelPrice, ProviderAttempt, TokenUsage};
 use ferrogate_core::TenantContext;
 
 fn service() -> BillingService {
@@ -32,6 +32,7 @@ fn event_json(provider: &str, model: &str) -> Vec<u8> {
     serde_json::to_vec(&BillingEvent {
         request_id: "req-http".into(),
         trace_id: Some("trace-http".into()),
+        provider_attempt: ProviderAttempt::for_request("req-http", 0),
         agent_run_id: None,
         workflow_id: None,
         workflow_version: None,
@@ -225,6 +226,7 @@ fn ledger_read_scopes_by_tenant_query() {
             serde_json::from_slice(&event_json("openai", "gpt-5.5")).unwrap();
         event.request_id = format!("req-{org}");
         event.trace_id = Some(format!("trace-{org}"));
+        event.provider_attempt = ProviderAttempt::for_request(&event.request_id, 0);
         event.tenant.organization_id = Some(org.into());
         service.charge_and_record(&event).unwrap();
     }
@@ -249,4 +251,53 @@ fn ledger_read_scopes_by_tenant_query() {
     let entries = scoped["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["tenant"]["organization_id"], "org-a");
+}
+
+#[test]
+fn charge_route_rejects_provider_attempt_key_collision() {
+    let service = service();
+    let original = event_json("openai", "gpt-5.5");
+    assert_eq!(
+        route_request(
+            &service,
+            &request("POST", "/v1/billing/charge", "", original.clone()),
+        )
+        .status,
+        200
+    );
+    let mut collision: BillingEvent = serde_json::from_slice(&original).unwrap();
+    collision.tenant.organization_id = Some("different-tenant".into());
+    let response = route_request(
+        &service,
+        &request(
+            "POST",
+            "/v1/billing/charge",
+            "",
+            serde_json::to_vec(&collision).unwrap(),
+        ),
+    );
+    assert_eq!(response.status, 409);
+    let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"]["code"], "billing_idempotency_conflict");
+    assert_eq!(
+        service
+            .sink
+            .list(&LedgerListFilter::default(), 0, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let mut correlation_collision: BillingEvent = serde_json::from_slice(&original).unwrap();
+    correlation_collision.request_id = "different-request".into();
+    let response = route_request(
+        &service,
+        &request(
+            "POST",
+            "/v1/billing/charge",
+            "",
+            serde_json::to_vec(&correlation_collision).unwrap(),
+        ),
+    );
+    assert_eq!(response.status, 409);
 }

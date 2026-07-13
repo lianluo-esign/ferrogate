@@ -1175,6 +1175,28 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         }
     }
 
+    let provider_attempt_columns = [
+        ("metering_events", "billing_event_id", "text"),
+        ("metering_events", "provider_attempt_id", "text"),
+        ("metering_events", "provider_attempt_index", "integer"),
+        ("metering_event_routes", "billing_event_id", "text"),
+        ("metering_event_usage", "billing_event_id", "text"),
+        ("billing_ledger", "provider_attempt_id", "text"),
+        ("billing_ledger", "provider_attempt_index", "integer"),
+    ];
+    for (table, column, expected_type) in provider_attempt_columns {
+        let data_type = postgres_scalar(&format!(
+            "SELECT data_type FROM information_schema.columns \
+             WHERE table_schema = '{}' AND table_name = '{}' AND column_name = '{}'",
+            sql_literal(schema),
+            sql_literal(table),
+            sql_literal(column)
+        ))?;
+        if data_type.trim() != expected_type {
+            bail!("expected {schema}.{table}.{column} to be {expected_type}, got {data_type}");
+        }
+    }
+
     let expected_indexes = [
         "idx_control_plane_resources_document_gin",
         "idx_agent_runs_tenant_started",
@@ -1203,8 +1225,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
         "idx_usage_aggregates_tenant_model_provider",
         "idx_tenant_contexts_api_key",
         "idx_metering_events_tenant_time",
+        "idx_metering_events_request",
         "idx_metering_event_routes_model_provider",
         "idx_usage_rollups_tenant_model_provider",
+        "idx_billing_ledger_request_attempt",
     ];
     for index in expected_indexes {
         let count = postgres_scalar(&format!(
@@ -1220,10 +1244,10 @@ fn expect_supabase_schema_migrations(schema: &str) -> Result<()> {
 
     let migration_version = postgres_scalar(&format!(
         "SELECT version::text || ':' || name \
-         FROM {}.storage_schema_migrations WHERE version = 29",
+         FROM {}.storage_schema_migrations WHERE version = 30",
         quote_ident(schema)
     ))?;
-    if migration_version.trim() != "29:029_tenant_only_asset_storage_quota" {
+    if migration_version.trim() != "30:030_provider_attempt_settlement_identity" {
         bail!("unexpected latest Supabase migration: {migration_version}");
     }
 
@@ -1854,10 +1878,10 @@ impl TursoRestartHarness {
             assert_eq!(body["storage"]["provider_order"][1], "postgres");
             if matches!(self.expected_storage_provider, "supabase" | "postgres") {
                 assert_eq!(body["storage"]["schema"]["engine"], "postgres");
-                assert_eq!(body["storage"]["schema"]["version"], 29);
+                assert_eq!(body["storage"]["schema"]["version"], 30);
                 assert_eq!(
                     body["storage"]["schema"]["name"],
-                    "029_tenant_only_asset_storage_quota"
+                    "030_provider_attempt_settlement_identity"
                 );
                 assert_eq!(body["storage"]["schema"]["validated"], true);
                 assert!(body["storage"]["schema"]["checksum"]

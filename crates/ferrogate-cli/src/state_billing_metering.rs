@@ -8,9 +8,20 @@
 use super::*;
 
 impl AppState {
+    #[cfg(test)]
     pub(crate) fn record_billing_event(
         &self,
         draft: BillingEventDraft<'_>,
+        usage: &ProviderUsage,
+    ) -> Result<(), ferrogate_billing::BillingError> {
+        let provider_attempt = ProviderAttempt::for_request(&draft.request.request_id, 0);
+        self.record_provider_attempt_billing_event(draft, &provider_attempt, usage)
+    }
+
+    pub(crate) fn record_provider_attempt_billing_event(
+        &self,
+        draft: BillingEventDraft<'_>,
+        provider_attempt: &ProviderAttempt,
         usage: &ProviderUsage,
     ) -> Result<(), ferrogate_billing::BillingError> {
         let usage = BillingTokenUsage::new(
@@ -19,40 +30,58 @@ impl AppState {
             usage.total_tokens.unwrap_or_default(),
         )
         .estimate_missing_total();
-        self.record_billing_token_usage(BillingTokenUsageDraft {
-            request: draft.request,
-            logical_model: draft.logical_model,
-            provider: draft.provider,
-            provider_model: draft.provider_model,
-            usage: &usage,
-            usage_source: BillingUsageSource::ProviderUsage,
-            status_code: draft.status_code,
-            latency_ms: draft.latency_ms,
-            metadata: draft.metadata,
-        })
+        self.record_billing_token_usage(
+            BillingTokenUsageDraft {
+                request: draft.request,
+                logical_model: draft.logical_model,
+                provider: draft.provider,
+                provider_model: draft.provider_model,
+                usage: &usage,
+                usage_source: BillingUsageSource::ProviderUsage,
+                status_code: draft.status_code,
+                latency_ms: draft.latency_ms,
+                metadata: draft.metadata,
+            },
+            provider_attempt,
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn record_estimated_billing_event(
         &self,
         draft: BillingEventDraft<'_>,
         usage: &BillingTokenUsage,
     ) -> Result<(), ferrogate_billing::BillingError> {
-        self.record_billing_token_usage(BillingTokenUsageDraft {
-            request: draft.request,
-            logical_model: draft.logical_model,
-            provider: draft.provider,
-            provider_model: draft.provider_model,
-            usage,
-            usage_source: BillingUsageSource::GatewayEstimate,
-            status_code: draft.status_code,
-            latency_ms: draft.latency_ms,
-            metadata: draft.metadata,
-        })
+        let provider_attempt = ProviderAttempt::for_request(&draft.request.request_id, 0);
+        self.record_estimated_provider_attempt_billing_event(draft, &provider_attempt, usage)
+    }
+
+    pub(crate) fn record_estimated_provider_attempt_billing_event(
+        &self,
+        draft: BillingEventDraft<'_>,
+        provider_attempt: &ProviderAttempt,
+        usage: &BillingTokenUsage,
+    ) -> Result<(), ferrogate_billing::BillingError> {
+        self.record_billing_token_usage(
+            BillingTokenUsageDraft {
+                request: draft.request,
+                logical_model: draft.logical_model,
+                provider: draft.provider,
+                provider_model: draft.provider_model,
+                usage,
+                usage_source: BillingUsageSource::GatewayEstimate,
+                status_code: draft.status_code,
+                latency_ms: draft.latency_ms,
+                metadata: draft.metadata,
+            },
+            provider_attempt,
+        )
     }
 
     fn record_billing_token_usage(
         &self,
         draft: BillingTokenUsageDraft<'_>,
+        provider_attempt: &ProviderAttempt,
     ) -> Result<(), ferrogate_billing::BillingError> {
         // Reconcile a missing prompt/completion split against total_tokens
         // before pricing (issue #145): some providers report only a total, and
@@ -81,12 +110,10 @@ impl AppState {
         // the billing service only ever mirrors this outcome, never
         // computes or applies its own (see `BillingEvent::wallet_delta_credits`'s
         // doc comment in `ferrogate-billing`).
-        let wallet_debit = cost_usd.and_then(|cost_usd| {
-            self.debit_wallet_for_settled_cost(&draft.request.tenant, cost_usd)
-        });
-        let event = BillingEvent {
+        let mut event = BillingEvent {
             request_id: draft.request.request_id.clone(),
             trace_id: draft.request.trace_id.clone(),
+            provider_attempt: provider_attempt.clone(),
             agent_run_id: draft.request.agent_run_id.clone(),
             workflow_id: draft.request.workflow_id.clone(),
             workflow_version: draft.request.workflow_version,
@@ -108,12 +135,17 @@ impl AppState {
             cost_usd,
             latency_ms: draft.latency_ms,
             metadata: draft.metadata.cloned().unwrap_or_default(),
-            wallet_delta_credits: wallet_debit.as_ref().map(|outcome| outcome.delta_credits),
-            wallet_balance_after_credits: wallet_debit
-                .as_ref()
-                .map(|outcome| outcome.balance_after_credits),
+            wallet_delta_credits: None,
+            wallet_balance_after_credits: None,
         };
-        self.metering_events.record(event.clone())?;
+        let settlement_id = ferrogate_billing::ledger::ledger_entry_id(&event);
+        let wallet_debit = cost_usd.and_then(|cost_usd| {
+            self.debit_wallet_for_settled_cost(&draft.request.tenant, cost_usd, &settlement_id)
+        });
+        event.wallet_delta_credits = wallet_debit.as_ref().map(|outcome| outcome.delta_credits);
+        event.wallet_balance_after_credits = wallet_debit
+            .as_ref()
+            .map(|outcome| outcome.balance_after_credits);
         // Durably enqueue the settled usage for delivery to the standalone
         // billing service (issues #131/#137) in the SAME call as the metering
         // write rather than a second sequential synchronous round-trip (issue
@@ -164,6 +196,7 @@ impl AppState {
         if !recorded {
             return Ok(());
         }
+        self.metering_events.record(event.clone())?;
         self.record_billing_metrics(&event);
         if let Some(exporter) = &self.metering_exporter {
             exporter.export_event(event.clone());
@@ -445,7 +478,15 @@ impl AppState {
     }
 
     pub(crate) fn record_admin_audit_event(&self, event: AdminAuditEventDraft) {
-        self.repositories.append_audit_event(StoredAuditEvent {
+        self.repositories
+            .append_audit_event(self.prepare_admin_audit_event(event));
+    }
+
+    pub(super) fn prepare_admin_audit_event(
+        &self,
+        event: AdminAuditEventDraft,
+    ) -> StoredAuditEvent {
+        StoredAuditEvent {
             id: self.repositories.next_audit_event_id(),
             request_id: event.request_id,
             trace_id: event.trace_id,
@@ -462,7 +503,7 @@ impl AppState {
             outcome: event.outcome,
             message: event.message,
             occurred_at_unix: now_unix_seconds(),
-        });
+        }
     }
 
     pub(crate) fn record_tool_billing_event(
@@ -476,6 +517,7 @@ impl AppState {
         let event = BillingEvent {
             request_id: request_id.into(),
             trace_id: None,
+            provider_attempt: ProviderAttempt::for_request(request_id, 0),
             agent_run_id: None,
             workflow_id: None,
             workflow_version: None,
@@ -541,6 +583,10 @@ impl AppState {
             })
     }
 }
+
+#[cfg(test)]
+#[path = "state_billing_metering_metrics_test.rs"]
+mod metrics_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1167,125 +1213,5 @@ mod tests {
         assert!(state.should_log_access_at("fg-0000000000000002", 500, false, 1_000));
         assert!(state.should_log_access_at("fg-0000000000000003", 500, false, 1_000));
         assert!(!state.should_log_access_at("fg-0000000000000004", 500, false, 1_000));
-    }
-
-    #[test]
-    fn prometheus_metrics_snapshot_aggregates_request_logs_and_billing() {
-        let config = Config {
-            telemetry: crate::config::TelemetryConfig {
-                service_name: "ferrogate-test".into(),
-                log_bodies: false,
-                otlp_endpoint: None,
-                ..crate::config::TelemetryConfig::default()
-            },
-            models: vec![Model {
-                name: "fast-chat".into(),
-                provider: "openai".into(),
-                provider_model: "gpt-4o-mini".into(),
-                routing_strategy: RoutingStrategy::Priority,
-                fallbacks: vec![],
-                visible_organization_ids: vec![],
-                visible_project_ids: vec![],
-                capabilities: vec![],
-                context_window: None,
-                input_price_per_1m: Some(1.0),
-                output_price_per_1m: Some(2.0),
-                enabled: true,
-                cache_enabled: None,
-            }],
-            ..Config::default()
-        };
-        let state = AppState::new(config);
-        let request = RequestContext {
-            request_id: "fg-test".into(),
-            trace_id: Some("trace-test".into()),
-            agent_run_id: None,
-            workflow_id: None,
-            workflow_version: None,
-            workflow_node_id: None,
-            route: Some("openai.chat.completions".into()),
-            upstream: Some("openai".into()),
-            tenant: ferrogate_core::TenantContext::default(),
-        };
-
-        state.record_request_log(StoredRequestLog {
-            request_id: "fg-test".into(),
-            trace_id: Some("trace-test".into()),
-            agent_run_id: None,
-            workflow_id: None,
-            workflow_version: None,
-            workflow_node_id: None,
-            cluster_id: None,
-            node_id: None,
-            tenant: ferrogate_core::TenantContext::default(),
-            route: Some("openai.chat.completions".into()),
-            provider: Some("openai".into()),
-            logical_model: Some("fast-chat".into()),
-            provider_model: Some("gpt-4o-mini".into()),
-            gateway_config_id: None,
-            gateway_config_revision: None,
-            status_code: 200,
-            error_code: None,
-            prompt_recorded: false,
-            response_recorded: false,
-            prompt_body: None,
-            response_body: None,
-            cache_status: None,
-            started_at_unix: None,
-            completed_at_unix: None,
-        });
-        state
-            .record_billing_event(
-                BillingEventDraft {
-                    request: &request,
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: None,
-                    metadata: None,
-                },
-                &ProviderUsage {
-                    prompt_tokens: Some(3),
-                    completion_tokens: Some(5),
-                    total_tokens: Some(8),
-                },
-            )
-            .unwrap();
-        state
-            .record_billing_event(
-                BillingEventDraft {
-                    request: &request,
-                    logical_model: "fast-chat",
-                    provider: "openai",
-                    provider_model: "gpt-4o-mini",
-                    status_code: 200,
-                    latency_ms: None,
-                    metadata: None,
-                },
-                &ProviderUsage {
-                    prompt_tokens: Some(7),
-                    completion_tokens: Some(11),
-                    total_tokens: Some(18),
-                },
-            )
-            .unwrap();
-
-        let snapshot = state.prometheus_metrics_snapshot();
-
-        assert_eq!(snapshot.service_name, "ferrogate-test");
-        assert_eq!(snapshot.request_log_total, 1);
-        assert_eq!(snapshot.request_status_totals[0].status_code, 200);
-        assert_eq!(snapshot.cache_hits_total, 0);
-        assert_eq!(snapshot.cache_misses_total, 0);
-        assert_eq!(snapshot.billing_event_total, 2);
-        assert_eq!(snapshot.token_totals.total_tokens, 26);
-        assert_eq!(snapshot.model_provider_totals[0].logical_model, "fast-chat");
-
-        let aggregates = state.usage_aggregates(None);
-        assert_eq!(aggregates.len(), 1);
-        assert_eq!(aggregates[0].usage.prompt_tokens, 10);
-        assert_eq!(aggregates[0].usage.completion_tokens, 16);
-        assert_eq!(aggregates[0].usage.total_tokens, 26);
     }
 }
