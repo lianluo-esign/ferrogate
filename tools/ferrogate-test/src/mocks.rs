@@ -151,6 +151,9 @@ fn provider_response_for_request(request: &str) -> ProviderMockResponse {
             body: r#"{"id":"chatcmpl_ferrogate_fallback","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"fallback ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}"#,
         };
     }
+    if let Some(response) = provider_matrix_response(request) {
+        return response;
+    }
     if request.contains("provider upstream error with usage") {
         return ProviderMockResponse {
             status: "400 Bad Request",
@@ -184,6 +187,103 @@ fn provider_response_for_request(request: &str) -> ProviderMockResponse {
         content_type: "application/json",
         body: r#"{"id":"chatcmpl_ferrogate_test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
     }
+}
+
+fn provider_matrix_response(request: &str) -> Option<ProviderMockResponse> {
+    let response = if request.contains("provider compliance openai-compatible streaming usage")
+        && request.contains(r#""stream_options":{"include_usage":true}"#)
+    {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"id\":\"chatcmpl_compliance_openai_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chatcmpl_compliance_openai_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\ndata: [DONE]\n\n",
+        }
+    } else if request.contains("provider compliance anthropic streaming usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_compliance_anthropic_stream\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-5-sonnet-latest\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+        }
+    } else if request.contains("provider compliance anthropic usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"id":"msg_compliance_anthropic","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-3-5-sonnet-latest","stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":5}}"#,
+        }
+    } else if request.contains("provider compliance gemini streaming usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":5,\"totalTokenCount\":8},\"modelVersion\":\"gemini-2.5-flash\",\"responseId\":\"resp_compliance_gemini_stream\"}\n\n",
+        }
+    } else if request.contains("provider compliance gemini usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5,"totalTokenCount":8},"modelVersion":"gemini-2.5-flash","responseId":"resp_compliance_gemini"}"#,
+        }
+    } else if request.contains("provider compliance grok streaming usage")
+        && request.contains(r#""stream_options":{"include_usage":true}"#)
+    {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"id\":\"chatcmpl_compliance_grok_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chatcmpl_compliance_grok_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\ndata: [DONE]\n\n",
+        }
+    } else if request.contains("provider compliance grok usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"id":"chatcmpl_compliance_grok","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+        }
+    } else if request.contains("provider compliance openrouter streaming usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"id\":\"chatcmpl_compliance_openrouter_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chatcmpl_compliance_openrouter_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\ndata: [DONE]\n\n",
+        }
+    } else if request.contains("provider compliance openrouter usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"id":"chatcmpl_compliance_openrouter","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+        }
+    } else if request.contains("provider compliance azure-openai streaming usage")
+        && request.contains(r#""stream_options":{"include_usage":true}"#)
+    {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"id\":\"chatcmpl_compliance_azure_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chatcmpl_compliance_azure_stream\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\ndata: [DONE]\n\n",
+        }
+    } else if request.contains("provider compliance azure-openai usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"id":"chatcmpl_compliance_azure","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"#,
+        }
+    } else if request.contains("provider compliance bedrock usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":3,"outputTokens":5,"totalTokens":8},"metrics":{"latencyMs":1}}"#,
+        }
+    } else if request.contains("provider compliance vertex streaming usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":5,\"totalTokenCount\":8},\"modelVersion\":\"gemini-2.5-flash\",\"responseId\":\"resp_compliance_vertex_stream\"}\n\n",
+        }
+    } else if request.contains("provider compliance vertex usage") {
+        ProviderMockResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5,"totalTokenCount":8},"modelVersion":"gemini-2.5-flash","responseId":"resp_compliance_vertex"}"#,
+        }
+    } else {
+        return None;
+    };
+    Some(response)
 }
 
 pub(crate) fn spawn_mock_mcp_server() -> Result<(String, JoinHandle<Vec<String>>)> {

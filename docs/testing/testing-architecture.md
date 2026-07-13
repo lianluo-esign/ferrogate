@@ -262,23 +262,21 @@ project/workspace/key asset quota writes are rejected because stored assets and
 their usage are tenant-owned. This closes the concrete #188-style write-only
 scope gap without inventing fake narrower-scope usage semantics.
 
-The provider contract now proves OpenAI-compatible primary success, exact
-GPT-5.5 pricing, fallback attribution, and streaming/non-streaming terminal
-errors that report usage. It compares the gateway billing event with the
-standalone billing ledger. Provider errors without usage remain non-billable.
-When multiple attempts report usage, distinct settlement identities are still
-required before both can be represented; that is tracked in #213.
+The provider contract proves OpenAI-compatible primary success, exact GPT-5.5
+pricing, fallback attribution, and streaming/non-streaming terminal errors that
+report usage. Its canonical matrix also covers Anthropic, Gemini, Grok/xAI,
+OpenRouter, Azure OpenAI, Bedrock, and Vertex with deterministic real wire-shape
+fixtures. Runtime and harness consume one adapter-family registry, and exact
+set equality is checked before E2E starts, so removing a case or registering a
+new family without one fails closed. Each case compares request/trace and
+provider-attempt attribution, exact provider usage and configured cost across
+the gateway billing event and standalone billing ledger. Streaming is exercised
+for every implemented adapter transport that exposes reported usage. Provider
+errors without usage remain non-billable, while multi-attempt settlement proves
+distinct attempt identities and replay idempotency.
 
 The Guardrail contract writes and reads a DB-backed policy, exercises allow and
 block, polls the tenant-authorized evidence API, then verifies evaluation,
 per-check, audit, and request-log rows directly in live Supabase. The existing
 restart, rollback, redaction, and streaming assertions remain around that shared
 contract.
-
-**Remaining gap:** the deterministic provider cases cover only the
-OpenAI-compatible adapter family. `ProviderAdapterRegistry` and the compliance
-case table are not yet forced to have the same canonical adapter set, so a new
-or existing non-OpenAI adapter can still lack this runtime settlement proof.
-Tracked in #214. Do not describe Anthropic, Gemini, Grok/xAI, OpenRouter, Azure
-OpenAI, Bedrock, or Vertex as provider-compliance proven until that matrix is
-complete.

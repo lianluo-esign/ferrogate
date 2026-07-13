@@ -37,9 +37,11 @@ pub use sigv4::{
     AwsCredentials, SignedHeaders, SigningRequest,
 };
 pub use types::{
-    is_openai_compatible_provider_kind, provider_compatibility_kind, AdapterError,
-    AwsProviderCredentials, ChatCompletionPlan, GcpProviderCredentials, ProviderAdapter,
-    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan, SecretValue,
+    canonical_provider_adapter_family, is_openai_compatible_provider_kind,
+    provider_compatibility_kind, AdapterError, AwsProviderCredentials, ChatCompletionPlan,
+    GcpProviderCredentials, ProviderAdapter, ProviderAdapterFamily,
+    ProviderAdapterFamilyDescriptor, ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig,
+    ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage, ResponsesPlan,
+    SecretValue, SUPPORTED_PROVIDER_ADAPTER_FAMILIES,
 };
 pub use vertex::VertexAiAdapter;

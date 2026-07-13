@@ -2117,12 +2117,27 @@ fn extract_last_provider_stream_usage(
     mut extract: impl FnMut(&[u8]) -> Option<ProviderUsage>,
 ) -> Option<ProviderUsage> {
     let mut event_data = Vec::new();
-    let mut last_usage = None;
+    let mut merged_usage: Option<ProviderUsage> = None;
 
     let mut finish_event = |event_data: &mut Vec<u8>| {
         if !event_data.is_empty() && event_data.as_slice() != b"[DONE]" {
             if let Some(usage) = extract(event_data) {
-                last_usage = Some(usage);
+                let previous = merged_usage.take().unwrap_or_default();
+                let prompt_tokens = usage.prompt_tokens.or(previous.prompt_tokens);
+                let completion_tokens = usage.completion_tokens.or(previous.completion_tokens);
+                let total_tokens = usage
+                    .total_tokens
+                    .or_else(|| {
+                        prompt_tokens
+                            .zip(completion_tokens)
+                            .map(|(prompt, completion)| prompt.saturating_add(completion))
+                    })
+                    .or(previous.total_tokens);
+                merged_usage = Some(ProviderUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                });
             }
         }
         event_data.clear();
@@ -2144,38 +2159,59 @@ fn extract_last_provider_stream_usage(
         event_data.extend_from_slice(data);
     }
     finish_event(&mut event_data);
-    last_usage
+    merged_usage
 }
 
 const STREAMING_USAGE_CAPTURE_MAX_BYTES: usize = 64 * 1024;
+const STREAMING_USAGE_CAPTURE_PREFIX_MAX_BYTES: usize = 8 * 1024;
+const STREAMING_USAGE_CAPTURE_SEPARATOR: &[u8] = b"\n\n";
+const STREAMING_USAGE_CAPTURE_TAIL_MAX_BYTES: usize = STREAMING_USAGE_CAPTURE_MAX_BYTES
+    - STREAMING_USAGE_CAPTURE_PREFIX_MAX_BYTES
+    - STREAMING_USAGE_CAPTURE_SEPARATOR.len();
 
 #[derive(Debug, Default)]
 struct StreamingUsageCapture {
+    prefix: Vec<u8>,
     body: VecDeque<u8>,
+    total_bytes: usize,
 }
 
 impl StreamingUsageCapture {
     fn append(&mut self, bytes: &[u8]) {
-        if bytes.len() >= STREAMING_USAGE_CAPTURE_MAX_BYTES {
+        let prefix_remaining = STREAMING_USAGE_CAPTURE_PREFIX_MAX_BYTES - self.prefix.len();
+        self.prefix
+            .extend_from_slice(&bytes[..bytes.len().min(prefix_remaining)]);
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+
+        let body_limit = if self.total_bytes > STREAMING_USAGE_CAPTURE_MAX_BYTES {
+            STREAMING_USAGE_CAPTURE_TAIL_MAX_BYTES
+        } else {
+            STREAMING_USAGE_CAPTURE_MAX_BYTES
+        };
+        if bytes.len() >= body_limit {
             self.body.clear();
-            self.body.extend(
-                bytes[bytes.len() - STREAMING_USAGE_CAPTURE_MAX_BYTES..]
-                    .iter()
-                    .copied(),
-            );
+            self.body
+                .extend(bytes[bytes.len() - body_limit..].iter().copied());
             return;
         }
         let overflow = self
             .body
             .len()
             .saturating_add(bytes.len())
-            .saturating_sub(STREAMING_USAGE_CAPTURE_MAX_BYTES);
+            .saturating_sub(body_limit);
         self.body.drain(..overflow);
         self.body.extend(bytes.iter().copied());
     }
 
     fn body(&self) -> Vec<u8> {
-        self.body.iter().copied().collect()
+        if self.total_bytes <= STREAMING_USAGE_CAPTURE_MAX_BYTES {
+            return self.body.iter().copied().collect();
+        }
+        let mut body = Vec::with_capacity(STREAMING_USAGE_CAPTURE_MAX_BYTES);
+        body.extend_from_slice(&self.prefix);
+        body.extend_from_slice(STREAMING_USAGE_CAPTURE_SEPARATOR);
+        body.extend(self.body.iter().copied());
+        body
     }
 }
 

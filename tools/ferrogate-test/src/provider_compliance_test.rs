@@ -7,8 +7,43 @@
 use super::*;
 
 #[test]
+fn provider_contract_matrix_exactly_matches_runtime_adapter_families() {
+    validate_provider_case_matrix(&PROVIDER_CASES).unwrap();
+}
+
+#[test]
+fn provider_contract_matrix_rejects_a_missing_runtime_family() {
+    let mut cases = PROVIDER_CASES.to_vec();
+    cases.retain(|case| case.adapter_family != "vertex");
+
+    let error = validate_provider_case_matrix(&cases).unwrap_err();
+    assert!(error.to_string().contains("missing compliance cases"));
+    assert!(error.to_string().contains("vertex"));
+}
+
+#[test]
+fn provider_contract_matrix_rejects_an_unsupported_family() {
+    let mut cases = PROVIDER_CASES.to_vec();
+    cases[0].adapter_family = "unsupported-test-adapter";
+
+    let error = validate_provider_case_matrix(&cases).unwrap_err();
+    assert!(error.to_string().contains("unsupported adapter families"));
+    assert!(error.to_string().contains("unsupported-test-adapter"));
+}
+
+#[test]
+fn provider_contract_matrix_rejects_a_new_runtime_family_without_a_case() {
+    let mut runtime = runtime_provider_adapter_families();
+    runtime.insert("future-test-adapter");
+
+    let error = validate_provider_case_matrix_against(&PROVIDER_CASES, &runtime).unwrap_err();
+    assert!(error.to_string().contains("missing compliance cases"));
+    assert!(error.to_string().contains("future-test-adapter"));
+}
+
+#[test]
 fn provider_contract_cases_cover_success_and_reported_usage_error() {
-    assert_eq!(PROVIDER_CASES.len(), 4);
+    assert_eq!(PROVIDER_CASES.len(), 18);
     for name in [
         "terminal-error-with-usage",
         "terminal-stream-error-with-usage",
@@ -33,15 +68,33 @@ fn provider_contract_cases_cover_success_and_reported_usage_error() {
 
 #[test]
 fn provider_contract_reserves_two_dispatches_for_multi_attempt_settlement() {
-    let single_attempts = PROVIDER_CASES
-        .iter()
-        .map(|case| case.expected_upstream_models.len())
-        .sum::<usize>();
     assert_eq!(
         expected_provider_requests(),
-        single_attempts + PROVIDER_NO_SETTLEMENT_CASES.len() + 2
+        PROVIDER_CASES.len() + PROVIDER_NO_SETTLEMENT_CASES.len() + 2
     );
     assert!(MULTI_ATTEMPT_CONTENT.contains("multi attempt"));
+}
+
+#[test]
+fn provider_contract_covers_reported_usage_streaming_families() {
+    let streaming = PROVIDER_CASES
+        .iter()
+        .filter(|case| case.stream && case.expected_error_code.is_none())
+        .map(|case| case.adapter_family)
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        streaming,
+        BTreeSet::from([
+            "anthropic",
+            "azure-openai",
+            "gemini",
+            "grok",
+            "openai-compatible",
+            "openrouter",
+            "vertex",
+        ])
+    );
 }
 
 #[test]

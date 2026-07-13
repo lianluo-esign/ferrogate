@@ -7,8 +7,9 @@
 use serde_json::{json, Value};
 
 use crate::{
-    AdapterError, ChatCompletionPlan, ProviderAdapter, ProviderConfig, ProviderErrorResponse,
-    ProviderHeader, ProviderHttpRequest, ProviderUsage, SecretValue,
+    openai::request_openai_stream_usage, AdapterError, ChatCompletionPlan, ProviderAdapter,
+    ProviderConfig, ProviderErrorResponse, ProviderHeader, ProviderHttpRequest, ProviderUsage,
+    SecretValue,
 };
 
 const DEFAULT_API_VERSION: &str = "2024-10-21";
@@ -32,6 +33,9 @@ impl ProviderAdapter for AzureOpenAiAdapter {
             .expect("object checked above")
             .remove("model");
         body["stream"] = Value::Bool(request.stream);
+        if request.stream {
+            request_openai_stream_usage(&mut body);
+        }
 
         let mut headers = vec![ProviderHeader {
             name: "content-type".into(),

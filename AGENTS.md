@@ -389,14 +389,16 @@ high-concurrency benchmarks against Supabase. Performance tests must use
 in-memory storage or a dedicated local Postgres instance so they cannot trigger
 managed-service abuse controls or consume shared service capacity.
 
-Known gap — do not present the whole provider matrix as done. The component
-compliance executor now covers tenant/project/workspace/key quota scopes, the
-OpenAI-compatible provider success/fallback/reported-error settlement paths,
-and Guardrail allow/block evidence. The quota and Guardrail contracts are also
-proved against live Supabase. The remaining provider gap is mechanical matrix
-enforcement across every canonical adapter family (#214); multi-attempt billing
-identity is tracked separately in #213. Until #214 closes, a provider adapter
-outside the registered OpenAI-compatible cases is not compliance-proven.
+Provider matrix status: the component compliance executor covers
+tenant/project/workspace/key quota scopes, Guardrail allow/block evidence, and
+every canonical provider adapter family. Runtime and test harness share the
+same provider-family registry; exact matrix equality is enforced before E2E
+starts. OpenAI-compatible, Anthropic, Gemini, Grok/xAI, OpenRouter, Azure
+OpenAI, Bedrock, and Vertex each prove request shape, provider-reported usage,
+configured cost, trace/request attribution, provider-attempt identity, gateway
+telemetry, and standalone ledger settlement. Streaming usage is covered for
+the adapter families whose implemented transport reports it. The quota and
+Guardrail contracts are also proved against live Supabase.
 
 ## Verification
 

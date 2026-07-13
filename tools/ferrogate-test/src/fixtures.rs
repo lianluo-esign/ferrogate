@@ -164,6 +164,48 @@ kind = "anthropic"
 base_url = "http://{provider_addr}/v1"
 api_key_env = "FERROGATE_PROVIDER_SECRET"
 
+[[providers]]
+name = "gemini"
+kind = "gemini"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[providers]]
+name = "xai"
+kind = "xai"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[providers]]
+name = "openrouter"
+kind = "openrouter"
+base_url = "http://{provider_addr}/v1"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+openrouter_http_referer = "https://ferrogate.test"
+openrouter_x_title = "FerroGate compliance"
+
+[[providers]]
+name = "azure-openai"
+kind = "azure-openai"
+base_url = "http://{provider_addr}"
+api_key_env = "FERROGATE_PROVIDER_SECRET"
+
+[[providers]]
+name = "bedrock"
+kind = "bedrock"
+base_url = "http://{provider_addr}"
+region = "us-east-1"
+aws_access_key_id = "AKIDFERROGATETEST"
+aws_secret_access_key_env = "FERROGATE_TEST_AWS_SECRET_ACCESS_KEY"
+
+[[providers]]
+name = "vertex"
+kind = "vertex"
+base_url = "http://{provider_addr}"
+region = "us-central1"
+gcp_project_id = "ferrogate-test"
+gcp_access_token_env = "FERROGATE_TEST_GCP_ACCESS_TOKEN"
+
 [[upstreams]]
 name = "operator-dynamic"
 url = "http://{provider_addr}"
@@ -242,12 +284,68 @@ capabilities = ["chat", "streaming"]
 input_price_per_1m = 5.0
 output_price_per_1m = 15.0
 
+[[models]]
+name = "anthropic-chat"
+provider = "anthropic"
+provider_model = "claude-3-5-sonnet-latest"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models]]
+name = "gemini-chat"
+provider = "gemini"
+provider_model = "gemini-2.5-flash"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models]]
+name = "grok-chat"
+provider = "xai"
+provider_model = "grok-4.20-fast"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models]]
+name = "openrouter-chat"
+provider = "openrouter"
+provider_model = "openai/gpt-4o-mini"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models]]
+name = "azure-openai-chat"
+provider = "azure-openai"
+provider_model = "azure-gpt-4o"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models]]
+name = "bedrock-chat"
+provider = "bedrock"
+provider_model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+capabilities = ["chat"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
+[[models]]
+name = "vertex-chat"
+provider = "vertex"
+provider_model = "gemini-2.5-flash"
+capabilities = ["chat", "streaming"]
+input_price_per_1m = 1.0
+output_price_per_1m = 2.0
+
 [[api_keys]]
 id = "client"
 name = "Client"
 key = "client-secret"
 scopes = ["models.read", "chat.completions", "responses.create", "agent.runs.create", "admin.read", "agents.read", "agents.invoke", "tools.read", "tools.execute", "functions.execute"]
-allowed_models = ["fast-chat", "fallback-chat", "gpt-5.5-chat"]
+allowed_models = ["fast-chat", "fallback-chat", "gpt-5.5-chat", "anthropic-chat", "gemini-chat", "grok-chat", "openrouter-chat", "azure-openai-chat", "bedrock-chat", "vertex-chat"]
 organization_id = "org_demo"
 project_id = "project_gateway"
 log_bodies = true

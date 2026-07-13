@@ -193,6 +193,96 @@ pub struct ProviderUsage {
     pub total_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ProviderAdapterFamily {
+    OpenAiCompatible,
+    Anthropic,
+    Gemini,
+    Grok,
+    OpenRouter,
+    AzureOpenAi,
+    Bedrock,
+    Vertex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderAdapterFamilyDescriptor {
+    pub family: ProviderAdapterFamily,
+    pub canonical_kind: &'static str,
+    pub aliases: &'static [&'static str],
+}
+
+pub const SUPPORTED_PROVIDER_ADAPTER_FAMILIES: &[ProviderAdapterFamilyDescriptor] = &[
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::OpenAiCompatible,
+        canonical_kind: "openai-compatible",
+        aliases: &[
+            "openai",
+            "deepseek",
+            "newapi",
+            "sub2api",
+            "cliproxyapi",
+            "cli-proxy-api",
+            "vllm",
+            "llama.cpp",
+            "llama-cpp",
+            "llamacpp",
+            "tgi",
+            "ollama",
+            "ollama-compatible",
+        ],
+    },
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::Anthropic,
+        canonical_kind: "anthropic",
+        aliases: &[],
+    },
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::Gemini,
+        canonical_kind: "gemini",
+        aliases: &[],
+    },
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::Grok,
+        canonical_kind: "grok",
+        aliases: &["xai"],
+    },
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::OpenRouter,
+        canonical_kind: "openrouter",
+        aliases: &[],
+    },
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::AzureOpenAi,
+        canonical_kind: "azure-openai",
+        aliases: &["azure"],
+    },
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::Bedrock,
+        canonical_kind: "bedrock",
+        aliases: &["aws-bedrock"],
+    },
+    ProviderAdapterFamilyDescriptor {
+        family: ProviderAdapterFamily::Vertex,
+        canonical_kind: "vertex",
+        aliases: &["vertex-ai"],
+    },
+];
+
+pub fn canonical_provider_adapter_family(kind: &str) -> Option<ProviderAdapterFamily> {
+    let kind = kind.trim();
+    SUPPORTED_PROVIDER_ADAPTER_FAMILIES
+        .iter()
+        .find(|descriptor| {
+            descriptor.canonical_kind.eq_ignore_ascii_case(kind)
+                || descriptor
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(kind))
+        })
+        .map(|descriptor| descriptor.family)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderErrorResponse {
     pub status: u16,
@@ -209,23 +299,7 @@ pub struct ProviderCatalogModel {
 }
 
 pub fn is_openai_compatible_provider_kind(kind: &str) -> bool {
-    matches!(
-        normalize_kind(kind).as_str(),
-        "openai"
-            | "openai-compatible"
-            | "deepseek"
-            | "newapi"
-            | "sub2api"
-            | "cliproxyapi"
-            | "cli-proxy-api"
-            | "vllm"
-            | "llama.cpp"
-            | "llama-cpp"
-            | "llamacpp"
-            | "tgi"
-            | "ollama"
-            | "ollama-compatible"
-    )
+    canonical_provider_adapter_family(kind) == Some(ProviderAdapterFamily::OpenAiCompatible)
 }
 
 pub fn provider_compatibility_kind(kind: &str) -> &'static str {
@@ -234,10 +308,6 @@ pub fn provider_compatibility_kind(kind: &str) -> &'static str {
     } else {
         "dedicated"
     }
-}
-
-fn normalize_kind(kind: &str) -> String {
-    kind.trim().to_ascii_lowercase()
 }
 
 pub trait ProviderAdapter: Send + Sync {

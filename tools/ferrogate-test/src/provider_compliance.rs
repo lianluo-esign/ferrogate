@@ -12,13 +12,23 @@ use crate::{
     local::{BillingHarness, LocalHarness},
 };
 use anyhow::{bail, Context, Result};
+use ferrogate_providers::SUPPORTED_PROVIDER_ADAPTER_FAMILIES;
 use serde_json::Value;
-use std::{cell::RefCell, collections::HashMap, thread, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, HashMap},
+    thread,
+    time::Duration,
+};
 
 const COST_SCALE: f64 = 1_000_000_000_000.0;
+const COMPLIANCE_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+const COMPLIANCE_TRACEPARENT: &str =
+    "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 #[derive(Clone, Copy, Debug)]
 struct ProviderCase {
+    adapter_family: &'static str,
     name: &'static str,
     logical_model: &'static str,
     content: &'static str,
@@ -31,11 +41,13 @@ struct ProviderCase {
     completion_tokens: u64,
     total_tokens: u64,
     expected_cost_picousd: u64,
-    expected_upstream_models: &'static [&'static str],
+    expected_response_marker: &'static str,
+    expected_upstream_marker: &'static str,
 }
 
-const PROVIDER_CASES: [ProviderCase; 4] = [
+const PROVIDER_CASES: [ProviderCase; 18] = [
     ProviderCase {
+        adapter_family: "openai-compatible",
         name: "primary-success",
         logical_model: "fast-chat",
         content: "provider compliance primary success",
@@ -48,9 +60,28 @@ const PROVIDER_CASES: [ProviderCase; 4] = [
         completion_tokens: 1,
         total_tokens: 2,
         expected_cost_picousd: 3_000_000,
-        expected_upstream_models: &["gpt-4o-mini"],
+        expected_response_marker: "chatcmpl_ferrogate_test",
+        expected_upstream_marker: r#""model":"gpt-4o-mini""#,
     },
     ProviderCase {
+        adapter_family: "openai-compatible",
+        name: "openai-stream-success",
+        logical_model: "fast-chat",
+        content: "provider compliance openai-compatible streaming usage",
+        stream: true,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "openai",
+        provider_model: "gpt-4o-mini",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "chatcmpl_compliance_openai_stream",
+        expected_upstream_marker: r#""model":"gpt-4o-mini""#,
+    },
+    ProviderCase {
+        adapter_family: "openai-compatible",
         name: "gpt-5.5-success",
         logical_model: "gpt-5.5-chat",
         content: "provider compliance gpt-5.5 success",
@@ -63,9 +94,11 @@ const PROVIDER_CASES: [ProviderCase; 4] = [
         completion_tokens: 1,
         total_tokens: 2,
         expected_cost_picousd: 20_000_000,
-        expected_upstream_models: &["gpt-5.5"],
+        expected_response_marker: "chatcmpl_ferrogate_test",
+        expected_upstream_marker: r#""model":"gpt-5.5""#,
     },
     ProviderCase {
+        adapter_family: "openai-compatible",
         name: "terminal-error-with-usage",
         logical_model: "fast-chat",
         content: "provider upstream error with usage",
@@ -78,9 +111,11 @@ const PROVIDER_CASES: [ProviderCase; 4] = [
         completion_tokens: 2,
         total_tokens: 5,
         expected_cost_picousd: 7_000_000,
-        expected_upstream_models: &["gpt-4o-mini"],
+        expected_response_marker: "bad_provider_request",
+        expected_upstream_marker: r#""model":"gpt-4o-mini""#,
     },
     ProviderCase {
+        adapter_family: "openai-compatible",
         name: "terminal-stream-error-with-usage",
         logical_model: "fast-chat",
         content: "provider upstream error with usage streaming",
@@ -93,7 +128,229 @@ const PROVIDER_CASES: [ProviderCase; 4] = [
         completion_tokens: 2,
         total_tokens: 5,
         expected_cost_picousd: 7_000_000,
-        expected_upstream_models: &["gpt-4o-mini"],
+        expected_response_marker: "bad_provider_request",
+        expected_upstream_marker: r#""model":"gpt-4o-mini""#,
+    },
+    ProviderCase {
+        adapter_family: "anthropic",
+        name: "anthropic-success",
+        logical_model: "anthropic-chat",
+        content: "provider compliance anthropic usage",
+        stream: false,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "anthropic",
+        provider_model: "claude-3-5-sonnet-latest",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "msg_compliance_anthropic",
+        expected_upstream_marker: r#""model":"claude-3-5-sonnet-latest""#,
+    },
+    ProviderCase {
+        adapter_family: "anthropic",
+        name: "anthropic-stream-success",
+        logical_model: "anthropic-chat",
+        content: "provider compliance anthropic streaming usage",
+        stream: true,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "anthropic",
+        provider_model: "claude-3-5-sonnet-latest",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "msg_compliance_anthropic_stream",
+        expected_upstream_marker: r#""model":"claude-3-5-sonnet-latest""#,
+    },
+    ProviderCase {
+        adapter_family: "gemini",
+        name: "gemini-success",
+        logical_model: "gemini-chat",
+        content: "provider compliance gemini usage",
+        stream: false,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "gemini",
+        provider_model: "gemini-2.5-flash",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "resp_compliance_gemini",
+        expected_upstream_marker: "models/gemini-2.5-flash:generateContent",
+    },
+    ProviderCase {
+        adapter_family: "gemini",
+        name: "gemini-stream-success",
+        logical_model: "gemini-chat",
+        content: "provider compliance gemini streaming usage",
+        stream: true,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "gemini",
+        provider_model: "gemini-2.5-flash",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "resp_compliance_gemini_stream",
+        expected_upstream_marker: "models/gemini-2.5-flash:streamGenerateContent",
+    },
+    ProviderCase {
+        adapter_family: "grok",
+        name: "grok-success",
+        logical_model: "grok-chat",
+        content: "provider compliance grok usage",
+        stream: false,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "xai",
+        provider_model: "grok-4.20-fast",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "chatcmpl_compliance_grok",
+        expected_upstream_marker: r#""model":"grok-4.20-fast""#,
+    },
+    ProviderCase {
+        adapter_family: "grok",
+        name: "grok-stream-success",
+        logical_model: "grok-chat",
+        content: "provider compliance grok streaming usage",
+        stream: true,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "xai",
+        provider_model: "grok-4.20-fast",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "chatcmpl_compliance_grok_stream",
+        expected_upstream_marker: r#""model":"grok-4.20-fast""#,
+    },
+    ProviderCase {
+        adapter_family: "openrouter",
+        name: "openrouter-success",
+        logical_model: "openrouter-chat",
+        content: "provider compliance openrouter usage",
+        stream: false,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "openrouter",
+        provider_model: "openai/gpt-4o-mini",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "chatcmpl_compliance_openrouter",
+        expected_upstream_marker: r#""model":"openai/gpt-4o-mini""#,
+    },
+    ProviderCase {
+        adapter_family: "openrouter",
+        name: "openrouter-stream-success",
+        logical_model: "openrouter-chat",
+        content: "provider compliance openrouter streaming usage",
+        stream: true,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "openrouter",
+        provider_model: "openai/gpt-4o-mini",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "chatcmpl_compliance_openrouter_stream",
+        expected_upstream_marker: r#""model":"openai/gpt-4o-mini""#,
+    },
+    ProviderCase {
+        adapter_family: "azure-openai",
+        name: "azure-openai-success",
+        logical_model: "azure-openai-chat",
+        content: "provider compliance azure-openai usage",
+        stream: false,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "azure-openai",
+        provider_model: "azure-gpt-4o",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "chatcmpl_compliance_azure",
+        expected_upstream_marker: "/openai/deployments/azure-gpt-4o/chat/completions",
+    },
+    ProviderCase {
+        adapter_family: "azure-openai",
+        name: "azure-openai-stream-success",
+        logical_model: "azure-openai-chat",
+        content: "provider compliance azure-openai streaming usage",
+        stream: true,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "azure-openai",
+        provider_model: "azure-gpt-4o",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "chatcmpl_compliance_azure_stream",
+        expected_upstream_marker: "/openai/deployments/azure-gpt-4o/chat/completions",
+    },
+    ProviderCase {
+        adapter_family: "bedrock",
+        name: "bedrock-success",
+        logical_model: "bedrock-chat",
+        content: "provider compliance bedrock usage",
+        stream: false,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "bedrock",
+        provider_model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: r#""stopReason":"end_turn""#,
+        expected_upstream_marker: "/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse",
+    },
+    ProviderCase {
+        adapter_family: "vertex",
+        name: "vertex-success",
+        logical_model: "vertex-chat",
+        content: "provider compliance vertex usage",
+        stream: false,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "vertex",
+        provider_model: "gemini-2.5-flash",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "resp_compliance_vertex",
+        expected_upstream_marker: "/v1/projects/ferrogate-test/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent",
+    },
+    ProviderCase {
+        adapter_family: "vertex",
+        name: "vertex-stream-success",
+        logical_model: "vertex-chat",
+        content: "provider compliance vertex streaming usage",
+        stream: true,
+        expected_status: 200,
+        expected_error_code: None,
+        provider: "vertex",
+        provider_model: "gemini-2.5-flash",
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        expected_cost_picousd: 13_000_000,
+        expected_response_marker: "resp_compliance_vertex_stream",
+        expected_upstream_marker: "/v1/projects/ferrogate-test/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent",
     },
 ];
 
@@ -126,6 +383,7 @@ const PROVIDER_NO_SETTLEMENT_CASES: [ProviderNoSettlementCase; 2] = [
 #[derive(Clone, Debug, PartialEq)]
 struct ProviderSettlementProjection {
     request_id: String,
+    trace_id: String,
     provider_attempt_id: String,
     provider_attempt_index: u64,
     logical_model: String,
@@ -199,7 +457,12 @@ impl ComponentContract for ProviderSettlementContract<'_> {
             gateway_addr,
             "POST",
             "/v1/chat/completions",
-            &[CLIENT_AUTH, JSON_CONTENT, &agent_header],
+            &[
+                CLIENT_AUTH,
+                JSON_CONTENT,
+                &agent_header,
+                COMPLIANCE_TRACEPARENT,
+            ],
             &body,
         )?;
         if response.status != case.expected_status {
@@ -211,18 +474,24 @@ impl ComponentContract for ProviderSettlementContract<'_> {
                 response.raw
             );
         }
-        let parsed: Value = serde_json::from_str(&response.body)
-            .with_context(|| format!("provider case {} returned invalid JSON", case.name))?;
-        match case.expected_error_code {
-            Some(code) if parsed["error"]["code"] != code => {
+        if !response.body.contains(case.expected_response_marker) {
+            bail!(
+                "provider case {} response omitted fixture marker {}: {}",
+                case.name,
+                case.expected_response_marker,
+                response.body
+            );
+        }
+        let parsed = (!case.stream || case.expected_error_code.is_some())
+            .then(|| {
+                serde_json::from_str::<Value>(&response.body)
+                    .with_context(|| format!("provider case {} returned invalid JSON", case.name))
+            })
+            .transpose()?;
+        match (case.expected_error_code, parsed.as_ref()) {
+            (Some(code), Some(parsed)) if parsed["error"]["code"] != code => {
                 bail!(
                     "provider case {} returned the wrong error: {parsed}",
-                    case.name
-                )
-            }
-            None if parsed["object"] != "chat.completion" => {
-                bail!(
-                    "provider case {} did not return a chat completion: {parsed}",
                     case.name
                 )
             }
@@ -307,6 +576,7 @@ impl ComponentContract for ProviderSettlementContract<'_> {
 }
 
 pub(crate) fn run_provider_compliance(args: &LocalArgs) -> Result<()> {
+    validate_provider_case_matrix(&PROVIDER_CASES)?;
     let billing = BillingHarness::start(&args.ferrogate_bin)?;
     assert_billing_auth(&billing.billing_addr)?;
     let expected_requests = expected_provider_requests();
@@ -323,18 +593,44 @@ pub(crate) fn run_provider_compliance(args: &LocalArgs) -> Result<()> {
 }
 
 pub(crate) fn expected_provider_requests() -> usize {
-    PROVIDER_CASES
+    PROVIDER_CASES.len() + PROVIDER_NO_SETTLEMENT_CASES.len() + 2
+}
+
+fn validate_provider_case_matrix(cases: &[ProviderCase]) -> Result<()> {
+    let runtime = runtime_provider_adapter_families();
+    validate_provider_case_matrix_against(cases, &runtime)
+}
+
+fn runtime_provider_adapter_families() -> BTreeSet<&'static str> {
+    SUPPORTED_PROVIDER_ADAPTER_FAMILIES
         .iter()
-        .map(|case| case.expected_upstream_models.len())
-        .sum::<usize>()
-        + PROVIDER_NO_SETTLEMENT_CASES.len()
-        + 2
+        .map(|family| family.canonical_kind)
+        .collect()
+}
+
+fn validate_provider_case_matrix_against(
+    cases: &[ProviderCase],
+    runtime: &BTreeSet<&str>,
+) -> Result<()> {
+    let compliance = cases
+        .iter()
+        .map(|case| case.adapter_family)
+        .collect::<BTreeSet<_>>();
+    let missing = runtime.difference(&compliance).copied().collect::<Vec<_>>();
+    let unsupported = compliance.difference(runtime).copied().collect::<Vec<_>>();
+    if !missing.is_empty() || !unsupported.is_empty() {
+        bail!(
+            "provider compliance matrix mismatch: missing compliance cases={missing:?}; unsupported adapter families={unsupported:?}"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn run_provider_compliance_at(
     gateway_addr: &str,
     billing: &BillingHarness,
 ) -> Result<()> {
+    validate_provider_case_matrix(&PROVIDER_CASES)?;
     assert_billing_auth(&billing.billing_addr)?;
     // The multi-attempt case is deliberately last because its primary 503
     // opens the shared provider circuit.
@@ -535,6 +831,7 @@ fn expected_projection(case: &ProviderCase, request_id: String) -> ProviderSettl
         provider_attempt_id: format!("{request_id}:provider-attempt:0"),
         provider_attempt_index: 0,
         request_id,
+        trace_id: COMPLIANCE_TRACE_ID.to_string(),
         logical_model: case.logical_model.to_string(),
         provider: case.provider.to_string(),
         provider_model: case.provider_model.to_string(),
@@ -555,6 +852,7 @@ fn expected_projection(case: &ProviderCase, request_id: String) -> ProviderSettl
 fn ledger_projection(entry: &Value) -> Result<ProviderSettlementProjection> {
     Ok(ProviderSettlementProjection {
         request_id: required_string(&entry["request_id"], "ledger.request_id")?,
+        trace_id: required_string(&entry["trace_id"], "ledger.trace_id")?,
         provider_attempt_id: required_string(
             &entry["provider_attempt_id"],
             "ledger.provider_attempt_id",
@@ -589,6 +887,7 @@ fn ledger_projection(entry: &Value) -> Result<ProviderSettlementProjection> {
 fn billing_event_projection(event: &Value) -> Result<ProviderSettlementProjection> {
     Ok(ProviderSettlementProjection {
         request_id: required_string(&event["request_id"], "billing_event.request_id")?,
+        trace_id: required_string(&event["trace_id"], "billing_event.trace_id")?,
         provider_attempt_id: required_string(
             &event["provider_attempt_id"],
             "billing_event.provider_attempt_id",
@@ -752,20 +1051,44 @@ fn assert_billing_auth(billing_addr: &str) -> Result<()> {
 
 pub(crate) fn assert_upstream_attempts(requests: &[String]) -> Result<()> {
     for case in PROVIDER_CASES {
-        for model in case.expected_upstream_models {
-            let count = requests
-                .iter()
-                .filter(|request| {
-                    request.contains(&format!(r#""content":"{}""#, case.content))
-                        && request.contains(&format!(r#""model":"{model}""#))
-                })
-                .count();
-            if count != 1 {
-                bail!(
-                    "provider case {} expected one upstream attempt for {model}, got {count}: {requests:#?}",
-                    case.name
-                );
-            }
+        let content_markers = [
+            format!(r#""content":"{}""#, case.content),
+            format!(r#""text":"{}""#, case.content),
+        ];
+        let matching = requests
+            .iter()
+            .filter(|request| {
+                content_markers
+                    .iter()
+                    .any(|marker| request.contains(marker))
+                    && request.contains(expected_provider_path(&case))
+                    && request.contains(expected_provider_body_shape(&case))
+                    && expected_provider_stream_usage_request_marker(&case)
+                        .is_none_or(|marker| request.contains(marker))
+                    && request.contains(case.expected_upstream_marker)
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            bail!(
+                "provider case {} expected one upstream attempt containing {}, got {}: {requests:#?}",
+                case.name,
+                case.expected_upstream_marker,
+                matching.len()
+            );
+        }
+        let request = matching[0].to_ascii_lowercase();
+        if !request.contains(&COMPLIANCE_TRACEPARENT.to_ascii_lowercase()) {
+            bail!("provider case {} lost W3C trace context", case.name);
+        }
+        if !request.contains("x-ferrogate-provider-attempt-index: 0")
+            || !request.contains("x-ferrogate-provider-attempt-id:")
+            || !request.contains(":provider-attempt:0")
+        {
+            bail!(
+                "provider case {} lost provider-attempt identity: {}",
+                case.name,
+                matching[0]
+            );
         }
     }
     for case in PROVIDER_NO_SETTLEMENT_CASES {
@@ -799,6 +1122,48 @@ pub(crate) fn assert_upstream_attempts(requests: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn expected_provider_path(case: &ProviderCase) -> &'static str {
+    match case.adapter_family {
+        "anthropic" => "POST /v1/messages ",
+        "gemini" if case.stream => {
+            "POST /v1/models/gemini-2.5-flash:streamGenerateContent?alt=sse "
+        }
+        "gemini" => "POST /v1/models/gemini-2.5-flash:generateContent ",
+        "azure-openai" => "POST /openai/deployments/azure-gpt-4o/chat/completions?",
+        "bedrock" => {
+            "POST /model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse "
+        }
+        "vertex" if case.stream => {
+            "POST /v1/projects/ferrogate-test/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse "
+        }
+        "vertex" => {
+            "POST /v1/projects/ferrogate-test/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent "
+        }
+        _ => "POST /v1/chat/completions ",
+    }
+}
+
+fn expected_provider_body_shape(case: &ProviderCase) -> &'static str {
+    match case.adapter_family {
+        "anthropic" => r#""max_tokens":1024,"messages""#,
+        "gemini" | "vertex" => r#""contents":[{"parts""#,
+        "bedrock" => r#""content":[{"text""#,
+        _ => r#""messages":[{"content""#,
+    }
+}
+
+fn expected_provider_stream_usage_request_marker(case: &ProviderCase) -> Option<&'static str> {
+    if !case.stream {
+        return None;
+    }
+    match case.adapter_family {
+        "openai-compatible" | "grok" | "azure-openai" => {
+            Some(r#""stream_options":{"include_usage":true}"#)
+        }
+        _ => None,
+    }
 }
 
 fn assert_no_settlement_cases(gateway_addr: &str, billing: &BillingHarness) -> Result<()> {

@@ -32,6 +32,9 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
         let mut body = ensure_chat_object_body(request.body)?;
         body["model"] = Value::String(request.provider_model);
         body["stream"] = Value::Bool(request.stream);
+        if request.stream {
+            request_openai_stream_usage(&mut body);
+        }
 
         Ok(ProviderHttpRequest {
             provider: provider.name,
@@ -201,6 +204,17 @@ impl ProviderAdapter for OpenAiCompatibleAdapter {
         }));
         Ok(body)
     }
+}
+
+pub(crate) fn request_openai_stream_usage(body: &mut Value) {
+    let object = body
+        .as_object_mut()
+        .expect("provider request body validated as an object");
+    let stream_options = object.entry("stream_options").or_insert_with(|| json!({}));
+    if !stream_options.is_object() {
+        *stream_options = json!({});
+    }
+    stream_options["include_usage"] = Value::Bool(true);
 }
 
 fn validate_kind(kind: &str) -> Result<(), AdapterError> {

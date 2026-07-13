@@ -130,7 +130,11 @@ impl ProviderAdapter for AnthropicAdapter {
 
     fn extract_usage(&self, body: &[u8]) -> Option<ProviderUsage> {
         let value = serde_json::from_slice::<Value>(body).ok()?;
-        let usage = value.get("usage")?;
+        let usage = value.get("usage").or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        })?;
         let prompt_tokens = usage.get("input_tokens").and_then(Value::as_u64);
         let completion_tokens = usage.get("output_tokens").and_then(Value::as_u64);
         let total_tokens = prompt_tokens

@@ -27,10 +27,20 @@ impl ProviderAdapter for OpenRouterAdapter {
     ) -> Result<ProviderHttpRequest, AdapterError> {
         validate_kind(&provider.kind)?;
         let headers = openrouter_headers(&provider);
+        let stream = request.stream;
         provider.kind = "openai-compatible".into();
         let mut prepared = self
             .openai_compatible
             .prepare_chat_completions(provider, request)?;
+        if stream {
+            // OpenRouter includes usage automatically and has deprecated both
+            // OpenAI's stream_options opt-in and its older usage.include flag.
+            let body = prepared
+                .body
+                .as_object_mut()
+                .expect("OpenAI-compatible adapter returned an object body");
+            body.remove("stream_options");
+        }
         prepared.headers.extend(headers);
         Ok(prepared)
     }

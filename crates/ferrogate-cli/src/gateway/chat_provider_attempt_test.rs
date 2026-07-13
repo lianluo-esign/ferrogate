@@ -113,6 +113,24 @@ data: [DONE]\n\n";
 }
 
 #[test]
+fn streaming_usage_merges_partial_provider_usage_events() {
+    let stream = b"event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n";
+    let adapters = ferrogate_providers::ProviderAdapterRegistry::default();
+
+    let usage = extract_last_provider_stream_usage(stream, |payload| {
+        adapters.extract_usage("anthropic", payload).ok().flatten()
+    })
+    .expect("partial provider usage events must be combined");
+
+    assert_eq!(usage.prompt_tokens, Some(3));
+    assert_eq!(usage.completion_tokens, Some(5));
+    assert_eq!(usage.total_tokens, Some(8));
+}
+
+#[test]
 fn streaming_usage_capture_retains_usage_at_the_tail_of_long_responses() {
     let mut capture = StreamingUsageCapture::default();
     capture.append(&vec![b'x'; STREAMING_USAGE_CAPTURE_MAX_BYTES]);
@@ -138,4 +156,28 @@ fn streaming_usage_capture_retains_usage_at_the_tail_of_long_responses() {
     .expect("tail capture must retain the provider usage event");
 
     assert_eq!(usage.total_tokens, Some(10));
+}
+
+#[test]
+fn streaming_usage_capture_retains_split_anthropic_usage_across_a_long_stream() {
+    let mut capture = StreamingUsageCapture::default();
+    capture.append(
+        b"event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+    );
+    capture.append(&vec![b'x'; STREAMING_USAGE_CAPTURE_MAX_BYTES]);
+    capture.append(
+        b"\n\nevent: message_delta\n\
+data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n",
+    );
+    let adapters = ferrogate_providers::ProviderAdapterRegistry::default();
+
+    let usage = extract_last_provider_stream_usage(&capture.body(), |payload| {
+        adapters.extract_usage("anthropic", payload).ok().flatten()
+    })
+    .expect("bounded capture must retain both Anthropic usage events");
+
+    assert_eq!(usage.prompt_tokens, Some(3));
+    assert_eq!(usage.completion_tokens, Some(5));
+    assert_eq!(usage.total_tokens, Some(8));
 }

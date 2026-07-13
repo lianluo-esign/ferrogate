@@ -1220,6 +1220,7 @@ dependencies = [
  "clap",
  "ferrogate-billing",
  "ferrogate-core",
+ "ferrogate-providers",
  "ferrogate-runtime",
  "ferrogate-storage",
  "jsonwebtoken",

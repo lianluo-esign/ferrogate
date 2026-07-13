@@ -7,12 +7,12 @@
 use ferrogate_core::{ToolCall, ToolDef, ToolResult};
 use serde_json::Value;
 
-use crate::types::is_openai_compatible_provider_kind;
 use crate::{
-    AdapterError, AnthropicAdapter, AzureOpenAiAdapter, BedrockAdapter, ChatCompletionPlan,
-    GeminiAdapter, GrokAdapter, OpenAiCompatibleAdapter, OpenRouterAdapter, ProviderAdapter,
-    ProviderCatalogModel, ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse,
-    ProviderHttpRequest, ProviderUsage, ResponsesPlan, VertexAiAdapter,
+    canonical_provider_adapter_family, AdapterError, AnthropicAdapter, AzureOpenAiAdapter,
+    BedrockAdapter, ChatCompletionPlan, GeminiAdapter, GrokAdapter, OpenAiCompatibleAdapter,
+    OpenRouterAdapter, ProviderAdapter, ProviderAdapterFamily, ProviderCatalogModel,
+    ProviderCatalogRequest, ProviderConfig, ProviderErrorResponse, ProviderHttpRequest,
+    ProviderUsage, ResponsesPlan, VertexAiAdapter,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -29,17 +29,17 @@ pub struct ProviderAdapterRegistry {
 
 impl ProviderAdapterRegistry {
     pub fn adapter_for(&self, kind: &str) -> Result<&dyn ProviderAdapter, AdapterError> {
-        match normalize_kind(kind).as_str() {
-            kind if is_openai_compatible_provider_kind(kind) => Ok(&self.openai_compatible),
-            "anthropic" => Ok(&self.anthropic),
-            "gemini" => Ok(&self.gemini),
-            "grok" | "xai" => Ok(&self.grok),
-            "openrouter" => Ok(&self.openrouter),
-            "azure" | "azure-openai" => Ok(&self.azure_openai),
-            "bedrock" | "aws-bedrock" => Ok(&self.bedrock),
-            "vertex" | "vertex-ai" => Ok(&self.vertex),
-            other => Err(AdapterError::UnsupportedProviderKind {
-                kind: other.to_string(),
+        match canonical_provider_adapter_family(kind) {
+            Some(ProviderAdapterFamily::OpenAiCompatible) => Ok(&self.openai_compatible),
+            Some(ProviderAdapterFamily::Anthropic) => Ok(&self.anthropic),
+            Some(ProviderAdapterFamily::Gemini) => Ok(&self.gemini),
+            Some(ProviderAdapterFamily::Grok) => Ok(&self.grok),
+            Some(ProviderAdapterFamily::OpenRouter) => Ok(&self.openrouter),
+            Some(ProviderAdapterFamily::AzureOpenAi) => Ok(&self.azure_openai),
+            Some(ProviderAdapterFamily::Bedrock) => Ok(&self.bedrock),
+            Some(ProviderAdapterFamily::Vertex) => Ok(&self.vertex),
+            None => Err(AdapterError::UnsupportedProviderKind {
+                kind: kind.trim().to_ascii_lowercase(),
             }),
         }
     }
@@ -136,10 +136,6 @@ impl ProviderAdapterRegistry {
     ) -> Result<bool, AdapterError> {
         Ok(self.adapter_for(provider_kind)?.is_retryable_status(status))
     }
-}
-
-fn normalize_kind(kind: &str) -> String {
-    kind.trim().to_ascii_lowercase()
 }
 
 #[cfg(test)]

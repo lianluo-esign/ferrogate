@@ -420,6 +420,11 @@ impl LocalHarness {
             .args(["run", "--config"])
             .arg(&config_path)
             .env("FERROGATE_PROVIDER_SECRET", "provider-secret")
+            .env(
+                "FERROGATE_TEST_AWS_SECRET_ACCESS_KEY",
+                "ferrogate-test-aws-secret",
+            )
+            .env("FERROGATE_TEST_GCP_ACCESS_TOKEN", "ferrogate-test-gcp-token")
             // Enable the function egress broker (#119) for the org_demo client so
             // the function-egress scenario can exercise the live gateway pipeline.
             // The allowlisted base is deliberately unreachable so the test proves
