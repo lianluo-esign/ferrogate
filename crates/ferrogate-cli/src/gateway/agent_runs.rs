@@ -1194,6 +1194,7 @@ mod tests {
                 session,
                 action: CapabilityAction::Cli,
                 target: "bash".to_string(),
+                canonical_target: None,
                 high_risk: false,
             },
         )
@@ -1284,6 +1285,7 @@ mod tests {
                 session,
                 action: CapabilityAction::Cli,
                 target: "bash".to_string(),
+                canonical_target: None,
                 high_risk: false,
             },
         )

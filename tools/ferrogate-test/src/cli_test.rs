@@ -36,3 +36,19 @@ fn live_supabase_schema_retention_requires_explicit_flag() {
     };
     assert!(args.keep_supabase_schema);
 }
+
+#[test]
+fn target_capability_supabase_uses_live_schema_controls() {
+    let cli = Cli::try_parse_from([
+        "ferrogate-test",
+        "target-capability-supabase",
+        "--supabase-dsn",
+        "postgresql://unused",
+        "--keep-supabase-schema",
+    ])
+    .unwrap();
+    let Commands::TargetCapabilitySupabase(args) = cli.command else {
+        panic!("expected target-capability-supabase command");
+    };
+    assert!(args.keep_supabase_schema);
+}

@@ -22,6 +22,7 @@ mod provider_compliance;
 mod scenarios;
 mod storage;
 mod supabase_schema;
+mod target_capability;
 
 use api_contract::run_api_contract;
 use compliance::{run_component_compliance, run_component_compliance_supabase};
@@ -37,6 +38,7 @@ use storage::{
     run_supabase_live_smoke, run_supabase_live_token4ai_provider, run_supabase_migration,
     run_supabase_restart,
 };
+use target_capability::run_target_capability_supabase;
 
 fn main() -> Result<()> {
     cli::run(cli::Dispatch {
@@ -54,6 +56,7 @@ fn main() -> Result<()> {
         supabase_live_token4ai_provider: run_supabase_live_token4ai_provider,
         guardrail_supabase: run_guardrail_supabase,
         mcp_identity_supabase: run_mcp_identity_supabase,
+        target_capability_supabase: run_target_capability_supabase,
         supabase_migration: run_supabase_migration,
         postgres_restart: run_postgres_restart,
         postgres_tls_restart: run_postgres_tls_restart,

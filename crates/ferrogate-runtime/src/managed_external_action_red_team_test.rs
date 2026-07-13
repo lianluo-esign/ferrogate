@@ -51,6 +51,8 @@ fn narrow_mcp_tool_only_policy() -> CapabilityPolicy {
         allowed_actions: BTreeSet::from([CapabilityAction::McpTool]),
         approval_required_actions: BTreeSet::new(),
         allow_direct_network_egress: false,
+        class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
+        ..CapabilityPolicy::default()
     }
 }
 
@@ -135,6 +137,7 @@ fn mcp_tool_scoped_invocation_cannot_escalate_to_raw_network_egress() {
             host: "attacker.test".to_string(),
             port: 4444,
             protocol: "tcp".to_string(),
+            resolved_ips: Vec::new(),
         }),
         CapabilityAction::NetworkEgress,
     );
@@ -154,6 +157,8 @@ fn network_egress_stays_denied_even_when_class_is_granted_without_direct_egress_
         allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
         approval_required_actions: BTreeSet::new(),
         allow_direct_network_egress: false,
+        class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
+        ..CapabilityPolicy::default()
     });
 
     let (evidence, event) = authorize_managed_external_action(
@@ -164,6 +169,7 @@ fn network_egress_stays_denied_even_when_class_is_granted_without_direct_egress_
                 host: "attacker.test".to_string(),
                 port: 4444,
                 protocol: "tcp".to_string(),
+                resolved_ips: Vec::new(),
             }),
             high_risk: false,
         },

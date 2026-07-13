@@ -324,21 +324,25 @@ agent_runtime:
 fn parses_yaml_managed_worker_authorizer_socket_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ferrogate.yaml");
+    let authorizer_socket = dir.path().join("agent-actions.sock");
     std::fs::write(
         &path,
-        r#"
+        format!(
+            r#"
 listen: "127.0.0.1:8080"
 agent_runtime:
   enabled: true
   provider: managed_worker
   managed_worker:
-    external_action_authorizer_http_listen: 127.0.0.1:7778
-    external_action_authorizer_socket: /tmp/ferrogate-agent-actions.sock
+    external_action_authorizer_socket: {}
     external_action_authorizer_max_requests: 2
     allowed_actions: [tool, mcp_tool, network_egress]
     approval_required_actions: [cli, rest]
     allow_direct_network_egress: true
+    class_only_policy_mode: legacy_class_wide
 "#,
+            authorizer_socket.display()
+        ),
     )
     .unwrap();
 
@@ -352,17 +356,9 @@ agent_runtime:
         config
             .agent_runtime
             .managed_worker
-            .external_action_authorizer_http_listen
-            .as_deref(),
-        Some("127.0.0.1:7778")
-    );
-    assert_eq!(
-        config
-            .agent_runtime
-            .managed_worker
             .external_action_authorizer_socket
             .as_deref(),
-        Some("/tmp/ferrogate-agent-actions.sock")
+        Some(authorizer_socket.to_str().unwrap())
     );
     assert_eq!(
         config

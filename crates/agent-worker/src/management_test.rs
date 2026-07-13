@@ -7,6 +7,35 @@
 //! Unit tests for the sibling module; kept out of the business-logic file.
 
 use super::*;
+
+#[test]
+fn management_runtime_uses_unix_external_action_authorizer() {
+    let runtime = AgentWorkerRuntime::with_unix_external_action_authorizer(
+        "/run/ferrogate/agent-actions.sock",
+        std::process::id(),
+    );
+    assert!(runtime.external_action_authorizer().is_some());
+}
+
+#[test]
+fn external_authorizer_socket_and_pid_must_be_configured_as_a_pair() {
+    assert!(
+        external_authorizer_config(Some("/tmp/authorizer.sock".into()), None)
+            .unwrap_err()
+            .to_string()
+            .contains("requires an expected gateway PID")
+    );
+    assert!(external_authorizer_config(None, Some(42))
+        .unwrap_err()
+        .to_string()
+        .contains("requires a socket"));
+    assert!(
+        external_authorizer_config(Some("/tmp/authorizer.sock".into()), Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("must be non-zero")
+    );
+}
 use crate::{
     backends::test_firecracker_microvm, state::AgentWorkerStateStore,
     test_support::lock_firecracker_env,

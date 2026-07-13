@@ -192,7 +192,7 @@ the retained microVM with
 microVM or becomes a safe no-op after stop.
 `exec_or_attach`
 now has a worker-owned native harness execution smoke, but the worker must have
-a gateway external-action HTTP authorizer configured before the handler may
+a gateway external-action Unix authorizer configured before the handler may
 continue. Without that gateway authorization client, `exec_or_attach` fails
 closed with `run_failed` before `run.completed` is emitted. With an allowed
 gateway decision, the result returns `result.kind=handler_events` with
@@ -496,7 +496,7 @@ snapshot API fails, the worker returns `outcome=snapshot_failed` with the same
 `isolation_instance_id` and keeps the retained VM available for later status,
 artifact, stop, or cleanup actions. Handler execution remains a separate
 worker-owned path that requires a
-`capability.allowed` decision from the configured gateway HTTP authorizer
+`capability.allowed` decision from the configured gateway Unix authorizer
 before continuing. The requested capability is framework-specific:
 the native harness
 uses a managed tool dispatch capability, Codex and Claude Code use a managed
@@ -618,13 +618,12 @@ so management callers can store `capability.denied` or `capability.requested`
 evidence in the run timeline instead of reducing the result to a worker-local
 error string.
 
-The worker-side transport contract for the real gateway/control-plane
-authorizer uses HTTP as the primary path:
-
-```text
-POST /v1/agent-worker/external-actions/authorize
-content-type: application/json
-```
+The current production worker-side transport for the gateway/control-plane
+authorizer is a same-host Unix domain socket. The worker must be launched with
+both the socket path and the expected FerroGate PID. After connecting it checks
+Linux `SO_PEERCRED` and rejects a peer whose PID or UID differs, including a
+same-UID process that replaces the socket path. Plain HTTP authorizer clients
+exist only in tests; configuration rejects the HTTP listener.
 
 The request body is the same shared JSON envelope wrapped as
 `GatewayExternalActionTransportRequest`:
@@ -641,20 +640,19 @@ decisions, approval-required decisions, and transport failures before handler
 execution. Gateway authorizer transport failures and timeouts are normalized as
 `capability.denied` events with `failure_source=gateway_authorizer_transport`,
 so the management caller can still persist timeline evidence for the blocked
-action instead of seeing only a worker-local I/O error. Same-host Unix socket
-transport remains available for local
-development and deterministic tests, but it is not the product callback
-protocol. Production deployments must run this HTTP callback path inside the
-same encrypted gateway-to-worker channel family as the management API.
+action instead of seeing only a worker-local I/O error. The current Unix path is
+appropriate only when gateway and worker share a trusted host/process
+supervision boundary. An authenticated encrypted guest channel is tracked in
+#205 and must replace this path before authorization crosses into an untrusted
+guest or remote worker.
 
-The worker-side HTTP transport smoke is:
+The worker-side Unix transport smoke is:
 
 ```bash
-agent-worker external-action-http-transport-smoke \
-  --gateway-authorizer-http-endpoint 127.0.0.1:7778
+agent-worker external-action-unix-transport-smoke
 ```
 
-It calls the gateway HTTP authorizer, requires a `capability.allowed` response,
+It calls a local Unix gateway authorizer, requires a `capability.allowed` response,
 prints the normalized event JSON, and still does not execute the requested tool.
 
 For a local execution smoke that proves the CLI action is not spawned until
@@ -774,27 +772,45 @@ It creates a temporary workspace file, requests a managed `filesystem`
 capability, reads that workspace-relative file only after
 `capability.allowed`, and prints `filesystem.requested` evidence with the
 resolved path, access mode, byte count, and bounded content excerpt. This proves
-the managed filesystem execution gate for local read-only workspace access; it
-is not broad host filesystem access, write/delete coverage, or Firecracker boot
-proof.
+the managed filesystem execution gate for local workspace reads. Typed writes
+are create-only: the gateway binds the existing parent identity and absent leaf,
+and the worker creates a `0600` file with Linux `openat2`, `O_EXCL`, and
+no-symlink resolution. Typed execute binds the root and target device/inode plus
+the executable content SHA-256. The worker copies the verified bytes into a
+sealed Linux memfd and executes that immutable snapshot with the bound root FD
+as cwd; an in-place source mutation cannot change executed bytes. Execute
+targets must be Linux ELF binaries. Shebang scripts fail closed because the
+interpreter path, interpreter device/inode, and interpreter content are not yet
+part of the canonical authorization target. Delete, overwrite, broad host
+filesystem access, script execution, and Firecracker boot proof remain out of
+scope.
 
-The gateway/control-plane side can serve this HTTP authorizer when
-managed runtime is enabled with:
+The gateway/control-plane side serves the authorizer over a same-host Unix
+socket when managed runtime is enabled with:
 
 ```yaml
 agent_runtime:
   enabled: true
   provider: managed_worker
   managed_worker:
-    external_action_authorizer_http_listen: 127.0.0.1:7778
-    # Optional local-only development/test path.
+    # This absolute path's parent must already exist, be owned by FerroGate's
+    # effective UID, and have mode 0700. The socket is created as 0600.
     external_action_authorizer_socket: /run/ferrogate/agent-actions.sock
     # Optional test/smoke limit. Omit for the long-running gateway service.
     external_action_authorizer_max_requests: 1
     allowed_actions: [tool, mcp_tool]
+    class_only_policy_mode: legacy_class_wide
     approval_required_actions: [cli, rest, network_egress]
     allow_direct_network_egress: false
 ```
+
+`external_action_authorizer_http_listen` is rejected because it is an
+unauthenticated plaintext control path. Authenticated guest transport remains
+tracked in #205; do not expose this authorization boundary over HTTP.
+Workers connecting to this socket must also receive FerroGate's PID through
+`--gateway-authorizer-pid` (or
+`AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_PID`) so path ownership alone is never
+treated as server authentication.
 
 The gateway service owns the shared
 `GatewayExternalActionTransportRequest`/`GatewayExternalActionTransportResponse`
@@ -806,6 +822,68 @@ That means the socket path is a real control-plane enforcement boundary, but it
 still does not run the handler action or manage the Firecracker microVM
 lifecycle.
 
+Target-level policies use additive typed grants for MCP server/tool/argument
+shape, workspace path and operation, REST/network scheme/host/port/method/path,
+secret reference destination, and CLI executable/argv/cwd/resource bounds.
+FerroGate evaluates grants against a normalized target and emits its
+`sha256:` action fingerprint with the selector id and policy revision. The
+fingerprint is a contract for Guardrail and exact-action approval consumers;
+the final approval workflow remains tracked in #200 and is not claimed as
+enforced by this authorizer alone.
+
+CLI canonical targets bind the executable path, device/inode, content SHA-256,
+argv, empty environment, cwd path/device/inode, and resource bounds. The worker
+copies the authorized executable into a write/grow/shrink-sealed memfd, verifies
+the copied bytes against that SHA-256, verifies the copied ELF magic, and
+executes only the descriptor-backed snapshot. Every source, cwd, root, and
+snapshot descriptor is close-on-exec; the current action descriptor is used to
+resolve the ELF image and no action snapshot descriptor survives into the
+executed process. It enters cwd through the already verified directory FD. It
+never returns to the caller pathname between verification and execution.
+
+Each CLI or filesystem execute action starts in a dedicated process group.
+CLI stdout and stderr are drained concurrently and each has a hard byte cap;
+overflow, timeout, cancellation, or leader exit kills and reaps the process
+group before output readers are joined. After shutdown, readers drain all bytes
+that are already available, still enforce the hard caps, and stop at EOF or the
+first current `WouldBlock`; a retained pipe cannot hang collection. A descendant
+that calls `setsid` can escape the original process-group signal and survive,
+even though it cannot hold output collection open. That containment gap, plus
+PID reuse between observing the child and signalling its process group, remains
+a documented same-host residual tracked by #205. This boundary does not claim
+pidfd- or cgroup-backed guest lifecycle enforcement yet.
+
+Every configured target grant names a `permission_key`. At request time the
+gateway resolves that key through the durable Permission -> Role ->
+TenantRoleBinding graph and keeps only grants present in the tenant's union of
+role permissions. Role ids, names, and slugs are operator-defined data; the
+authorizer never enumerates or interprets fixed role names. A repository error
+fails the action closed rather than falling back to the unfiltered config.
+
+The bounded live storage contract is:
+
+```bash
+ferrogate-test target-capability-supabase
+```
+
+It owns one unique Supabase schema, writes an arbitrary operator-named role
+through the Admin API, verifies the Permission -> Role -> TenantRoleBinding rows
+directly, observes allow through the running authorizer, revokes the binding,
+observes deny, deletes the feature rows, and drops only that exact schema. It is
+functional coverage, never a performance or concurrency test.
+
+Class-only `allowed_actions` no longer grant a target by default. Existing
+deployments must either add typed `target_grants` or explicitly set
+`class_only_policy_mode = "legacy_class_wide"`; the latter is reported in
+decision and Admin evidence. Hostname network actions must carry a selector-
+allowed pinned IP. The current governed network/REST execution paths consume
+that same IP and fail before connection when the pin is absent or differs, so
+they never perform a second unbound DNS lookup. Redirect authorization is not
+implemented: caller-declared chains are rejected, the execution transport does
+not follow `Location`, and 3xx responses fail closed. These pins are part of
+the worker authorization envelope, not a claim that arbitrary caller-provided
+DNS data is trustworthy outside the configured selector allowlist.
+
 The current typed action specs are:
 
 - `ManagedToolAction`: governed built-in or plugin tool call with argument
@@ -816,19 +894,22 @@ The current typed action specs are:
 - `ManagedSkillAction`: skill id and declared capability list.
 - `ManagedFilesystemAction`: path, access mode, and workspace-relative flag.
 - `ManagedBrowserAction`: browser operation, URL, and timeout.
-- `ManagedRestAction`: method, URL, headers policy, body policy, timeout, and
-  retry limit.
+- `ManagedRestAction`: method, URL, headers policy, body policy, timeout, retry
+  limit, pinned resolved IPs, and a redirect field that must remain empty until
+  execution-derived hop authorization exists.
 - `ManagedSecretAction`: secret id and use purpose.
 - `ManagedMemoryAction`: read/write access, namespace, and key.
-- `ManagedNetworkEgressAction`: host, port, and protocol.
+- `ManagedNetworkEgressAction`: host, port, protocol, and pinned resolved IPs.
 
 Each action maps to the stable `CapabilityAction` policy surface and produces a
 normalized framework event with `capability.allowed`, `capability.denied`, or
 `capability.requested`. The event metadata preserves both the generic
 authorization fields (`action`, `target`, `decision`, tenant/workspace/worker,
-and isolation backend) and the action-specific policy shape such as CLI limits
-or REST body/header policy. Invalid action specs fail before authorization so
-operators do not see malformed worker requests as policy decisions.
+isolation backend, canonical target, selector, revision, fingerprint, and
+request/trace/run ids) and the action-specific policy shape such as CLI limits
+or REST body/header policy. Secret decision evidence contains only the secret
+reference fingerprint, never a caller value. Invalid or ambiguous targets fail
+closed.
 
 Self-hosted workers use `self_hosted_external_action_report` for the same action
 shape, but the event remains reported telemetry with

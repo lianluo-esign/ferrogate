@@ -145,7 +145,26 @@ pub(crate) struct AdminManagedWorkerRuntime {
     pub(crate) lifecycle_actions: Vec<&'static str>,
     pub(crate) isolation_backends: Vec<AdminManagedWorkerIsolationBackend>,
     pub(crate) capability_boundary: &'static str,
+    pub(crate) capability_policy: AdminManagedWorkerCapabilityPolicy,
     pub(crate) persistence: AdminManagedWorkerPersistence,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminManagedWorkerCapabilityPolicy {
+    pub(crate) revision: String,
+    pub(crate) class_only_policy_mode: &'static str,
+    pub(crate) target_level_enforced: bool,
+    pub(crate) action_fingerprint_contract: &'static str,
+    pub(crate) exact_action_approval_enforced: bool,
+    pub(crate) target_grants: Vec<AdminManagedWorkerTargetGrant>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AdminManagedWorkerTargetGrant {
+    pub(crate) selector_id: String,
+    pub(crate) permission_key: String,
+    pub(crate) action: &'static str,
+    pub(crate) selector: ferrogate_runtime::CapabilityTargetSelector,
 }
 
 #[derive(Debug, Serialize)]

@@ -17,7 +17,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    authorize_framework_capability, self_hosted_framework_capability_report, CapabilityAction,
+    authorize_framework_capability, canonical_cli_target, canonical_filesystem_target,
+    canonical_mcp_target, canonical_network_host, canonical_network_url, canonical_secret_target,
+    opaque_reference_fingerprint, self_hosted_framework_capability_report, CapabilityAction,
     CapabilityAuthorizationDecision, CapabilityAuthorizationEvidence, CapabilityAuthorizer,
     FrameworkAdapterError, FrameworkAdapterEventKind, FrameworkAdapterMode,
     FrameworkAdapterSession, FrameworkCapabilityRequest, NormalizedFrameworkEvent,
@@ -97,6 +99,8 @@ pub enum ExternalActionSpec {
         server_name: String,
         tool_name: String,
         arguments_policy: String,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        arguments: serde_json::Value,
     },
     Cli {
         command: String,
@@ -129,6 +133,10 @@ pub enum ExternalActionSpec {
         body_policy: String,
         timeout_millis: u64,
         retry_limit: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        resolved_ips: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        redirect_chain: Vec<String>,
     },
     Secret {
         secret_id: String,
@@ -143,6 +151,8 @@ pub enum ExternalActionSpec {
         host: String,
         port: u16,
         protocol: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        resolved_ips: Vec<String>,
     },
 }
 
@@ -152,6 +162,7 @@ pub enum ExternalActionFilesystemAccess {
     Read,
     Write,
     Delete,
+    Execute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,7 +259,9 @@ impl ManagedExternalAction {
                 format!("browser:{}:{}", action.operation.as_str(), action.url)
             }
             Self::Rest(action) => format!("{} {}", action.method, action.url),
-            Self::Secret(action) => format!("secret:{}", action.secret_id),
+            Self::Secret(action) => {
+                format!("secret:{}", opaque_reference_fingerprint(&action.secret_id))
+            }
             Self::Memory(action) => format!(
                 "memory:{}:{}:{}",
                 action.access.as_str(),
@@ -339,7 +352,10 @@ impl ManagedExternalAction {
                 ("retry_limit".to_string(), action.retry_limit.to_string()),
             ]),
             Self::Secret(action) => BTreeMap::from([
-                ("secret_id".to_string(), action.secret_id.clone()),
+                (
+                    "secret_ref_fingerprint".to_string(),
+                    opaque_reference_fingerprint(&action.secret_id),
+                ),
                 ("purpose".to_string(), action.purpose.clone()),
             ]),
             Self::Memory(action) => BTreeMap::from([
@@ -484,6 +500,7 @@ impl ExternalActionSpec {
                 server_name: action.server_name,
                 tool_name: action.tool_name,
                 arguments_policy: action.arguments_policy,
+                arguments: action.arguments,
             },
             ManagedExternalAction::Cli(action) => Self::Cli {
                 command: action.command,
@@ -516,6 +533,8 @@ impl ExternalActionSpec {
                 body_policy: action.body_policy,
                 timeout_millis: action.timeout_millis,
                 retry_limit: action.retry_limit,
+                resolved_ips: action.resolved_ips,
+                redirect_chain: action.redirect_chain,
             },
             ManagedExternalAction::Secret(action) => Self::Secret {
                 secret_id: action.secret_id,
@@ -530,6 +549,7 @@ impl ExternalActionSpec {
                 host: action.host,
                 port: action.port,
                 protocol: action.protocol,
+                resolved_ips: action.resolved_ips,
             },
         }
     }
@@ -547,10 +567,12 @@ impl ExternalActionSpec {
                 server_name,
                 tool_name,
                 arguments_policy,
+                arguments,
             } => ManagedExternalAction::McpTool(ManagedMcpToolAction {
                 server_name,
                 tool_name,
                 arguments_policy,
+                arguments,
             }),
             Self::Cli {
                 command,
@@ -603,6 +625,8 @@ impl ExternalActionSpec {
                 body_policy,
                 timeout_millis,
                 retry_limit,
+                resolved_ips,
+                redirect_chain,
             } => ManagedExternalAction::Rest(ManagedRestAction {
                 method,
                 url,
@@ -610,6 +634,8 @@ impl ExternalActionSpec {
                 body_policy,
                 timeout_millis,
                 retry_limit,
+                resolved_ips,
+                redirect_chain,
             }),
             Self::Secret { secret_id, purpose } => {
                 ManagedExternalAction::Secret(ManagedSecretAction { secret_id, purpose })
@@ -627,10 +653,12 @@ impl ExternalActionSpec {
                 host,
                 port,
                 protocol,
+                resolved_ips,
             } => ManagedExternalAction::NetworkEgress(ManagedNetworkEgressAction {
                 host,
                 port,
                 protocol,
+                resolved_ips,
             }),
         }
     }
@@ -642,6 +670,7 @@ impl ExternalActionFilesystemAccess {
             ManagedFilesystemAccess::Read => Self::Read,
             ManagedFilesystemAccess::Write => Self::Write,
             ManagedFilesystemAccess::Delete => Self::Delete,
+            ManagedFilesystemAccess::Execute => Self::Execute,
         }
     }
 
@@ -650,6 +679,7 @@ impl ExternalActionFilesystemAccess {
             Self::Read => ManagedFilesystemAccess::Read,
             Self::Write => ManagedFilesystemAccess::Write,
             Self::Delete => ManagedFilesystemAccess::Delete,
+            Self::Execute => ManagedFilesystemAccess::Execute,
         }
     }
 }
@@ -804,6 +834,7 @@ pub struct ManagedMcpToolAction {
     pub server_name: String,
     pub tool_name: String,
     pub arguments_policy: String,
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -836,6 +867,7 @@ pub enum ManagedFilesystemAccess {
     Read,
     Write,
     Delete,
+    Execute,
 }
 
 impl ManagedFilesystemAccess {
@@ -844,6 +876,7 @@ impl ManagedFilesystemAccess {
             Self::Read => "read",
             Self::Write => "write",
             Self::Delete => "delete",
+            Self::Execute => "execute",
         }
     }
 }
@@ -882,6 +915,8 @@ pub struct ManagedRestAction {
     pub body_policy: String,
     pub timeout_millis: u64,
     pub retry_limit: u32,
+    pub resolved_ips: Vec<String>,
+    pub redirect_chain: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -917,6 +952,7 @@ pub struct ManagedNetworkEgressAction {
     pub host: String,
     pub port: u16,
     pub protocol: String,
+    pub resolved_ips: Vec<String>,
 }
 
 pub fn authorize_managed_external_action<A>(
@@ -928,10 +964,16 @@ where
 {
     validate_managed_external_action(&request.action)?;
     let mut metadata = request.action.metadata();
+    let canonical_target = canonical_target_for_managed_action(
+        &request.action,
+        &request.session.adapter_name,
+        request.high_risk,
+    );
     let capability_request = FrameworkCapabilityRequest {
         session: request.session,
         action: request.action.capability_action(),
         target: request.action.target(),
+        canonical_target,
         high_risk: request.high_risk,
     };
     let (evidence, mut event) = authorize_framework_capability(authorizer, capability_request)?;
@@ -952,6 +994,7 @@ pub fn self_hosted_external_action_report(
         session: request.session,
         action: request.action.capability_action(),
         target: request.action.target(),
+        canonical_target: None,
         high_risk: request.high_risk,
     })?;
     let mut metadata = request.action.metadata();
@@ -965,6 +1008,65 @@ pub fn self_hosted_external_action_report(
     );
     event.metadata.extend(metadata);
     Ok(event)
+}
+
+pub fn canonical_target_for_managed_action(
+    action: &ManagedExternalAction,
+    adapter_name: &str,
+    high_risk: bool,
+) -> Option<crate::CanonicalCapabilityTarget> {
+    match action {
+        ManagedExternalAction::McpTool(action) => (!action.arguments.is_null())
+            .then(|| serde_json::to_string(&action.arguments).ok())
+            .flatten()
+            .and_then(|arguments| {
+                canonical_mcp_target(
+                    &action.server_name,
+                    &action.tool_name,
+                    &arguments,
+                    high_risk,
+                )
+                .ok()
+            }),
+        ManagedExternalAction::Filesystem(action) => canonical_filesystem_target(
+            &action.path,
+            match action.access {
+                ManagedFilesystemAccess::Read => crate::TargetOperation::Read,
+                ManagedFilesystemAccess::Write => crate::TargetOperation::Write,
+                ManagedFilesystemAccess::Delete => crate::TargetOperation::Delete,
+                ManagedFilesystemAccess::Execute => crate::TargetOperation::Execute,
+            },
+            action.workspace_relative,
+        )
+        .ok(),
+        ManagedExternalAction::Rest(action) => canonical_network_url(
+            &action.url,
+            Some(&action.method),
+            &action.resolved_ips,
+            &action.redirect_chain,
+        )
+        .ok(),
+        ManagedExternalAction::NetworkEgress(action) => canonical_network_host(
+            &action.protocol,
+            &action.host,
+            action.port,
+            &action.resolved_ips,
+        )
+        .ok(),
+        ManagedExternalAction::Secret(action) => {
+            canonical_secret_target(&action.secret_id, adapter_name, &action.purpose).ok()
+        }
+        ManagedExternalAction::Cli(action) => canonical_cli_target(
+            &action.command,
+            &action.args,
+            &action.working_dir,
+            action.timeout_millis,
+            action.stdout_limit_bytes,
+            action.stderr_limit_bytes,
+        )
+        .ok(),
+        _ => None,
+    }
 }
 
 pub fn managed_external_action_transport_failure_event(
@@ -1026,6 +1128,11 @@ fn validate_managed_external_action(
             require_request_field("server_name", &action.server_name)?;
             require_request_field("tool_name", &action.tool_name)?;
             require_request_field("arguments_policy", &action.arguments_policy)?;
+            if !action.arguments.is_object() {
+                return Err(FrameworkAdapterError::InvalidRequest(
+                    "MCP arguments must be an exact JSON object execution payload".to_string(),
+                ));
+            }
         }
         ManagedExternalAction::Cli(action) => {
             require_request_field("command", &action.command)?;
@@ -1200,6 +1307,7 @@ mod tests {
                     server_name: "filesystem".to_string(),
                     tool_name: "read_file".to_string(),
                     arguments_policy: "workspace_only".to_string(),
+                    arguments: serde_json::json!({}),
                 }),
                 CapabilityAction::McpTool,
                 "mcp:filesystem:read_file",
@@ -1252,6 +1360,8 @@ mod tests {
                     body_policy: "guardrail_scan".to_string(),
                     timeout_millis: 10_000,
                     retry_limit: 2,
+                    resolved_ips: Vec::new(),
+                    redirect_chain: Vec::new(),
                 }),
                 CapabilityAction::Rest,
                 "POST https://api.example.test/v1/jobs",
@@ -1287,6 +1397,7 @@ mod tests {
                     host: "api.example.test".to_string(),
                     port: 443,
                     protocol: "https".to_string(),
+                    resolved_ips: Vec::new(),
                 }),
                 CapabilityAction::NetworkEgress,
                 "api.example.test:443",
@@ -1295,10 +1406,16 @@ mod tests {
         let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
             allowed_actions: actions.iter().map(|(_, action, _)| *action).collect(),
             allow_direct_network_egress: true,
+            class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         });
 
         for (action, expected_capability, expected_target) in actions {
+            let expected_target = if expected_capability == CapabilityAction::Secret {
+                format!("secret:{}", opaque_reference_fingerprint("openai-api-key"))
+            } else {
+                expected_target.to_string()
+            };
             assert_eq!(action.capability_action(), expected_capability);
             assert_eq!(action.target(), expected_target);
 
@@ -1322,7 +1439,7 @@ mod tests {
             );
             assert_eq!(
                 event.metadata.get("external_target").map(String::as_str),
-                Some(expected_target)
+                Some(expected_target.as_str())
             );
         }
     }
@@ -1352,6 +1469,7 @@ mod tests {
 
         let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
             allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Tool]),
+            class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         });
         let (evidence, event) = authorize_managed_external_action(&authorizer, round_trip).unwrap();
@@ -1428,6 +1546,7 @@ mod tests {
         let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
             allowed_actions: std::collections::BTreeSet::from([CapabilityAction::NetworkEgress]),
             allow_direct_network_egress: false,
+            class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         });
 
@@ -1439,6 +1558,7 @@ mod tests {
                     host: "api.example.test".to_string(),
                     port: 443,
                     protocol: "https".to_string(),
+                    resolved_ips: Vec::new(),
                 }),
                 high_risk: false,
             },
@@ -1467,6 +1587,7 @@ mod tests {
         let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
             allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
             approval_required_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
+            class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         });
 
@@ -1533,6 +1654,8 @@ mod tests {
                     body_policy: "redact_and_scan".to_string(),
                     timeout_millis: 2_000,
                     retry_limit: 0,
+                    resolved_ips: Vec::new(),
+                    redirect_chain: Vec::new(),
                 }),
                 high_risk: false,
             },
@@ -1616,6 +1739,7 @@ mod tests {
                 host: "customer.local".to_string(),
                 port: 8443,
                 protocol: "https".to_string(),
+                resolved_ips: Vec::new(),
             }),
             high_risk: true,
         })
@@ -1642,6 +1766,7 @@ mod tests {
         let (session, _) = adapter.start_session(session_request()).unwrap();
         let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
             allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
+            class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         });
 
@@ -1703,6 +1828,7 @@ mod tests {
                     server_name: "filesystem".to_string(),
                     tool_name: "read_file".to_string(),
                     arguments_policy: "workspace_only".to_string(),
+                    arguments: serde_json::json!({}),
                 }),
                 high_risk: false,
             },
@@ -1737,6 +1863,8 @@ mod tests {
                     body_policy: "guardrail_scan".to_string(),
                     timeout_millis: 10_000,
                     retry_limit: 2,
+                    resolved_ips: Vec::new(),
+                    redirect_chain: Vec::new(),
                 }),
                 high_risk: true,
             },
@@ -1768,6 +1896,7 @@ mod tests {
                 },
                 CapabilityPolicy {
                     allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Tool]),
+                    class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
                     ..CapabilityPolicy::default()
                 },
             ),
@@ -1781,6 +1910,8 @@ mod tests {
                         body_policy: "redact_and_scan".to_string(),
                         timeout_millis: 2_000,
                         retry_limit: 0,
+                        resolved_ips: Vec::new(),
+                        redirect_chain: Vec::new(),
                     }),
                     high_risk: false,
                 },
@@ -1806,6 +1937,7 @@ mod tests {
                     approval_required_actions: std::collections::BTreeSet::from([
                         CapabilityAction::Cli,
                     ]),
+                    class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
                     ..CapabilityPolicy::default()
                 },
             ),
@@ -1859,3 +1991,7 @@ mod tests {
 #[cfg(test)]
 #[path = "managed_external_action_red_team_test.rs"]
 mod managed_external_action_red_team_test;
+
+#[cfg(test)]
+#[path = "managed_external_action_target_test.rs"]
+mod managed_external_action_target_test;

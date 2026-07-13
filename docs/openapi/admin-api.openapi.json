@@ -15463,6 +15463,7 @@
           "lifecycle_actions",
           "isolation_backends",
           "capability_boundary",
+          "capability_policy",
           "persistence"
         ],
         "properties": {
@@ -15516,11 +15517,60 @@
             "type": "string",
             "const": "gateway_mediated"
           },
+          "capability_policy": {
+            "$ref": "#/components/schemas/AdminManagedWorkerCapabilityPolicy"
+          },
           "persistence": {
             "$ref": "#/components/schemas/AdminManagedWorkerPersistence"
           }
         },
         "additionalProperties": false
+      },
+      "AdminManagedWorkerCapabilityPolicy": {
+        "type": "object",
+        "required": ["revision", "class_only_policy_mode", "target_level_enforced", "action_fingerprint_contract", "exact_action_approval_enforced", "target_grants"],
+        "properties": {
+          "revision": {"type": "string", "minLength": 1},
+          "class_only_policy_mode": {"type": "string", "enum": ["deny", "legacy_class_wide"]},
+          "target_level_enforced": {"type": "boolean", "description": "False while explicit legacy_class_wide migration mode permits class-only grants."},
+          "action_fingerprint_contract": {"type": "string", "const": "canonical_target_sha256", "description": "Stable fingerprint emitted for approval and Guardrail consumers."},
+          "exact_action_approval_enforced": {"type": "boolean", "const": false, "description": "False until the #200 exact-action approval workflow consumes and rechecks this fingerprint."},
+          "target_grants": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/AdminManagedWorkerTargetGrant"}
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminManagedWorkerTargetGrant": {
+        "type": "object",
+        "required": ["selector_id", "permission_key", "action", "selector"],
+        "properties": {
+          "selector_id": {"type": "string", "minLength": 1},
+          "permission_key": {"type": "string", "minLength": 1, "description": "DB-backed RBAC action key required by this target grant; role names are not interpreted."},
+          "action": {"type": "string", "enum": ["mcp.tool", "filesystem", "rest", "network.egress", "secret", "cli"]},
+          "selector": {"$ref": "#/components/schemas/CapabilityTargetSelector"}
+        },
+        "additionalProperties": false
+      },
+      "CapabilityTargetSelector": {
+        "oneOf": [
+          {"type": "object", "required": ["kind", "server", "tool", "risk", "argument_schema", "allow_extra_arguments"], "properties": {"kind": {"const": "mcp"}, "server": {"type": "string"}, "tool": {"type": "string"}, "risk": {"type": "string", "enum": ["read", "write"]}, "argument_schema": {"$ref": "#/components/schemas/JsonShape"}, "allow_extra_arguments": {"type": "boolean"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "workspace_root", "path_glob", "operations"], "properties": {"kind": {"const": "filesystem"}, "workspace_root": {"type": "string"}, "path_glob": {"type": "string"}, "operations": {"type": "array", "items": {"type": "string", "enum": ["read", "write", "delete", "execute"]}}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "scheme", "host", "port", "method", "path_glob", "allowed_ips", "allow_redirects"], "properties": {"kind": {"const": "network"}, "scheme": {"type": "string", "enum": ["http", "https", "tcp", "tls"]}, "host": {"type": "string"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "method": {"type": ["string", "null"]}, "path_glob": {"type": "string"}, "allowed_ips": {"type": "array", "items": {"type": "string"}}, "allow_redirects": {"type": "boolean"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "reference_namespace", "reference_name", "destination_adapter", "destination_action"], "properties": {"kind": {"const": "secret"}, "reference_namespace": {"type": "string"}, "reference_name": {"type": "string"}, "destination_adapter": {"type": "string"}, "destination_action": {"type": "string"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "executable", "argv", "environment", "cwd_glob", "max_timeout_millis", "max_stdout_bytes", "max_stderr_bytes"], "properties": {"kind": {"const": "cli"}, "executable": {"type": "string"}, "argv": {"type": "array", "items": {"type": "string"}}, "environment": {"type": "object", "maxProperties": 0, "additionalProperties": false, "description": "Must be empty; managed CLI execution clears the inherited environment."}, "cwd_glob": {"type": "string"}, "max_timeout_millis": {"type": "integer", "minimum": 1}, "max_stdout_bytes": {"type": "integer", "minimum": 1}, "max_stderr_bytes": {"type": "integer", "minimum": 1}}, "additionalProperties": false}
+        ]
+      },
+      "JsonShape": {
+        "oneOf": [
+          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "null"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "boolean"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "number"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "string"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "items"], "properties": {"kind": {"const": "array"}, "items": {"$ref": "#/components/schemas/JsonShape"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "fields"], "properties": {"kind": {"const": "object"}, "fields": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/JsonShape"}}}, "additionalProperties": false}
+        ]
       },
       "AdminManagedWorkerIsolationBackend": {
         "type": "object",

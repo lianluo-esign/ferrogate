@@ -788,16 +788,9 @@ impl Config {
                     .external_action_authorizer_http_listen
                     .as_deref()
                 {
-                    if http_listen.trim().is_empty() {
-                        bail!(
-                            "field agent_runtime.managed_worker.external_action_authorizer_http_listen: must not be empty when provided"
-                        );
-                    }
-                    http_listen.parse::<std::net::SocketAddr>().map_err(|error| {
-                        anyhow::anyhow!(
-                            "field agent_runtime.managed_worker.external_action_authorizer_http_listen: invalid socket address: {error}"
-                        )
-                    })?;
+                    bail!(
+                        "field agent_runtime.managed_worker.external_action_authorizer_http_listen: insecure plaintext authorizer transport is unsupported; configure external_action_authorizer_socket in a private owner-only directory (authenticated guest transport remains tracked in #205), got {http_listen:?}"
+                    );
                 }
                 if let Some(socket_path) = self
                     .agent_runtime
@@ -829,6 +822,60 @@ impl Config {
                     "agent_runtime.managed_worker.approval_required_actions",
                     &self.agent_runtime.managed_worker.approval_required_actions,
                 )?;
+                if self.agent_runtime.managed_worker.class_only_policy_mode
+                    == ferrogate_runtime::ClassOnlyPolicyMode::Deny
+                    && (!self.agent_runtime.managed_worker.allowed_actions.is_empty()
+                        || !self
+                            .agent_runtime
+                            .managed_worker
+                            .approval_required_actions
+                            .is_empty())
+                {
+                    bail!(
+                        "field agent_runtime.managed_worker.class_only_policy_mode: class-only actions require explicit legacy_class_wide migration mode; otherwise replace them with target_grants"
+                    );
+                }
+                if self
+                    .agent_runtime
+                    .managed_worker
+                    .policy_revision
+                    .trim()
+                    .is_empty()
+                {
+                    bail!("field agent_runtime.managed_worker.policy_revision: must not be empty");
+                }
+                let mut selector_ids = std::collections::BTreeSet::new();
+                for grant in &self.agent_runtime.managed_worker.target_grants {
+                    if grant.selector_id.trim().is_empty() {
+                        bail!("field agent_runtime.managed_worker.target_grants.selector_id: must not be empty");
+                    }
+                    if grant.permission_key.trim().is_empty() {
+                        bail!("field agent_runtime.managed_worker.target_grants.permission_key: must not be empty");
+                    }
+                    if !selector_ids.insert(grant.selector_id.as_str()) {
+                        bail!(
+                            "field agent_runtime.managed_worker.target_grants: duplicate selector_id {}",
+                            grant.selector_id
+                        );
+                    }
+                    if !grant
+                        .selector
+                        .supports_action(grant.action.as_policy_action())
+                    {
+                        bail!(
+                            "field agent_runtime.managed_worker.target_grants: selector {} is incompatible with action {}",
+                            grant.selector_id,
+                            grant.action.as_str()
+                        );
+                    }
+                    grant.selector.validate().map_err(|reason| {
+                        anyhow::anyhow!(
+                            "field agent_runtime.managed_worker.target_grants selector {}: {}",
+                            grant.selector_id,
+                            reason
+                        )
+                    })?;
+                }
             }
             crate::config::AgentRuntimeProvider::External => {
                 if self.agent_runtime.external.command.trim().is_empty() {

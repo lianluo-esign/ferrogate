@@ -41,7 +41,8 @@
         "kind": "mcp_tool",
         "server_name": "filesystem",
         "tool_name": "read_file",
-        "arguments_policy": "workspace_only"
+        "arguments_policy": "workspace_only",
+        "arguments": {}
       },
       "high_risk": false
     }

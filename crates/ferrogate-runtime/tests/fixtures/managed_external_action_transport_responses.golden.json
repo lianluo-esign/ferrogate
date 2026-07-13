@@ -24,7 +24,14 @@
           "tenant_id": "tenant-1",
           "tool_name": "native.echo",
           "worker_id": "worker-1",
-          "workspace_id": "workspace-1"
+          "workspace_id": "workspace-1",
+          "subject": "tenant:tenant-1/workspace:workspace-1/worker:worker-1",
+          "selector": "legacy_class_wide",
+          "canonical_target": "tool:native.echo",
+          "action_fingerprint": "",
+          "policy_revision": "unversioned",
+          "request_id": "run-1:session-1",
+          "trace_id": "run-1"
         }
       },
       "error": null
@@ -59,7 +66,14 @@
           "timeout_millis": "2000",
           "url": "https://api.third-party.test/v1/payments",
           "worker_id": "worker-1",
-          "workspace_id": "workspace-1"
+          "workspace_id": "workspace-1",
+          "subject": "tenant:tenant-1/workspace:workspace-1/worker:worker-1",
+          "selector": "none",
+          "canonical_target": "{\"kind\":\"network\",\"scheme\":\"https\",\"host\":\"api.third-party.test\",\"port\":443,\"method\":\"POST\",\"path\":\"/v1/payments\",\"resolved_ips\":[],\"redirects\":[]}",
+          "action_fingerprint": "sha256:af07d680d4ab19d8f79c9a54526ff7c830c379816da1abd75abb6b21931430cc",
+          "policy_revision": "unversioned",
+          "request_id": "run-1:session-1",
+          "trace_id": "run-1"
         }
       },
       "error": null
@@ -96,7 +110,14 @@
           "timeout_millis": "30000",
           "worker_id": "worker-1",
           "working_dir": "/workspace",
-          "workspace_id": "workspace-1"
+          "workspace_id": "workspace-1",
+          "subject": "tenant:tenant-1/workspace:workspace-1/worker:worker-1",
+          "selector": "legacy_class_wide",
+          "canonical_target": "bash",
+          "action_fingerprint": "",
+          "policy_revision": "unversioned",
+          "request_id": "run-1:session-1",
+          "trace_id": "run-1"
         }
       },
       "error": null

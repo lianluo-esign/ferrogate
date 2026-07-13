@@ -12,7 +12,10 @@
 
 use std::{collections::BTreeSet, error::Error, fmt};
 
-use crate::{FrameworkAdapterMode, SelfHostedTelemetryTrustLevel};
+use crate::{
+    CanonicalCapabilityTarget, CapabilityTargetSelector, ClassOnlyPolicyMode, FrameworkAdapterMode,
+    SelfHostedTelemetryTrustLevel,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CapabilityAction {
@@ -45,6 +48,18 @@ impl CapabilityAction {
             Self::NetworkEgress => "network.egress",
         }
     }
+
+    fn requires_canonical_target(self) -> bool {
+        matches!(
+            self,
+            Self::McpTool
+                | Self::Cli
+                | Self::Filesystem
+                | Self::Rest
+                | Self::Secret
+                | Self::NetworkEgress
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +73,7 @@ pub struct ManagedCapabilityRequest {
     pub isolation_backend: String,
     pub action: CapabilityAction,
     pub target: String,
+    pub canonical_target: Option<CanonicalCapabilityTarget>,
     pub high_risk: bool,
 }
 
@@ -66,6 +82,16 @@ pub struct CapabilityPolicy {
     pub allowed_actions: BTreeSet<CapabilityAction>,
     pub approval_required_actions: BTreeSet<CapabilityAction>,
     pub allow_direct_network_egress: bool,
+    pub target_grants: Vec<CapabilityTargetGrant>,
+    pub class_only_policy_mode: ClassOnlyPolicyMode,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityTargetGrant {
+    pub action: CapabilityAction,
+    pub selector_id: String,
+    pub selector: CapabilityTargetSelector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +109,7 @@ pub struct CapabilityAuthorizationOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityAuthorizationEvidence {
+    pub subject: String,
     pub tenant_id: String,
     pub workspace_id: String,
     pub worker_id: String,
@@ -92,6 +119,15 @@ pub struct CapabilityAuthorizationEvidence {
     pub isolation_backend: String,
     pub action: CapabilityAction,
     pub target: String,
+    pub selector: String,
+    pub canonical_target: String,
+    /// Stable exact-action contract consumed by approval/Guardrail layers.
+    /// This authorizer produces the value; approval persistence/enforcement is
+    /// owned by the control-plane workflow tracked in issue #200.
+    pub action_fingerprint: String,
+    pub policy_revision: String,
+    pub request_id: String,
+    pub trace_id: String,
     pub decision: CapabilityAuthorizationDecision,
     pub reason: String,
 }
@@ -120,27 +156,55 @@ impl CapabilityAuthorizer for SimpleCapabilityAuthorizer {
         request: ManagedCapabilityRequest,
     ) -> Result<CapabilityAuthorizationOutcome, CapabilityBoundaryError> {
         validate_request(&request)?;
-        let (decision, reason) = if request.action == CapabilityAction::NetworkEgress
+        let target_decision = evaluate_target_grants(&self.policy, &request);
+        let (decision, reason, selector, canonical_target, action_fingerprint) = if request.action
+            == CapabilityAction::NetworkEgress
             && !self.policy.allow_direct_network_egress
         {
             (
                 CapabilityAuthorizationDecision::Denied,
                 "managed workers cannot use direct network egress".to_string(),
+                "network_egress_disabled".to_string(),
+                canonical_target_json(&request),
+                canonical_target_fingerprint(&request),
+            )
+        } else if let TargetGrantDecision::Denied(reason) = &target_decision {
+            (
+                CapabilityAuthorizationDecision::Denied,
+                reason.clone(),
+                "none".to_string(),
+                canonical_target_json(&request),
+                canonical_target_fingerprint(&request),
             )
         } else if self
             .policy
             .approval_required_actions
             .contains(&request.action)
             || request.high_risk
+            || target_decision.approval_required()
         {
             (
                 CapabilityAuthorizationDecision::ApprovalRequired,
                 format!("{} requires approval", request.action.as_str()),
+                target_decision.selector().to_string(),
+                target_decision.canonical_target(&request),
+                target_decision.action_fingerprint(&request),
             )
-        } else if self.policy.allowed_actions.contains(&request.action) {
+        } else if target_decision.allowed() {
+            let reason = if target_decision.selector() == "legacy_class_wide" {
+                format!("{} allowed by capability policy", request.action.as_str())
+            } else {
+                format!(
+                    "{} target allowed by capability policy",
+                    request.action.as_str()
+                )
+            };
             (
                 CapabilityAuthorizationDecision::Allowed,
-                format!("{} allowed by capability policy", request.action.as_str()),
+                reason,
+                target_decision.selector().to_string(),
+                target_decision.canonical_target(&request),
+                target_decision.action_fingerprint(&request),
             )
         } else {
             (
@@ -149,9 +213,24 @@ impl CapabilityAuthorizer for SimpleCapabilityAuthorizer {
                     "{} is not allowed by capability policy",
                     request.action.as_str()
                 ),
+                "none".to_string(),
+                canonical_target_json(&request),
+                canonical_target_fingerprint(&request),
             )
         };
+        let policy_revision = if self.policy.revision.trim().is_empty() {
+            "unversioned".to_string()
+        } else {
+            self.policy.revision.clone()
+        };
+        let subject = format!(
+            "tenant:{}/workspace:{}/worker:{}",
+            request.tenant_id, request.workspace_id, request.worker_id
+        );
+        let request_id = format!("{}:{}", request.run_id, request.session_id);
+        let trace_id = request.run_id.clone();
         let evidence = CapabilityAuthorizationEvidence {
+            subject,
             tenant_id: request.tenant_id,
             workspace_id: request.workspace_id,
             worker_id: request.worker_id,
@@ -161,11 +240,177 @@ impl CapabilityAuthorizer for SimpleCapabilityAuthorizer {
             isolation_backend: request.isolation_backend,
             action: request.action,
             target: request.target,
+            selector,
+            canonical_target,
+            action_fingerprint,
+            policy_revision,
+            request_id,
+            trace_id,
             decision,
             reason,
         };
         Ok(CapabilityAuthorizationOutcome { decision, evidence })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetGrantDecision {
+    Allowed {
+        selector: String,
+        canonical_target: String,
+        action_fingerprint: String,
+        approval_required: bool,
+    },
+    Denied(String),
+}
+
+impl TargetGrantDecision {
+    fn allowed(&self) -> bool {
+        matches!(self, Self::Allowed { .. })
+    }
+
+    fn selector(&self) -> &str {
+        match self {
+            Self::Allowed { selector, .. } => selector,
+            Self::Denied(_) => "none",
+        }
+    }
+
+    fn approval_required(&self) -> bool {
+        matches!(
+            self,
+            Self::Allowed {
+                approval_required: true,
+                ..
+            }
+        )
+    }
+
+    fn canonical_target(&self, request: &ManagedCapabilityRequest) -> String {
+        match self {
+            Self::Allowed {
+                canonical_target, ..
+            } => canonical_target.clone(),
+            Self::Denied(_) => canonical_target_json(request),
+        }
+    }
+
+    fn action_fingerprint(&self, request: &ManagedCapabilityRequest) -> String {
+        match self {
+            Self::Allowed {
+                action_fingerprint, ..
+            } => action_fingerprint.clone(),
+            Self::Denied(_) => canonical_target_fingerprint(request),
+        }
+    }
+}
+
+fn evaluate_target_grants(
+    policy: &CapabilityPolicy,
+    request: &ManagedCapabilityRequest,
+) -> TargetGrantDecision {
+    let class_granted = policy.allowed_actions.contains(&request.action)
+        || policy.approval_required_actions.contains(&request.action);
+    let legacy_class_wide =
+        class_granted && policy.class_only_policy_mode == ClassOnlyPolicyMode::LegacyClassWide;
+    let action_grants = policy
+        .target_grants
+        .iter()
+        .filter(|grant| grant.action == request.action)
+        .collect::<Vec<_>>();
+    if action_grants.is_empty() {
+        return if legacy_class_wide {
+            TargetGrantDecision::Allowed {
+                selector: "legacy_class_wide".to_string(),
+                canonical_target: canonical_target_json(request),
+                action_fingerprint: canonical_target_fingerprint(request),
+                approval_required: false,
+            }
+        } else if class_granted {
+            TargetGrantDecision::Denied(
+                "class-only policy requires explicit legacy_class_wide migration mode or typed target grants"
+                    .to_string(),
+            )
+        } else {
+            TargetGrantDecision::Denied(format!(
+                "{} is not allowed by capability policy",
+                request.action.as_str()
+            ))
+        };
+    }
+    if request.canonical_target.is_none() && request.action.requires_canonical_target() {
+        return TargetGrantDecision::Denied(
+            "target-level action requires an unambiguous canonical execution target".to_string(),
+        );
+    }
+    let Some(target) = request.canonical_target.as_ref() else {
+        return if legacy_class_wide {
+            TargetGrantDecision::Allowed {
+                selector: "legacy_class_wide".to_string(),
+                canonical_target: canonical_target_json(request),
+                action_fingerprint: canonical_target_fingerprint(request),
+                approval_required: false,
+            }
+        } else {
+            TargetGrantDecision::Denied(
+                "typed target grant requires an unambiguous canonical target".to_string(),
+            )
+        };
+    };
+    let mut matched = Vec::new();
+    for grant in action_grants {
+        match target.bind(&grant.selector) {
+            Ok(Some(bound)) => matched.push((grant.selector_id.as_str(), bound)),
+            Ok(None) => {}
+            Err(reason) => return TargetGrantDecision::Denied(reason),
+        }
+    }
+    if matched.is_empty() {
+        return if legacy_class_wide {
+            TargetGrantDecision::Allowed {
+                selector: "legacy_class_wide".to_string(),
+                canonical_target: canonical_target_json(request),
+                action_fingerprint: canonical_target_fingerprint(request),
+                approval_required: false,
+            }
+        } else {
+            TargetGrantDecision::Denied("canonical target does not match a typed grant".to_string())
+        };
+    }
+    let canonical_target = matched[0].1.canonical_target.clone();
+    let action_fingerprint = matched[0].1.action_fingerprint.clone();
+    if matched.iter().any(|(_, bound)| {
+        bound.canonical_target != canonical_target || bound.action_fingerprint != action_fingerprint
+    }) {
+        return TargetGrantDecision::Denied(
+            "canonical target matches grants with conflicting execution targets".to_string(),
+        );
+    }
+    let mut selectors = matched.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    selectors.sort_unstable();
+    selectors.dedup();
+    TargetGrantDecision::Allowed {
+        selector: selectors.join(","),
+        canonical_target,
+        action_fingerprint,
+        approval_required: matched.iter().any(|(_, bound)| bound.approval_required),
+    }
+}
+
+fn canonical_target_json(request: &ManagedCapabilityRequest) -> String {
+    request
+        .canonical_target
+        .as_ref()
+        .map(CanonicalCapabilityTarget::canonical_json)
+        .unwrap_or_else(|| request.target.clone())
+}
+
+fn canonical_target_fingerprint(request: &ManagedCapabilityRequest) -> String {
+    request
+        .canonical_target
+        .as_ref()
+        .map(CanonicalCapabilityTarget::fingerprint)
+        .unwrap_or_default()
 }
 
 pub fn self_hosted_trust_level_for_capability_report(
@@ -218,101 +463,5 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), CapabilityBoundaryE
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn allows_managed_worker_action_when_policy_allows_it() {
-        let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
-            allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
-            ..CapabilityPolicy::default()
-        });
-
-        let outcome = authorizer
-            .authorize(request(CapabilityAction::Tool))
-            .unwrap();
-
-        assert_eq!(outcome.decision, CapabilityAuthorizationDecision::Allowed);
-        assert_eq!(outcome.evidence.tenant_id, "tenant-1");
-        assert_eq!(outcome.evidence.workspace_id, "workspace-1");
-        assert_eq!(outcome.evidence.worker_id, "worker-1");
-        assert_eq!(outcome.evidence.session_id, "session-1");
-        assert_eq!(outcome.evidence.run_id, "run-1");
-        assert_eq!(outcome.evidence.adapter_name, "native-harness");
-        assert_eq!(outcome.evidence.isolation_backend, "firecracker");
-    }
-
-    #[test]
-    fn denies_managed_worker_action_when_policy_does_not_allow_it() {
-        let authorizer = SimpleCapabilityAuthorizer::default();
-
-        let outcome = authorizer
-            .authorize(request(CapabilityAction::Cli))
-            .unwrap();
-
-        assert_eq!(outcome.decision, CapabilityAuthorizationDecision::Denied);
-        assert!(outcome.evidence.reason.contains("not allowed"));
-    }
-
-    #[test]
-    fn requires_approval_for_high_risk_or_policy_shaped_actions() {
-        let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
-            allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
-            approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
-            ..CapabilityPolicy::default()
-        });
-
-        let outcome = authorizer
-            .authorize(request(CapabilityAction::Cli))
-            .unwrap();
-
-        assert_eq!(
-            outcome.decision,
-            CapabilityAuthorizationDecision::ApprovalRequired
-        );
-        assert!(outcome.evidence.reason.contains("requires approval"));
-    }
-
-    #[test]
-    fn denies_direct_unmanaged_network_egress_even_when_action_is_allowlisted() {
-        let authorizer = SimpleCapabilityAuthorizer::new(CapabilityPolicy {
-            allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
-            allow_direct_network_egress: false,
-            ..CapabilityPolicy::default()
-        });
-
-        let outcome = authorizer
-            .authorize(request(CapabilityAction::NetworkEgress))
-            .unwrap();
-
-        assert_eq!(outcome.decision, CapabilityAuthorizationDecision::Denied);
-        assert!(outcome.evidence.reason.contains("direct network egress"));
-    }
-
-    #[test]
-    fn self_hosted_capability_reports_are_not_managed_authorization_evidence() {
-        assert_eq!(
-            self_hosted_trust_level_for_capability_report(FrameworkAdapterMode::SelfHosted),
-            Some(SelfHostedTelemetryTrustLevel::ReportedBySelfHostedWorker)
-        );
-        assert_eq!(
-            self_hosted_trust_level_for_capability_report(FrameworkAdapterMode::Managed),
-            None
-        );
-    }
-
-    fn request(action: CapabilityAction) -> ManagedCapabilityRequest {
-        ManagedCapabilityRequest {
-            tenant_id: "tenant-1".to_string(),
-            workspace_id: "workspace-1".to_string(),
-            worker_id: "worker-1".to_string(),
-            session_id: "session-1".to_string(),
-            run_id: "run-1".to_string(),
-            adapter_name: "native-harness".to_string(),
-            isolation_backend: "firecracker".to_string(),
-            action,
-            target: "target-1".to_string(),
-            high_risk: false,
-        }
-    }
-}
+#[path = "capability_boundary_test.rs"]
+mod tests;

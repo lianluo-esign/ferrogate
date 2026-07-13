@@ -264,7 +264,7 @@ pub(crate) struct AgentRuntimeExternalConfig {
     pub(crate) timeout_millis: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct AgentRuntimeManagedWorkerConfig {
     #[serde(default)]
     pub(crate) external_action_authorizer_http_listen: Option<String>,
@@ -278,6 +278,40 @@ pub(crate) struct AgentRuntimeManagedWorkerConfig {
     pub(crate) approval_required_actions: Vec<ManagedWorkerCapabilityActionConfig>,
     #[serde(default)]
     pub(crate) allow_direct_network_egress: bool,
+    #[serde(default)]
+    pub(crate) target_grants: Vec<ManagedWorkerCapabilityTargetGrantConfig>,
+    #[serde(default)]
+    pub(crate) class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode,
+    #[serde(default = "default_managed_worker_policy_revision")]
+    pub(crate) policy_revision: String,
+}
+
+impl Default for AgentRuntimeManagedWorkerConfig {
+    fn default() -> Self {
+        Self {
+            external_action_authorizer_http_listen: None,
+            external_action_authorizer_socket: None,
+            external_action_authorizer_max_requests: None,
+            allowed_actions: Vec::new(),
+            approval_required_actions: Vec::new(),
+            allow_direct_network_egress: false,
+            target_grants: Vec::new(),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::Deny,
+            policy_revision: default_managed_worker_policy_revision(),
+        }
+    }
+}
+
+fn default_managed_worker_policy_revision() -> String {
+    "config-v1".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ManagedWorkerCapabilityTargetGrantConfig {
+    pub(crate) selector_id: String,
+    pub(crate) permission_key: String,
+    pub(crate) action: ManagedWorkerCapabilityActionConfig,
+    pub(crate) selector: ferrogate_runtime::CapabilityTargetSelector,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -297,6 +331,10 @@ pub(crate) enum ManagedWorkerCapabilityActionConfig {
 }
 
 impl ManagedWorkerCapabilityActionConfig {
+    pub(crate) fn as_str(self) -> &'static str {
+        self.as_policy_action().as_str()
+    }
+
     pub(crate) fn as_policy_action(self) -> ferrogate_runtime::CapabilityAction {
         match self {
             Self::Tool => ferrogate_runtime::CapabilityAction::Tool,

@@ -34,8 +34,10 @@ dependencies = [
  "anyhow",
  "clap",
  "ferrogate-runtime",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
@@ -1061,6 +1063,7 @@ dependencies = [
  "redis",
  "regex",
  "reqwest",
+ "rustix",
  "rustls",
  "rustls-native-certs 0.8.3",
  "serde",

@@ -2411,7 +2411,7 @@ fn rejects_invalid_managed_worker_authorizer_socket_config() {
         agent_runtime: AgentRuntimeConfig {
             enabled: true,
             managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
-                external_action_authorizer_http_listen: Some("not-a-socket".into()),
+                external_action_authorizer_http_listen: Some("127.0.0.1:7778".into()),
                 ..crate::config::AgentRuntimeManagedWorkerConfig::default()
             },
             ..AgentRuntimeConfig::default()
@@ -2422,6 +2422,7 @@ fn rejects_invalid_managed_worker_authorizer_socket_config() {
     let error = config.validate().unwrap_err().to_string();
     assert!(
         error.contains("field agent_runtime.managed_worker.external_action_authorizer_http_listen")
+            && error.contains("insecure plaintext")
     );
 
     let config = Config {
@@ -2490,6 +2491,83 @@ fn rejects_external_agent_runtime_without_command() {
     let error = config.validate().unwrap_err().to_string();
 
     assert!(error.contains("field agent_runtime.external.command"));
+}
+
+#[test]
+fn rejects_incompatible_or_duplicate_managed_worker_target_selectors() {
+    let implicit_legacy = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
+                allowed_actions: vec![
+                    crate::config::ManagedWorkerCapabilityActionConfig::Filesystem,
+                ],
+                ..crate::config::AgentRuntimeManagedWorkerConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+    assert!(implicit_legacy
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("explicit legacy_class_wide migration mode"));
+
+    let incompatible = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
+                target_grants: vec![crate::config::ManagedWorkerCapabilityTargetGrantConfig {
+                    selector_id: "wrong-kind".into(),
+                    permission_key: "managed_actions.crm.lookup".into(),
+                    action: crate::config::ManagedWorkerCapabilityActionConfig::Cli,
+                    selector: ferrogate_runtime::CapabilityTargetSelector::Secret {
+                        reference_namespace: "vault".into(),
+                        reference_name: "provider-key".into(),
+                        destination_adapter: "codex".into(),
+                        destination_action: "provider.call".into(),
+                    },
+                }],
+                ..crate::config::AgentRuntimeManagedWorkerConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+    assert!(incompatible
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("incompatible with action cli"));
+
+    let grant = crate::config::ManagedWorkerCapabilityTargetGrantConfig {
+        selector_id: "duplicate".into(),
+        permission_key: "managed_actions.provider.secret".into(),
+        action: crate::config::ManagedWorkerCapabilityActionConfig::Secret,
+        selector: ferrogate_runtime::CapabilityTargetSelector::Secret {
+            reference_namespace: "vault".into(),
+            reference_name: "provider-key".into(),
+            destination_adapter: "codex".into(),
+            destination_action: "provider.call".into(),
+        },
+    };
+    let duplicate = Config {
+        agent_runtime: AgentRuntimeConfig {
+            enabled: true,
+            managed_worker: crate::config::AgentRuntimeManagedWorkerConfig {
+                target_grants: vec![grant.clone(), grant],
+                ..crate::config::AgentRuntimeManagedWorkerConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        },
+        ..Config::default()
+    };
+    assert!(duplicate
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate selector_id duplicate"));
 }
 
 #[test]

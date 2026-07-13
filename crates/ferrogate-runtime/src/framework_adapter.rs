@@ -272,6 +272,7 @@ pub struct FrameworkCapabilityRequest {
     pub session: FrameworkAdapterSession,
     pub action: CapabilityAction,
     pub target: String,
+    pub canonical_target: Option<crate::CanonicalCapabilityTarget>,
     pub high_risk: bool,
 }
 
@@ -1023,6 +1024,7 @@ where
             isolation_backend: request.session.isolation_backend.clone(),
             action: request.action,
             target: request.target,
+            canonical_target: request.canonical_target,
             high_risk: request.high_risk,
         })
         .map_err(|error| FrameworkAdapterError::CapabilityDenied(error.to_string()))?;
@@ -1205,6 +1207,13 @@ fn capability_authorization_event(
             ("worker_id", evidence.worker_id.as_str()),
             ("action", evidence.action.as_str()),
             ("target", evidence.target.as_str()),
+            ("subject", evidence.subject.as_str()),
+            ("selector", evidence.selector.as_str()),
+            ("canonical_target", evidence.canonical_target.as_str()),
+            ("action_fingerprint", evidence.action_fingerprint.as_str()),
+            ("policy_revision", evidence.policy_revision.as_str()),
+            ("request_id", evidence.request_id.as_str()),
+            ("trace_id", evidence.trace_id.as_str()),
             ("decision", capability_decision_label(evidence.decision)),
             ("isolation_backend", evidence.isolation_backend.as_str()),
         ],
@@ -1600,6 +1609,7 @@ mod tests {
         let (session, _) = adapter.start_session(session_request()).unwrap();
         let authorizer = crate::SimpleCapabilityAuthorizer::new(crate::CapabilityPolicy {
             allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Tool]),
+            class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
             ..crate::CapabilityPolicy::default()
         });
 
@@ -1609,6 +1619,7 @@ mod tests {
                 session,
                 action: CapabilityAction::Tool,
                 target: "native.echo".to_string(),
+                canonical_target: None,
                 high_risk: false,
             },
         )
@@ -1639,6 +1650,7 @@ mod tests {
                 session,
                 action: CapabilityAction::Cli,
                 target: "bash".to_string(),
+                canonical_target: None,
                 high_risk: false,
             },
         )
@@ -1660,6 +1672,7 @@ mod tests {
         let authorizer = crate::SimpleCapabilityAuthorizer::new(crate::CapabilityPolicy {
             allowed_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
             approval_required_actions: std::collections::BTreeSet::from([CapabilityAction::Cli]),
+            class_only_policy_mode: crate::ClassOnlyPolicyMode::LegacyClassWide,
             ..crate::CapabilityPolicy::default()
         });
 
@@ -1669,6 +1682,7 @@ mod tests {
                 session,
                 action: CapabilityAction::Cli,
                 target: "bash -lc cargo test".to_string(),
+                canonical_target: None,
                 high_risk: true,
             },
         )
@@ -1720,6 +1734,7 @@ mod tests {
             session,
             action: CapabilityAction::Cli,
             target: "local-shell".to_string(),
+            canonical_target: None,
             high_risk: true,
         })
         .unwrap();
@@ -1754,6 +1769,7 @@ mod tests {
                 session: session.clone(),
                 action,
                 target: target.to_string(),
+                canonical_target: None,
                 high_risk: true,
             })
             .unwrap()
@@ -1787,6 +1803,7 @@ mod tests {
                 session,
                 action: CapabilityAction::Cli,
                 target: "bash".to_string(),
+                canonical_target: None,
                 high_risk: false,
             },
         )

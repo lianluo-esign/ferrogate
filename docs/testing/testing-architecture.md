@@ -121,7 +121,8 @@ through the admin API but the runtime only ever read the tenant scope.
 
 - **Mechanism:** `ferrogate-test supabase-live-smoke`, `supabase-live-restart`,
   `supabase-live-token4ai-provider`, `guardrail-supabase`,
-  `mcp-identity-supabase`, `component-compliance-supabase`. Gated behind
+  `mcp-identity-supabase`, `target-capability-supabase`,
+  `component-compliance-supabase`. Gated behind
   explicit DSN/credential env vars; never part of the default gate.
 - **Isolation contract:** every live scenario creates a unique per-run schema,
   reuses that exact schema across its internal restarts, then drops it and

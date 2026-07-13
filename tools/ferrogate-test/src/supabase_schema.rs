@@ -26,6 +26,7 @@ pub(crate) enum LiveSupabaseScenario {
     Guardrail,
     McpIdentity,
     Compliance,
+    TargetCapability,
 }
 
 impl LiveSupabaseScenario {
@@ -37,6 +38,7 @@ impl LiveSupabaseScenario {
             Self::Guardrail => "grd",
             Self::McpIdentity => "mcp",
             Self::Compliance => "cmp",
+            Self::TargetCapability => "tgt",
         }
     }
 }

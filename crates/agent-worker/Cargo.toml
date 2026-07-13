@@ -25,6 +25,10 @@ clap.workspace = true
 ferrogate-runtime = { path = "../ferrogate-runtime" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", features = ["fs", "net", "process"] }
 
 [dev-dependencies]
 tempfile.workspace = true

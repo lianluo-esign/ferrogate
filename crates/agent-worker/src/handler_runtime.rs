@@ -724,6 +724,7 @@ mod tests {
             SimpleCapabilityAuthorizer::new(CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
                 approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             }),
         );
@@ -851,6 +852,7 @@ mod tests {
                     CapabilityAction::Cli,
                     CapabilityAction::MemoryRead,
                 ]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             }),
         )

@@ -20,27 +20,34 @@ use std::{
     net::{Shutdown, SocketAddr, TcpStream},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::Arc,
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 use ferrogate_runtime::{
-    authorize_managed_external_action, managed_external_action_transport_failure_event,
-    CapabilityAction, CapabilityAuthorizationDecision, CapabilityAuthorizer, CapabilityPolicy,
-    ExternalActionAuthorizationRequest, ExternalActionAuthorizationResponse, FrameworkAdapterError,
-    FrameworkAdapterEventKind, FrameworkAdapterMode, FrameworkAdapterSession,
-    GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
-    ManagedBrowserAction, ManagedBrowserOperation, ManagedCliAction, ManagedExternalAction,
-    ManagedExternalActionDecision, ManagedExternalActionRequest, ManagedFilesystemAccess,
-    ManagedFilesystemAction, ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction,
-    ManagedNetworkEgressAction, ManagedRestAction, ManagedSecretAction, ManagedSkillAction,
-    ManagedToolAction, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
+    authorize_managed_external_action, canonical_target_for_managed_action,
+    managed_external_action_transport_failure_event, opaque_reference_fingerprint,
+    CanonicalCapabilityTarget, CapabilityAction, CapabilityAuthorizationDecision,
+    CapabilityAuthorizer, CapabilityPolicy, ExternalActionAuthorizationRequest,
+    ExternalActionAuthorizationResponse, FrameworkAdapterError, FrameworkAdapterEventKind,
+    FrameworkAdapterMode, FrameworkAdapterSession, GatewayExternalActionTransportRequest,
+    GatewayExternalActionTransportResponse, ManagedBrowserAction, ManagedBrowserOperation,
+    ManagedCliAction, ManagedExternalAction, ManagedExternalActionDecision,
+    ManagedExternalActionRequest, ManagedFilesystemAccess, ManagedFilesystemAction,
+    ManagedMcpToolAction, ManagedMemoryAccess, ManagedMemoryAction, ManagedNetworkEgressAction,
+    ManagedRestAction, ManagedSecretAction, ManagedSkillAction, ManagedToolAction,
+    NormalizedFrameworkEvent, SimpleCapabilityAuthorizer, SupportedFramework,
 };
 
 const EXTERNAL_ACTION_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const EXTERNAL_ACTION_UNIX_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
 const DEFAULT_EXTERNAL_ACTION_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,10 +338,77 @@ where
 {
     let session = request.session.clone();
     let action = request.action.clone();
+    let high_risk = request.high_risk;
     let decision = request_handler_external_action_decision(authorizer, request)?;
+    if decision.allowed() {
+        verify_authorized_action_fingerprint(&decision, &session, &action, high_risk)?;
+    }
     let evidence =
         ExternalActionEvidenceRecord::for_action(&session, &action, Some(decision.decision));
     Ok(HandlerExternalActionEvidence { decision, evidence })
+}
+
+fn verify_authorized_action_fingerprint(
+    decision: &ExternalActionGateDecision,
+    session: &FrameworkAdapterSession,
+    action: &ManagedExternalAction,
+    high_risk: bool,
+) -> Result<(), FrameworkAdapterError> {
+    let expected_target =
+        canonical_target_for_managed_action(action, &session.adapter_name, high_risk);
+    let Some(expected_target) = expected_target else {
+        return if matches!(
+            action,
+            ManagedExternalAction::McpTool(_)
+                | ManagedExternalAction::Cli(_)
+                | ManagedExternalAction::Filesystem(_)
+                | ManagedExternalAction::Rest(_)
+                | ManagedExternalAction::Secret(_)
+                | ManagedExternalAction::NetworkEgress(_)
+        ) {
+            Err(FrameworkAdapterError::CapabilityDenied(
+                "worker cannot derive a canonical execution target for the allowed target-level action"
+                    .to_string(),
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let canonical_evidence = decision
+        .event
+        .metadata
+        .get("canonical_target")
+        .ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(
+                "gateway allowed a target-level action without canonical target evidence"
+                    .to_string(),
+            )
+        })?;
+    let provided_fingerprint = decision
+        .event
+        .metadata
+        .get("action_fingerprint")
+        .ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(
+                "gateway allowed a target-level action without an action fingerprint".to_string(),
+            )
+        })?;
+    let evidence_fingerprint = opaque_reference_fingerprint(canonical_evidence);
+    if provided_fingerprint != &evidence_fingerprint {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "gateway action fingerprint does not authenticate its canonical target evidence"
+                .to_string(),
+        ));
+    }
+    if !matches!(action, ManagedExternalAction::Filesystem(_))
+        && canonical_evidence != &expected_target.canonical_json()
+    {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "gateway action fingerprint mismatch: authorized target differs from execution target"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn request_handler_external_action_decision<A>(
@@ -372,6 +446,7 @@ pub(crate) fn accept_external_action_json_command() -> Result<()> {
         &RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         )),
@@ -398,6 +473,7 @@ pub(crate) fn external_action_unix_transport_smoke_command(
             RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
                 CapabilityPolicy {
                     allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                    class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                     ..CapabilityPolicy::default()
                 },
             )),
@@ -405,7 +481,8 @@ pub(crate) fn external_action_unix_transport_smoke_command(
         )
     });
     wait_for_authorizer_socket(&socket_path)?;
-    let client = UnixGatewayExternalActionAuthorizer::new(&socket_path);
+    let client =
+        UnixGatewayExternalActionAuthorizer::new_authenticated(&socket_path, std::process::id());
     let decision = authorize_handler_external_action(
         Some(&client),
         ExternalActionGateRequest {
@@ -424,24 +501,130 @@ pub(crate) fn external_action_unix_transport_smoke_command(
     Ok(())
 }
 
-pub(crate) fn external_action_http_transport_smoke_command(
-    endpoint: SocketAddr,
+pub(crate) fn governed_target_execution_unix_smoke_command(
+    socket_path: &Path,
+    expected_gateway_pid: u32,
+    workspace_root: &Path,
+    network_target: SocketAddr,
     mode: FrameworkAdapterMode,
 ) -> Result<()> {
-    let client = HttpGatewayExternalActionAuthorizer::new(endpoint);
-    let decision = authorize_handler_external_action(
-        Some(&client),
-        ExternalActionGateRequest {
-            session: smoke_session(mode),
-            action: ManagedExternalAction::Tool(ManagedToolAction {
-                tool_name: "native.echo".to_string(),
-                arguments_policy: "redacted_json".to_string(),
-            }),
-            high_risk: false,
+    let client =
+        UnixGatewayExternalActionAuthorizer::new_authenticated(socket_path, expected_gateway_pid);
+    let mcp = execute_governed_mcp_tool_action(
+        &client,
+        smoke_session(mode),
+        ManagedMcpToolAction {
+            server_name: "local-smoke".to_string(),
+            tool_name: "echo".to_string(),
+            arguments_policy: "exact_arguments".to_string(),
+            arguments: serde_json::json!({"message": "ferrogate governed mcp smoke"}),
         },
+        false,
     )?;
-    println!("{}", decision.event.canonical_json());
+    let filesystem = execute_governed_filesystem_action(
+        &client,
+        smoke_session(mode),
+        ManagedFilesystemAction {
+            path: "allowed.txt".to_string(),
+            access: ManagedFilesystemAccess::Read,
+            workspace_relative: true,
+        },
+        workspace_root,
+        false,
+    )?;
+    let filesystem_write = execute_governed_filesystem_action(
+        &client,
+        smoke_session(mode),
+        ManagedFilesystemAction {
+            path: "allowed-created.txt".to_string(),
+            access: ManagedFilesystemAccess::Write,
+            workspace_relative: true,
+        },
+        workspace_root,
+        false,
+    )?;
+    let network = execute_governed_network_egress_action(
+        &client,
+        smoke_session(mode),
+        ManagedNetworkEgressAction {
+            host: network_target.ip().to_string(),
+            port: network_target.port(),
+            protocol: "tcp".to_string(),
+            resolved_ips: vec![network_target.ip().to_string()],
+        },
+        false,
+    )?;
+    let secrets = BTreeMap::from([(
+        "vault/provider-key".to_string(),
+        "resolved-secret-value".to_string(),
+    )]);
+    let secret = execute_governed_secret_action(
+        &client,
+        smoke_session(mode),
+        ManagedSecretAction {
+            secret_id: "vault/provider-key".to_string(),
+            purpose: "provider.call".to_string(),
+        },
+        &secrets,
+        false,
+    )?;
+    let cli = execute_governed_cli_action(
+        &client,
+        smoke_session(mode),
+        ManagedCliAction {
+            command: "/usr/bin/env".to_string(),
+            args: Vec::new(),
+            working_dir: workspace_root.display().to_string(),
+            env_policy: "empty".to_string(),
+            timeout_millis: 1_000,
+            stdout_limit_bytes: 1_024,
+            stderr_limit_bytes: 1_024,
+            artifact_capture: false,
+        },
+        false,
+    )?;
+    let output = serde_json::json!({
+        "mcp": target_execution_projection(&mcp, &["output_excerpt"] )?,
+        "filesystem": target_execution_projection(&filesystem, &["content_excerpt"] )?,
+        "filesystem_write": target_execution_projection(&filesystem_write, &["byte_len"] )?,
+        "network": target_execution_projection(&network, &["bytes_written"] )?,
+        "secret": target_execution_projection(&secret, &["redacted_value", "secret_len"] )?,
+        "cli": target_execution_projection(&cli, &["stdout_excerpt", "stderr_excerpt", "status_code"] )?,
+    });
+    println!("{}", serde_json::to_string(&output)?);
     Ok(())
+}
+
+fn target_execution_projection(
+    events: &[NormalizedFrameworkEvent],
+    evidence_fields: &[&str],
+) -> Result<serde_json::Value> {
+    let event = events
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("governed action produced no execution evidence"))?;
+    if event
+        .metadata
+        .get("executed_after_authorization")
+        .map(String::as_str)
+        != Some("true")
+    {
+        anyhow::bail!("governed action did not prove post-authorization execution");
+    }
+    let mut projection = serde_json::Map::from_iter([(
+        "executed_after_authorization".to_string(),
+        serde_json::Value::Bool(true),
+    )]);
+    for field in evidence_fields {
+        let value = event
+            .metadata
+            .get(*field)
+            .ok_or_else(|| anyhow::anyhow!("governed action evidence omitted {field}"))?;
+        projection.insert(
+            (*field).to_string(),
+            serde_json::Value::String(value.clone()),
+        );
+    }
+    Ok(serde_json::Value::Object(projection))
 }
 
 pub(crate) fn governed_cli_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
@@ -461,6 +644,7 @@ pub(crate) fn governed_cli_execution_smoke_command(mode: FrameworkAdapterMode) -
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -491,6 +675,7 @@ pub(crate) fn governed_cli_timeout_smoke_command(mode: FrameworkAdapterMode) -> 
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -526,6 +711,7 @@ pub(crate) fn governed_cli_cancel_smoke_command(mode: FrameworkAdapterMode) -> R
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -555,6 +741,7 @@ pub(crate) fn governed_tool_execution_smoke_command(mode: FrameworkAdapterMode) 
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -576,10 +763,12 @@ pub(crate) fn governed_mcp_tool_execution_smoke_command(mode: FrameworkAdapterMo
         server_name: "local-smoke".to_string(),
         tool_name: "echo".to_string(),
         arguments_policy: "smoke_literal:ferrogate governed mcp smoke".to_string(),
+        arguments: serde_json::json!({"message": "ferrogate governed mcp smoke"}),
     };
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::McpTool]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -604,6 +793,7 @@ pub(crate) fn governed_skill_execution_smoke_command(mode: FrameworkAdapterMode)
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Skill]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -628,6 +818,7 @@ pub(crate) fn governed_memory_execution_smoke_command(mode: FrameworkAdapterMode
                 CapabilityAction::MemoryRead,
                 CapabilityAction::MemoryWrite,
             ]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -668,16 +859,17 @@ pub(crate) fn governed_memory_execution_smoke_command(mode: FrameworkAdapterMode
 
 pub(crate) fn governed_secret_execution_smoke_command(mode: FrameworkAdapterMode) -> Result<()> {
     let secrets = BTreeMap::from([(
-        "openai-api-key".to_string(),
+        "vault/openai-api-key".to_string(),
         "ferrogate governed secret smoke".to_string(),
     )]);
     let action = ManagedSecretAction {
-        secret_id: "openai-api-key".to_string(),
+        secret_id: "vault/openai-api-key".to_string(),
         purpose: "provider_call".to_string(),
     };
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Secret]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -703,11 +895,13 @@ pub(crate) fn governed_network_egress_execution_smoke_command(
         host: "127.0.0.1".to_string(),
         port: server.endpoint.port(),
         protocol: "tcp".to_string(),
+        resolved_ips: vec!["127.0.0.1".to_string()],
     };
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
             allow_direct_network_egress: true,
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -733,6 +927,7 @@ pub(crate) fn governed_browser_execution_smoke_command(mode: FrameworkAdapterMod
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Browser]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -758,10 +953,13 @@ pub(crate) fn governed_rest_execution_smoke_command(mode: FrameworkAdapterMode) 
         body_policy: "empty_body".to_string(),
         timeout_millis: 2_000,
         retry_limit: 0,
+        resolved_ips: vec!["127.0.0.1".to_string()],
+        redirect_chain: Vec::new(),
     };
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Rest]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -798,6 +996,7 @@ pub(crate) fn governed_filesystem_execution_smoke_command(
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Filesystem]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -891,12 +1090,21 @@ where
 
 pub(crate) struct UnixGatewayExternalActionAuthorizer {
     socket_path: std::path::PathBuf,
+    expected_gateway_pid: u32,
+    expected_gateway_uid: u32,
+    timeout: Duration,
 }
 
 impl UnixGatewayExternalActionAuthorizer {
-    pub(crate) fn new(socket_path: impl Into<std::path::PathBuf>) -> Self {
+    pub(crate) fn new_authenticated(
+        socket_path: impl Into<std::path::PathBuf>,
+        expected_gateway_pid: u32,
+    ) -> Self {
         Self {
             socket_path: socket_path.into(),
+            expected_gateway_pid,
+            expected_gateway_uid: rustix::process::geteuid().as_raw(),
+            timeout: EXTERNAL_ACTION_UNIX_TIMEOUT,
         }
     }
 }
@@ -921,6 +1129,25 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
                 );
             }
         };
+        if let Err(error) = authenticate_unix_authorizer_peer(
+            &stream,
+            self.expected_gateway_pid,
+            self.expected_gateway_uid,
+        ) {
+            return transport_failure_decision(&request, error);
+        }
+        if let Err(error) = stream.set_read_timeout(Some(self.timeout)) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action authorizer read timeout setup failed: {error}"),
+            );
+        }
+        if let Err(error) = stream.set_write_timeout(Some(self.timeout)) {
+            return transport_failure_decision(
+                &request,
+                format!("gateway external action authorizer write timeout setup failed: {error}"),
+            );
+        }
         let payload = serde_json::to_string(&transport_request).map_err(|error| {
             FrameworkAdapterError::InvalidRequest(format!(
                 "gateway external action authorization request serialization failed: {error}"
@@ -972,11 +1199,51 @@ impl GatewayExternalActionAuthorizer for UnixGatewayExternalActionAuthorizer {
     }
 }
 
-pub(crate) struct HttpGatewayExternalActionAuthorizer {
+#[cfg(target_os = "linux")]
+fn authenticate_unix_authorizer_peer(
+    stream: &UnixStream,
+    expected_gateway_pid: u32,
+    expected_gateway_uid: u32,
+) -> Result<(), String> {
+    if expected_gateway_pid == 0 {
+        return Err("gateway external action authorizer expected peer PID must be non-zero".into());
+    }
+    let peer = rustix::net::sockopt::socket_peercred(stream).map_err(|error| {
+        format!("gateway external action authorizer peer credentials failed: {error}")
+    })?;
+    let peer_pid = u32::try_from(peer.pid.as_raw_pid()).map_err(|_| {
+        "gateway external action authorizer peer PID cannot be represented".to_string()
+    })?;
+    if peer_pid != expected_gateway_pid {
+        return Err(format!(
+            "gateway external action authorizer peer PID mismatch: expected {expected_gateway_pid}, got {peer_pid}"
+        ));
+    }
+    let peer_uid = peer.uid.as_raw();
+    if peer_uid != expected_gateway_uid {
+        return Err(format!(
+            "gateway external action authorizer peer UID mismatch: expected {expected_gateway_uid}, got {peer_uid}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn authenticate_unix_authorizer_peer(
+    _stream: &UnixStream,
+    _expected_gateway_pid: u32,
+    _expected_gateway_uid: u32,
+) -> Result<(), String> {
+    Err("authenticated gateway Unix peer verification requires Linux SO_PEERCRED".to_string())
+}
+
+#[cfg(test)]
+struct HttpGatewayExternalActionAuthorizer {
     endpoint: SocketAddr,
     timeout: Duration,
 }
 
+#[cfg(test)]
 impl HttpGatewayExternalActionAuthorizer {
     pub(crate) fn new(endpoint: SocketAddr) -> Self {
         Self::new_with_timeout(endpoint, DEFAULT_EXTERNAL_ACTION_HTTP_TIMEOUT)
@@ -987,6 +1254,7 @@ impl HttpGatewayExternalActionAuthorizer {
     }
 }
 
+#[cfg(test)]
 impl GatewayExternalActionAuthorizer for HttpGatewayExternalActionAuthorizer {
     fn authorize_external_action(
         &self,
@@ -1106,6 +1374,7 @@ fn transport_failure_decision(
     })
 }
 
+#[cfg(test)]
 fn decode_http_authorizer_response(
     response: &[u8],
 ) -> Result<GatewayExternalActionTransportResponse, FrameworkAdapterError> {
@@ -1135,6 +1404,7 @@ fn decode_http_authorizer_response(
     })
 }
 
+#[cfg(test)]
 fn parse_http_status_code(status_line: &str) -> Result<u16, FrameworkAdapterError> {
     let mut parts = status_line.split_whitespace();
     let version = parts.next().unwrap_or_default();
@@ -1214,6 +1484,7 @@ fn external_action_smoke(mode: FrameworkAdapterMode) -> Result<ExternalActionGat
     let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
         CapabilityPolicy {
             allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+            class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
             ..CapabilityPolicy::default()
         },
     ));
@@ -1497,7 +1768,7 @@ where
             high_risk,
         },
     )?;
-    let execution = run_authorized_cli_action(&action)?;
+    let execution = run_authorized_cli_action(&action, &decision)?;
     Ok(vec![
         decision.event,
         NormalizedFrameworkEvent {
@@ -1531,7 +1802,7 @@ where
             high_risk,
         },
     )?;
-    match run_authorized_cli_action(&action) {
+    match run_authorized_cli_action(&action, &decision) {
         Ok(execution) => Ok(vec![
             decision.event,
             NormalizedFrameworkEvent {
@@ -1584,7 +1855,7 @@ where
             high_risk,
         },
     )?;
-    let cancellation = run_authorized_cli_action_until_cancelled(&action)?;
+    let cancellation = run_authorized_cli_action_until_cancelled(&action, &decision)?;
     Ok(vec![
         decision.event,
         NormalizedFrameworkEvent {
@@ -1679,17 +1950,16 @@ impl GovernedCliCancellation {
 
 fn run_authorized_cli_action_until_cancelled(
     action: &ManagedCliAction,
+    decision: &ExternalActionGateDecision,
 ) -> Result<GovernedCliCancellation, FrameworkAdapterError> {
-    let mut command = Command::new(&action.command);
+    let authorized = open_authorized_cli_objects(decision)?;
+    let mut command = authorized.command(action);
     command
-        .args(&action.args)
-        .current_dir(&action.working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if action.env_policy == "deny_all" {
-        command.env_clear();
-    }
+    command.env_clear();
+    configure_managed_process_group(&mut command);
     let mut child = spawn_cli_with_executable_busy_retry(&mut command).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
             "managed CLI action spawn failed after gateway authorization: {error}"
@@ -1697,21 +1967,24 @@ fn run_authorized_cli_action_until_cancelled(
     })?;
     let started_at = Instant::now();
     thread::sleep(Duration::from_millis(25));
-    if child
-        .try_wait()
-        .map_err(|error| {
-            FrameworkAdapterError::CapabilityDenied(format!(
+    let status = match child.try_wait() {
+        Ok(status) => status,
+        Err(error) => {
+            kill_and_reap_process_group(&mut child);
+            return Err(FrameworkAdapterError::CapabilityDenied(format!(
                 "managed CLI action status check failed: {error}"
-            ))
-        })?
-        .is_none()
-    {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Ok(GovernedCliCancellation {
-            cancellation_reason: "operator_cancelled".to_string(),
-            elapsed_millis: started_at.elapsed().as_millis(),
-        });
+            )));
+        }
+    };
+    match status {
+        None => {
+            kill_and_reap_process_group(&mut child);
+            return Ok(GovernedCliCancellation {
+                cancellation_reason: "operator_cancelled".to_string(),
+                elapsed_millis: started_at.elapsed().as_millis(),
+            });
+        }
+        Some(_) => kill_process_group(child.id()),
     }
     Err(FrameworkAdapterError::CapabilityDenied(
         "managed CLI action completed before cancellation could be observed".to_string(),
@@ -1770,7 +2043,7 @@ where
             high_risk,
         },
     )?;
-    let execution = run_authorized_filesystem_action(&action, workspace_root)?;
+    let execution = run_authorized_filesystem_action(&action, workspace_root, &decision)?;
     Ok(vec![
         decision.event,
         NormalizedFrameworkEvent {
@@ -1866,7 +2139,16 @@ fn run_authorized_mcp_tool_action(
             action.server_name, action.tool_name
         )));
     }
-    let message = smoke_literal_argument(&action.arguments_policy)?;
+    let message = action
+        .arguments
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .ok_or_else(|| {
+            FrameworkAdapterError::InvalidRequest(
+                "managed MCP smoke requires exact arguments.message".to_string(),
+            )
+        })?;
     Ok(GovernedMcpToolExecution {
         output_excerpt: bounded_utf8_excerpt(message.as_bytes(), 512),
     })
@@ -2002,9 +2284,12 @@ impl GovernedSecretExecution {
             ("external_action".to_string(), "secret".to_string()),
             (
                 "external_target".to_string(),
-                format!("secret:{}", action.secret_id),
+                format!("secret:{}", opaque_reference_fingerprint(&action.secret_id)),
             ),
-            ("secret_id".to_string(), action.secret_id.clone()),
+            (
+                "secret_ref_fingerprint".to_string(),
+                opaque_reference_fingerprint(&action.secret_id),
+            ),
             ("purpose".to_string(), action.purpose.clone()),
             ("redacted_value".to_string(), "***".to_string()),
             ("secret_len".to_string(), self.secret_len.to_string()),
@@ -2067,14 +2352,14 @@ fn run_authorized_network_egress_action(
             "managed network egress smoke only supports loopback hosts".to_string(),
         ));
     }
-    let endpoint = SocketAddr::new(
-        "127.0.0.1".parse().map_err(|error| {
-            FrameworkAdapterError::InvalidRequest(format!(
-                "managed network egress smoke loopback parse failed: {error}"
-            ))
-        })?,
-        action.port,
-    );
+    let pinned_ip = required_pinned_ip(&action.resolved_ips)?;
+    if !pinned_ip.is_loopback() {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed network egress pinned IP is outside the loopback execution boundary"
+                .to_string(),
+        ));
+    }
+    let endpoint = SocketAddr::new(pinned_ip, action.port);
     let payload = b"ferrogate governed network smoke\n";
     let timeout = Duration::from_secs(2);
     let mut stream = TcpStream::connect_timeout(&endpoint, timeout).map_err(|error| {
@@ -2190,10 +2475,17 @@ impl GovernedFilesystemExecution {
 fn run_authorized_filesystem_action(
     action: &ManagedFilesystemAction,
     workspace_root: &Path,
+    decision: &ExternalActionGateDecision,
 ) -> Result<GovernedFilesystemExecution, FrameworkAdapterError> {
-    if action.access != ManagedFilesystemAccess::Read {
+    if !matches!(
+        action.access,
+        ManagedFilesystemAccess::Read
+            | ManagedFilesystemAccess::Write
+            | ManagedFilesystemAccess::Execute
+    ) {
         return Err(FrameworkAdapterError::InvalidRequest(
-            "managed filesystem smoke currently supports read access only".to_string(),
+            "managed filesystem execution supports read, create-only write, and execute access"
+                .to_string(),
         ));
     }
     if !action.workspace_relative {
@@ -2211,17 +2503,510 @@ fn run_authorized_filesystem_action(
             "managed filesystem smoke path must stay inside the workspace".to_string(),
         ));
     }
-    let resolved_path = workspace_root.join(relative);
-    let bytes = std::fs::read(&resolved_path).map_err(|error| {
+    let resolved_root = std::fs::canonicalize(workspace_root).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
-            "managed filesystem action read failed after gateway authorization: {error}"
+            "managed filesystem execution root cannot be resolved: {error}"
         ))
     })?;
+    let authorized_identity =
+        authorized_filesystem_identity(decision, &resolved_root, relative, action.access)?;
+    let (resolved_path, bytes) = match action.access {
+        ManagedFilesystemAccess::Read => {
+            read_beneath_authorized_root(&resolved_root, relative, authorized_identity.as_ref())?
+        }
+        ManagedFilesystemAccess::Write => {
+            create_beneath_authorized_root(&resolved_root, relative, authorized_identity.as_ref())?
+        }
+        ManagedFilesystemAccess::Execute => {
+            execute_beneath_authorized_root(&resolved_root, relative, authorized_identity.as_ref())?
+        }
+        ManagedFilesystemAccess::Delete => unreachable!(),
+    };
     Ok(GovernedFilesystemExecution {
         resolved_path,
         byte_len: bytes.len(),
         content_excerpt: bounded_utf8_excerpt(&bytes, 512),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthorizedFilesystemIdentity {
+    Read {
+        root_device: u64,
+        root_inode: u64,
+        target_device: u64,
+        target_inode: u64,
+        target_content_fingerprint: Option<String>,
+    },
+    Create {
+        root_device: u64,
+        root_inode: u64,
+        parent_device: u64,
+        parent_inode: u64,
+    },
+}
+
+fn authorized_filesystem_identity(
+    decision: &ExternalActionGateDecision,
+    execution_root: &Path,
+    relative: &Path,
+    access: ManagedFilesystemAccess,
+) -> Result<Option<AuthorizedFilesystemIdentity>, FrameworkAdapterError> {
+    let selector = decision
+        .event
+        .metadata
+        .get("selector")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if selector == "legacy_class_wide" {
+        return Ok(None);
+    }
+    let canonical = decision
+        .event
+        .metadata
+        .get("canonical_target")
+        .ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(
+                "typed filesystem authorization omitted canonical target evidence".to_string(),
+            )
+        })?;
+    let value: serde_json::Value = serde_json::from_str(canonical).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "typed filesystem authorization returned invalid canonical target evidence: {error}"
+        ))
+    })?;
+    if value.get("kind").and_then(serde_json::Value::as_str) != Some("filesystem")
+        || value.get("operation").and_then(serde_json::Value::as_str) != Some(access.as_str())
+    {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "typed filesystem authorization returned the wrong target kind or operation"
+                .to_string(),
+        ));
+    }
+    let authorized_root = required_canonical_path_field(&value, "workspace_root")?;
+    if authorized_root != execution_root {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed filesystem execution root differs from the authorized root".to_string(),
+        ));
+    }
+    if access == ManagedFilesystemAccess::Write {
+        let authorized_parent = required_canonical_path_field(&value, "resolved_parent")?;
+        let expected_parent =
+            execution_root.join(relative.parent().unwrap_or_else(|| Path::new("")));
+        if authorized_parent != expected_parent {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "managed filesystem execution parent differs from the authorized parent"
+                    .to_string(),
+            ));
+        }
+        let leaf = relative
+            .file_name()
+            .and_then(|leaf| leaf.to_str())
+            .ok_or_else(|| {
+                FrameworkAdapterError::CapabilityDenied(
+                    "managed filesystem execution target has no UTF-8 leaf".to_string(),
+                )
+            })?;
+        if value.get("leaf_name").and_then(serde_json::Value::as_str) != Some(leaf)
+            || value
+                .get("target_must_not_exist")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "typed filesystem create authorization omitted create-only target evidence"
+                    .to_string(),
+            ));
+        }
+        return Ok(Some(AuthorizedFilesystemIdentity::Create {
+            root_device: required_u64_field(&value, "root_device")?,
+            root_inode: required_u64_field(&value, "root_inode")?,
+            parent_device: required_u64_field(&value, "parent_device")?,
+            parent_inode: required_u64_field(&value, "parent_inode")?,
+        }));
+    }
+    let authorized_target = required_canonical_path_field(&value, "resolved_path")?;
+    if authorized_target != execution_root.join(relative) {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed filesystem execution target differs from the authorized target".to_string(),
+        ));
+    }
+    Ok(Some(AuthorizedFilesystemIdentity::Read {
+        root_device: required_u64_field(&value, "root_device")?,
+        root_inode: required_u64_field(&value, "root_inode")?,
+        target_device: required_u64_field(&value, "target_device")?,
+        target_inode: required_u64_field(&value, "target_inode")?,
+        target_content_fingerprint: value
+            .get("target_content_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }))
+}
+
+fn required_canonical_path_field(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<PathBuf, FrameworkAdapterError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "typed filesystem authorization omitted {field}"
+            ))
+        })
+}
+
+fn required_u64_field(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<u64, FrameworkAdapterError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "typed filesystem authorization omitted {field}"
+            ))
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn read_beneath_authorized_root(
+    root: &Path,
+    relative: &Path,
+    authorized: Option<&AuthorizedFilesystemIdentity>,
+) -> Result<(PathBuf, Vec<u8>), FrameworkAdapterError> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{open, openat2, Mode, OFlags, ResolveFlags};
+
+    let root_fd = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem execution root open failed: {error}"
+        ))
+    })?;
+    let root_file: std::fs::File = root_fd.into();
+    if let Some(authorized) = authorized {
+        let AuthorizedFilesystemIdentity::Read {
+            root_device,
+            root_inode,
+            ..
+        } = authorized
+        else {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "filesystem read received create authorization evidence".to_string(),
+            ));
+        };
+        let metadata = root_file.metadata().map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed filesystem execution root identity failed: {error}"
+            ))
+        })?;
+        if metadata.dev() != *root_device || metadata.ino() != *root_inode {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "managed filesystem execution root identity changed after authorization"
+                    .to_string(),
+            ));
+        }
+    }
+    let target_fd = openat2(
+        &root_file,
+        relative,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem target open beneath authorized root failed: {error}"
+        ))
+    })?;
+    let mut target_file: std::fs::File = target_fd.into();
+    if let Some(authorized) = authorized {
+        let AuthorizedFilesystemIdentity::Read {
+            target_device,
+            target_inode,
+            ..
+        } = authorized
+        else {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "filesystem read received create authorization evidence".to_string(),
+            ));
+        };
+        let metadata = target_file.metadata().map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed filesystem target identity failed: {error}"
+            ))
+        })?;
+        if metadata.dev() != *target_device || metadata.ino() != *target_inode {
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "managed filesystem target identity changed after authorization".to_string(),
+            ));
+        }
+    }
+    let mut bytes = Vec::new();
+    target_file.read_to_end(&mut bytes).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem action read failed after gateway authorization: {error}"
+        ))
+    })?;
+    Ok((root.join(relative), bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn create_beneath_authorized_root(
+    root: &Path,
+    relative: &Path,
+    authorized: Option<&AuthorizedFilesystemIdentity>,
+) -> Result<(PathBuf, Vec<u8>), FrameworkAdapterError> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{open, openat2, Mode, OFlags, ResolveFlags};
+
+    let root_fd = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem execution root open failed: {error}"
+        ))
+    })?;
+    let root_file: std::fs::File = root_fd.into();
+    let AuthorizedFilesystemIdentity::Create {
+        root_device,
+        root_inode,
+        parent_device,
+        parent_inode,
+    } = authorized.ok_or_else(|| {
+        FrameworkAdapterError::CapabilityDenied(
+            "create-only filesystem writes require typed authorization evidence".to_string(),
+        )
+    })?
+    else {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "filesystem create received read authorization evidence".to_string(),
+        ));
+    };
+    let root_metadata = root_file.metadata().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem execution root identity failed: {error}"
+        ))
+    })?;
+    if root_metadata.dev() != *root_device || root_metadata.ino() != *root_inode {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed filesystem execution root identity changed after authorization".to_string(),
+        ));
+    }
+    let parent_relative = relative
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_fd = openat2(
+        &root_file,
+        parent_relative,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem write parent open beneath authorized root failed: {error}"
+        ))
+    })?;
+    let parent_file: std::fs::File = parent_fd.into();
+    let parent_metadata = parent_file.metadata().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem write parent identity failed: {error}"
+        ))
+    })?;
+    if parent_metadata.dev() != *parent_device || parent_metadata.ino() != *parent_inode {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed filesystem write parent identity changed after authorization".to_string(),
+        ));
+    }
+    let leaf = relative.file_name().ok_or_else(|| {
+        FrameworkAdapterError::CapabilityDenied(
+            "managed filesystem write target has no filename".to_string(),
+        )
+    })?;
+    let target_fd = openat2(
+        &parent_file,
+        Path::new(leaf),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::from_bits_retain(0o600),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem create-only target open failed: {error}"
+        ))
+    })?;
+    let _target_file: std::fs::File = target_fd.into();
+    Ok((root.join(relative), Vec::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn execute_beneath_authorized_root(
+    root: &Path,
+    relative: &Path,
+    authorized: Option<&AuthorizedFilesystemIdentity>,
+) -> Result<(PathBuf, Vec<u8>), FrameworkAdapterError> {
+    use std::{os::fd::AsRawFd, os::unix::fs::MetadataExt};
+
+    use rustix::fs::{open, openat2, Mode, OFlags, ResolveFlags};
+
+    let root_fd = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem execution root open failed: {error}"
+        ))
+    })?;
+    let root_file: std::fs::File = root_fd.into();
+    let AuthorizedFilesystemIdentity::Read {
+        root_device,
+        root_inode,
+        target_device,
+        target_inode,
+        target_content_fingerprint,
+    } = authorized.ok_or_else(|| {
+        FrameworkAdapterError::CapabilityDenied(
+            "filesystem execute requires typed authorization evidence".to_string(),
+        )
+    })?
+    else {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "filesystem execute received create authorization evidence".to_string(),
+        ));
+    };
+    let root_metadata = root_file.metadata().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem execution root identity failed: {error}"
+        ))
+    })?;
+    if root_metadata.dev() != *root_device || root_metadata.ino() != *root_inode {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed filesystem execution root identity changed after authorization".to_string(),
+        ));
+    }
+    let expected_content_fingerprint = target_content_fingerprint.as_deref().ok_or_else(|| {
+        FrameworkAdapterError::CapabilityDenied(
+            "filesystem execute authorization omitted target content fingerprint".to_string(),
+        )
+    })?;
+    let target_fd = openat2(
+        &root_file,
+        relative,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem executable open beneath authorized root failed: {error}"
+        ))
+    })?;
+    let target_file: std::fs::File = target_fd.into();
+    let metadata = target_file.metadata().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem executable identity failed: {error}"
+        ))
+    })?;
+    if metadata.dev() != *target_device || metadata.ino() != *target_inode {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed filesystem executable identity changed after authorization".to_string(),
+        ));
+    }
+    let target_file = immutable_executable_snapshot(target_file, expected_content_fingerprint)?;
+    let mut command = Command::new(format!("/proc/self/fd/{}", target_file.as_raw_fd()));
+    command
+        .current_dir(format!("/proc/self/fd/{}", root_file.as_raw_fd()))
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_managed_process_group(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed filesystem executable spawn failed: {error}"
+        ))
+    })?;
+    let started_at = Instant::now();
+    let timeout = Duration::from_secs(2);
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                kill_and_reap_process_group(&mut child);
+                return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                    "managed filesystem executable status failed: {error}"
+                )));
+            }
+        };
+        if let Some(status) = status {
+            kill_process_group(child.id());
+            if !status.success() {
+                return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                    "managed filesystem executable exited with status {:?}",
+                    status.code()
+                )));
+            }
+            break;
+        }
+        if started_at.elapsed() >= timeout {
+            kill_and_reap_process_group(&mut child);
+            return Err(FrameworkAdapterError::CapabilityDenied(
+                "managed filesystem executable timed out after 2000ms".to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok((root.join(relative), Vec::new()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn execute_beneath_authorized_root(
+    _root: &Path,
+    _relative: &Path,
+    _authorized: Option<&AuthorizedFilesystemIdentity>,
+) -> Result<(PathBuf, Vec<u8>), FrameworkAdapterError> {
+    Err(FrameworkAdapterError::CapabilityDenied(
+        "race-resistant managed filesystem execution requires Linux descriptor binding".to_string(),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_beneath_authorized_root(
+    _root: &Path,
+    _relative: &Path,
+    _authorized: Option<&AuthorizedFilesystemIdentity>,
+) -> Result<(PathBuf, Vec<u8>), FrameworkAdapterError> {
+    Err(FrameworkAdapterError::CapabilityDenied(
+        "race-resistant managed filesystem creation requires Linux openat2".to_string(),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_beneath_authorized_root(
+    _root: &Path,
+    _relative: &Path,
+    _authorized: Option<&AuthorizedFilesystemIdentity>,
+) -> Result<(PathBuf, Vec<u8>), FrameworkAdapterError> {
+    Err(FrameworkAdapterError::CapabilityDenied(
+        "race-resistant managed filesystem execution requires Linux openat2".to_string(),
+    ))
 }
 
 struct GovernedCliExecution {
@@ -2273,51 +3058,27 @@ impl GovernedCliExecution {
 
 fn run_authorized_cli_action(
     action: &ManagedCliAction,
+    decision: &ExternalActionGateDecision,
 ) -> Result<GovernedCliExecution, FrameworkAdapterError> {
-    let mut command = Command::new(&action.command);
+    let authorized = open_authorized_cli_objects(decision)?;
+    let mut command = authorized.command(action);
     command
-        .args(&action.args)
-        .current_dir(&action.working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if action.env_policy == "deny_all" {
-        command.env_clear();
-    }
+    command.env_clear();
+    configure_managed_process_group(&mut command);
     let mut child = spawn_cli_with_executable_busy_retry(&mut command).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
             "managed CLI action spawn failed after gateway authorization: {error}"
         ))
     })?;
-    let started_at = Instant::now();
-    let timeout = Duration::from_millis(action.timeout_millis.max(1));
-    loop {
-        if child
-            .try_wait()
-            .map_err(|error| {
-                FrameworkAdapterError::CapabilityDenied(format!(
-                    "managed CLI action status check failed: {error}"
-                ))
-            })?
-            .is_some()
-        {
-            break;
-        }
-        if started_at.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(FrameworkAdapterError::CapabilityDenied(format!(
-                "managed CLI action timed out after {}ms",
-                timeout.as_millis()
-            )));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let output = child.wait_with_output().map_err(|error| {
-        FrameworkAdapterError::CapabilityDenied(format!(
-            "managed CLI action output collection failed: {error}"
-        ))
-    })?;
+    let output = collect_bounded_child_output(
+        &mut child,
+        Duration::from_millis(action.timeout_millis.max(1)),
+        action.stdout_limit_bytes,
+        action.stderr_limit_bytes,
+    )?;
     if !output.status.success() {
         return Err(FrameworkAdapterError::CapabilityDenied(format!(
             "managed CLI action exited with status {:?}",
@@ -2329,6 +3090,481 @@ fn run_authorized_cli_action(
         stdout_excerpt: bounded_utf8_excerpt(&output.stdout, action.stdout_limit_bytes),
         stderr_excerpt: bounded_utf8_excerpt(&output.stderr, action.stderr_limit_bytes),
     })
+}
+
+struct BoundedChildOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+enum BoundedPipeRead {
+    Complete(Vec<u8>),
+    Exceeded,
+}
+
+fn collect_bounded_child_output(
+    child: &mut Child,
+    timeout: Duration,
+    stdout_limit: u64,
+    stderr_limit: u64,
+) -> Result<BoundedChildOutput, FrameworkAdapterError> {
+    let Some(stdout) = child.stdout.take() else {
+        kill_and_reap_process_group(child);
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed CLI action stdout pipe was not configured".to_string(),
+        ));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        kill_and_reap_process_group(child);
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed CLI action stderr pipe was not configured".to_string(),
+        ));
+    };
+    configure_nonblocking_pipe(&stdout).map_err(|error| {
+        kill_and_reap_process_group(child);
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed CLI action stdout setup failed: {error}"
+        ))
+    })?;
+    configure_nonblocking_pipe(&stderr).map_err(|error| {
+        kill_and_reap_process_group(child);
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed CLI action stderr setup failed: {error}"
+        ))
+    })?;
+    let stop_readers = Arc::new(AtomicBool::new(false));
+    let mut stdout_reader = Some(spawn_bounded_pipe_reader(
+        stdout,
+        stdout_limit,
+        Arc::clone(&stop_readers),
+    ));
+    let mut stderr_reader = Some(spawn_bounded_pipe_reader(
+        stderr,
+        stderr_limit,
+        Arc::clone(&stop_readers),
+    ));
+    let mut stdout_result = None;
+    let mut stderr_result = None;
+    let started_at = Instant::now();
+
+    let status = loop {
+        if let Err(error) = poll_bounded_reader(&mut stdout_reader, &mut stdout_result) {
+            kill_and_reap_process_group(child);
+            stop_readers.store(true, Ordering::Release);
+            join_remaining_reader(&mut stderr_reader);
+            return Err(error);
+        }
+        if let Err(error) = poll_bounded_reader(&mut stderr_reader, &mut stderr_result) {
+            kill_and_reap_process_group(child);
+            stop_readers.store(true, Ordering::Release);
+            join_remaining_reader(&mut stdout_reader);
+            return Err(error);
+        }
+        if matches!(stdout_result, Some(BoundedPipeRead::Exceeded)) {
+            kill_and_reap_process_group(child);
+            stop_readers.store(true, Ordering::Release);
+            join_remaining_reader(&mut stderr_reader);
+            return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                "managed CLI action stdout exceeded {stdout_limit} bytes"
+            )));
+        }
+        if matches!(stderr_result, Some(BoundedPipeRead::Exceeded)) {
+            kill_and_reap_process_group(child);
+            stop_readers.store(true, Ordering::Release);
+            join_remaining_reader(&mut stdout_reader);
+            return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                "managed CLI action stderr exceeded {stderr_limit} bytes"
+            )));
+        }
+        let child_status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                kill_and_reap_process_group(child);
+                stop_readers.store(true, Ordering::Release);
+                join_remaining_reader(&mut stdout_reader);
+                join_remaining_reader(&mut stderr_reader);
+                return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                    "managed CLI action status check failed: {error}"
+                )));
+            }
+        };
+        if let Some(status) = child_status {
+            // A successful leader may leave descendants holding the pipes. The
+            // action owns the whole group, so no descendant may outlive it.
+            kill_process_group(child.id());
+            stop_readers.store(true, Ordering::Release);
+            break status;
+        }
+        if started_at.elapsed() >= timeout {
+            kill_and_reap_process_group(child);
+            stop_readers.store(true, Ordering::Release);
+            join_remaining_reader(&mut stdout_reader);
+            join_remaining_reader(&mut stderr_reader);
+            return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                "managed CLI action timed out after {}ms",
+                timeout.as_millis()
+            )));
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    let stdout = finish_bounded_reader(stdout_reader, stdout_result, "stdout");
+    let stderr = finish_bounded_reader(stderr_reader, stderr_result, "stderr");
+    Ok(BoundedChildOutput {
+        status,
+        stdout: stdout?,
+        stderr: stderr?,
+    })
+}
+
+fn spawn_bounded_pipe_reader<R>(
+    mut pipe: R,
+    limit: u64,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<io::Result<BoundedPipeRead>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let stopping = stop.load(Ordering::Acquire);
+            let read = match pipe.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if stopping {
+                        return Ok(BoundedPipeRead::Complete(captured));
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if read == 0 {
+                return Ok(BoundedPipeRead::Complete(captured));
+            }
+            let next_len = u64::try_from(captured.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+            if next_len > limit {
+                return Ok(BoundedPipeRead::Exceeded);
+            }
+            captured.extend_from_slice(&buffer[..read]);
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn configure_nonblocking_pipe<Fd: std::os::fd::AsFd>(fd: &Fd) -> io::Result<()> {
+    let flags = rustix::fs::fcntl_getfl(fd)?;
+    Ok(rustix::fs::fcntl_setfl(
+        fd,
+        flags | rustix::fs::OFlags::NONBLOCK,
+    )?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_nonblocking_pipe<Fd>(_fd: &Fd) -> io::Result<()> {
+    Ok(())
+}
+
+fn poll_bounded_reader(
+    reader: &mut Option<thread::JoinHandle<io::Result<BoundedPipeRead>>>,
+    result: &mut Option<BoundedPipeRead>,
+) -> Result<(), FrameworkAdapterError> {
+    if reader.as_ref().is_some_and(thread::JoinHandle::is_finished) {
+        *result = Some(join_bounded_reader(reader.take().expect("reader exists"))?);
+    }
+    Ok(())
+}
+
+fn finish_bounded_reader(
+    reader: Option<thread::JoinHandle<io::Result<BoundedPipeRead>>>,
+    result: Option<BoundedPipeRead>,
+    stream: &str,
+) -> Result<Vec<u8>, FrameworkAdapterError> {
+    let result = match result {
+        Some(result) => result,
+        None => join_bounded_reader(reader.ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed CLI action {stream} reader disappeared"
+            ))
+        })?)?,
+    };
+    match result {
+        BoundedPipeRead::Complete(bytes) => Ok(bytes),
+        BoundedPipeRead::Exceeded => Err(FrameworkAdapterError::CapabilityDenied(format!(
+            "managed CLI action {stream} exceeded its configured byte limit"
+        ))),
+    }
+}
+
+fn join_bounded_reader(
+    reader: thread::JoinHandle<io::Result<BoundedPipeRead>>,
+) -> Result<BoundedPipeRead, FrameworkAdapterError> {
+    reader
+        .join()
+        .map_err(|_| {
+            FrameworkAdapterError::CapabilityDenied(
+                "managed CLI action output reader panicked".to_string(),
+            )
+        })?
+        .map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed CLI action output collection failed: {error}"
+            ))
+        })
+}
+
+fn join_remaining_reader(reader: &mut Option<thread::JoinHandle<io::Result<BoundedPipeRead>>>) {
+    if let Some(reader) = reader.take() {
+        let _ = reader.join();
+    }
+}
+
+struct AuthorizedCliObjects {
+    executable: std::fs::File,
+    cwd: std::fs::File,
+}
+
+impl AuthorizedCliObjects {
+    #[cfg(target_os = "linux")]
+    fn command(&self, action: &ManagedCliAction) -> Command {
+        use std::os::fd::AsRawFd;
+
+        let mut command = Command::new(format!("/proc/self/fd/{}", self.executable.as_raw_fd()));
+        command
+            .args(&action.args)
+            .current_dir(format!("/proc/self/fd/{}", self.cwd.as_raw_fd()));
+        command
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn command(&self, _action: &ManagedCliAction) -> Command {
+        unreachable!("authorized CLI objects are only available on Linux")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_authorized_cli_objects(
+    decision: &ExternalActionGateDecision,
+) -> Result<AuthorizedCliObjects, FrameworkAdapterError> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{open, Mode, OFlags};
+
+    let canonical = decision
+        .event
+        .metadata
+        .get("canonical_target")
+        .ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(
+                "CLI authorization omitted canonical target evidence".to_string(),
+            )
+        })?;
+    let target: CanonicalCapabilityTarget = serde_json::from_str(canonical).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "CLI authorization returned invalid canonical target evidence: {error}"
+        ))
+    })?;
+    let CanonicalCapabilityTarget::Cli {
+        executable,
+        executable_device,
+        executable_inode,
+        executable_content_fingerprint,
+        cwd,
+        cwd_device,
+        cwd_inode,
+        ..
+    } = target
+    else {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "CLI authorization returned the wrong canonical target kind".to_string(),
+        ));
+    };
+    let executable = open(
+        &executable,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "authorized CLI executable open failed: {error}"
+        ))
+    })?;
+    let executable: std::fs::File = executable.into();
+    let metadata = executable.metadata().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "authorized CLI executable identity failed: {error}"
+        ))
+    })?;
+    if metadata.dev() != executable_device || metadata.ino() != executable_inode {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "authorized CLI executable identity changed before execution".to_string(),
+        ));
+    }
+    let executable = immutable_executable_snapshot(executable, &executable_content_fingerprint)?;
+    let cwd = open(
+        &cwd,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!("authorized CLI cwd open failed: {error}"))
+    })?;
+    let cwd: std::fs::File = cwd.into();
+    let metadata = cwd.metadata().map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "authorized CLI cwd identity failed: {error}"
+        ))
+    })?;
+    if metadata.dev() != cwd_device || metadata.ino() != cwd_inode {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "authorized CLI cwd identity changed before execution".to_string(),
+        ));
+    }
+    Ok(AuthorizedCliObjects { executable, cwd })
+}
+
+#[cfg(target_os = "linux")]
+fn immutable_executable_snapshot(
+    mut source: std::fs::File,
+    expected_fingerprint: &str,
+) -> Result<std::fs::File, FrameworkAdapterError> {
+    use sha2::{Digest, Sha256};
+    use std::os::fd::AsRawFd;
+
+    use rustix::fs::{
+        fchmod, fcntl_add_seals, memfd_create, open, MemfdFlags, Mode, OFlags, SealFlags,
+    };
+
+    const MAX_CLI_EXECUTABLE_BYTES: usize = 128 * 1024 * 1024;
+
+    let snapshot_fd = memfd_create(
+        "ferrogate-cli-executable",
+        MemfdFlags::ALLOW_SEALING | MemfdFlags::CLOEXEC,
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed immutable executable snapshot creation failed: {error}"
+        ))
+    })?;
+    let mut snapshot: std::fs::File = snapshot_fd.into();
+    let mut digest = Sha256::new();
+    let mut copied = 0_usize;
+    let mut magic = [0_u8; 4];
+    let mut magic_len = 0_usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source.read(&mut buffer).map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed executable snapshot read failed: {error}"
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        copied = copied.checked_add(read).ok_or_else(|| {
+            FrameworkAdapterError::CapabilityDenied(
+                "managed executable snapshot length overflow".to_string(),
+            )
+        })?;
+        if copied > MAX_CLI_EXECUTABLE_BYTES {
+            return Err(FrameworkAdapterError::CapabilityDenied(format!(
+                "managed executable exceeds the {MAX_CLI_EXECUTABLE_BYTES}-byte immutable snapshot limit"
+            )));
+        }
+        snapshot.write_all(&buffer[..read]).map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed executable snapshot write failed: {error}"
+            ))
+        })?;
+        let magic_remaining = magic.len().saturating_sub(magic_len);
+        let magic_read = magic_remaining.min(read);
+        magic[magic_len..magic_len + magic_read].copy_from_slice(&buffer[..magic_read]);
+        magic_len += magic_read;
+        digest.update(&buffer[..read]);
+    }
+    let actual_fingerprint = format!("sha256:{:x}", digest.finalize());
+    if actual_fingerprint != expected_fingerprint {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed executable content fingerprint changed after authorization".to_string(),
+        ));
+    }
+    if magic_len >= 2 && &magic[..2] == b"#!" {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed executable shebang scripts are denied until interpreter identity and content are bound"
+                .to_string(),
+        ));
+    }
+    if magic_len < 4 || &magic != b"\x7fELF" {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed executable is not a Linux ELF binary".to_string(),
+        ));
+    }
+    fchmod(&snapshot, Mode::RUSR | Mode::XUSR).map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed executable snapshot mode setup failed: {error}"
+        ))
+    })?;
+    fcntl_add_seals(
+        &snapshot,
+        SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+    )
+    .map_err(|error| {
+        FrameworkAdapterError::CapabilityDenied(format!(
+            "managed executable snapshot sealing failed: {error}"
+        ))
+    })?;
+    let snapshot_path = format!("/proc/self/fd/{}", snapshot.as_raw_fd());
+    let executable =
+        open(snapshot_path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty()).map_err(|error| {
+            FrameworkAdapterError::CapabilityDenied(format!(
+                "managed sealed executable snapshot reopen failed: {error}"
+            ))
+        })?;
+    Ok(executable.into())
+}
+
+#[cfg(target_os = "linux")]
+fn configure_managed_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_managed_process_group(_command: &mut Command) {}
+
+#[cfg(target_os = "linux")]
+fn kill_process_group(raw_pid: u32) {
+    let Ok(raw_pid) = i32::try_from(raw_pid) else {
+        return;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw_pid) else {
+        return;
+    };
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_process_group(_raw_pid: u32) {}
+
+fn kill_and_reap_process_group(child: &mut Child) {
+    kill_process_group(child.id());
+    let _ = child.wait();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_authorized_cli_objects(
+    _decision: &ExternalActionGateDecision,
+) -> Result<AuthorizedCliObjects, FrameworkAdapterError> {
+    Err(FrameworkAdapterError::CapabilityDenied(
+        "race-resistant managed CLI execution requires Linux descriptor binding".to_string(),
+    ))
 }
 
 fn spawn_cli_with_executable_busy_retry(command: &mut Command) -> io::Result<std::process::Child> {
@@ -2392,6 +3628,12 @@ fn run_authorized_rest_action(
         ));
     }
     let target = parse_local_http_url(&action.url)?;
+    let pinned_ip = required_pinned_ip(&action.resolved_ips)?;
+    if pinned_ip != target.endpoint.ip() {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed REST execution endpoint differs from the authorized pinned IP".to_string(),
+        ));
+    }
     let timeout = Duration::from_millis(action.timeout_millis.max(1));
     let mut stream = TcpStream::connect_timeout(&target.endpoint, timeout).map_err(|error| {
         FrameworkAdapterError::CapabilityDenied(format!(
@@ -2438,6 +3680,19 @@ fn run_authorized_rest_action(
     Ok(GovernedRestExecution {
         status_code,
         response_excerpt: response.chars().take(512).collect(),
+    })
+}
+
+fn required_pinned_ip(values: &[String]) -> Result<std::net::IpAddr, FrameworkAdapterError> {
+    let [value] = values else {
+        return Err(FrameworkAdapterError::CapabilityDenied(
+            "managed network execution requires exactly one authorization-pinned IP".to_string(),
+        ));
+    };
+    value.parse().map_err(|_| {
+        FrameworkAdapterError::CapabilityDenied(
+            "managed network execution received an invalid authorization-pinned IP".to_string(),
+        )
     })
 }
 
@@ -2614,6 +3869,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -2665,6 +3921,7 @@ mod tests {
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
                 approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -2706,6 +3963,8 @@ mod tests {
                     body_policy: "redact_and_scan".to_string(),
                     timeout_millis: 2_000,
                     retry_limit: 0,
+                    resolved_ips: Vec::new(),
+                    redirect_chain: Vec::new(),
                 }),
                 high_risk: false,
             },
@@ -2728,6 +3987,7 @@ mod tests {
                     server_name: "filesystem".to_string(),
                     tool_name: "read_file".to_string(),
                     arguments_policy: "workspace_only".to_string(),
+                    arguments: serde_json::json!({}),
                 }),
                 high_risk: false,
             },
@@ -2742,6 +4002,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -2801,6 +4062,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::McpTool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -2812,6 +4074,7 @@ mod tests {
                 server_name: "local-smoke".to_string(),
                 tool_name: "echo".to_string(),
                 arguments_policy: "smoke_literal:mcp smoke ok".to_string(),
+                arguments: serde_json::json!({"message": "mcp smoke ok"}),
             },
             false,
         )
@@ -2852,6 +4115,7 @@ mod tests {
                 server_name: "remote".to_string(),
                 tool_name: "read_file".to_string(),
                 arguments_policy: "smoke_literal:must not run".to_string(),
+                arguments: serde_json::json!({}),
             },
             false,
         )
@@ -2866,6 +4130,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Skill]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -2932,6 +4197,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::MemoryWrite]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -2974,6 +4240,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::MemoryRead]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3065,11 +4332,12 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Secret]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
         let secrets = BTreeMap::from([(
-            "openai-api-key".to_string(),
+            "vault/openai-api-key".to_string(),
             "ferrogate governed secret smoke".to_string(),
         )]);
 
@@ -3077,7 +4345,7 @@ mod tests {
             &gate,
             session(),
             ManagedSecretAction {
-                secret_id: "openai-api-key".to_string(),
+                secret_id: "vault/openai-api-key".to_string(),
                 purpose: "provider_call".to_string(),
             },
             &secrets,
@@ -3094,9 +4362,13 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
+        let expected_secret_fingerprint = opaque_reference_fingerprint("vault/openai-api-key");
         assert_eq!(
-            events[1].metadata.get("secret_id").map(String::as_str),
-            Some("openai-api-key")
+            events[1]
+                .metadata
+                .get("secret_ref_fingerprint")
+                .map(String::as_str),
+            Some(expected_secret_fingerprint.as_str())
         );
         assert_eq!(
             events[1].metadata.get("redacted_value").map(String::as_str),
@@ -3137,6 +4409,7 @@ mod tests {
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
                 allow_direct_network_egress: true,
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3148,6 +4421,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: server.endpoint.port(),
                 protocol: "tcp".to_string(),
+                resolved_ips: vec!["127.0.0.1".to_string()],
             },
             false,
         )
@@ -3191,6 +4465,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: endpoint.port(),
                 protocol: "tcp".to_string(),
+                resolved_ips: Vec::new(),
             },
             false,
         )
@@ -3210,6 +4485,7 @@ mod tests {
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
                 allow_direct_network_egress: false,
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3223,6 +4499,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 9,
                 protocol: "tcp".to_string(),
+                resolved_ips: Vec::new(),
             },
             false,
         )
@@ -3236,6 +4513,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Browser]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3296,58 +4574,6 @@ mod tests {
     }
 
     #[test]
-    fn governed_cli_execution_runs_only_after_gateway_authorization() {
-        let temp = tempfile::tempdir().unwrap();
-        let binary_path = temp.path().join("governed-cli-smoke");
-        let marker_path = temp.path().join("executed-marker");
-        write_executable_script(
-            &binary_path,
-            &format!(
-                "#!/bin/sh\nprintf 'executed %s\\n' \"$1\"\nprintf done > {}\n",
-                marker_path.display()
-            ),
-        );
-        let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
-            CapabilityPolicy {
-                allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
-                ..CapabilityPolicy::default()
-            },
-        ));
-
-        let events = execute_governed_cli_action(
-            &gate,
-            session(),
-            ManagedCliAction {
-                command: binary_path.display().to_string(),
-                args: vec!["ok".to_string()],
-                working_dir: temp.path().display().to_string(),
-                env_policy: "deny_all".to_string(),
-                timeout_millis: 1_000,
-                stdout_limit_bytes: 128,
-                stderr_limit_bytes: 128,
-                artifact_capture: false,
-            },
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(events[0].kind.as_str(), "capability.allowed");
-        assert_eq!(events[1].kind.as_str(), "cli.requested");
-        assert_eq!(
-            events[1]
-                .metadata
-                .get("executed_after_authorization")
-                .map(String::as_str),
-            Some("true")
-        );
-        assert!(events[1]
-            .metadata
-            .get("stdout_excerpt")
-            .is_some_and(|stdout| stdout.contains("executed ok")));
-        assert!(marker_path.exists());
-    }
-
-    #[test]
     fn governed_cli_execution_denial_happens_before_process_spawn() {
         let temp = tempfile::tempdir().unwrap();
         let binary_path = temp.path().join("must-not-run");
@@ -3385,6 +4611,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3427,6 +4654,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3473,6 +4701,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Rest]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3487,6 +4716,8 @@ mod tests {
                 body_policy: "empty_body".to_string(),
                 timeout_millis: 1_000,
                 retry_limit: 0,
+                resolved_ips: vec!["127.0.0.1".to_string()],
+                redirect_chain: Vec::new(),
             },
             false,
         )
@@ -3533,6 +4764,8 @@ mod tests {
                 body_policy: "empty_body".to_string(),
                 timeout_millis: 1_000,
                 retry_limit: 0,
+                resolved_ips: Vec::new(),
+                redirect_chain: Vec::new(),
             },
             false,
         )
@@ -3557,6 +4790,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Filesystem]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3629,6 +4863,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Filesystem]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3646,7 +4881,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("must stay inside the workspace"));
+        assert!(error
+            .to_string()
+            .contains("cannot derive a canonical execution target"));
     }
 
     #[test]
@@ -3654,6 +4891,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3693,6 +4931,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3713,6 +4952,7 @@ mod tests {
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
                 approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3752,6 +4992,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3787,6 +5028,7 @@ mod tests {
             CapabilityPolicy {
                 allowed_actions,
                 allow_direct_network_egress: true,
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3803,6 +5045,14 @@ mod tests {
             let event = response.event.unwrap();
             assert_eq!(event["kind"], "capability.allowed");
             assert_eq!(event["metadata"]["external_action"], expected_action);
+            let expected_target = if expected_action == "secret" {
+                format!(
+                    "secret:{}",
+                    opaque_reference_fingerprint("vault/openai-api-key")
+                )
+            } else {
+                expected_target.to_string()
+            };
             assert_eq!(event["metadata"]["external_target"], expected_target);
             assert_eq!(event["metadata"]["tenant_id"], "tenant-1");
             assert_eq!(event["metadata"]["worker_id"], "worker-1");
@@ -3816,6 +5066,7 @@ mod tests {
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
                 allow_direct_network_egress: false,
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -3824,6 +5075,7 @@ mod tests {
             host: "api.example.test".to_string(),
             port: 443,
             protocol: "https".to_string(),
+            resolved_ips: Vec::new(),
         };
         let input = serde_json::to_string(&request).unwrap();
 
@@ -3852,6 +5104,8 @@ mod tests {
                 RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
                     CapabilityPolicy {
                         allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                        class_only_policy_mode:
+                            ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                         ..CapabilityPolicy::default()
                     },
                 )),
@@ -3859,7 +5113,10 @@ mod tests {
             )
         });
         wait_for_authorizer_socket(&socket_path).unwrap();
-        let client = UnixGatewayExternalActionAuthorizer::new(&socket_path);
+        let client = UnixGatewayExternalActionAuthorizer::new_authenticated(
+            &socket_path,
+            std::process::id(),
+        );
 
         let decision = authorize_handler_external_action(
             Some(&client),
@@ -3906,7 +5163,10 @@ mod tests {
             )
         });
         wait_for_authorizer_socket(&socket_path).unwrap();
-        let client = UnixGatewayExternalActionAuthorizer::new(&socket_path);
+        let client = UnixGatewayExternalActionAuthorizer::new_authenticated(
+            &socket_path,
+            std::process::id(),
+        );
 
         let error = authorize_handler_external_action(
             Some(&client),
@@ -3972,7 +5232,10 @@ mod tests {
                 .unwrap();
         });
         wait_for_authorizer_socket(&socket_path).unwrap();
-        let client = UnixGatewayExternalActionAuthorizer::new(&socket_path);
+        let client = UnixGatewayExternalActionAuthorizer::new_authenticated(
+            &socket_path,
+            std::process::id(),
+        );
 
         let error = authorize_handler_external_action(
             Some(&client),
@@ -4142,6 +5405,7 @@ mod tests {
         let gate = RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -4200,6 +5464,7 @@ mod tests {
                 server_name: "filesystem".to_string(),
                 tool_name: "read_file".to_string(),
                 arguments_policy: "workspace_only".to_string(),
+                arguments: serde_json::json!({}),
             }),
             high_risk: false,
         };
@@ -4240,6 +5505,7 @@ mod tests {
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Cli]),
                 approval_required_actions: BTreeSet::from([CapabilityAction::Cli]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ));
@@ -4317,6 +5583,8 @@ mod tests {
                 body_policy: "redact_and_scan".to_string(),
                 timeout_millis: 2_000,
                 retry_limit: 0,
+                resolved_ips: Vec::new(),
+                redirect_chain: Vec::new(),
             }),
             Some(CapabilityAuthorizationDecision::Allowed),
         );
@@ -4338,6 +5606,7 @@ mod tests {
                 host: "api.example.test".to_string(),
                 port: 443,
                 protocol: "https".to_string(),
+                resolved_ips: Vec::new(),
             }),
             Some(CapabilityAuthorizationDecision::Allowed),
         );
@@ -4515,6 +5784,7 @@ mod tests {
                     server_name: "filesystem".to_string(),
                     tool_name: "read_file".to_string(),
                     arguments_policy: "workspace_only".to_string(),
+                    arguments: serde_json::json!({}),
                 },
                 "mcp.tool",
                 "mcp:filesystem:read_file",
@@ -4567,17 +5837,19 @@ mod tests {
                     body_policy: "guardrail_scan".to_string(),
                     timeout_millis: 10_000,
                     retry_limit: 2,
+                    resolved_ips: Vec::new(),
+                    redirect_chain: Vec::new(),
                 },
                 "rest",
                 "POST https://api.example.test/v1/jobs",
             ),
             (
                 ExternalActionSpec::Secret {
-                    secret_id: "openai-api-key".to_string(),
+                    secret_id: "vault/openai-api-key".to_string(),
                     purpose: "provider_call".to_string(),
                 },
                 "secret",
-                "secret:openai-api-key",
+                "secret:vault/openai-api-key",
             ),
             (
                 ExternalActionSpec::Memory {
@@ -4602,6 +5874,7 @@ mod tests {
                     host: "api.example.test".to_string(),
                     port: 443,
                     protocol: "https".to_string(),
+                    resolved_ips: Vec::new(),
                 },
                 "network.egress",
                 "api.example.test:443",
@@ -4613,6 +5886,7 @@ mod tests {
         RuntimeGatewayExternalActionAuthorizer::new(SimpleCapabilityAuthorizer::new(
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         ))
@@ -4633,3 +5907,7 @@ mod tests {
 #[cfg(test)]
 #[path = "external_actions_worker_type_test.rs"]
 mod external_actions_worker_type_test;
+
+#[cfg(test)]
+#[path = "external_actions_target_test.rs"]
+mod external_actions_target_test;

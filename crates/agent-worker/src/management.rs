@@ -9,7 +9,7 @@ use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     os::unix::net::UnixListener,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,7 +27,7 @@ use ferrogate_runtime::{
 
 use crate::{
     backends::isolation_backends,
-    external_actions::{GatewayExternalActionAuthorizer, HttpGatewayExternalActionAuthorizer},
+    external_actions::{GatewayExternalActionAuthorizer, UnixGatewayExternalActionAuthorizer},
     handlers::framework_handlers,
     lifecycle::dispatch_lifecycle_action,
     state::{AgentWorkerStateStore, InMemoryAgentWorkerStateStore},
@@ -40,12 +40,24 @@ struct AgentWorkerRuntime {
     external_action_authorizer: Option<Box<dyn GatewayExternalActionAuthorizer + Send + Sync>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct ExternalAuthorizerConfig {
+    socket_path: PathBuf,
+    gateway_pid: u32,
+}
+
 impl AgentWorkerRuntime {
-    fn with_http_external_action_authorizer(endpoint: SocketAddr) -> Self {
+    fn with_unix_external_action_authorizer(
+        socket_path: impl Into<PathBuf>,
+        expected_gateway_pid: u32,
+    ) -> Self {
         Self {
-            external_action_authorizer: Some(Box::new(HttpGatewayExternalActionAuthorizer::new(
-                endpoint,
-            ))),
+            external_action_authorizer: Some(Box::new(
+                UnixGatewayExternalActionAuthorizer::new_authenticated(
+                    socket_path,
+                    expected_gateway_pid,
+                ),
+            )),
         }
     }
 
@@ -198,14 +210,16 @@ pub(crate) fn serve_management_unix_command(
     now_unix_millis: Option<u64>,
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
+    external_action_authorizer: Option<ExternalAuthorizerConfig>,
 ) -> Result<()> {
-    let responses = serve_management_unix(
+    let responses = serve_management_unix_with_external_authorizer(
         socket_path,
         key_id,
         shared_secret,
         now_unix_millis,
         max_requests,
         idle_timeout_millis,
+        external_action_authorizer,
     )?;
     if let Some(response) = responses.last() {
         println!(
@@ -227,7 +241,7 @@ pub(crate) fn serve_management_http_command(
     now_unix_millis: Option<u64>,
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
-    external_action_authorizer_http_endpoint: Option<SocketAddr>,
+    external_action_authorizer: Option<ExternalAuthorizerConfig>,
 ) -> Result<()> {
     let responses = serve_management_http(
         listen,
@@ -236,7 +250,7 @@ pub(crate) fn serve_management_http_command(
         now_unix_millis,
         max_requests,
         idle_timeout_millis,
-        external_action_authorizer_http_endpoint,
+        external_action_authorizer,
     )?;
     if let Some(response) = responses.last() {
         println!(
@@ -258,7 +272,7 @@ fn serve_management_http(
     now_unix_millis: Option<u64>,
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
-    external_action_authorizer_http_endpoint: Option<SocketAddr>,
+    external_action_authorizer: Option<ExternalAuthorizerConfig>,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -271,7 +285,7 @@ fn serve_management_http(
         now_unix_millis,
         max_requests,
         idle_timeout_millis,
-        external_action_authorizer_http_endpoint,
+        external_action_authorizer,
     )
 }
 
@@ -282,7 +296,7 @@ fn serve_management_http_listener(
     now_unix_millis: Option<u64>,
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
-    external_action_authorizer_http_endpoint: Option<SocketAddr>,
+    external_action_authorizer: Option<ExternalAuthorizerConfig>,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -294,8 +308,11 @@ fn serve_management_http_listener(
         }])?,
     )));
     let state = Arc::new(Mutex::new(InMemoryAgentWorkerStateStore::new()));
-    let runtime = Arc::new(match external_action_authorizer_http_endpoint {
-        Some(endpoint) => AgentWorkerRuntime::with_http_external_action_authorizer(endpoint),
+    let runtime = Arc::new(match external_action_authorizer {
+        Some(config) => AgentWorkerRuntime::with_unix_external_action_authorizer(
+            config.socket_path,
+            config.gateway_pid,
+        ),
         None => AgentWorkerRuntime::default(),
     });
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
@@ -537,6 +554,7 @@ fn http_invalid_request_response(message: impl Into<String>) -> AgentWorkerManag
     )
 }
 
+#[cfg(test)]
 fn serve_management_unix(
     socket_path: &Path,
     key_id: &str,
@@ -544,6 +562,26 @@ fn serve_management_unix(
     now_unix_millis: Option<u64>,
     max_requests: usize,
     idle_timeout_millis: Option<u64>,
+) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
+    serve_management_unix_with_external_authorizer(
+        socket_path,
+        key_id,
+        shared_secret,
+        now_unix_millis,
+        max_requests,
+        idle_timeout_millis,
+        None,
+    )
+}
+
+fn serve_management_unix_with_external_authorizer(
+    socket_path: &Path,
+    key_id: &str,
+    shared_secret: &str,
+    now_unix_millis: Option<u64>,
+    max_requests: usize,
+    idle_timeout_millis: Option<u64>,
+    external_action_authorizer: Option<ExternalAuthorizerConfig>,
 ) -> Result<Vec<ferrogate_runtime::AgentWorkerManagementResponse>> {
     if max_requests == 0 {
         anyhow::bail!("max_requests must be greater than zero");
@@ -559,6 +597,13 @@ fn serve_management_unix(
         }])?,
     )));
     let state = Arc::new(Mutex::new(InMemoryAgentWorkerStateStore::new()));
+    let runtime = Arc::new(match external_action_authorizer {
+        Some(config) => AgentWorkerRuntime::with_unix_external_action_authorizer(
+            config.socket_path,
+            config.gateway_pid,
+        ),
+        None => AgentWorkerRuntime::default(),
+    });
     let now_unix_millis = now_unix_millis.unwrap_or_else(current_unix_millis);
     let mut handles = Vec::with_capacity(max_requests);
     let idle_timeout = idle_timeout_millis.map(Duration::from_millis);
@@ -574,12 +619,14 @@ fn serve_management_unix(
             Ok((stream, _)) => {
                 let transport = Arc::clone(&transport);
                 let state = Arc::clone(&state);
+                let runtime = Arc::clone(&runtime);
                 let shared_secret = shared_secret.to_string();
                 handles.push(thread::spawn(move || {
                     handle_management_unix_stream(
                         stream,
                         transport,
                         state,
+                        runtime,
                         &shared_secret,
                         now_unix_millis,
                     )
@@ -612,6 +659,30 @@ fn serve_management_unix(
     Ok(responses)
 }
 
+pub(crate) fn external_authorizer_config(
+    socket_path: Option<PathBuf>,
+    gateway_pid: Option<u32>,
+) -> Result<Option<ExternalAuthorizerConfig>> {
+    match (socket_path, gateway_pid) {
+        (None, None) => Ok(None),
+        (Some(socket_path), Some(gateway_pid)) => {
+            if gateway_pid == 0 {
+                anyhow::bail!("external action authorizer expected gateway PID must be non-zero");
+            }
+            Ok(Some(ExternalAuthorizerConfig {
+                socket_path,
+                gateway_pid,
+            }))
+        }
+        (Some(_), None) => {
+            anyhow::bail!("external action authorizer socket requires an expected gateway PID")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("external action authorizer expected gateway PID requires a socket")
+        }
+    }
+}
+
 fn is_idle_accept_error(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -623,6 +694,7 @@ fn handle_management_unix_stream(
     mut stream: std::os::unix::net::UnixStream,
     transport: Arc<Mutex<InMemoryAgentWorkerManagementTransport>>,
     state: Arc<Mutex<InMemoryAgentWorkerStateStore>>,
+    runtime: Arc<AgentWorkerRuntime>,
     shared_secret: &str,
     now_unix_millis: u64,
 ) -> Result<ferrogate_runtime::AgentWorkerManagementResponse> {
@@ -639,7 +711,6 @@ fn handle_management_unix_stream(
     let mut state = state
         .lock()
         .map_err(|_| anyhow::anyhow!("agent-worker management state lock poisoned"))?;
-    let runtime = AgentWorkerRuntime::default();
     let response = accept_verified_management_response(&mut *state, &runtime, envelope, response);
     let response_json = serde_json::to_string(&response)?;
     stream.write_all(response_json.as_bytes())?;

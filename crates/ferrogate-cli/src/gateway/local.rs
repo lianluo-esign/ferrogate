@@ -35,22 +35,23 @@ use crate::{
         AdminConfigValidateRequest, AdminConfigValidateResponse, AdminDeleteResponse,
         AdminDrainRequest, AdminDrainResponse, AdminFrameworkAdapterRuntime,
         AdminGatewayConfigMutation, AdminGatewayConfigMutationResponse, AdminGatewayConfigProfile,
-        AdminList, AdminManagedWorkerIsolationBackend, AdminManagedWorkerPersistence,
-        AdminManagedWorkerRuntime, AdminMcpServerMutationResponse, AdminPlugin,
-        AdminPluginMutation, AdminPluginMutationResponse, AdminPolicyMutation,
-        AdminPolicyMutationResponse, AdminPromptTemplate, AdminPromptTemplateMutation,
-        AdminPromptTemplateMutationResponse, AdminProvider, AdminProviderModelCandidate,
-        AdminProviderModelCatalog, AdminSelfHostedWorkerArtifactRequest,
-        AdminSelfHostedWorkerArtifactResponse, AdminSelfHostedWorkerCheckpointRequest,
-        AdminSelfHostedWorkerCheckpointResponse, AdminSelfHostedWorkerDispatchContract,
-        AdminSelfHostedWorkerHeartbeatRequest, AdminSelfHostedWorkerHeartbeatResponse,
-        AdminSelfHostedWorkerPersistence, AdminSelfHostedWorkerRegistrationRequest,
-        AdminSelfHostedWorkerRegistrationResponse, AdminSelfHostedWorkerRotateRequest,
-        AdminSelfHostedWorkerRuntime, AdminSelfHostedWorkerSurface,
-        AdminSelfHostedWorkerTelemetryEventRequest, AdminSelfHostedWorkerTelemetryEventResponse,
-        AdminSkillPackage, AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage,
-        AgentUpstreamDiscovery, HealthResponse, OpenAiModel, OpenAiModelList,
-        PromptTemplateRenderRequest, ReadinessResponse, SelfHostedWorkerArtifactTransportRequest,
+        AdminList, AdminManagedWorkerCapabilityPolicy, AdminManagedWorkerIsolationBackend,
+        AdminManagedWorkerPersistence, AdminManagedWorkerRuntime, AdminManagedWorkerTargetGrant,
+        AdminMcpServerMutationResponse, AdminPlugin, AdminPluginMutation,
+        AdminPluginMutationResponse, AdminPolicyMutation, AdminPolicyMutationResponse,
+        AdminPromptTemplate, AdminPromptTemplateMutation, AdminPromptTemplateMutationResponse,
+        AdminProvider, AdminProviderModelCandidate, AdminProviderModelCatalog,
+        AdminSelfHostedWorkerArtifactRequest, AdminSelfHostedWorkerArtifactResponse,
+        AdminSelfHostedWorkerCheckpointRequest, AdminSelfHostedWorkerCheckpointResponse,
+        AdminSelfHostedWorkerDispatchContract, AdminSelfHostedWorkerHeartbeatRequest,
+        AdminSelfHostedWorkerHeartbeatResponse, AdminSelfHostedWorkerPersistence,
+        AdminSelfHostedWorkerRegistrationRequest, AdminSelfHostedWorkerRegistrationResponse,
+        AdminSelfHostedWorkerRotateRequest, AdminSelfHostedWorkerRuntime,
+        AdminSelfHostedWorkerSurface, AdminSelfHostedWorkerTelemetryEventRequest,
+        AdminSelfHostedWorkerTelemetryEventResponse, AdminSkillPackage,
+        AdminSkillPackageMutationResponse, AdminStatus, AgentSkillPackage, AgentUpstreamDiscovery,
+        HealthResponse, OpenAiModel, OpenAiModelList, PromptTemplateRenderRequest,
+        ReadinessResponse, SelfHostedWorkerArtifactTransportRequest,
         SelfHostedWorkerCheckpointTransportRequest, SelfHostedWorkerHeartbeatTransportRequest,
         SelfHostedWorkerRunAckResponse, SelfHostedWorkerRunLeaseResponse,
         SelfHostedWorkerTelemetryEventTransportRequest,
@@ -4428,6 +4429,46 @@ impl FerroGateway {
                         },
                     ],
                     capability_boundary: "gateway_mediated",
+                    capability_policy: AdminManagedWorkerCapabilityPolicy {
+                        revision: state
+                            .config
+                            .agent_runtime
+                            .managed_worker
+                            .policy_revision
+                            .clone(),
+                        class_only_policy_mode: match state
+                            .config
+                            .agent_runtime
+                            .managed_worker
+                            .class_only_policy_mode
+                        {
+                            ferrogate_runtime::ClassOnlyPolicyMode::Deny => "deny",
+                            ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide => {
+                                "legacy_class_wide"
+                            }
+                        },
+                        target_level_enforced: state
+                            .config
+                            .agent_runtime
+                            .managed_worker
+                            .class_only_policy_mode
+                            != ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
+                        action_fingerprint_contract: "canonical_target_sha256",
+                        exact_action_approval_enforced: false,
+                        target_grants: state
+                            .config
+                            .agent_runtime
+                            .managed_worker
+                            .target_grants
+                            .iter()
+                            .map(|grant| AdminManagedWorkerTargetGrant {
+                                selector_id: grant.selector_id.clone(),
+                                permission_key: grant.permission_key.clone(),
+                                action: grant.action.as_str(),
+                                selector: grant.selector.clone(),
+                            })
+                            .collect(),
+                    },
                     persistence: AdminManagedWorkerPersistence {
                         provider: storage.provider,
                         durable: storage.durable,

@@ -14,35 +14,63 @@
 
 use std::{
     io::{Read, Write},
-    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::Path,
     sync::Arc,
     thread,
 };
 
+#[cfg(test)]
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+
 use anyhow::{Context, Result as AnyResult};
 use ferrogate_core::TenantContext;
+#[cfg(test)]
+use ferrogate_runtime::CapabilityPolicy;
 use ferrogate_runtime::{
-    authorize_managed_external_action, CapabilityPolicy, ExternalActionAuthorizationResponse,
-    FrameworkAdapterError, GatewayExternalActionTransportRequest,
-    GatewayExternalActionTransportResponse, ManagedExternalActionDecision,
-    NormalizedFrameworkEvent, SimpleCapabilityAuthorizer,
+    authorize_managed_external_action, ExternalActionAuthorizationResponse, FrameworkAdapterError,
+    GatewayExternalActionTransportRequest, GatewayExternalActionTransportResponse,
+    ManagedExternalActionDecision, NormalizedFrameworkEvent, SimpleCapabilityAuthorizer,
 };
 use ferrogate_storage::StoredAgentRunEvent;
 
-use crate::state::AppState;
+use crate::state::{AppState, SharedAppState};
 
 const EXTERNAL_ACTION_AUTHORIZER_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub(super) struct GatewayExternalActionAuthorizerService {
-    state: AppState,
-    policy: CapabilityPolicy,
+    state: GatewayExternalActionAuthorizerState,
 }
 
+#[derive(Debug, Clone)]
+enum GatewayExternalActionAuthorizerState {
+    Dynamic(SharedAppState),
+    #[cfg(test)]
+    Fixed {
+        state: Box<AppState>,
+        policy: Box<CapabilityPolicy>,
+    },
+}
+
+#[cfg(test)]
+#[path = "external_actions_target_test.rs"]
+mod external_actions_target_test;
+
 impl GatewayExternalActionAuthorizerService {
-    pub(super) fn new(state: AppState, policy: CapabilityPolicy) -> Self {
-        Self { state, policy }
+    pub(super) fn new(state: SharedAppState) -> Self {
+        Self {
+            state: GatewayExternalActionAuthorizerState::Dynamic(state),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(state: AppState, policy: CapabilityPolicy) -> Self {
+        Self {
+            state: GatewayExternalActionAuthorizerState::Fixed {
+                state: Box::new(state),
+                policy: Box::new(policy),
+            },
+        }
     }
 
     pub(super) fn authorize_transport_request(
@@ -75,12 +103,43 @@ impl GatewayExternalActionAuthorizerService {
             Err(error) => return ExternalActionAuthorizationResponse::rejected(error),
         };
         let timeline_tenant = tenant_context_from_external_action(&managed_request.session);
+        let (state, policy) = match &self.state {
+            GatewayExternalActionAuthorizerState::Dynamic(shared) => {
+                let state = shared.current();
+                let policy = match super::managed_worker_capability_policy_for_tenant(
+                    &state,
+                    &managed_request.session.tenant_id,
+                ) {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        return ExternalActionAuthorizationResponse::rejected(
+                            FrameworkAdapterError::CapabilityDenied(format!(
+                                "managed action RBAC resolution failed closed: {error}"
+                            )),
+                        )
+                    }
+                };
+                (state, policy)
+            }
+            #[cfg(test)]
+            GatewayExternalActionAuthorizerState::Fixed { state, policy } => {
+                (state.as_ref().clone(), policy.as_ref().clone())
+            }
+        };
         match authorize_managed_external_action(
-            &SimpleCapabilityAuthorizer::new(self.policy.clone()),
+            &SimpleCapabilityAuthorizer::new(policy),
             managed_request,
         ) {
-            Ok((evidence, event)) => {
-                self.record_timeline_event(transport_request_id, timeline_tenant, event.clone());
+            Ok((evidence, mut event)) => {
+                event
+                    .metadata
+                    .insert("request_id".to_string(), transport_request_id.to_string());
+                Self::record_timeline_event(
+                    &state,
+                    transport_request_id,
+                    timeline_tenant,
+                    event.clone(),
+                );
                 ExternalActionAuthorizationResponse::from_decision(ManagedExternalActionDecision {
                     decision: evidence.decision,
                     event,
@@ -91,7 +150,7 @@ impl GatewayExternalActionAuthorizerService {
     }
 
     fn record_timeline_event(
-        &self,
+        state: &AppState,
         transport_request_id: &str,
         tenant: TenantContext,
         event: NormalizedFrameworkEvent,
@@ -99,7 +158,7 @@ impl GatewayExternalActionAuthorizerService {
         let Ok(record) = event.timeline_record() else {
             return;
         };
-        self.state.record_agent_run_event(StoredAgentRunEvent {
+        state.record_agent_run_event(StoredAgentRunEvent {
             id: record.event_id,
             run_id: record.run_id,
             request_id: transport_request_id.to_string(),
@@ -122,42 +181,117 @@ pub(super) fn serve_gateway_external_action_authorizer_unix(
     service: GatewayExternalActionAuthorizerService,
     max_requests: Option<usize>,
 ) -> AnyResult<Vec<GatewayExternalActionTransportResponse>> {
+    serve_gateway_external_action_authorizer_unix_with_hooks(
+        socket_path,
+        service,
+        max_requests,
+        || {},
+        || {},
+    )
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+fn serve_gateway_external_action_authorizer_unix_with_pre_bind_hook<F>(
+    socket_path: &Path,
+    service: GatewayExternalActionAuthorizerService,
+    max_requests: Option<usize>,
+    pre_bind_hook: F,
+) -> AnyResult<Vec<GatewayExternalActionTransportResponse>>
+where
+    F: FnOnce(),
+{
+    serve_gateway_external_action_authorizer_unix_with_hooks(
+        socket_path,
+        service,
+        max_requests,
+        pre_bind_hook,
+        || {},
+    )
+}
+
+#[cfg(unix)]
+fn serve_gateway_external_action_authorizer_unix_with_hooks<F, B>(
+    socket_path: &Path,
+    service: GatewayExternalActionAuthorizerService,
+    max_requests: Option<usize>,
+    pre_bind_hook: F,
+    bound_hook: B,
+) -> AnyResult<Vec<GatewayExternalActionTransportResponse>>
+where
+    F: FnOnce(),
+    B: FnOnce(),
+{
     use std::os::unix::net::UnixListener;
 
     if max_requests == Some(0) {
         anyhow::bail!("max_requests must be greater than zero");
     }
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path).with_context(|| {
+    let validated = validate_external_action_authorizer_socket_parent(socket_path)?;
+    pre_bind_hook();
+    validated.revalidate_path()?;
+    let anchored_socket_path = validated.anchored_socket_path()?;
+    if anchored_socket_path.exists() {
+        std::fs::remove_file(&anchored_socket_path).with_context(|| {
             format!(
                 "failed to remove stale gateway external action authorizer socket {}",
-                socket_path.display()
+                validated.canonical_socket_path.display()
             )
         })?;
     }
-    let listener = UnixListener::bind(socket_path).with_context(|| {
+    validated.revalidate_path()?;
+    let listener = UnixListener::bind(&anchored_socket_path).with_context(|| {
         format!(
             "failed to bind gateway external action authorizer socket {}",
-            socket_path.display()
+            validated.canonical_socket_path.display()
         )
     })?;
+    listener.set_nonblocking(true)?;
+    let _socket_cleanup = UnixSocketPathCleanup(anchored_socket_path.clone());
+    use std::os::unix::fs::PermissionsExt;
+    validated.revalidate_path()?;
+    if let Err(error) = std::fs::set_permissions(
+        &anchored_socket_path,
+        std::fs::Permissions::from_mode(0o600),
+    ) {
+        let _ = std::fs::remove_file(&anchored_socket_path);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to restrict gateway external action authorizer socket {} to mode 0600",
+                validated.canonical_socket_path.display()
+            )
+        });
+    }
+    validated.verify_bound_socket(&anchored_socket_path)?;
+    bound_hook();
     let service = Arc::new(service);
     let mut handles = Vec::with_capacity(max_requests.unwrap_or(0));
-    while max_requests.is_none_or(|limit| handles.len() < limit) {
-        let (stream, _) = listener.accept().with_context(|| {
-            format!(
-                "failed to accept gateway external action authorizer connection at {}",
-                socket_path.display()
-            )
-        })?;
+    let mut responses = Vec::with_capacity(max_requests.unwrap_or(0));
+    let mut accepted_requests = 0_usize;
+    while !external_action_request_limit_reached(accepted_requests, max_requests) {
+        validated.verify_bound_socket(&anchored_socket_path)?;
+        let (stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to accept gateway external action authorizer connection at {}",
+                        validated.canonical_socket_path.display()
+                    )
+                })
+            }
+        };
+        accepted_requests = accepted_requests.saturating_add(1);
         let service = Arc::clone(&service);
         handles.push(thread::spawn(move || {
             handle_gateway_external_action_authorizer_stream(stream, service)
         }));
-        reap_finished_authorizer_threads(&mut handles)?;
+        reap_finished_authorizer_threads(&mut handles, &mut responses)?;
     }
-    let _ = std::fs::remove_file(socket_path);
-    let mut responses = Vec::with_capacity(handles.len());
     for handle in handles {
         responses.push(handle.join().map_err(|_| {
             anyhow::anyhow!("gateway external action authorizer thread panicked")
@@ -166,7 +300,248 @@ pub(super) fn serve_gateway_external_action_authorizer_unix(
     Ok(responses)
 }
 
-pub(super) fn serve_gateway_external_action_authorizer_http(
+#[cfg(unix)]
+struct UnixSocketPathCleanup(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for UnixSocketPathCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ValidatedExternalActionAuthorizerSocketPath {
+    canonical_socket_path: std::path::PathBuf,
+    canonical_parent: std::path::PathBuf,
+    file_name: std::ffi::OsString,
+    parent_device: u64,
+    parent_inode: u64,
+    parent_dir: std::fs::File,
+    effective_uid: u32,
+}
+
+#[cfg(unix)]
+impl ValidatedExternalActionAuthorizerSocketPath {
+    fn revalidate_path(&self) -> AnyResult<()> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let current_parent = std::fs::canonicalize(&self.canonical_parent).with_context(|| {
+            format!(
+                "gateway external action authorizer socket parent {} changed after validation",
+                self.canonical_parent.display()
+            )
+        })?;
+        let metadata = std::fs::symlink_metadata(&self.canonical_parent)?;
+        if current_parent != self.canonical_parent
+            || metadata.dev() != self.parent_device
+            || metadata.ino() != self.parent_inode
+        {
+            anyhow::bail!(
+                "gateway external action authorizer socket parent {} changed after validation",
+                self.canonical_parent.display()
+            );
+        }
+        validate_external_action_authorizer_parent_access(
+            metadata.uid(),
+            metadata.permissions().mode() & 0o777,
+            self.effective_uid,
+        )?;
+        validate_external_action_authorizer_ancestor_chain(
+            &self.canonical_parent,
+            self.effective_uid,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn anchored_socket_path(&self) -> AnyResult<std::path::PathBuf> {
+        use std::os::fd::AsRawFd;
+
+        Ok(std::path::PathBuf::from(format!(
+            "/proc/self/fd/{}/{}",
+            self.parent_dir.as_raw_fd(),
+            self.file_name.to_string_lossy()
+        )))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn anchored_socket_path(&self) -> AnyResult<std::path::PathBuf> {
+        anyhow::bail!("race-resistant Unix authorizer socket binding requires Linux procfs")
+    }
+
+    fn verify_bound_socket(&self, anchored_socket_path: &Path) -> AnyResult<()> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
+        self.revalidate_path()?;
+        let anchored = std::fs::symlink_metadata(anchored_socket_path)?;
+        let canonical =
+            std::fs::symlink_metadata(&self.canonical_socket_path).with_context(|| {
+                format!(
+                    "gateway external action authorizer socket {} changed after bind",
+                    self.canonical_socket_path.display()
+                )
+            })?;
+        if !anchored.file_type().is_socket()
+            || !canonical.file_type().is_socket()
+            || anchored.dev() != canonical.dev()
+            || anchored.ino() != canonical.ino()
+            || canonical.permissions().mode() & 0o777 != 0o600
+        {
+            anyhow::bail!(
+                "gateway external action authorizer socket {} failed identity or mode verification",
+                self.canonical_socket_path.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn validate_external_action_authorizer_socket_parent(
+    socket_path: &Path,
+) -> AnyResult<ValidatedExternalActionAuthorizerSocketPath> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !socket_path.is_absolute() {
+        anyhow::bail!("gateway external action authorizer socket path must be absolute");
+    }
+    let file_name = socket_path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .context("gateway external action authorizer socket path has no filename")?
+        .to_os_string();
+    let parent = socket_path.parent().with_context(|| {
+        format!(
+            "gateway external action authorizer socket {} has no parent directory",
+            socket_path.display()
+        )
+    })?;
+    let parent = std::fs::canonicalize(parent).with_context(|| {
+        format!(
+            "gateway external action authorizer socket parent {} must already exist",
+            parent.display()
+        )
+    })?;
+    if socket_path.parent() != Some(parent.as_path()) {
+        anyhow::bail!(
+            "gateway external action authorizer socket lexical parent must equal its canonical parent; symlinked or non-normalized parents are rejected"
+        );
+    }
+    let metadata = std::fs::symlink_metadata(&parent).with_context(|| {
+        format!(
+            "failed to inspect gateway external action authorizer socket parent {}",
+            parent.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "gateway external action authorizer socket parent {} is not a directory",
+            parent.display()
+        );
+    }
+    let effective_uid = rustix::process::geteuid().as_raw();
+    let mode = metadata.permissions().mode() & 0o777;
+    validate_external_action_authorizer_parent_access(metadata.uid(), mode, effective_uid)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "gateway external action authorizer socket parent {} is insecure: {error}",
+                parent.display()
+            )
+        })?;
+    validate_external_action_authorizer_ancestor_chain(&parent, effective_uid)?;
+    use rustix::fs::{open, Mode, OFlags};
+    let parent_fd = open(
+        &parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    let parent_dir: std::fs::File = parent_fd.into();
+    let opened_metadata = parent_dir.metadata()?;
+    if opened_metadata.dev() != metadata.dev() || opened_metadata.ino() != metadata.ino() {
+        anyhow::bail!(
+            "gateway external action authorizer socket parent changed while opening directory"
+        );
+    }
+    Ok(ValidatedExternalActionAuthorizerSocketPath {
+        canonical_socket_path: parent.join(&file_name),
+        canonical_parent: parent,
+        file_name,
+        parent_device: metadata.dev(),
+        parent_inode: metadata.ino(),
+        parent_dir,
+        effective_uid,
+    })
+}
+
+#[cfg(unix)]
+fn validate_external_action_authorizer_ancestor_chain(
+    parent: &Path,
+    effective_uid: u32,
+) -> AnyResult<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let mut child = parent;
+    for ancestor in parent.ancestors().skip(1) {
+        let metadata = std::fs::symlink_metadata(ancestor)?;
+        let mode = metadata.permissions().mode();
+        let child_metadata = std::fs::symlink_metadata(child)?;
+        validate_external_action_authorizer_ancestor_access(
+            metadata.uid(),
+            mode,
+            child_metadata.uid(),
+            effective_uid,
+        )
+        .with_context(|| format!("insecure socket path ancestor {}", ancestor.display()))?;
+        child = ancestor;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_external_action_authorizer_ancestor_access(
+    owner_uid: u32,
+    mode: u32,
+    child_owner_uid: u32,
+    effective_uid: u32,
+) -> AnyResult<()> {
+    if owner_uid != 0 && owner_uid != effective_uid {
+        anyhow::bail!(
+            "socket path ancestor owner uid {owner_uid} is neither root nor effective uid {effective_uid}"
+        );
+    }
+    if mode & 0o022 != 0 {
+        if mode & 0o1000 == 0 {
+            anyhow::bail!("writable socket path ancestor must have the sticky bit");
+        }
+        if child_owner_uid != effective_uid {
+            anyhow::bail!(
+                "child beneath sticky writable ancestor must be owned by effective uid {effective_uid}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_external_action_authorizer_parent_access(
+    owner_uid: u32,
+    mode: u32,
+    effective_uid: u32,
+) -> AnyResult<()> {
+    if owner_uid != effective_uid {
+        anyhow::bail!(
+            "socket parent must be owned by effective uid {effective_uid} (actual uid={owner_uid})"
+        );
+    }
+    if mode != 0o700 {
+        anyhow::bail!("socket parent must have mode 0700 (mode={mode:04o})");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn serve_gateway_external_action_authorizer_http(
     listen: SocketAddr,
     service: GatewayExternalActionAuthorizerService,
     max_requests: Option<usize>,
@@ -179,19 +554,21 @@ pub(super) fn serve_gateway_external_action_authorizer_http(
     })?;
     let service = Arc::new(service);
     let mut handles = Vec::with_capacity(max_requests.unwrap_or(0));
-    while max_requests.is_none_or(|limit| handles.len() < limit) {
+    let mut responses = Vec::with_capacity(max_requests.unwrap_or(0));
+    let mut accepted_requests = 0_usize;
+    while !external_action_request_limit_reached(accepted_requests, max_requests) {
         let (stream, _) = listener.accept().with_context(|| {
             format!(
                 "failed to accept gateway external action HTTP authorizer connection at {listen}"
             )
         })?;
+        accepted_requests = accepted_requests.saturating_add(1);
         let service = Arc::clone(&service);
         handles.push(thread::spawn(move || {
             handle_gateway_external_action_authorizer_http_stream(stream, service)
         }));
-        reap_finished_authorizer_threads(&mut handles)?;
+        reap_finished_authorizer_threads(&mut handles, &mut responses)?;
     }
-    let mut responses = Vec::with_capacity(handles.len());
     for handle in handles {
         responses.push(handle.join().map_err(|_| {
             anyhow::anyhow!("gateway external action HTTP authorizer thread panicked")
@@ -200,16 +577,25 @@ pub(super) fn serve_gateway_external_action_authorizer_http(
     Ok(responses)
 }
 
+fn external_action_request_limit_reached(
+    accepted_requests: usize,
+    max_requests: Option<usize>,
+) -> bool {
+    max_requests.is_some_and(|limit| accepted_requests >= limit)
+}
+
 fn reap_finished_authorizer_threads(
     handles: &mut Vec<thread::JoinHandle<AnyResult<GatewayExternalActionTransportResponse>>>,
+    responses: &mut Vec<GatewayExternalActionTransportResponse>,
 ) -> AnyResult<()> {
     let mut index = 0;
     while index < handles.len() {
         if handles[index].is_finished() {
             let handle = handles.remove(index);
-            handle.join().map_err(|_| {
+            let response = handle.join().map_err(|_| {
                 anyhow::anyhow!("gateway external action authorizer thread panicked")
             })??;
+            responses.push(response);
         } else {
             index += 1;
         }
@@ -217,6 +603,7 @@ fn reap_finished_authorizer_threads(
     Ok(())
 }
 
+#[cfg(test)]
 fn handle_gateway_external_action_authorizer_http_stream(
     mut stream: TcpStream,
     service: Arc<GatewayExternalActionAuthorizerService>,
@@ -230,6 +617,7 @@ fn handle_gateway_external_action_authorizer_http_stream(
     Ok(response)
 }
 
+#[cfg(test)]
 fn read_external_action_authorizer_http_request(stream: &mut TcpStream) -> AnyResult<String> {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];
@@ -314,6 +702,7 @@ fn read_external_action_authorizer_http_request(stream: &mut TcpStream) -> AnyRe
     Ok(body.to_string())
 }
 
+#[cfg(test)]
 fn write_external_action_authorizer_http_response(
     stream: &mut TcpStream,
     status: u16,
@@ -335,6 +724,7 @@ fn write_external_action_authorizer_http_response(
         .context("failed to write external action HTTP authorization response")
 }
 
+#[cfg(test)]
 fn find_header_end(request: &[u8]) -> Option<usize> {
     request.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -396,7 +786,7 @@ mod tests {
         collections::BTreeSet,
         io::{Read, Write},
         net::{Shutdown, TcpListener, TcpStream},
-        os::unix::net::UnixStream,
+        os::unix::{fs::PermissionsExt, net::UnixStream},
         time::Duration,
     };
 
@@ -412,10 +802,11 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_allows_and_records_timeline_event() {
         let state = AppState::new(crate::config::Config::default());
-        let service = GatewayExternalActionAuthorizerService::new(
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         );
@@ -451,8 +842,10 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_denies_and_records_timeline_event() {
         let state = AppState::new(crate::config::Config::default());
-        let service =
-            GatewayExternalActionAuthorizerService::new(state.clone(), CapabilityPolicy::default());
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
+            state.clone(),
+            CapabilityPolicy::default(),
+        );
         let authorization =
             ExternalActionAuthorizationRequest::from_managed_request(managed_tool_request());
         let response = service.authorize_transport_request(GatewayExternalActionTransportRequest {
@@ -479,10 +872,11 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_uses_configured_approval_policy() {
         let state = AppState::new(crate::config::Config::default());
-        let service = GatewayExternalActionAuthorizerService::new(
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
                 approval_required_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         );
@@ -511,11 +905,12 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_can_allow_direct_network_egress_by_policy() {
         let state = AppState::new(crate::config::Config::default());
-        let service = GatewayExternalActionAuthorizerService::new(
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::NetworkEgress]),
                 allow_direct_network_egress: true,
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         );
@@ -542,10 +937,11 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_rejects_mismatched_request_id_without_timeline_event() {
         let state = AppState::new(crate::config::Config::default());
-        let service = GatewayExternalActionAuthorizerService::new(
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         );
@@ -574,12 +970,14 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_serves_shared_unix_transport_contract() {
         let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = temp.path().join("gateway-external-action-authorizer.sock");
         let state = AppState::new(crate::config::Config::default());
-        let service = GatewayExternalActionAuthorizerService::new(
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         );
@@ -616,10 +1014,11 @@ mod tests {
     #[test]
     fn gateway_external_action_authorizer_serves_shared_http_transport_contract() {
         let state = AppState::new(crate::config::Config::default());
-        let service = GatewayExternalActionAuthorizerService::new(
+        let service = GatewayExternalActionAuthorizerService::new_for_test(
             state.clone(),
             CapabilityPolicy {
                 allowed_actions: BTreeSet::from([CapabilityAction::Tool]),
+                class_only_policy_mode: ferrogate_runtime::ClassOnlyPolicyMode::LegacyClassWide,
                 ..CapabilityPolicy::default()
             },
         );
@@ -670,6 +1069,7 @@ mod tests {
                 host: "api.example.com".to_string(),
                 port: 443,
                 protocol: "tcp".to_string(),
+                resolved_ips: Vec::new(),
             }),
             high_risk: false,
         }

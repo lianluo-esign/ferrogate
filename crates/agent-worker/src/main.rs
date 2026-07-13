@@ -163,11 +163,20 @@ enum Command {
     AcceptExternalActionJson,
     /// Run the Unix socket gateway-authorizer transport smoke without executing the action.
     ExternalActionUnixTransportSmoke,
-    /// Call a gateway HTTP authorizer transport smoke without executing the action.
-    ExternalActionHttpTransportSmoke {
-        /// Gateway external action authorizer HTTP endpoint.
-        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_HTTP_ENDPOINT")]
-        gateway_authorizer_http_endpoint: SocketAddr,
+    /// Execute all target-governed action families through a live gateway Unix authorizer.
+    GovernedTargetExecutionUnixSmoke {
+        /// Gateway external action authorizer Unix socket.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_SOCKET")]
+        gateway_authorizer_socket: PathBuf,
+        /// Kernel-authenticated PID expected on the gateway Unix socket.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_PID")]
+        gateway_authorizer_pid: u32,
+        /// Workspace root containing the authorized filesystem smoke target.
+        #[arg(long)]
+        workspace_root: PathBuf,
+        /// Pinned loopback endpoint authorized for the network smoke target.
+        #[arg(long)]
+        network_target: SocketAddr,
     },
     /// Execute a local governed CLI smoke after gateway authorization.
     GovernedCliExecutionSmoke,
@@ -225,15 +234,24 @@ enum Command {
         /// Exit after this many idle milliseconds without a new management connection.
         #[arg(long)]
         idle_timeout_millis: Option<u64>,
+        /// Gateway Unix authorizer required before handler actions continue.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_SOCKET")]
+        external_action_authorizer_socket: Option<PathBuf>,
+        /// Kernel-authenticated PID expected on the gateway Unix socket.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_PID")]
+        external_action_authorizer_pid: Option<u32>,
     },
     /// Serve signed management JSON over the HTTP management API.
     ServeManagementHttp {
         /// HTTP listen address for the management API.
         #[arg(long, env = "AGENT_WORKER_MANAGEMENT_HTTP_ADDR")]
         listen: SocketAddr,
-        /// Gateway external action authorizer endpoint required before handler actions continue.
-        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_HTTP_ENDPOINT")]
-        external_action_authorizer_http_endpoint: Option<SocketAddr>,
+        /// Gateway Unix authorizer required before handler actions continue.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_SOCKET")]
+        external_action_authorizer_socket: Option<PathBuf>,
+        /// Kernel-authenticated PID expected on the gateway Unix socket.
+        #[arg(long, env = "AGENT_WORKER_EXTERNAL_ACTION_AUTHORIZER_PID")]
+        external_action_authorizer_pid: Option<u32>,
         /// Management key id expected in the signed envelope.
         #[arg(long, env = "AGENT_WORKER_MANAGEMENT_KEY_ID")]
         key_id: String,
@@ -346,10 +364,16 @@ fn main() -> Result<()> {
         Command::ExternalActionUnixTransportSmoke => {
             external_actions::external_action_unix_transport_smoke_command(worker_mode)
         }
-        Command::ExternalActionHttpTransportSmoke {
-            gateway_authorizer_http_endpoint,
-        } => external_actions::external_action_http_transport_smoke_command(
-            gateway_authorizer_http_endpoint,
+        Command::GovernedTargetExecutionUnixSmoke {
+            gateway_authorizer_socket,
+            gateway_authorizer_pid,
+            workspace_root,
+            network_target,
+        } => external_actions::governed_target_execution_unix_smoke_command(
+            &gateway_authorizer_socket,
+            gateway_authorizer_pid,
+            &workspace_root,
+            network_target,
             worker_mode,
         ),
         Command::GovernedCliExecutionSmoke => {
@@ -400,6 +424,8 @@ fn main() -> Result<()> {
             now_unix_millis,
             max_requests,
             idle_timeout_millis,
+            external_action_authorizer_socket,
+            external_action_authorizer_pid,
         } => management::serve_management_unix_command(
             &socket_path,
             &key_id,
@@ -407,10 +433,15 @@ fn main() -> Result<()> {
             now_unix_millis,
             max_requests,
             idle_timeout_millis,
+            management::external_authorizer_config(
+                external_action_authorizer_socket,
+                external_action_authorizer_pid,
+            )?,
         ),
         Command::ServeManagementHttp {
             listen,
-            external_action_authorizer_http_endpoint,
+            external_action_authorizer_socket,
+            external_action_authorizer_pid,
             key_id,
             shared_secret,
             now_unix_millis,
@@ -423,7 +454,10 @@ fn main() -> Result<()> {
             now_unix_millis,
             max_requests,
             idle_timeout_millis,
-            external_action_authorizer_http_endpoint,
+            management::external_authorizer_config(
+                external_action_authorizer_socket,
+                external_action_authorizer_pid,
+            )?,
         ),
     }
 }

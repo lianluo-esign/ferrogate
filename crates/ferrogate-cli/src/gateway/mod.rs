@@ -42,7 +42,6 @@ use pingora::{
     },
 };
 use std::{
-    net::SocketAddr,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -66,8 +65,7 @@ use crate::{
 };
 
 use self::external_actions::{
-    serve_gateway_external_action_authorizer_http, serve_gateway_external_action_authorizer_unix,
-    GatewayExternalActionAuthorizerService,
+    serve_gateway_external_action_authorizer_unix, GatewayExternalActionAuthorizerService,
 };
 
 /// Operator-facing label for the Pingora HTTP proxy service: used as the
@@ -239,33 +237,7 @@ fn start_external_action_authorizer_if_configured(
     let max_requests = config
         .managed_worker
         .external_action_authorizer_max_requests;
-    let service = GatewayExternalActionAuthorizerService::new(
-        current.clone(),
-        managed_worker_capability_policy(&config.managed_worker),
-    );
-
-    if let Some(http_listen) = config
-        .managed_worker
-        .external_action_authorizer_http_listen
-        .as_deref()
-    {
-        let listen: SocketAddr = match http_listen.parse() {
-            Ok(listen) => listen,
-            Err(error) => {
-                tracing::warn!(
-                    "gateway external action HTTP authorizer listen address is invalid: {error}"
-                );
-                return None;
-            }
-        };
-        return Some(thread::spawn(move || {
-            if let Err(error) =
-                serve_gateway_external_action_authorizer_http(listen, service, max_requests)
-            {
-                tracing::warn!("gateway external action HTTP authorizer exited: {error}");
-            }
-        }));
-    }
+    let service = GatewayExternalActionAuthorizerService::new(state.clone());
 
     #[cfg(unix)]
     let socket_path = config
@@ -302,7 +274,34 @@ fn managed_worker_capability_policy(
             .map(|action| action.as_policy_action())
             .collect(),
         allow_direct_network_egress: config.allow_direct_network_egress,
+        target_grants: config
+            .target_grants
+            .iter()
+            .map(|grant| ferrogate_runtime::CapabilityTargetGrant {
+                action: grant.action.as_policy_action(),
+                selector_id: grant.selector_id.clone(),
+                selector: grant.selector.clone(),
+            })
+            .collect(),
+        class_only_policy_mode: config.class_only_policy_mode,
+        revision: config.policy_revision.clone(),
     }
+}
+
+fn managed_worker_capability_policy_for_tenant(
+    state: &crate::state::AppState,
+    tenant_id: &str,
+) -> anyhow::Result<ferrogate_runtime::CapabilityPolicy> {
+    let config = &state.config.agent_runtime.managed_worker;
+    let mut policy = managed_worker_capability_policy(config);
+    let mut effective_grants = Vec::with_capacity(config.target_grants.len());
+    for (configured, runtime) in config.target_grants.iter().zip(policy.target_grants) {
+        if state.tenant_has_permission_result(tenant_id, &configured.permission_key)? {
+            effective_grants.push(runtime);
+        }
+    }
+    policy.target_grants = effective_grants;
+    Ok(policy)
 }
 
 #[derive(Debug)]
