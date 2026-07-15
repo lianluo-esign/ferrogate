@@ -130,11 +130,11 @@ pub struct McpIdentityRevocationOutcome {
 
 #[async_trait::async_trait]
 pub trait McpCredentialRepository {
-    fn authorize_mcp_identity(
+    async fn authorize_mcp_identity(
         &self,
         request: &McpIdentityAccessRequest,
     ) -> Result<McpIdentityAccessOutcome, StorageError>;
-    fn authorize_mcp_identity_with_operation(
+    async fn authorize_mcp_identity_with_operation(
         &self,
         request: &McpIdentityAccessRequest,
         operation: &StorageOperation,
@@ -251,32 +251,33 @@ fn oauth_flow_from_row(row: &PostgresRow) -> StoredMcpOauthFlow {
 }
 
 fn oauth_credential_from_row(row: &PostgresRow) -> Result<StoredMcpOauthCredential, StorageError> {
-    let scopes = super::deserialize_storage_document(&row.get::<_, String>(8))?;
+    let scopes = super::deserialize_storage_document(&row.get::<_, String>("scopes_json"))?;
     Ok(StoredMcpOauthCredential {
-        id: row.get(0),
-        tenant_id: row.get(1),
-        workspace_id: row.get(2),
-        user_id: row.get(3),
-        server_name: row.get(4),
-        issuer: row.get(5),
-        subject: row.get(6),
-        token_type: row.get(7),
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        workspace_id: row.get("workspace_id"),
+        user_id: row.get("user_id"),
+        server_name: row.get("server_name"),
+        issuer: row.get("issuer"),
+        subject: row.get("subject"),
+        token_type: row.get("token_type"),
         scopes,
-        access_token_nonce: row.get(9),
-        access_token_ciphertext: row.get(10),
-        refresh_token_nonce: row.get(11),
-        refresh_token_ciphertext: row.get(12),
-        expires_at_unix: row.get(13),
-        key_version: u32::try_from(row.get::<_, i64>(14)).unwrap_or(u32::MAX),
-        version: u64::try_from(row.get::<_, i64>(15)).unwrap_or(u64::MAX),
-        authorization_generation: u64::try_from(row.get::<_, i64>(16)).unwrap_or(u64::MAX),
-        refresh_lease_id: row.get(17),
-        refresh_lease_expires_at_unix: row.get(18),
-        created_at_unix: row.get(19),
-        updated_at_unix: row.get(20),
-        revoked_at_unix: row.get(21),
-        last_refresh_outcome: row.get(22),
-        last_revocation_outcome: row.get(23),
+        access_token_nonce: row.get("access_token_nonce"),
+        access_token_ciphertext: row.get("access_token_ciphertext"),
+        refresh_token_nonce: row.get("refresh_token_nonce"),
+        refresh_token_ciphertext: row.get("refresh_token_ciphertext"),
+        expires_at_unix: row.get("expires_at_unix"),
+        key_version: u32::try_from(row.get::<_, i64>("key_version")).unwrap_or(u32::MAX),
+        version: u64::try_from(row.get::<_, i64>("version")).unwrap_or(u64::MAX),
+        authorization_generation: u64::try_from(row.get::<_, i64>("authorization_generation"))
+            .unwrap_or(u64::MAX),
+        refresh_lease_id: row.get("refresh_lease_id"),
+        refresh_lease_expires_at_unix: row.get("refresh_lease_expires_at_unix"),
+        created_at_unix: row.get("created_at_unix"),
+        updated_at_unix: row.get("updated_at_unix"),
+        revoked_at_unix: row.get("revoked_at_unix"),
+        last_refresh_outcome: row.get("last_refresh_outcome"),
+        last_revocation_outcome: row.get("last_revocation_outcome"),
     })
 }
 
@@ -285,8 +286,19 @@ const CREDENTIAL_COLUMNS: &str = "id, tenant_id, workspace_id, user_id, server_n
     refresh_token_nonce, refresh_token_ciphertext, expires_at_unix, key_version, version, \
     authorization_generation, refresh_lease_id, refresh_lease_expires_at_unix, created_at_unix, \
     updated_at_unix, revoked_at_unix, last_refresh_outcome, last_revocation_outcome";
+const AUTHORIZATION_CREDENTIAL_COLUMNS: &str = "credential.id, credential.tenant_id, \
+    credential.workspace_id, credential.user_id, credential.server_name, credential.issuer, \
+    credential.subject, credential.token_type, credential.scopes_json::text AS scopes_json, \
+    credential.access_token_nonce, credential.access_token_ciphertext, \
+    credential.refresh_token_nonce, credential.refresh_token_ciphertext, \
+    credential.expires_at_unix, credential.key_version, credential.version, \
+    credential.authorization_generation, credential.refresh_lease_id, \
+    credential.refresh_lease_expires_at_unix, credential.created_at_unix, \
+    credential.updated_at_unix, credential.revoked_at_unix, \
+    credential.last_refresh_outcome, credential.last_revocation_outcome";
 const MCP_REFRESH_MUTATION_LOCK_TIMEOUT_MILLIS: i32 = 1;
 const MCP_REFRESH_MUTATION_STATEMENT_TIMEOUT_MILLIS: i32 = 3_000;
+const MCP_IDENTITY_AUTHORIZATION_LOCK_TIMEOUT_MILLIS: i32 = 1;
 const MCP_REFRESH_AUTHORITATIVE_REREAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(3);
 
@@ -473,6 +485,38 @@ fn postgres_refresh_authoritative_reread_query() -> String {
          FROM operation_clock \
          LEFT JOIN mcp_oauth_credentials \
            ON tenant_id=$1 AND id=$2"
+    )
+}
+
+fn postgres_mcp_identity_authorization_query() -> String {
+    format!(
+        "SELECT \
+           EXISTS( \
+             SELECT 1 FROM permissions AS permission \
+             JOIN tenant_role_bindings AS binding ON binding.tenant_id=$1 \
+             JOIN roles AS role ON role.id=binding.role_id \
+             WHERE permission.key=$5 \
+               AND jsonb_exists(role.permission_keys_json, permission.key) \
+           ) AS has_permission, \
+           EXISTS( \
+             SELECT 1 FROM admin_users \
+             WHERE id=$3 AND disabled_at_unix IS NULL \
+           ) AS user_active, \
+           EXISTS( \
+             SELECT 1 FROM admin_user_tenant_memberships \
+             WHERE user_id=$3 AND tenant_id=$1 \
+           ) AS member, \
+           EXISTS( \
+             SELECT 1 FROM workspaces \
+             WHERE id=$2 AND tenant_id=$1 AND status='active' \
+           ) AS workspace_active, \
+           {AUTHORIZATION_CREDENTIAL_COLUMNS} \
+         FROM (VALUES (TRUE)) AS singleton(present) \
+         LEFT JOIN mcp_oauth_credentials AS credential \
+           ON credential.tenant_id=$1 \
+          AND credential.workspace_id=$2 \
+          AND credential.user_id=$3 \
+          AND credential.server_name=$4"
     )
 }
 
@@ -867,77 +911,61 @@ fn set_mcp_rls_context(
     Ok(())
 }
 
-fn postgres_authorize_mcp_actor(
-    transaction: &mut postgres::Transaction<'_>,
+async fn postgres_authorize_mcp_actor(
+    transaction: &deadpool_postgres::Transaction<'_>,
     request: &McpIdentityAccessRequest,
+    operation: &StorageOperation,
 ) -> Result<McpIdentityAccessOutcome, StorageError> {
-    let has_permission = transaction
+    let query = postgres_mcp_identity_authorization_query();
+    let row = transaction
         .query_one(
-            "SELECT EXISTS( \
-               SELECT 1 FROM permissions AS permission \
-               JOIN tenant_role_bindings AS binding ON binding.tenant_id=$1 \
-               JOIN roles AS role ON role.id=binding.role_id \
-               WHERE permission.key=$2 \
-                 AND jsonb_exists(role.permission_keys_json, permission.key) \
-             )",
-            &[&request.tenant_id, &request.permission_key],
-        )
-        .map_err(super::postgres_error)?
-        .get::<_, bool>(0);
-    if !has_permission {
-        return Ok(McpIdentityAccessOutcome::PermissionDenied);
-    }
-    let user_active = transaction
-        .query_one(
-            "SELECT EXISTS(SELECT 1 FROM admin_users WHERE id=$1 AND disabled_at_unix IS NULL)",
-            &[&request.user_id],
-        )
-        .map_err(super::postgres_error)?
-        .get::<_, bool>(0);
-    if !user_active {
-        return Ok(McpIdentityAccessOutcome::UserInactive);
-    }
-    let member = transaction
-        .query_one(
-            "SELECT EXISTS(SELECT 1 FROM admin_user_tenant_memberships \
-             WHERE user_id=$1 AND tenant_id=$2)",
-            &[&request.user_id, &request.tenant_id],
-        )
-        .map_err(super::postgres_error)?
-        .get::<_, bool>(0);
-    if !member {
-        return Ok(McpIdentityAccessOutcome::MembershipRevoked);
-    }
-    let workspace_active = transaction
-        .query_one(
-            "SELECT EXISTS(SELECT 1 FROM workspaces \
-             WHERE id=$1 AND tenant_id=$2 AND status='active')",
-            &[&request.workspace_id, &request.tenant_id],
-        )
-        .map_err(super::postgres_error)?
-        .get::<_, bool>(0);
-    if !workspace_active {
-        return Ok(McpIdentityAccessOutcome::WorkspaceInactive);
-    }
-    let query = format!(
-        "SELECT {CREDENTIAL_COLUMNS} FROM mcp_oauth_credentials \
-         WHERE tenant_id=$1 AND workspace_id=$2 AND user_id=$3 AND server_name=$4"
-    );
-    let credential = transaction
-        .query_opt(
             &query,
             &[
                 &request.tenant_id,
                 &request.workspace_id,
                 &request.user_id,
                 &request.server_name,
+                &request.permission_key,
             ],
         )
-        .map_err(super::postgres_error)?
-        .as_ref()
-        .map(oauth_credential_from_row)
+        .await
+        .map_err(|error| {
+            if is_mcp_authorization_statement_timeout_code(error.code()) {
+                let _ = operation.cancel();
+                StorageError::OperationDeadlineExceeded {
+                    operation: operation.name(),
+                    stage: "authorization read",
+                    commit_started: false,
+                }
+            } else {
+                super::postgres_error(error)
+            }
+        })?;
+    let has_permission = row.get::<_, bool>("has_permission");
+    if !has_permission {
+        return Ok(McpIdentityAccessOutcome::PermissionDenied);
+    }
+    let user_active = row.get::<_, bool>("user_active");
+    if !user_active {
+        return Ok(McpIdentityAccessOutcome::UserInactive);
+    }
+    let member = row.get::<_, bool>("member");
+    if !member {
+        return Ok(McpIdentityAccessOutcome::MembershipRevoked);
+    }
+    let workspace_active = row.get::<_, bool>("workspace_active");
+    if !workspace_active {
+        return Ok(McpIdentityAccessOutcome::WorkspaceInactive);
+    }
+    let credential = row
+        .get::<_, Option<String>>("id")
+        .map(|_| oauth_credential_from_row(&row))
         .transpose()?;
     Ok(McpIdentityAccessOutcome::Allowed(Box::new(credential)))
+}
+
+fn is_mcp_authorization_statement_timeout_code(code: Option<&postgres::error::SqlState>) -> bool {
+    code == Some(&postgres::error::SqlState::QUERY_CANCELED)
 }
 
 fn prepare_mcp_storage_statement(
@@ -999,27 +1027,6 @@ fn commit_mcp_storage_transaction(
     });
     operation.finish_commit();
     result
-}
-
-fn commit_mcp_storage_read_transaction(
-    transaction: postgres::Transaction<'_>,
-    operation: Option<&StorageOperation>,
-) -> Result<(), StorageError> {
-    let Some(operation) = operation else {
-        return transaction.commit().map_err(super::postgres_error);
-    };
-    operation.check_active("before read transaction commit")?;
-    transaction.commit().map_err(|error| {
-        if error.code() == Some(&postgres::error::SqlState::QUERY_CANCELED) {
-            StorageError::OperationDeadlineExceeded {
-                operation: operation.name(),
-                stage: "read transaction commit",
-                commit_started: false,
-            }
-        } else {
-            super::postgres_error(error)
-        }
-    })
 }
 
 enum McpStorageWatchdogOutcome {
@@ -1193,39 +1200,87 @@ impl PostgresControlPlaneStore {
         })
     }
 
-    fn authorize_mcp_identity(
+    async fn authorize_mcp_identity(
         &self,
         request: &McpIdentityAccessRequest,
     ) -> Result<McpIdentityAccessOutcome, StorageError> {
-        self.authorize_mcp_identity_impl(request, None)
+        self.authorize_mcp_identity_impl(request, None).await
     }
 
-    fn authorize_mcp_identity_with_operation(
+    async fn authorize_mcp_identity_with_operation(
         &self,
         request: &McpIdentityAccessRequest,
         operation: &StorageOperation,
     ) -> Result<McpIdentityAccessOutcome, StorageError> {
         self.authorize_mcp_identity_impl(request, Some(operation))
+            .await
     }
 
-    fn authorize_mcp_identity_impl(
+    async fn authorize_mcp_identity_impl(
         &self,
         request: &McpIdentityAccessRequest,
         operation: Option<&StorageOperation>,
     ) -> Result<McpIdentityAccessOutcome, StorageError> {
-        self.with_mcp_storage_operation(operation, |client, operation| {
-            let mut transaction = client.transaction().map_err(super::postgres_error)?;
-            prepare_mcp_storage_statement(
-                &mut transaction,
-                operation,
-                "authorization RLS context",
-            )?;
-            set_mcp_rls_context(&mut transaction, Some(&request.tenant_id))?;
-            prepare_mcp_storage_statement(&mut transaction, operation, "authorization read")?;
-            let outcome = postgres_authorize_mcp_actor(&mut transaction, request)?;
-            commit_mcp_storage_read_transaction(transaction, operation)?;
+        let default_operation = operation.is_none().then(|| {
+            StorageOperation::new(
+                "authorize MCP identity actor",
+                self.async_pool.statement_timeout(),
+            )
+        });
+        let operation = operation
+            .or(default_operation.as_ref())
+            .expect("default MCP authorization operation");
+        let mut client = self
+            .async_pool
+            .acquire(
+                operation.name(),
+                operation.remaining("authorization pool acquisition")?,
+            )
+            .await?;
+        let transaction_budget = operation.remaining("authorization transaction")?;
+        tokio::time::timeout(transaction_budget, async {
+            let transaction = client
+                .build_transaction()
+                .read_only(true)
+                .start()
+                .await
+                .map_err(super::postgres_error)?;
+            if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+                transaction
+                    .batch_execute(search_path_sql)
+                    .await
+                    .map_err(super::postgres_error)?;
+            }
+            let statement_timeout = format!(
+                "{}ms",
+                mcp_statement_timeout_for_operation(operation, "authorization RLS context")?
+            );
+            let lock_timeout = format!("{MCP_IDENTITY_AUTHORIZATION_LOCK_TIMEOUT_MILLIS}ms");
+            transaction
+                .execute(
+                    "SELECT set_config('ferrogate.tenant_id', $1, true), \
+                            set_config('ferrogate.platform_mode', 'off', true), \
+                            set_config('lock_timeout', $2, true), \
+                            set_config('statement_timeout', $3, true)",
+                    &[&request.tenant_id, &lock_timeout, &statement_timeout],
+                )
+                .await
+                .map_err(super::postgres_error)?;
+            operation.check_active("authorization read")?;
+            let outcome = postgres_authorize_mcp_actor(&transaction, request, operation).await?;
+            operation.check_active("before authorization transaction commit")?;
+            transaction.commit().await.map_err(super::postgres_error)?;
             Ok(outcome)
         })
+        .await
+        .map_err(|_| {
+            let _ = operation.cancel();
+            StorageError::OperationDeadlineExceeded {
+                operation: operation.name(),
+                stage: "authorization transaction",
+                commit_started: false,
+            }
+        })?
     }
 
     fn begin_mcp_oauth_flow(
@@ -2095,7 +2150,7 @@ fn memory_authorize_mcp_actor(
 
 #[async_trait::async_trait]
 impl McpCredentialRepository for RuntimeStorageRepositories {
-    fn authorize_mcp_identity(
+    async fn authorize_mcp_identity(
         &self,
         request: &McpIdentityAccessRequest,
     ) -> Result<McpIdentityAccessOutcome, StorageError> {
@@ -2106,11 +2161,13 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 })?;
                 Ok(memory_authorize_mcp_actor(&store, request))
             }
-            RuntimeControlPlaneBackend::Postgres(store) => store.authorize_mcp_identity(request),
+            RuntimeControlPlaneBackend::Postgres(store) => {
+                store.authorize_mcp_identity(request).await
+            }
         }
     }
 
-    fn authorize_mcp_identity_with_operation(
+    async fn authorize_mcp_identity_with_operation(
         &self,
         request: &McpIdentityAccessRequest,
         operation: &StorageOperation,
@@ -2125,7 +2182,9 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
                 Ok(memory_authorize_mcp_actor(&store, request))
             }
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.authorize_mcp_identity_with_operation(request, operation)
+                store
+                    .authorize_mcp_identity_with_operation(request, operation)
+                    .await
             }
         }
     }

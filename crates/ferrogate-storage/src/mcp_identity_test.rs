@@ -137,7 +137,7 @@ fn exhausted_postgres_pool_returns_at_deadline_without_late_action() {
 }
 
 #[test]
-fn exhausted_postgres_pool_bounds_mcp_identity_authorization_read() {
+fn expired_operation_fences_async_mcp_identity_authorization_read() {
     let store = exhausted_postgres_store();
     let request = McpIdentityAccessRequest {
         tenant_id: "tenant".into(),
@@ -146,28 +146,56 @@ fn exhausted_postgres_pool_bounds_mcp_identity_authorization_read() {
         server_name: "server".into(),
         permission_key: "mcp.identity.use".into(),
     };
-    let operation = StorageOperation::new(
-        "authorize MCP refresh identity actor",
-        Duration::from_millis(40),
-    );
+    let operation = StorageOperation::new("authorize MCP refresh identity actor", Duration::ZERO);
     let started = Instant::now();
 
-    let error = store
-        .authorize_mcp_identity_with_operation(&request, &operation)
-        .expect_err("empty pool must bound the authorization read");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let error = runtime
+        .block_on(store.authorize_mcp_identity_with_operation(&request, &operation))
+        .expect_err("expired operation must bound the authorization read");
 
     assert!(matches!(
         error,
         StorageError::OperationDeadlineExceeded {
             operation: "authorize MCP refresh identity actor",
-            stage: "pool acquisition",
+            stage: "authorization pool acquisition",
             commit_started: false,
         }
     ));
-    assert!(started.elapsed() >= Duration::from_millis(35));
-    assert!(started.elapsed() < Duration::from_secs(1));
-    std::thread::sleep(Duration::from_millis(80));
+    assert!(started.elapsed() < Duration::from_millis(100));
     assert!(store.pool.clients.lock().unwrap().is_empty());
+    assert_eq!(
+        store.async_pool.metrics_snapshot(),
+        crate::PostgresPoolMetricsSnapshot::default()
+    );
+}
+
+#[test]
+fn postgres_identity_authorization_is_one_short_nonlocking_read() {
+    let query = postgres_mcp_identity_authorization_query();
+    let normalized = query.to_ascii_uppercase();
+
+    assert!(!query.contains(';'));
+    assert!(!normalized.contains(" FOR UPDATE"));
+    assert!(!normalized.contains(" FOR SHARE"));
+    assert!(!normalized.contains(" LOCK "));
+    assert!(!normalized.contains("PG_SLEEP"));
+    assert!(!normalized.contains(" WITH "));
+    assert!(normalized.contains("LEFT JOIN MCP_OAUTH_CREDENTIALS"));
+    assert!(normalized.contains("CREDENTIAL.TENANT_ID=$1"));
+    assert!(normalized.contains("CREDENTIAL.WORKSPACE_ID=$2"));
+    assert!(normalized.contains("CREDENTIAL.USER_ID=$3"));
+    assert!(normalized.contains("CREDENTIAL.SERVER_NAME=$4"));
+    assert!(is_mcp_authorization_statement_timeout_code(Some(
+        &postgres::error::SqlState::QUERY_CANCELED
+    )));
+    assert!(!is_mcp_authorization_statement_timeout_code(Some(
+        &postgres::error::SqlState::LOCK_NOT_AVAILABLE
+    )));
+    assert!(!is_mcp_authorization_statement_timeout_code(None));
 }
 
 #[test]

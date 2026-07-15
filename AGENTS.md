@@ -389,13 +389,15 @@ high-concurrency benchmarks against Supabase. Performance tests must use
 in-memory storage or a dedicated local Postgres instance so they cannot trigger
 managed-service abuse controls or consume shared service capacity.
 
-Supabase coordination never waits. Keep the database layer to simple indexed
-CRUD/CAS, and make each coordination mutation one short conditional CAS
-statement that returns immediately. Rust async owns business orchestration,
-wait, retry, and backoff. Do not use long transactions, lock waits, `pg_sleep`,
-database retry loops, or external work inside a Supabase/Postgres transaction;
-use a transaction only for the smallest irreducible atomic invariant that
-cannot be expressed as one conditional DML/CTE.
+All Postgres/Supabase execution stays short, simple, and indexed. Keep the
+database layer to minimal CRUD/CAS, and make each coordination mutation one
+short conditional statement that returns immediately. Rust async and process
+memory own business orchestration, parsing, aggregation, long computation,
+wait, retry, and backoff. Transactions are forbidden by default: use one only
+for the smallest irreducible atomic invariant or transaction-local security
+context that cannot be expressed safely as one conditional DML/CTE. Never put
+external work, `pg_sleep`, database retry loops, unbounded lock waits, or long
+computation inside a transaction.
 
 Before a database mutation crosses an async timeout, define and test its result
 truth table, including `CommitInFlight` and `OutcomeUnknown`. A stale reread

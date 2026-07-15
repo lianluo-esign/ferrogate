@@ -46,6 +46,8 @@ const REFRESH_STORAGE_RECONCILABLE_COMMIT_TIMEOUT_SECS: u64 = 10;
 // machine cannot turn ordinary contention into a long database lock wait.
 const REFRESH_CLAIM_OPERATION_TIMEOUT_SECS: u64 = 4;
 const REFRESH_CLAIM_RESPONSE_TIMEOUT_SECS: u64 = 5;
+const MCP_IDENTITY_AUTH_READ_OPERATION_TIMEOUT_SECS: u64 = 4;
+const MCP_IDENTITY_AUTH_READ_RESPONSE_TIMEOUT_SECS: u64 = 5;
 const REFRESH_AUTH_READ_OPERATION_TIMEOUT_SECS: u64 = 8;
 const REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS: u64 = 10;
 const REFRESH_STORAGE_RECONCILE_TIMEOUT_SECS: u64 = 1;
@@ -78,6 +80,10 @@ const _: () = {
             > REFRESH_STORAGE_RESPONSE_TIMEOUT_SECS + REFRESH_STORAGE_RECONCILE_TIMEOUT_SECS
     );
     assert!(REFRESH_CLAIM_RESPONSE_TIMEOUT_SECS > REFRESH_CLAIM_OPERATION_TIMEOUT_SECS);
+    assert!(
+        MCP_IDENTITY_AUTH_READ_RESPONSE_TIMEOUT_SECS
+            > MCP_IDENTITY_AUTH_READ_OPERATION_TIMEOUT_SECS
+    );
     assert!(REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS > REFRESH_AUTH_READ_OPERATION_TIMEOUT_SECS);
     assert!(REFRESH_WAIT_TIMEOUT_SECS > REFRESH_AUTH_READ_RESPONSE_TIMEOUT_SECS);
 };
@@ -1351,15 +1357,13 @@ impl AppState {
                 )
             })?;
         let request = actor.access_request(server_name, action);
-        let repositories = Arc::clone(&self.repositories);
         let outcome = self
-            .run_mcp_refresh_storage_with_budgets(
+            .run_mcp_identity_authorization_read(
                 "authorize MCP refresh identity actor",
                 operation_budget,
                 response_budget,
-                move |operation| {
-                    repositories.authorize_mcp_identity_with_operation(&request, &operation)
-                },
+                request,
+                true,
             )
             .await?;
         authorize_mcp_identity_outcome(outcome, action)
@@ -1372,13 +1376,72 @@ impl AppState {
         action: &str,
     ) -> Result<Option<StoredMcpOauthCredential>, McpIdentityError> {
         let request = actor.access_request(server_name, action);
-        let repositories = Arc::clone(&self.repositories);
         let outcome = self
-            .run_mcp_identity_storage("authorize MCP identity actor", move || {
-                repositories.authorize_mcp_identity(&request)
-            })
+            .run_mcp_identity_authorization_read(
+                "authorize MCP identity actor",
+                Duration::from_secs(MCP_IDENTITY_AUTH_READ_OPERATION_TIMEOUT_SECS),
+                Duration::from_secs(MCP_IDENTITY_AUTH_READ_RESPONSE_TIMEOUT_SECS),
+                request,
+                false,
+            )
             .await?;
         authorize_mcp_identity_outcome(outcome, action)
+    }
+
+    async fn run_mcp_identity_authorization_read(
+        &self,
+        operation_name: &'static str,
+        operation_timeout: Duration,
+        response_timeout: Duration,
+        request: McpIdentityAccessRequest,
+        record_refresh_metrics: bool,
+    ) -> Result<McpIdentityAccessOutcome, McpIdentityError> {
+        let operation = StorageOperation::new(operation_name, operation_timeout);
+        let result = tokio::time::timeout(
+            response_timeout,
+            self.repositories
+                .authorize_mcp_identity_with_operation(&request, &operation),
+        )
+        .await;
+        match result {
+            Ok(result) => {
+                if record_refresh_metrics
+                    && matches!(
+                        &result,
+                        Err(StorageError::OperationDeadlineExceeded { .. }
+                            | StorageError::OperationCancelled { .. })
+                    )
+                {
+                    self.record_mcp_refresh_storage_cancellation();
+                }
+                result.map_err(storage_identity_error)
+            }
+            Err(_) => {
+                let cancel_outcome = operation.cancel();
+                if record_refresh_metrics {
+                    if let Ok(mut metrics) = self.metrics.lock() {
+                        metrics.record_mcp_refresh_response_deadline();
+                    }
+                    if matches!(
+                        cancel_outcome,
+                        StorageOperationCancelOutcome::Cancelled
+                            | StorageOperationCancelOutcome::AlreadyCancelled
+                    ) {
+                        self.record_mcp_refresh_storage_cancellation();
+                    }
+                }
+                tracing::warn!(
+                    operation = operation_name,
+                    ?cancel_outcome,
+                    outcome = "authorization_response_deadline",
+                    "MCP identity authorization read exceeded its response deadline"
+                );
+                Err(McpIdentityError::unavailable(
+                    "mcp_identity_storage_deadline",
+                    format!("MCP identity authorization read {operation_name} timed out"),
+                ))
+            }
+        }
     }
 
     async fn run_mcp_identity_storage<T, F>(

@@ -71,6 +71,7 @@ where
 pub(crate) struct AsyncPostgresPool {
     pool: Pool,
     acquire_timeout: Duration,
+    statement_timeout: Duration,
     transaction_search_path_sql: Option<String>,
     metrics: PostgresPoolMetrics,
 }
@@ -81,6 +82,7 @@ impl std::fmt::Debug for AsyncPostgresPool {
             .debug_struct("AsyncPostgresPool")
             .field("pool", &"<redacted>")
             .field("acquire_timeout", &self.acquire_timeout)
+            .field("statement_timeout", &self.statement_timeout)
             .field(
                 "transaction_search_path_sql",
                 &self.transaction_search_path_sql,
@@ -130,6 +132,7 @@ impl AsyncPostgresPool {
         Ok(Self {
             pool,
             acquire_timeout: Duration::from_millis(config.pool_acquire_timeout_millis),
+            statement_timeout: Duration::from_millis(config.statement_timeout_millis),
             transaction_search_path_sql: (config.schema.is_some()
                 || !config.search_path.is_empty())
             .then(|| {
@@ -191,6 +194,10 @@ impl AsyncPostgresPool {
 
     pub(crate) fn transaction_search_path_sql(&self) -> Option<&str> {
         self.transaction_search_path_sql.as_deref()
+    }
+
+    pub(crate) fn statement_timeout(&self) -> Duration {
+        self.statement_timeout
     }
 
     #[cfg(test)]
