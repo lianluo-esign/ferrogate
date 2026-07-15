@@ -549,7 +549,8 @@ impl AppState {
     }
 
     pub(crate) fn prometheus_metrics_snapshot(&self) -> GatewayMetricsSnapshot {
-        self.metrics
+        let mut snapshot = self
+            .metrics
             .lock()
             .map(|metrics| metrics.snapshot(self.state_service_name()))
             .unwrap_or_else(|_| GatewayMetricsSnapshot {
@@ -581,11 +582,19 @@ impl AppState {
                 mcp_refresh_storage_outcome_unknown_total: 0,
                 mcp_refresh_late_reconciliation_total: 0,
                 mcp_identity_error_audit_deadline_total: 0,
+                postgres_pool_acquire_total: 0,
+                postgres_pool_acquire_timeout_total: 0,
+                postgres_pool_acquire_wait_micros_total: 0,
                 token_totals: TokenMetricTotals::default(),
                 model_provider_totals: Vec::new(),
                 network_access_denied_total: 0,
                 network_access_rate_limited_total: 0,
-            })
+            });
+        let pool = self.repositories.postgres_pool_metrics_snapshot();
+        snapshot.postgres_pool_acquire_total = pool.acquire_total;
+        snapshot.postgres_pool_acquire_timeout_total = pool.acquire_timeout_total;
+        snapshot.postgres_pool_acquire_wait_micros_total = pool.acquire_wait_micros_total;
+        snapshot
     }
 }
 

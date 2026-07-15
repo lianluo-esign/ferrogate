@@ -2873,6 +2873,19 @@ fn validates_storage_provider_contract_order_and_fail_closed_provider_selection(
             provider: ferrogate_storage::StorageProviderKind::Postgres,
             required: true,
             postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),
+            postgres_pool_acquire_timeout_millis: 0,
+            ..StorageConfig::default()
+        },
+        ..Config::default()
+    };
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("field storage.postgres_pool_acquire_timeout_millis"));
+
+    let config = Config {
+        storage: StorageConfig {
+            provider: ferrogate_storage::StorageProviderKind::Postgres,
+            required: true,
+            postgres_dsn_env: Some("FERROGATE_POSTGRES_DSN".into()),
             postgres_connect_timeout_secs: 0,
             ..StorageConfig::default()
         },

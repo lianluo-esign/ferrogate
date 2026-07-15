@@ -5,9 +5,8 @@
 // description: Focused schema-contract query regression coverage for issue #213.
 
 use super::{
-    existing_postgres_session_sql, postgres_transport_config, PostgresStorageConfig,
-    PostgresTlsMode, POSTGRES_SCHEMA_NAME, POSTGRES_SCHEMA_SQL, POSTGRES_SCHEMA_VERSION,
-    PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY,
+    postgres_transport_config, PostgresStorageConfig, PostgresTlsMode, POSTGRES_SCHEMA_NAME,
+    POSTGRES_SCHEMA_SQL, POSTGRES_SCHEMA_VERSION, PROVIDER_ATTEMPT_FOREIGN_KEY_VALIDATION_QUERY,
 };
 
 #[test]
@@ -26,33 +25,11 @@ fn provider_attempt_foreign_key_query_rejects_same_named_tables_in_other_schemas
 }
 
 #[test]
-fn authoritative_reread_session_uses_existing_schema_without_ddl() {
-    let sql = existing_postgres_session_sql(
-        &PostgresStorageConfig {
-            dsn: "postgresql://example.invalid/db".into(),
-            pool_size: 1,
-            tls_mode: PostgresTlsMode::Require,
-            tls_ca_cert_path: None,
-            connect_timeout_secs: 10,
-            statement_timeout_millis: 30_000,
-            schema: Some("tenant schema".into()),
-            search_path: vec!["public".into()],
-        },
-        std::time::Duration::from_secs(3),
-    );
-
-    assert!(sql.contains("SET statement_timeout = 3000"));
-    assert!(sql.contains("SET search_path TO \"tenant schema\", \"public\""));
-    assert!(!sql.contains("CREATE"));
-    assert!(!sql.contains("ALTER"));
-    assert!(!sql.contains("DROP"));
-}
-
-#[test]
 fn authoritative_reread_transport_caps_connect_and_tcp_user_timeouts() {
     let config = PostgresStorageConfig {
         dsn: "postgresql://example.invalid/db".into(),
         pool_size: 1,
+        pool_acquire_timeout_millis: 1_000,
         tls_mode: PostgresTlsMode::Require,
         tls_ca_cert_path: None,
         connect_timeout_secs: 10,

@@ -1242,6 +1242,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             PostgresStorageConfig {
                 dsn,
                 pool_size: storage.postgres_pool_size,
+                pool_acquire_timeout_millis: storage.postgres_pool_acquire_timeout_millis,
                 tls_mode: storage.postgres_tls_mode,
                 tls_ca_cert_path: storage
                     .postgres_tls_ca_cert_path
@@ -1279,6 +1280,7 @@ fn runtime_storage_repositories(config: &Config) -> anyhow::Result<RuntimeStorag
             PostgresStorageConfig {
                 dsn,
                 pool_size: storage.postgres_pool_size,
+                pool_acquire_timeout_millis: storage.postgres_pool_acquire_timeout_millis,
                 tls_mode: storage.postgres_tls_mode,
                 tls_ca_cert_path: storage
                     .postgres_tls_ca_cert_path
@@ -2915,6 +2917,9 @@ impl GatewayMetricsAccumulator {
                 .mcp_refresh_storage_outcome_unknown_total,
             mcp_refresh_late_reconciliation_total: self.mcp_refresh_late_reconciliation_total,
             mcp_identity_error_audit_deadline_total: self.mcp_identity_error_audit_deadline_total,
+            postgres_pool_acquire_total: 0,
+            postgres_pool_acquire_timeout_total: 0,
+            postgres_pool_acquire_wait_micros_total: 0,
             token_totals: self.token_totals.clone(),
             model_provider_totals: self.model_provider_totals.values().cloned().collect(),
             network_access_denied_total: self.network_access_denied_total,

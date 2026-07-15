@@ -394,32 +394,34 @@ fn authoritative_claim_reread_with_matching_lease_recovers_success() {
 }
 
 #[test]
-fn authoritative_reread_caller_timeout_is_unknown_and_keeps_an_observer() {
+fn authoritative_reread_caller_timeout_cancels_the_async_future() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .unwrap();
     runtime.block_on(async {
         let metrics = Arc::new(Mutex::new(GatewayMetricsAccumulator::default()));
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        let task = tokio::task::spawn_blocking(move || {
-            started_tx.send(()).expect("reread started");
-            release_rx.recv().expect("reread release");
-            finished_tx.send(()).expect("reread finished");
-            Ok::<_, StorageError>(())
-        });
-        started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("reread did not start");
+        struct DropSignal(Option<std::sync::mpsc::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    sender.send(()).expect("signal reread cancellation");
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let reread = async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            std::future::pending::<Result<(), StorageError>>().await
+        };
 
         let error = await_mcp_authoritative_reread(
             Arc::clone(&metrics),
             "test authoritative reread",
-            task,
+            reread,
             Duration::from_millis(5),
-            tracing::Span::current(),
         )
         .await
         .expect_err("reread caller deadline must be bounded");
@@ -430,11 +432,9 @@ fn authoritative_reread_caller_timeout_is_unknown_and_keeps_an_observer() {
             assert_eq!(metrics.mcp_refresh_storage_outcome_unknown_total, 1);
         }
 
-        release_tx.send(()).expect("release reread");
-        finished_rx
+        dropped_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("observed reread did not finish");
-        tokio::task::yield_now().await;
+            .expect("timed-out async reread future was not cancelled");
     });
 }
 

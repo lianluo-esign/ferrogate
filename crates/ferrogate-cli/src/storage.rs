@@ -38,6 +38,7 @@ fn migrate_to_supabase(args: StorageMigrateToSupabaseArgs) -> AnyResult<()> {
     let base_config = |dsn: String| PostgresStorageConfig {
         dsn,
         pool_size: 2,
+        pool_acquire_timeout_millis: 1_000,
         tls_mode,
         tls_ca_cert_path: args
             .postgres_tls_ca_cert_path

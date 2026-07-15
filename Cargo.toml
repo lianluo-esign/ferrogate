@@ -53,6 +53,7 @@ blake2 = "0.10"
 bytes = "1.7"
 chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
+deadpool-postgres = "0.14.1"
 futures-util = "0.3"
 hmac = "0.12"
 http = "1"
@@ -82,6 +83,7 @@ sha2 = "0.10"
 subtle = "2.6"
 tempfile = "3.10"
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = "0.7.18"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

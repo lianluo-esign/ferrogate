@@ -145,6 +145,9 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
         mcp_refresh_storage_outcome_unknown_total: 4,
         mcp_refresh_late_reconciliation_total: 1,
         mcp_identity_error_audit_deadline_total: 4,
+        postgres_pool_acquire_total: 7,
+        postgres_pool_acquire_timeout_total: 2,
+        postgres_pool_acquire_wait_micros_total: 1_500_000,
         token_totals: TokenMetricTotals {
             prompt_tokens: 3,
             completion_tokens: 5,
@@ -185,6 +188,9 @@ fn renders_prometheus_text_for_gateway_metrics_snapshot() {
     assert!(text.contains("ferrogate_mcp_refresh_response_deadlines_total 3"));
     assert!(text.contains("ferrogate_mcp_refresh_storage_cancellations_total 2"));
     assert!(text.contains("ferrogate_mcp_refresh_storage_outcome_unknown_total 4"));
+    assert!(text.contains("ferrogate_postgres_pool_acquires_total 7"));
+    assert!(text.contains("ferrogate_postgres_pool_acquire_timeouts_total 2"));
+    assert!(text.contains("ferrogate_postgres_pool_acquire_wait_seconds_total 1.5"));
     assert!(text.contains("ferrogate_mcp_refresh_late_reconciliations_total 1"));
     assert!(text.contains("ferrogate_mcp_identity_error_audit_deadlines_total 4"));
     assert!(text.contains("ferrogate_tokens_total{type=\"total\"} 8"));

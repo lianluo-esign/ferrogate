@@ -30,6 +30,9 @@ use postgres::{Client as PostgresClient, NoTls};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 
+mod async_postgres;
+pub use async_postgres::PostgresPoolMetricsSnapshot;
+
 mod rbac;
 pub use rbac::{tenant_role_binding_id, StoredPermission, StoredRole, StoredTenantRoleBinding};
 
@@ -317,6 +320,7 @@ impl PostgresTlsMode {
 pub struct PostgresStorageConfig {
     pub dsn: String,
     pub pool_size: usize,
+    pub pool_acquire_timeout_millis: u64,
     pub tls_mode: PostgresTlsMode,
     pub tls_ca_cert_path: Option<String>,
     pub connect_timeout_secs: u64,
@@ -1086,6 +1090,7 @@ pub struct RuntimeControlPlaneState {
 
 struct PostgresControlPlaneStore {
     pool: Arc<PostgresClientPool>,
+    async_pool: Arc<async_postgres::AsyncPostgresPool>,
     schema: StorageSchemaEvidence,
 }
 
@@ -1117,12 +1122,14 @@ impl PostgresControlPlaneStore {
         for _ in 0..config.pool_size {
             clients.push(connect_postgres_client(&config)?);
         }
+        let async_pool = Arc::new(async_postgres::AsyncPostgresPool::new(&config)?);
         let store = Self {
             pool: Arc::new(PostgresClientPool {
                 clients: Mutex::new(clients),
                 available: Condvar::new(),
                 config,
             }),
+            async_pool,
             schema: StorageSchemaEvidence::postgres_expected(),
         };
         if initialize_schema {
@@ -1154,12 +1161,14 @@ impl PostgresControlPlaneStore {
         for _ in 0..config.pool_size {
             clients.push(connect_postgres_client(&config)?);
         }
+        let async_pool = Arc::new(async_postgres::AsyncPostgresPool::new(&config)?);
         let store = Self {
             pool: Arc::new(PostgresClientPool {
                 clients: Mutex::new(clients),
                 available: Condvar::new(),
                 config,
             }),
+            async_pool,
             schema: StorageSchemaEvidence::postgres_expected(),
         };
         if initialize_schema {
@@ -4270,46 +4279,6 @@ fn connect_postgres_client(config: &PostgresStorageConfig) -> Result<PostgresCli
     )?;
     initialize_postgres_session(&mut client, config)?;
     Ok(client)
-}
-
-fn connect_existing_postgres_client(
-    config: &PostgresStorageConfig,
-    deadline: Instant,
-) -> Result<PostgresClient, StorageError> {
-    let remaining = deadline
-        .checked_duration_since(Instant::now())
-        .ok_or_else(|| {
-            StorageError::Runtime("authoritative PostgreSQL reread deadline elapsed".into())
-        })?;
-    let mut client = connect_postgres_transport(config, remaining, Some(remaining))?;
-    let remaining = deadline
-        .checked_duration_since(Instant::now())
-        .ok_or_else(|| {
-            StorageError::Runtime("authoritative PostgreSQL reread deadline elapsed".into())
-        })?;
-    client
-        .batch_execute(&existing_postgres_session_sql(config, remaining))
-        .map_err(postgres_error)?;
-    Ok(client)
-}
-
-fn existing_postgres_session_sql(config: &PostgresStorageConfig, remaining: Duration) -> String {
-    let fractional_millis = u128::from(remaining.subsec_nanos() % 1_000_000 != 0);
-    let timeout_millis = remaining
-        .as_millis()
-        .saturating_add(fractional_millis)
-        .clamp(1, i32::MAX as u128);
-    let mut statements = vec![
-        format!("SET statement_timeout = {timeout_millis}"),
-        "SET lock_timeout = '1ms'".into(),
-    ];
-    if config.schema.is_some() || !config.search_path.is_empty() {
-        statements.push(format!(
-            "SET search_path TO {}",
-            postgres_search_path_sql(config)
-        ));
-    }
-    statements.join("; ")
 }
 
 fn build_postgres_tls_connector(
@@ -7624,6 +7593,15 @@ impl RuntimeStorageRepositories {
         evidence
     }
 
+    pub fn postgres_pool_metrics_snapshot(&self) -> PostgresPoolMetricsSnapshot {
+        match &self.control_plane {
+            RuntimeControlPlaneBackend::Memory(_) => PostgresPoolMetricsSnapshot::default(),
+            RuntimeControlPlaneBackend::Postgres(control_plane) => {
+                control_plane.async_pool.metrics_snapshot()
+            }
+        }
+    }
+
     pub fn control_plane_snapshot(&self) -> Result<ControlPlaneSnapshot, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Memory(control_plane) => Ok(control_plane
@@ -9817,6 +9795,10 @@ impl<T> StoragePage<T> {
 mod schema_validation_test;
 
 #[cfg(test)]
+#[path = "async_postgres_test.rs"]
+mod async_postgres_test;
+
+#[cfg(test)]
 #[path = "storage_ledger_sink_test.rs"]
 mod storage_ledger_sink_test;
 
@@ -10668,6 +10650,7 @@ mod tests {
             PostgresStorageConfig {
                 dsn: "host=127.0.0.1 port=1 user=postgres dbname=ferrogate".into(),
                 pool_size: 1,
+                pool_acquire_timeout_millis: 1_000,
                 tls_mode: PostgresTlsMode::VerifyFull,
                 tls_ca_cert_path: Some("/tmp/ferrogate-missing-postgres-ca.pem".into()),
                 connect_timeout_secs: 1,

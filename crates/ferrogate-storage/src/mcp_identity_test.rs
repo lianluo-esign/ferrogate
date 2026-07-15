@@ -14,8 +14,8 @@ use std::{
 
 use super::*;
 use crate::{
-    PostgresClientPool, PostgresStorageConfig, PostgresTlsMode, StorageOperationCancelOutcome,
-    StorageProviderKind, StorageSchemaEvidence, StoredAuditEvent,
+    async_postgres::AsyncPostgresPool, PostgresClientPool, PostgresStorageConfig, PostgresTlsMode,
+    StorageOperationCancelOutcome, StorageProviderKind, StorageSchemaEvidence, StoredAuditEvent,
 };
 
 fn audit_event(id: &str) -> StoredAuditEvent {
@@ -85,25 +85,32 @@ fn repositories_with_credential() -> RuntimeStorageRepositories {
     repositories
 }
 
-#[test]
-fn exhausted_postgres_pool_returns_at_deadline_without_late_action() {
-    let store = PostgresControlPlaneStore {
+fn exhausted_postgres_store() -> PostgresControlPlaneStore {
+    let config = PostgresStorageConfig {
+        dsn: "host=127.0.0.1 port=1 user=postgres".into(),
+        pool_size: 1,
+        pool_acquire_timeout_millis: 40,
+        tls_mode: PostgresTlsMode::Disable,
+        tls_ca_cert_path: None,
+        connect_timeout_secs: 1,
+        statement_timeout_millis: 1_000,
+        schema: None,
+        search_path: Vec::new(),
+    };
+    PostgresControlPlaneStore {
         pool: Arc::new(PostgresClientPool {
             clients: Mutex::new(Vec::new()),
             available: Condvar::new(),
-            config: PostgresStorageConfig {
-                dsn: "host=127.0.0.1 port=1 user=postgres".into(),
-                pool_size: 1,
-                tls_mode: PostgresTlsMode::Disable,
-                tls_ca_cert_path: None,
-                connect_timeout_secs: 1,
-                statement_timeout_millis: 1_000,
-                schema: None,
-                search_path: Vec::new(),
-            },
+            config: config.clone(),
         }),
+        async_pool: Arc::new(AsyncPostgresPool::new(&config).expect("async test pool")),
         schema: StorageSchemaEvidence::postgres_expected(),
-    };
+    }
+}
+
+#[test]
+fn exhausted_postgres_pool_returns_at_deadline_without_late_action() {
+    let store = exhausted_postgres_store();
     let action_ran = Arc::new(AtomicBool::new(false));
     let observed = Arc::clone(&action_ran);
     let operation = StorageOperation::new("pool pressure test", Duration::from_millis(40));
@@ -131,23 +138,7 @@ fn exhausted_postgres_pool_returns_at_deadline_without_late_action() {
 
 #[test]
 fn exhausted_postgres_pool_bounds_mcp_identity_authorization_read() {
-    let store = PostgresControlPlaneStore {
-        pool: Arc::new(PostgresClientPool {
-            clients: Mutex::new(Vec::new()),
-            available: Condvar::new(),
-            config: PostgresStorageConfig {
-                dsn: "host=127.0.0.1 port=1 user=postgres".into(),
-                pool_size: 1,
-                tls_mode: PostgresTlsMode::Disable,
-                tls_ca_cert_path: None,
-                connect_timeout_secs: 1,
-                statement_timeout_millis: 1_000,
-                schema: None,
-                search_path: Vec::new(),
-            },
-        }),
-        schema: StorageSchemaEvidence::postgres_expected(),
-    };
+    let store = exhausted_postgres_store();
     let request = McpIdentityAccessRequest {
         tenant_id: "tenant".into(),
         workspace_id: "workspace".into(),
@@ -181,23 +172,7 @@ fn exhausted_postgres_pool_bounds_mcp_identity_authorization_read() {
 
 #[test]
 fn exhausted_postgres_pool_fences_mcp_identity_audit_without_late_write() {
-    let store = PostgresControlPlaneStore {
-        pool: Arc::new(PostgresClientPool {
-            clients: Mutex::new(Vec::new()),
-            available: Condvar::new(),
-            config: PostgresStorageConfig {
-                dsn: "host=127.0.0.1 port=1 user=postgres".into(),
-                pool_size: 1,
-                tls_mode: PostgresTlsMode::Disable,
-                tls_ca_cert_path: None,
-                connect_timeout_secs: 1,
-                statement_timeout_millis: 1_000,
-                schema: None,
-                search_path: Vec::new(),
-            },
-        }),
-        schema: StorageSchemaEvidence::postgres_expected(),
-    };
+    let store = exhausted_postgres_store();
     let operation =
         StorageOperation::new("record MCP identity error audit", Duration::from_millis(40));
     let started = Instant::now();

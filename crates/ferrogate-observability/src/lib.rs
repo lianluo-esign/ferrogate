@@ -370,6 +370,9 @@ pub struct GatewayMetricsSnapshot {
     pub mcp_refresh_storage_outcome_unknown_total: u64,
     pub mcp_refresh_late_reconciliation_total: u64,
     pub mcp_identity_error_audit_deadline_total: u64,
+    pub postgres_pool_acquire_total: u64,
+    pub postgres_pool_acquire_timeout_total: u64,
+    pub postgres_pool_acquire_wait_micros_total: u64,
     pub token_totals: TokenMetricTotals,
     pub model_provider_totals: Vec<ModelProviderMetricTotal>,
     /// Requests rejected pre-authentication for not matching a configured
@@ -579,6 +582,36 @@ pub fn render_prometheus_text(snapshot: &GatewayMetricsSnapshot) -> String {
     output.push_str(&format!(
         "ferrogate_mcp_identity_error_audit_deadlines_total {}\n",
         snapshot.mcp_identity_error_audit_deadline_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_postgres_pool_acquires_total",
+        "Total async PostgreSQL pool acquisition attempts.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_postgres_pool_acquires_total {}\n",
+        snapshot.postgres_pool_acquire_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_postgres_pool_acquire_timeouts_total",
+        "Total async PostgreSQL pool acquisition attempts that reached their Rust-side deadline.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_postgres_pool_acquire_timeouts_total {}\n",
+        snapshot.postgres_pool_acquire_timeout_total
+    ));
+    push_help(
+        &mut output,
+        "ferrogate_postgres_pool_acquire_wait_seconds_total",
+        "Cumulative time spent waiting for async PostgreSQL pool acquisition.",
+        "counter",
+    );
+    output.push_str(&format!(
+        "ferrogate_postgres_pool_acquire_wait_seconds_total {}\n",
+        snapshot.postgres_pool_acquire_wait_micros_total as f64 / 1_000_000.0
     ));
 
     push_help(
@@ -979,6 +1012,24 @@ fn gateway_metrics_json(snapshot: &GatewayMetricsSnapshot) -> Vec<serde_json::Va
             "ferrogate.mcp_identity.error_audit_deadlines",
             "Total MCP identity error audits fenced before they could delay the original response.",
             snapshot.mcp_identity_error_audit_deadline_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.postgres.pool.acquires",
+            "Total async PostgreSQL pool acquisition attempts.",
+            snapshot.postgres_pool_acquire_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.postgres.pool.acquire_timeouts",
+            "Total async PostgreSQL pool acquisition attempts that reached their Rust-side deadline.",
+            snapshot.postgres_pool_acquire_timeout_total as f64,
+            vec![],
+        ),
+        sum_metric_json(
+            "ferrogate.postgres.pool.acquire_wait_seconds",
+            "Cumulative time spent waiting for async PostgreSQL pool acquisition.",
+            snapshot.postgres_pool_acquire_wait_micros_total as f64 / 1_000_000.0,
             vec![],
         ),
         sum_metric_json(

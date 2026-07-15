@@ -119,6 +119,7 @@ fn supabase_api_key_authenticator(
         PostgresStorageConfig {
             dsn: dsn.to_string(),
             pool_size: args.supabase_pool_size,
+            pool_acquire_timeout_millis: 1_000,
             tls_mode: parse_postgres_tls_mode(&args.supabase_tls_mode)?,
             tls_ca_cert_path: None,
             connect_timeout_secs: args.supabase_connect_timeout_secs,

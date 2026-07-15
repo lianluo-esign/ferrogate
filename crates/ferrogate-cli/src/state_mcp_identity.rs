@@ -1300,15 +1300,11 @@ impl AppState {
         request: McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, McpIdentityError> {
         let repositories = Arc::clone(&self.repositories);
-        let task = tokio::task::spawn_blocking(move || {
-            repositories.reconcile_mcp_oauth_refresh_renewal(&request)
-        });
         await_mcp_authoritative_reread(
             Arc::clone(&self.metrics),
             "renew MCP refresh lease",
-            task,
+            repositories.reconcile_mcp_oauth_refresh_renewal(&request),
             Duration::from_secs(REFRESH_STORAGE_AUTHORITATIVE_REREAD_TIMEOUT_SECS),
-            tracing::Span::current(),
         )
         .await
     }
@@ -1318,15 +1314,11 @@ impl AppState {
         request: McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, McpIdentityError> {
         let repositories = Arc::clone(&self.repositories);
-        let task = tokio::task::spawn_blocking(move || {
-            repositories.reconcile_mcp_oauth_refresh_claim(&request)
-        });
         await_mcp_authoritative_reread(
             Arc::clone(&self.metrics),
             "claim MCP refresh lease",
-            task,
+            repositories.reconcile_mcp_oauth_refresh_claim(&request),
             Duration::from_secs(REFRESH_STORAGE_AUTHORITATIVE_REREAD_TIMEOUT_SECS),
-            tracing::Span::current(),
         )
         .await
     }
@@ -1816,15 +1808,17 @@ fn refresh_authorization_read_budgets(
     })
 }
 
-async fn await_mcp_authoritative_reread<T: Send + 'static>(
+async fn await_mcp_authoritative_reread<T, F>(
     metrics: Arc<Mutex<GatewayMetricsAccumulator>>,
     operation_name: &'static str,
-    mut task: tokio::task::JoinHandle<Result<T, StorageError>>,
+    reread: F,
     timeout: Duration,
-    operation_span: tracing::Span,
-) -> Result<T, McpIdentityError> {
-    match tokio::time::timeout(timeout, &mut task).await {
-        Ok(Ok(Ok(outcome))) => {
+) -> Result<T, McpIdentityError>
+where
+    F: std::future::Future<Output = Result<T, StorageError>>,
+{
+    match tokio::time::timeout(timeout, reread).await {
+        Ok(Ok(outcome)) => {
             tracing::warn!(
                 operation = operation_name,
                 outcome = "authoritative_reread_observed",
@@ -1832,7 +1826,7 @@ async fn await_mcp_authoritative_reread<T: Send + 'static>(
             );
             Ok(outcome)
         }
-        Ok(Ok(Err(error))) => {
+        Ok(Err(error)) => {
             if let Ok(mut metrics) = metrics.lock() {
                 metrics.record_mcp_refresh_storage_outcome_unknown();
             }
@@ -1847,21 +1841,6 @@ async fn await_mcp_authoritative_reread<T: Send + 'static>(
                 format!("{operation_name} outcome could not be proven from durable storage"),
             ))
         }
-        Ok(Err(error)) => {
-            if let Ok(mut metrics) = metrics.lock() {
-                metrics.record_mcp_refresh_storage_outcome_unknown();
-            }
-            tracing::error!(
-                operation = operation_name,
-                error_detail = %sanitize_mcp_reconciliation_text(&error.to_string()),
-                outcome = "storage_outcome_unknown",
-                "authoritative MCP refresh reread task failed"
-            );
-            Err(McpIdentityError::unavailable(
-                "mcp_identity_storage_outcome_unknown",
-                format!("{operation_name} outcome reread task failed"),
-            ))
-        }
         Err(_) => {
             if let Ok(mut metrics) = metrics.lock() {
                 metrics.record_mcp_refresh_storage_outcome_unknown();
@@ -1870,12 +1849,6 @@ async fn await_mcp_authoritative_reread<T: Send + 'static>(
                 operation = operation_name,
                 outcome = "storage_outcome_unknown",
                 "authoritative MCP refresh reread exceeded its caller deadline"
-            );
-            observe_mcp_refresh_storage_task(
-                operation_name,
-                task,
-                operation_span,
-                "late_authoritative_reread_observed",
             );
             Err(McpIdentityError::unavailable(
                 "mcp_identity_storage_outcome_unknown",

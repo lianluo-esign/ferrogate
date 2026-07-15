@@ -1257,6 +1257,8 @@ pub(crate) struct StorageConfig {
     pub(crate) supabase_dsn_env: Option<String>,
     #[serde(default = "default_postgres_pool_size")]
     pub(crate) postgres_pool_size: usize,
+    #[serde(default = "default_postgres_pool_acquire_timeout_millis")]
+    pub(crate) postgres_pool_acquire_timeout_millis: u64,
     #[serde(default)]
     pub(crate) postgres_tls_mode: PostgresTlsMode,
     #[serde(default)]
@@ -1672,6 +1674,10 @@ fn default_postgres_pool_size() -> usize {
     4
 }
 
+fn default_postgres_pool_acquire_timeout_millis() -> u64 {
+    1_000
+}
+
 fn default_postgres_connect_timeout_secs() -> u64 {
     5
 }
@@ -1791,6 +1797,7 @@ impl Default for StorageConfig {
             postgres_dsn_env: None,
             supabase_dsn_env: None,
             postgres_pool_size: default_postgres_pool_size(),
+            postgres_pool_acquire_timeout_millis: default_postgres_pool_acquire_timeout_millis(),
             postgres_tls_mode: PostgresTlsMode::default(),
             postgres_tls_ca_cert_path: None,
             postgres_connect_timeout_secs: default_postgres_connect_timeout_secs(),

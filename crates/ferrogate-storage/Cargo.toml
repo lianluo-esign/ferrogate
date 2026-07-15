@@ -16,6 +16,8 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+deadpool-postgres.workspace = true
 ferrogate-billing = { path = "../ferrogate-billing" }
 ferrogate-core = { path = "../ferrogate-core" }
 native-tls.workspace = true
@@ -25,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

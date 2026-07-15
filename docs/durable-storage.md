@@ -71,6 +71,7 @@ storage:
     - postgres
   supabase_dsn_env: "FERROGATE_SUPABASE_DSN"
   postgres_pool_size: 4
+  postgres_pool_acquire_timeout_millis: 1000
   postgres_tls_mode: verify_full
   postgres_tls_ca_cert_path: "/etc/ferrogate/supabase-ca.pem"
   postgres_connect_timeout_secs: 5
@@ -315,6 +316,7 @@ storage:
     - postgres
   postgres_dsn_env: "FERROGATE_POSTGRES_DSN"
   postgres_pool_size: 4
+  postgres_pool_acquire_timeout_millis: 1000
   postgres_tls_mode: verify_full
   postgres_tls_ca_cert_path: "/etc/ferrogate/postgres-ca.pem"
   postgres_connect_timeout_secs: 5
@@ -339,6 +341,8 @@ Runtime behavior:
 - Control-plane resources use the same document-store contract as libSQL.
 - `postgres_pool_size` opens a small fixed connection pool for Admin API
   control-plane mutations and restart restore.
+- `postgres_pool_acquire_timeout_millis` bounds how long an async repository
+  operation may wait for a PostgreSQL connection before failing explicitly.
 - `postgres_connect_timeout_secs` is applied to each PostgreSQL connection
   attempt.
 - `postgres_statement_timeout_millis` sets the session statement timeout on

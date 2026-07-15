@@ -128,6 +128,7 @@ pub struct McpIdentityRevocationOutcome {
     pub revoked_at_unix: i64,
 }
 
+#[async_trait::async_trait]
 pub trait McpCredentialRepository {
     fn authorize_mcp_identity(
         &self,
@@ -194,11 +195,11 @@ pub trait McpCredentialRepository {
         request: &McpRefreshRenewRequest,
         operation: &StorageOperation,
     ) -> Result<McpRefreshRenewOutcome, StorageError>;
-    fn reconcile_mcp_oauth_refresh_claim(
+    async fn reconcile_mcp_oauth_refresh_claim(
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError>;
-    fn reconcile_mcp_oauth_refresh_renewal(
+    async fn reconcile_mcp_oauth_refresh_renewal(
         &self,
         request: &McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, StorageError>;
@@ -1571,55 +1572,76 @@ impl PostgresControlPlaneStore {
         })
     }
 
-    fn read_mcp_refresh_authoritative_state(
+    async fn read_mcp_refresh_authoritative_state(
         &self,
         tenant_id: &str,
         credential_id: &str,
     ) -> Result<(Option<StoredMcpOauthCredential>, i64), StorageError> {
-        let deadline = std::time::Instant::now()
+        let deadline = tokio::time::Instant::now()
             .checked_add(MCP_REFRESH_AUTHORITATIVE_REREAD_TIMEOUT)
             .ok_or_else(|| {
                 StorageError::Runtime("authoritative PostgreSQL reread deadline overflow".into())
             })?;
-        let mut client = super::connect_existing_postgres_client(&self.pool.config, deadline)?;
+        let mut client = self
+            .async_pool
+            .acquire(
+                "reconcile MCP refresh state",
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await?;
         let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| {
                 StorageError::Runtime("authoritative PostgreSQL reread deadline elapsed".into())
             })?;
         let statement_timeout = format!("{}ms", mcp_statement_timeout_millis(remaining));
-        client
-            .execute(
-                "SELECT set_config('ferrogate.tenant_id', $1, false), \
-                        set_config('ferrogate.platform_mode', 'off', false), \
-                        set_config('statement_timeout', $2, false)",
-                &[&tenant_id, &statement_timeout],
-            )
-            .map_err(super::postgres_error)?;
-        if std::time::Instant::now() >= deadline {
-            return Err(StorageError::Runtime(
-                "authoritative PostgreSQL reread deadline elapsed".into(),
-            ));
-        }
         let query = postgres_refresh_authoritative_reread_query();
-        let row = client
-            .query_one(&query, &[&tenant_id, &credential_id])
-            .map_err(super::postgres_error)?;
-        let operation_now_unix = row.get::<_, i64>("operation_now_unix");
-        let credential = if row.get::<_, Option<String>>(0).is_some() {
-            Some(oauth_credential_from_row(&row)?)
-        } else {
-            None
-        };
-        Ok((credential, operation_now_unix))
+        tokio::time::timeout(remaining, async {
+            let transaction = client.transaction().await.map_err(super::postgres_error)?;
+            if let Some(search_path_sql) = self.async_pool.transaction_search_path_sql() {
+                transaction
+                    .batch_execute(search_path_sql)
+                    .await
+                    .map_err(super::postgres_error)?;
+            }
+            transaction
+                .execute(
+                    "SELECT set_config('ferrogate.tenant_id', $1, true), \
+                            set_config('ferrogate.platform_mode', 'off', true), \
+                            set_config('statement_timeout', $2, true)",
+                    &[&tenant_id, &statement_timeout],
+                )
+                .await
+                .map_err(super::postgres_error)?;
+            let row = transaction
+                .query_one(&query, &[&tenant_id, &credential_id])
+                .await
+                .map_err(super::postgres_error)?;
+            let operation_now_unix = row.get::<_, i64>("operation_now_unix");
+            let credential = if row.get::<_, Option<String>>(0).is_some() {
+                Some(oauth_credential_from_row(&row)?)
+            } else {
+                None
+            };
+            transaction.commit().await.map_err(super::postgres_error)?;
+            Ok((credential, operation_now_unix))
+        })
+        .await
+        .map_err(|_| StorageError::OperationDeadlineExceeded {
+            operation: "reconcile MCP refresh state",
+            stage: "authoritative reread",
+            commit_started: false,
+        })?
     }
 
-    fn reconcile_mcp_oauth_refresh_claim(
+    async fn reconcile_mcp_oauth_refresh_claim(
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError> {
-        let (current, operation_now_unix) =
-            self.read_mcp_refresh_authoritative_state(&request.tenant_id, &request.credential_id)?;
+        let (current, operation_now_unix) = self
+            .read_mcp_refresh_authoritative_state(&request.tenant_id, &request.credential_id)
+            .await?;
         Ok(reconcile_mcp_refresh_claim_state(
             current,
             request,
@@ -1627,12 +1649,13 @@ impl PostgresControlPlaneStore {
         ))
     }
 
-    fn reconcile_mcp_oauth_refresh_renewal(
+    async fn reconcile_mcp_oauth_refresh_renewal(
         &self,
         request: &McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, StorageError> {
-        let (credential, operation_now_unix) =
-            self.read_mcp_refresh_authoritative_state(&request.tenant_id, &request.credential_id)?;
+        let (credential, operation_now_unix) = self
+            .read_mcp_refresh_authoritative_state(&request.tenant_id, &request.credential_id)
+            .await?;
         let current = credential.as_ref().map(|credential| {
             McpRefreshLeaseState::from_credential(credential, &request.tenant_id)
         });
@@ -2070,6 +2093,7 @@ fn memory_authorize_mcp_actor(
     McpIdentityAccessOutcome::Allowed(Box::new(credential))
 }
 
+#[async_trait::async_trait]
 impl McpCredentialRepository for RuntimeStorageRepositories {
     fn authorize_mcp_identity(
         &self,
@@ -2378,13 +2402,13 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn reconcile_mcp_oauth_refresh_claim(
+    async fn reconcile_mcp_oauth_refresh_claim(
         &self,
         request: &McpRefreshClaimRequest,
     ) -> Result<McpRefreshClaimOutcome, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.reconcile_mcp_oauth_refresh_claim(request)
+                store.reconcile_mcp_oauth_refresh_claim(request).await
             }
             RuntimeControlPlaneBackend::Memory(store) => {
                 let store = store.lock().map_err(|_| {
@@ -2400,13 +2424,13 @@ impl McpCredentialRepository for RuntimeStorageRepositories {
         }
     }
 
-    fn reconcile_mcp_oauth_refresh_renewal(
+    async fn reconcile_mcp_oauth_refresh_renewal(
         &self,
         request: &McpRefreshRenewRequest,
     ) -> Result<McpRefreshRenewOutcome, StorageError> {
         match &self.control_plane {
             RuntimeControlPlaneBackend::Postgres(store) => {
-                store.reconcile_mcp_oauth_refresh_renewal(request)
+                store.reconcile_mcp_oauth_refresh_renewal(request).await
             }
             RuntimeControlPlaneBackend::Memory(store) => {
                 let store = store.lock().map_err(|_| {

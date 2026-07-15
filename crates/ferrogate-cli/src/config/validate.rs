@@ -674,6 +674,9 @@ impl Config {
         if self.storage.postgres_pool_size == 0 {
             bail!("field storage.postgres_pool_size: must be greater than zero");
         }
+        if self.storage.postgres_pool_acquire_timeout_millis == 0 {
+            bail!("field storage.postgres_pool_acquire_timeout_millis: must be greater than zero");
+        }
         if self.storage.postgres_connect_timeout_secs == 0 {
             bail!("field storage.postgres_connect_timeout_secs: must be greater than zero");
         }

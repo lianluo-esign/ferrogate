@@ -40,6 +40,7 @@ pub(crate) fn build_supabase_repositories(
         PostgresStorageConfig {
             dsn: dsn.to_string(),
             pool_size: 4,
+            pool_acquire_timeout_millis: 1_000,
             tls_mode: parse_postgres_tls_mode(connection.tls_mode)?,
             tls_ca_cert_path: None,
             connect_timeout_secs: 10,

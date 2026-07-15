@@ -86,6 +86,7 @@ impl PgContainer {
         PostgresStorageConfig {
             dsn: self.dsn(),
             pool_size: 1,
+            pool_acquire_timeout_millis: 1_000,
             tls_mode: PostgresTlsMode::Disable,
             tls_ca_cert_path: None,
             connect_timeout_secs: 5,

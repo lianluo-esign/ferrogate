@@ -782,6 +782,7 @@ fn run_live_repository_replay(args: &SupabaseLiveRestartArgs, schema: &str) -> R
         PostgresStorageConfig {
             dsn: args.supabase_dsn.clone(),
             pool_size: 1,
+            pool_acquire_timeout_millis: 1_000,
             tls_mode,
             tls_ca_cert_path: args
                 .tls_ca_cert_path
@@ -1590,6 +1591,7 @@ fn expect_validate_only_failure(
         PostgresStorageConfig {
             dsn: args.supabase_dsn.clone(),
             pool_size: 1,
+            pool_acquire_timeout_millis: 1_000,
             tls_mode,
             tls_ca_cert_path: args
                 .tls_ca_cert_path
